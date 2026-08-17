@@ -107,7 +107,24 @@ def test_duplicate_source_addr_on_other_hub_is_refused(tmp_path):
     _queue(v.state_store, USER_A)  # user_from_addr == f'{USER_A[:6]}src' → collides
     assert finalize_won_seats(v, NOW) == []
     assert not client.finalized, 'colliding-source seat must not be finalized'
-    assert v.state_store.distinct_routed_pools() == [], 'colliding queue dropped'
+    # Queue is NOT dropped: the only user collides, so nothing finalizes this pass, but the entry persists
+    # (its sibling may clear, or the TTL prunes it) — dropping it would be a griefing lever (see below).
+    assert v.state_store.distinct_routed_pools() != [], 'colliding queue must persist, not be dropped'
+    v.state_store.close()
+
+
+def test_colliding_front_user_does_not_block_an_honest_user(tmp_path):
+    # V-C2 griefing guard: from_addrs are public, so an attacker can queue a front (oldest) request whose
+    # source collides with a live seat. That must NOT knock out the honest queued users behind it — the
+    # sweep skips the colliding entry and finalizes the next eligible user.
+    client = SweepClient(None)
+    client._reservation = _drawn_seat(client)
+    client.siblings['tao'] = _live_sibling(from_chain='sol', from_addr=f'{USER_A[:6]}src')  # USER_A collides
+    v = _validator(tmp_path, client)
+    _queue(v.state_store, USER_A, created_at=NOW - 50)  # oldest, colliding — the griefer
+    _queue(v.state_store, USER_B, created_at=NOW - 5)  # honest, non-colliding
+    assert finalize_won_seats(v, NOW) == [MINER]
+    assert len(client.finalized) == 1 and client.finalized[0][1] == USER_B, 'honest user must still be served'
     v.state_store.close()
 
 

@@ -281,29 +281,34 @@ def finalize_won_seats(validator, now: int) -> list:
                 bt.logging.info(f'routed sweep {miner[:8]}: reservation filled or window lapsed, dropping queue')
                 store.delete_routed_requests(miner, from_chain, to_chain, backing)
             continue
-        req = draw_pool_winner(queue)
-        # A source address may back only ONE live-unclaimed reservation per miner at a time. Two live
-        # reservations that share (from_chain, from_addr) on one miner are both matchable by a single
-        # deposit — matching is `>=` amount, so the amount can't disambiguate — and confirm_deposit
-        # would claim it for whichever slot is scanned first. That lets an attacker who declares a
-        # victim's from_addr on the miner's OTHER hub siphon the victim's deposit. Refuse to finalize a
-        # colliding seat. No post-claim state needed: a claimed reservation leaves the live-unclaimed
-        # set on its own, so the address frees itself.
+        # A source may back only ONE live-unclaimed reservation per miner: two reservations sharing
+        # (from_chain, from_addr) are both matchable by a single `>=`-amount deposit, so an attacker
+        # declaring a victim's from_addr on the miner's OTHER hub could siphon that deposit. Draw only from
+        # queued users whose source doesn't already back a live seat — skip a colliding entry, don't drop
+        # the whole queue (else one crafted front-of-queue request knocks out every honest queued user).
         providers = getattr(validator, 'axon_assets', {})
         src = providers.get(from_chain)
-        want_addr = src.chain.normalize_address(req['user_from_addr']) if src else req['user_from_addr']
-        live_slots, _ = _live_unclaimed_slots(client, Pubkey.from_string(miner), now)
-        if any(
-            s.from_chain == from_chain
-            and (src.chain.normalize_address(s.from_addr) if src else s.from_addr) == want_addr
-            for s, _b in live_slots
-        ):
-            bt.logging.warning(
-                f'routed sweep {miner[:8]}: source address already backs a live reservation on this '
-                f'miner — refusing a duplicate-source seat, dropping queue'
-            )
-            store.delete_routed_requests(miner, from_chain, to_chain, backing)
+        try:
+            live_slots, _ = _live_unclaimed_slots(client, Pubkey.from_string(miner), now)
+        except Exception as e:
+            bt.logging.warning(f'routed sweep {miner[:8]}: live-slot read failed, retrying next step: {e}')
             continue
+
+        def _collides(addr: str) -> bool:
+            want = src.chain.normalize_address(addr) if src else addr
+            return any(
+                s.from_chain == from_chain and (src.chain.normalize_address(s.from_addr) if src else s.from_addr) == want
+                for s, _b in live_slots
+            )
+
+        eligible = [q for q in queue if not _collides(q['user_from_addr'])]
+        if not eligible:
+            bt.logging.warning(
+                f'routed sweep {miner[:8]}: every queued source already backs a live seat — nothing to '
+                f'finalize this pass (TTL prunes stale colliders)'
+            )
+            continue
+        req = draw_pool_winner(eligible)
         if read_only:
             bt.logging.info(f'routed sweep {miner[:8]}: WOULD finalize for {req["user_pubkey"][:8]} (read-only)')
             continue
