@@ -86,6 +86,9 @@ fn pool_pda(m: &Pubkey) -> Pubkey {
 fn swap_pda(key: &[u8; 32]) -> Pubkey {
     Pubkey::find_program_address(&[b"swap", key], &pid()).0
 }
+fn bind_pda(m: &Pubkey) -> Pubkey {
+    Pubkey::find_program_address(&[b"bind", m.as_ref()], &pid()).0
+}
 fn srclock_pda(m: &Pubkey, from_chain: &str, from_addr: &str) -> Pubkey {
     Pubkey::find_program_address(
         &[b"srclock", m.as_ref(), from_chain.as_bytes(), &hashv(&[from_addr.as_bytes()]).to_bytes()],
@@ -343,6 +346,7 @@ fn initiate_ix(validator: &Pubkey, miner: &Pubkey, from_tx_hash: &str) -> Instru
             vote_round: vote_pda(REQ_INITIATE, &key),
             swap: swap_pda(&key),
             attestation: None,
+            binding: bind_pda(miner),
             system_program: SYSTEM_PROGRAM,
         }
         .to_account_metas(None),

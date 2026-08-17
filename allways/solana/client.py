@@ -647,6 +647,9 @@ class AllwaysSolanaClient:
             AccountMeta(pdas.vote_round_pda(pdas.REQ_INITIATE, swap_key, self.program_id), False, True),
             AccountMeta(pdas.swap_pda(swap_key, self.program_id), False, True),
             AccountMeta(self._attestation_meta(m, backing), False, False),
+            # The Binding PDA is always passed; the program tolerates it uninitialized (never-bound
+            # miner) and pins the bonded hotkey onto the Swap at quorum (V-M1).
+            AccountMeta(pdas.binding_pda(m, self.program_id), False, False),
             AccountMeta(SYSTEM_PROGRAM, False, False),
         ]
         args = layouts.IX_SWAP_KEY_ARGS.build({'swap_key': swap_key})

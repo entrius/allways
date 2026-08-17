@@ -103,9 +103,11 @@ def test_swap_roundtrip_enum_status():
         'max_extend_at': 0,
         'fulfilled_at': 0,
         'bump': 1,
+        'hotkey': bytes(range(32)),
     }
     p = _roundtrip(layouts.Swap, v)
     assert p.from_tx_hash == 'deadbeef' and type(p.status).__name__ == 'PendingAttestation'
+    assert bytes(p.hotkey) == bytes(range(32))  # V-M1 pin stays raw bytes
 
 
 def test_pool_roundtrip_vec_of_request():

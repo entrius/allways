@@ -213,6 +213,8 @@ Swap = CStruct(
     'max_extend_at' / I64,
     'fulfilled_at' / I64,
     'bump' / U8,
+    # V-M1 — hotkey pinned from the Binding at initiate ([0]*32 = never bound); appended last.
+    'hotkey' / Hash32,
 )
 
 Pool = CStruct(
@@ -442,6 +444,9 @@ EVENT_LAYOUTS = {
         'penalty' / U64,
         'reimbursement' / U64,
         'payee' / String,
+        # V-M1 — the hotkey the swap pinned at initiate ([0]*32 = never bound): the bond the vault
+        # seizure targets, carried in the verdict so no reconciler ever consults the live binding.
+        'hotkey' / Hash32,
     ),
     'SwapCancelled': CStruct(
         'swap_key' / Hash32,

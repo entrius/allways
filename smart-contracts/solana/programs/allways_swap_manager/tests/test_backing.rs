@@ -92,6 +92,27 @@ fn pool_pda(m: &Pubkey) -> Pubkey {
 fn swap_pda(key: &[u8; 32]) -> Pubkey {
     Pubkey::find_program_address(&[b"swap", key], &pid()).0
 }
+fn bind_pda(m: &Pubkey) -> Pubkey {
+    Pubkey::find_program_address(&[b"bind", m.as_ref()], &pid()).0
+}
+fn hkbind_pda(hotkey: &[u8; 32]) -> Pubkey {
+    Pubkey::find_program_address(&[b"hkbind", hotkey], &pid()).0
+}
+fn bind_ix(miner: &Pubkey, hotkey: [u8; 32], hotkey_sig: [u8; 64]) -> Instruction {
+    Instruction::new_with_bytes(
+        pid(),
+        &allways_swap_manager::instruction::BindHotkey { hotkey, hotkey_sig }.data(),
+        allways_swap_manager::accounts::BindHotkey {
+            miner: *miner,
+            config: config_pda(),
+            miner_state: Some(miner_pda(miner)),
+            binding: bind_pda(miner),
+            hotkey_binding: hkbind_pda(&hotkey),
+            system_program: SYSTEM_PROGRAM,
+        }
+        .to_account_metas(None),
+    )
+}
 fn swap_key(from_tx_hash: &str) -> [u8; 32] {
     hashv(&[from_tx_hash.as_bytes()]).to_bytes()
 }
@@ -336,6 +357,7 @@ fn initiate_ix(validator: &Pubkey, miner: &Pubkey, from_tx_hash: &str) -> Instru
             vote_round: vote_pda(REQ_INITIATE, &key),
             swap: swap_pda(&key),
             attestation: None,
+            binding: bind_pda(miner),
             system_program: SYSTEM_PROGRAM,
         }
         .to_account_metas(None),
@@ -675,6 +697,49 @@ fn test_the_verdict_names_the_payee_on_the_backing_chain() {
     assert_eq!(ev.collateral_chain, "tao");
     assert_eq!(ev.payee, "userDstAddr", "TAO is the destination leg, so its address is the payee");
     assert_eq!(ev.reimbursement, required_collateral(SOL_AMOUNT), "figures unchanged by W3.1");
+}
+
+#[test]
+fn test_timeout_verdict_carries_the_hotkey_pinned_at_initiate() {
+    // V-M1: the swap pins the miner's bonded hotkey at initiate quorum and the timeout verdict
+    // emits it, so the vault seizure targets that hotkey without any live binding lookup — and the
+    // set-once binding means a post-initiate change attempt reverts instead of moving the target.
+    let (mut svm, _admin, vals, miner) = setup();
+    let hotkey = [9u8; 32];
+    send(&mut svm, bind_ix(&miner.pubkey(), hotkey, [1u8; 64]), &miner.pubkey(), &miner).expect("bind");
+
+    reserve_spoke(&mut svm, &vals[0], &miner.pubkey());
+    let initiated_at = now_ts(&svm);
+    do_initiate(&mut svm, &vals, &miner.pubkey(), "srctx1");
+    let key = swap_key("srctx1");
+    assert_eq!(swap_acct(&svm, &key).hotkey, hotkey, "hotkey pinned onto the swap at initiate");
+    set_swap_backing(&mut svm, &key, "tao");
+
+    // The dodge attempt: rebinding to a fresh hotkey mid-swap must revert (set-once binding).
+    let res = send(&mut svm, bind_ix(&miner.pubkey(), [8u8; 32], [2u8; 64]), &miner.pubkey(), &miner);
+    assert!(res.is_err(), "a mid-swap hotkey change must be refused");
+    assert_eq!(swap_acct(&svm, &key).hotkey, hotkey, "the pinned target did not move");
+
+    set_clock(&mut svm, initiated_at + TIMEOUT_SECS + 1);
+    send(&mut svm, timeout_ix(&vals[0].pubkey(), &miner.pubkey(), &LOTTERY_USER, "srctx1"), &vals[0].pubkey(), &vals[0]).expect("t0");
+    let logs = send_meta(&mut svm, timeout_ix(&vals[1].pubkey(), &miner.pubkey(), &LOTTERY_USER, "srctx1"), &vals[1].pubkey(), &vals[1]).expect("t1");
+    assert_eq!(timed_out_event(&logs).hotkey, hotkey, "the verdict names the pinned hotkey");
+}
+
+#[test]
+fn test_unbound_miner_swap_pins_a_zeroed_hotkey() {
+    // No Binding PDA: the initiate-time read degrades to zeros — the swap and its timeout still
+    // work; the relay treats a zeroed hotkey as unattributable, exactly as before the pin existed.
+    let (mut svm, _admin, vals, miner) = setup();
+    reserve_spoke(&mut svm, &vals[0], &miner.pubkey());
+    let initiated_at = now_ts(&svm);
+    do_initiate(&mut svm, &vals, &miner.pubkey(), "srctx1");
+    assert_eq!(swap_acct(&svm, &swap_key("srctx1")).hotkey, [0u8; 32]);
+
+    set_clock(&mut svm, initiated_at + TIMEOUT_SECS + 1);
+    send(&mut svm, timeout_ix(&vals[0].pubkey(), &miner.pubkey(), &LOTTERY_USER, "srctx1"), &vals[0].pubkey(), &vals[0]).expect("t0");
+    let logs = send_meta(&mut svm, timeout_ix(&vals[1].pubkey(), &miner.pubkey(), &LOTTERY_USER, "srctx1"), &vals[1].pubkey(), &vals[1]).expect("t1");
+    assert_eq!(timed_out_event(&logs).hotkey, [0u8; 32]);
 }
 
 #[test]

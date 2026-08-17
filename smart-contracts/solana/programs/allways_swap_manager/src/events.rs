@@ -107,6 +107,10 @@ pub struct SwapTimedOut {
     /// the seizure can be relayed from this event alone. Empty when the backing settles locally —
     /// that refund already moved, to `Swap::user`.
     pub payee: String,
+    /// Bittensor hotkey the swap pinned at initiate ([0;32] = never bound) — the bond the vault
+    /// seizure targets, so a rebind can never redirect it (V-M1). Appended last; prefix decoders
+    /// keep working.
+    pub hotkey: [u8; 32],
 }
 
 /// The no-fault cancel verdict: the destination provably could not receive the payout, so the swap is

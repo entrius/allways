@@ -418,6 +418,9 @@ pub struct Swap {
     pub max_extend_at: i64,
     pub fulfilled_at: i64,
     pub bump: u8,
+    /// Bittensor hotkey pinned from the miner's Binding at initiate ([0;32] = never bound), so the
+    /// timeout verdict names the bonded hotkey itself (V-M1). Appended last (Config precedent).
+    pub hotkey: [u8; 32],
 }
 
 // (Removed: the permanent `TxMarker` source-replay marker — A4. Source replay is now blocked by a
@@ -495,7 +498,7 @@ pub struct MinerDirectionStats {
 /// Bittensor hotkey. `hotkey_sig` is an sr25519 signature by the hotkey over the miner's Solana pubkey;
 /// the contract only STORES it (sr25519 verify is too costly on-chain) — the validator verifies it
 /// off-chain. This PDA enforces pubkey→≤1 hotkey structurally; the reverse (hotkey→≤1 pubkey) is enforced
-/// by the `HotkeyBinding` marker below. The miner may re-bind in place (refresh sig / change hotkey).
+/// by the `HotkeyBinding` marker below. The hotkey is set-once (V-M1); only the sig may refresh in place.
 #[account]
 #[derive(InitSpace)]
 pub struct Binding {

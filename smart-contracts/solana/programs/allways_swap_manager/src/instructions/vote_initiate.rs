@@ -2,11 +2,13 @@ use anchor_lang::prelude::*;
 
 use crate::consensus::{record_vote, swap_request_hash};
 use crate::constants::{
-    ATTEST_SEED, CONFIG_SEED, MINER_SEED, REQ_INITIATE, RESV_SEED, SWAP_SEED, VOTE_SEED,
+    ATTEST_SEED, BIND_SEED, CONFIG_SEED, MINER_SEED, REQ_INITIATE, RESV_SEED, SWAP_SEED, VOTE_SEED,
 };
 use crate::error::ErrorCode;
 use crate::events::SwapInitiated;
-use crate::state::{BondAttestation, Config, MinerState, Reservation, Swap, SwapStatus, VoteRound};
+use crate::state::{
+    Binding, BondAttestation, Config, MinerState, Reservation, Swap, SwapStatus, VoteRound,
+};
 
 /// Validators attest a `PendingAttestation` claim: confirm the source-chain deposit is real and, on
 /// quorum, promote the swap to `Active` — where the miner's obligation (`timeout_at`) begins. All terms
@@ -65,6 +67,11 @@ pub struct VoteInitiate<'info> {
         bump,
     )]
     pub attestation: Option<Box<Account<'info, BondAttestation>>>,
+
+    /// CHECK: the miner's Binding PDA, seeds-checked; may be uninitialized (never-bound miner →
+    /// the swap pins a zeroed hotkey). Read at quorum so the verdict names the bonded hotkey (V-M1).
+    #[account(seeds = [BIND_SEED, miner.key().as_ref()], bump)]
+    pub binding: UncheckedAccount<'info>,
 
     pub system_program: Program<'info, System>,
 }
@@ -141,11 +148,19 @@ pub fn handler(ctx: Context<VoteInitiate>, swap_key: [u8; 32]) -> Result<()> {
         let to_amount = ctx.accounts.swap.to_amount;
         let collateral_chain = ctx.accounts.swap.collateral_chain.clone();
 
+        // V-M1: pin the bonded hotkey the moment the obligation binds. The binding is set-once, so
+        // this equals every validator's view and a later rebind can never move the seizure.
+        let pinned_hotkey = {
+            let data = ctx.accounts.binding.try_borrow_data()?;
+            Binding::try_deserialize(&mut &data[..]).map(|b| b.hotkey).unwrap_or_default()
+        };
+
         let swap = &mut ctx.accounts.swap;
         swap.status = SwapStatus::Active;
         swap.initiated_at = now;
         swap.timeout_at = timeout_at;
         swap.max_extend_at = max_extend_at;
+        swap.hotkey = pinned_hotkey;
 
         let bit = crate::backing::backing_bit(&ctx.accounts.swap.collateral_chain)?;
         ctx.accounts.miner_state.set_swap(bit, true);

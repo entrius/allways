@@ -354,6 +354,7 @@ fn initiate_ix(validator: &Pubkey, miner: &Pubkey, from_tx_hash: &str) -> Instru
             vote_round: vote_pda(REQ_INITIATE, &key),
             swap: swap_pda(&key),
             attestation: None,
+            binding: bind_pda(miner),
             system_program: SYSTEM_PROGRAM,
         }
         .to_account_metas(None),

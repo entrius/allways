@@ -125,6 +125,7 @@ def test_decode_swap_timed_out_roundtrip():
             'penalty': 3_300_000_000,
             'reimbursement': 3_300_000_000,
             'payee': '5FHneW46xGXgs5mUiveU4sbTyGBzmstUspZC92UhjJM694ty',
+            'hotkey': bytes(range(32)),
         },
     )
     name, f = decode_event(raw)
@@ -133,6 +134,7 @@ def test_decode_swap_timed_out_roundtrip():
     assert f.collateral_chain == 'tao' and f.slash == 0
     assert f.penalty == 3_300_000_000 and f.reimbursement == 3_300_000_000
     assert f.payee == '5FHneW46xGXgs5mUiveU4sbTyGBzmstUspZC92UhjJM694ty'
+    assert bytes(f.hotkey) == bytes(range(32))  # V-M1 pin — raw bytes, like swap_key
 
 
 def test_decode_swap_timed_out_carries_no_payee_when_it_settled_locally():
@@ -149,10 +151,12 @@ def test_decode_swap_timed_out_carries_no_payee_when_it_settled_locally():
             'penalty': 2_200_000_000,
             'reimbursement': 2_200_000_000,
             'payee': '',
+            'hotkey': bytes(32),
         },
     )
     _, f = decode_event(raw)
     assert f.payee == '' and f.slash == 2_200_000_000
+    assert bytes(f.hotkey) == bytes(32)  # never-bound miner ⇒ zeroed pin decodes as a value
 
 
 def test_decode_miner_activated_and_collateral():

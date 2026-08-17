@@ -104,6 +104,7 @@ def test_vote_initiate_ix(client):
         (pdas.vote_round_pda(pdas.REQ_INITIATE, SK, PID), False, True),
         (pdas.swap_pda(SK, PID), False, True),
         (PID, False, False),  # absent optional BondAttestation — a "sol"-backed swap has no bond
+        (pdas.binding_pda(miner, PID), False, False),  # V-M1: hotkey pinned onto the swap at quorum
         (SYSTEM_PROGRAM, False, False),
     ]
 

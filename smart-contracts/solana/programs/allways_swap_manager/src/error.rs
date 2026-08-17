@@ -173,4 +173,8 @@ pub enum ErrorCode {
     MigrationSwapNotDrained,
     #[msg("Attestation would lower the bond while a reservation/swap is live on this hub")]
     AttestationWouldStrandSwap,
+
+    // --- V-M1: hotkey-binding freeze ---
+    #[msg("Hotkey binding is set-once; a bound pubkey cannot change its hotkey")]
+    HotkeyChangeForbidden,
 }
