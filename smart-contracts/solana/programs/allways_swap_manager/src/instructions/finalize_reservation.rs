@@ -107,24 +107,17 @@ pub fn handler(
     // that half. Also reject the default pubkey: a timeout would "refund" the slash to the burn address.
     require!(user != ctx.accounts.miner.key(), ErrorCode::SelfSwapNotAllowed);
     require!(user != Pubkey::default(), ErrorCode::InvalidUser);
-    // H1 (V-H1) on-chain backstop: a taker's payout address must differ from the miner's own delivery
-    // address (pinned on the reservation at draw). Equal addresses make the miner "deliver to itself" —
-    // a self-represented taker (who skips the validator's normalized reserve-time gate) could poison it
-    // into a false non-delivery slash or a collusion volume-farm. Raw compare: fully effective on
-    // case-sensitive chains; EVM case-variants stay covered by the validator's normalized routed check.
+    // H1 (V-H1) fast-fail: reject an exact user_to_addr == miner delivery address at finalize (pinned on
+    // the reservation at draw) so a poisoned self-represented reservation dies BEFORE the taker deposits.
+    // Raw byte compare — complete on case-sensitive chains (BTC/SOL/TAO). It CANNOT normalize per-chain,
+    // so an EVM checksum-variant slips past here; the authoritative, chain-aware H1 check runs validator-
+    // side at the attest gate (_decide_pending_attestation), which BOTH lanes hit before any obligation.
     require!(
         user_to_addr != ctx.accounts.reservation.miner_to_addr,
         ErrorCode::DestEqualsMinerAddr
     );
 
     let now = Clock::get()?.unix_timestamp;
-    // V-C2: the source_lock's seeds omit the backing, so it is shared across hubs. A lock still live
-    // (reserved_until in the future) means another unclaimed reservation on this miner already holds this
-    // (from_chain, from_addr) — reject the duplicate. A stale/`< now` (or freshly-init 0) lock is ours.
-    require!(
-        ctx.accounts.source_lock.reserved_until < now,
-        ErrorCode::DuplicateSourceAddr
-    );
     let cfg = &ctx.accounts.config;
 
     // Fill exactly once, and only inside the finalize window. Both sentinels are load-bearing:
@@ -189,6 +182,15 @@ pub fn handler(
         ErrorCode::InsufficientCollateral
     );
 
+    // V-C2 (after the fundamental entry gates above so a settling/halted/undercollateralized miner reports
+    // THAT, not this): the source_lock's seeds omit the backing, so it is shared across hubs. A lock still
+    // live (reserved_until >= now) means another unclaimed reservation on this miner already holds this
+    // (from_chain, from_addr) — reject the duplicate. A stale/`< now` (or freshly-init 0) lock is ours.
+    require!(
+        ctx.accounts.source_lock.reserved_until < now,
+        ErrorCode::DuplicateSourceAddr
+    );
+
     let ttl = cfg.reservation_ttl_secs;
     let extension_budget = cfg.max_total_extension_secs;
     let miner_key = ctx.accounts.miner.key();
@@ -208,8 +210,9 @@ pub fn handler(
         (r.from_chain.clone(), r.to_chain.clone(), r.reserved_until, r.collateral_chain.clone())
     };
 
-    // V-C2: hold this (from_chain, from_addr) for the fill's live window. A colliding finalize (any hub)
-    // seeds the same lock and reverts above until this lapses.
+    // V-C2: hold this (from_chain, from_addr) for the reservation's live window. extend_reservation slides
+    // this lock forward in lockstep with reserved_until, so an extended reservation can never outlive its
+    // lock and re-open the cross-hub collision. A colliding finalize on any hub reverts until it lapses.
     ctx.accounts.source_lock.reserved_until = reserved_until;
     ctx.accounts.source_lock.bump = ctx.bumps.source_lock;
 

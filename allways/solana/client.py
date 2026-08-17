@@ -843,18 +843,23 @@ class AllwaysSolanaClient:
         args = layouts.IX_EXTEND_TIMEOUT_ARGS.build({'swap_key': swap_key, 'target_at': target_at})
         return self._send([self._ix('extend_timeout', args, metas)])
 
-    def extend_reservation(self, miner, target_at: int, backing: str = 'sol') -> str:
-        """Single-validator slide of a reservation's reserved_until forward (no consensus)."""
+    def extend_reservation(
+        self, miner, target_at: int, backing: str = 'sol', *, from_chain: str, from_addr: str
+    ) -> str:
+        """Single-validator slide of a reservation's reserved_until forward (no consensus). Slides the
+        V-C2 source_lock in lockstep — `from_chain` + keccak(`from_addr`) seed it (verified on-chain)."""
         validator = self.keypair.pubkey()
         m = _as_pubkey(miner)
+        from_addr_hash = keccak.new(data=from_addr.encode(), digest_bits=256).digest()
         metas = [
             AccountMeta(validator, True, False),
             AccountMeta(pdas.config_pda(self.program_id), False, False),
             AccountMeta(m, False, False),
             AccountMeta(pdas.miner_state_pda(m, self.program_id), False, True),
             AccountMeta(pdas.reservation_pda(m, backing, self.program_id), False, True),
+            AccountMeta(pdas.source_lock_pda(m, from_chain, from_addr_hash, self.program_id), False, True),
         ]
-        args = layouts.IX_EXTEND_RESERVATION_ARGS.build({'target_at': target_at})
+        args = layouts.IX_EXTEND_RESERVATION_ARGS.build({'target_at': target_at, 'from_addr_hash': from_addr_hash})
         return self._send([self._ix('extend_reservation', args, metas)])
 
     # ---------- swap intake (Phase 9: reservation-lottery pool) ----------

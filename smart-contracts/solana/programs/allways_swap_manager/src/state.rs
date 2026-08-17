@@ -352,8 +352,10 @@ pub struct Reservation {
 /// V-C2 on-chain source-address lock (`seeds = [SRCLOCK_SEED, miner, from_chain, keccak(from_addr)]`).
 /// `finalize_reservation` claims it so a live-unclaimed reservation holds a `(from_chain, from_addr)`
 /// exclusively per miner — a second reservation (any backing/hub) declaring the same source finds a live
-/// lock and reverts. `reserved_until` is the staleness marker: a lock at or past it is free to reclaim,
-/// so a lapsed reservation never permanently strands its source. Reused across rounds (never closed).
+/// lock and reverts. `reserved_until` mirrors the holding reservation's `reserved_until` and is slid
+/// forward by `extend_reservation` in lockstep, so an extended reservation can't outlive its lock; a lock
+/// at or past `now` is free to reclaim, so a lapsed reservation never permanently strands its source.
+/// Reused across rounds (never closed).
 #[account]
 #[derive(InitSpace)]
 pub struct SourceLock {

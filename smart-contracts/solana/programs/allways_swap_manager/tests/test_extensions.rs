@@ -317,13 +317,22 @@ fn fulfill_ix(miner: &Pubkey, from_tx_hash: &str) -> Instruction {
 fn extend_reservation_ix(validator: &Pubkey, miner: &Pubkey, target_at: i64) -> Instruction {
     Instruction::new_with_bytes(
         pid(),
-        &allways_swap_manager::instruction::ExtendReservation { target_at }.data(),
+        &allways_swap_manager::instruction::ExtendReservation {
+            target_at,
+            from_addr_hash: hashv(&[FROM_ADDR.as_bytes()]).to_bytes(),
+        }
+        .data(),
         allways_swap_manager::accounts::ExtendReservation {
             validator: *validator,
             config: config_pda(),
             miner: *miner,
             miner_state: miner_pda(miner),
             reservation: resv_pda(miner),
+            source_lock: Pubkey::find_program_address(
+                &[b"srclock", miner.as_ref(), FROM_CHAIN.as_bytes(), &hashv(&[FROM_ADDR.as_bytes()]).to_bytes()],
+                &pid(),
+            )
+            .0,
         }
         .to_account_metas(None),
     )

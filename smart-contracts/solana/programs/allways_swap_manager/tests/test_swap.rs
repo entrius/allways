@@ -720,7 +720,8 @@ fn test_finalize_rejects_duplicate_live_source() {
     arm_and_resolve(&mut svm, &vals[0], &miner.pubkey());
     let res = send(&mut svm, finalize_ix(&vals[0].pubkey(), &miner.pubkey(), &LOTTERY_USER), &vals[0].pubkey(), &vals[0]);
     assert!(res.is_err(), "a second live reservation from the same source must be refused (V-C2)");
-    // And once the lock lapses (past finalize + TTL), the same source is free again.
+    // And once the lock lapses (past the reservation's reserved_until — base TTL here, since it was never
+    // extended), the same source is free again.
     set_clock(&mut svm, now + TTL + 1);
     send(&mut svm, open_ix(&vals[0].pubkey(), &miner.pubkey()), &vals[0].pubkey(), &vals[0]).expect("re-open after lapse");
     set_clock(&mut svm, now + TTL + POOL_WINDOW_SECS + 2);
@@ -1107,7 +1108,7 @@ fn test_contract_no_longer_blocks_reused_tx() {
     // miner freed → re-reserve, re-claim + re-attest the SAME from_tx_hash → now permitted on-chain.
     // The consumed reservation blocks a re-open until its finalize window lapses; warp past it.
     let fb = reservation_acct(&svm, &miner.pubkey()).finalize_by;
-    set_clock(&mut svm, fb + TTL + 1); // +TTL: also clears the V-C2 source-lock (held for the reservation TTL)
+    set_clock(&mut svm, fb + TTL + 1); // +TTL clears the V-C2 source lock (held for the reservation TTL)
     do_reserve(&mut svm, &vals[0], &miner.pubkey());
     do_initiate(&mut svm, &vals, &miner.pubkey(), "srctx1");
     let s = Swap::try_deserialize(&mut svm.get_account(&swap_pda(&swap_key("srctx1"))).unwrap().data.as_slice()).unwrap();
@@ -1131,7 +1132,7 @@ fn test_stats_accumulate_same_direction() {
     // miner freed → re-reserve via the lottery, run a second swap (different source tx) same direction.
     // The consumed reservation blocks a re-open until its finalize window lapses; warp past it.
     let fb = reservation_acct(&svm, &miner.pubkey()).finalize_by;
-    set_clock(&mut svm, fb + TTL + 1); // +TTL: also clears the V-C2 source-lock (held for the reservation TTL)
+    set_clock(&mut svm, fb + TTL + 1); // +TTL clears the V-C2 source lock (held for the reservation TTL)
     do_reserve(&mut svm, &vals[0], &miner.pubkey());
     run_full_swap(&mut svm, &vals, &miner, "srctx2");
 
@@ -1206,4 +1207,59 @@ fn test_finalize_refuses_a_reservation_already_consumed_by_initiate() {
 
 fn reservation_acct(svm: &LiteSVM, miner: &Pubkey) -> Reservation {
     Reservation::try_deserialize(&mut svm.get_account(&resv_pda(miner)).unwrap().data.as_slice()).unwrap()
+}
+
+// ── REVIEW PROBE (c15ae2b / V-C2 extension gap) ─────────────────────────────────────────────────
+// Demonstrates that `extend_reservation` slides a live-unclaimed reservation's `reserved_until`
+// forward but never touches its SourceLock, so the lock lapses while the reservation is still live —
+// re-opening the cross-hub collision window the C2 guard is meant to hold shut.
+fn extend_ix(validator: &Pubkey, miner: &Pubkey, target_at: i64) -> Instruction {
+    Instruction::new_with_bytes(
+        pid(),
+        &allways_swap_manager::instruction::ExtendReservation {
+            target_at,
+            from_addr_hash: hashv(&[FROM_ADDR.as_bytes()]).to_bytes(),
+        }
+        .data(),
+        allways_swap_manager::accounts::ExtendReservation {
+            validator: *validator,
+            config: config_pda(),
+            miner: *miner,
+            miner_state: miner_pda(miner),
+            reservation: resv_pda(miner),
+            source_lock: srclock_pda(miner, FROM_CHAIN, FROM_ADDR),
+        }
+        .to_account_metas(None),
+    )
+}
+
+fn srclock_reserved_until(svm: &LiteSVM, miner: &Pubkey) -> i64 {
+    use allways_swap_manager::state::SourceLock;
+    let acct = svm.get_account(&srclock_pda(miner, FROM_CHAIN, FROM_ADDR)).unwrap();
+    SourceLock::try_deserialize(&mut acct.data.as_slice()).unwrap().reserved_until
+}
+
+#[test]
+fn test_extend_slides_the_source_lock() {
+    // V-C2 under extension: extend_reservation slides the source lock forward in lockstep with
+    // reserved_until, so an extended, still-unclaimed reservation never outlives its lock and re-opens the
+    // cross-hub collision (a colliding finalize on another hub keeps finding a live lock).
+    let (mut svm, vals, miner, _rent) = setup();
+    let resv = reservation_acct(&svm, &miner.pubkey());
+    assert_eq!(
+        srclock_reserved_until(&svm, &miner.pubkey()),
+        resv.reserved_until,
+        "lock is aligned to the reservation at finalize"
+    );
+
+    let target = resv.reserved_until + 5_000; // still-unclaimed reservation extended (slow source deposit)
+    send(&mut svm, extend_ix(&vals[0].pubkey(), &miner.pubkey(), target), &vals[0].pubkey(), &vals[0])
+        .expect("extend");
+
+    assert_eq!(reservation_acct(&svm, &miner.pubkey()).reserved_until, target, "reservation slid forward");
+    assert_eq!(
+        srclock_reserved_until(&svm, &miner.pubkey()),
+        target,
+        "the source lock slid with it — no lapse window opens under extension"
+    );
 }

@@ -267,14 +267,20 @@ def test_extend_timeout_ix(client):
 
 def test_extend_reservation_ix(client):
     miner = Keypair().pubkey()
-    client.extend_reservation(miner, 1_700_009_999)
+    client.extend_reservation(miner, 1_700_009_999, from_chain='btc', from_addr='userBTCaddr')
     ix = _ix(client)
+    from Crypto.Hash import keccak
+
+    expected_hash = keccak.new(data=b'userBTCaddr', digest_bits=256).digest()
     assert ix.data[:8] == layouts.IX_DISCRIMINATORS['extend_reservation']
-    assert ix.data[8:] == layouts.IX_EXTEND_RESERVATION_ARGS.build({'target_at': 1_700_009_999})
+    assert ix.data[8:] == layouts.IX_EXTEND_RESERVATION_ARGS.build(
+        {'target_at': 1_700_009_999, 'from_addr_hash': expected_hash}
+    )
     assert _metas(ix) == [
         (client.keypair.pubkey(), True, False),
         (pdas.config_pda(PID), False, False),
         (miner, False, False),
         (pdas.miner_state_pda(miner, PID), False, True),
         (pdas.reservation_pda(miner, 'sol', PID), False, True),
+        (pdas.source_lock_pda(miner, 'btc', expected_hash, PID), False, True),
     ]

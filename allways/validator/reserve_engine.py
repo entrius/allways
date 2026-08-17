@@ -426,7 +426,9 @@ def _extend_for_claim(client, miner_pk, reservation, backing) -> None:
     if target <= reserved_until:
         return  # already at the contract ceiling — nothing left to buy
     try:
-        client.extend_reservation(miner_pk, target, backing)
+        client.extend_reservation(
+            miner_pk, target, backing, from_chain=reservation.from_chain, from_addr=reservation.from_addr
+        )
         bt.logging.info(f'claim runway: extended reserved_until {reserved_until} -> {target} (+{target - now}s)')
     except Exception as e:  # noqa: BLE001 - never block the claim on a failed extension
         bt.logging.warning(f'claim runway: extend_reservation failed ({e}); attempting the claim anyway')

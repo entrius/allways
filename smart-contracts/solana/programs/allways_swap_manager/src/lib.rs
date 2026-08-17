@@ -272,8 +272,12 @@ pub mod allways_swap_manager {
     // --- Deadline extensions (single validator, no quorum; bounded by a frozen ceiling) ---
     /// A validator slides a reservation's deadline forward while it waits on slow source-chain
     /// confirmation. Bounded by the per-reservation ceiling frozen at creation.
-    pub fn extend_reservation(ctx: Context<ExtendReservation>, target_at: i64) -> Result<()> {
-        extend_reservation::handler(ctx, target_at)
+    pub fn extend_reservation(
+        ctx: Context<ExtendReservation>,
+        target_at: i64,
+        from_addr_hash: [u8; 32],
+    ) -> Result<()> {
+        extend_reservation::handler(ctx, target_at, from_addr_hash)
     }
     /// A validator slides a swap's fulfillment timeout forward while it waits on slow destination-chain
     /// confirmation. Bounded by the per-swap ceiling frozen at creation.

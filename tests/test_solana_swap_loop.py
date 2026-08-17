@@ -90,6 +90,9 @@ class RecordingProvider:
     def is_valid_address(self, address):
         return self.valid_addr
 
+    def normalize_address(self, address):
+        return address.lower() if isinstance(address, str) else address  # mirror the EVM provider
+
     @property
     def chain_def(self):
         return SimpleNamespace(replay_grace_secs=self.grace)
@@ -289,6 +292,16 @@ def test_fulfilled_pending_dest_at_ceiling_overdue_times_out():
 def test_pending_attestation_source_ok_attests():
     loop, _ = loop_with(result=True)
     assert loop.decide(make_swap(status='PendingAttestation'), now=1500).decision == SwapDecision.ATTEST
+
+
+def test_pending_attestation_rejects_dest_equal_to_miner_delivery():
+    # V-H1 (chain-aware attest gate): user_to_addr NORMALIZE-equal to the miner's delivery address → never
+    # attest. Catches the EVM checksum-variant a self-represented taker uses to slip the on-chain raw
+    # compare (provider normalize lowercases). Poisoned dest → the miner must never be obligated.
+    loop, _ = loop_with(result=True)
+    swap = make_swap(status='PendingAttestation')
+    swap.user_to_addr = swap.miner_to_addr.upper()  # case-variant of the pinned miner delivery address
+    assert loop.decide(swap, now=1500).decision == SwapDecision.REJECT
 
 
 def test_pending_attestation_source_missing_waits():
@@ -516,7 +529,7 @@ class ExtendRecordingClient:
         self.calls = []
         self.keypair = SimpleNamespace(pubkey=lambda: 'VALIDATOR')
 
-    def extend_reservation(self, miner, target_at, backing='sol'):
+    def extend_reservation(self, miner, target_at, backing='sol', *, from_chain=None, from_addr=None):
         self.calls.append(('extend_reservation', miner, target_at))
         if self.reservation_exc:
             raise self.reservation_exc
