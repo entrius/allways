@@ -141,7 +141,9 @@ class Erc20(EvmAsset):
             # A probe we can't COMPLETE is transient (unreachable RPC / rate-limit storm) — degrade, never
             # crash the whole validator at boot over one spoke's flaky endpoint (that takes the hub down too).
             # The real config fault — a codeless/wrong contract — is a COMPLETED probe returning '0x' below.
-            bt.logging.warning(f'{self.chain_def.id} token contract probe unreachable on {self.chain.network} ({e}) — degraded')
+            bt.logging.warning(
+                f'{self.chain_def.id} token contract probe unreachable on {self.chain.network} ({e}) — degraded'
+            )
             return
         if code == '0x':
             # A typo'd override or wrong network would otherwise surface as every send failing.

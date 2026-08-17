@@ -297,7 +297,8 @@ def finalize_won_seats(validator, now: int) -> list:
         def _collides(addr: str) -> bool:
             want = src.chain.normalize_address(addr) if src else addr
             return any(
-                s.from_chain == from_chain and (src.chain.normalize_address(s.from_addr) if src else s.from_addr) == want
+                s.from_chain == from_chain
+                and (src.chain.normalize_address(s.from_addr) if src else s.from_addr) == want
                 for s, _b in live_slots
             )
 
