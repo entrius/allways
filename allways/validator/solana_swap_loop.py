@@ -416,14 +416,19 @@ class SolanaSwapLoop:
         chain providers + the Reservation PDA."""
         status = _status_name(swap)
         overdue = now >= int(swap.timeout_at)
+        # No dest provider here → can't verify locally. SKIP below the ceiling (a re-enabled spoke or a
+        # provider-equipped peer still resolves it); past max_extend_at TIMEOUT so a permanently unverifiable
+        # pair frees the collateral instead of freezing it forever (only network-wide gaps reach quorum).
+        if status in ('Active', 'Fulfilled') and self.providers.get(swap.to_chain) is None:
+            if now < int(swap.max_extend_at):
+                return SwapAction(SwapDecision.SKIP, reason=f'no provider for dest {swap.to_chain} — cannot verify yet')
+            return SwapAction(
+                SwapDecision.TIMEOUT,
+                reason=f'no provider for dest {swap.to_chain} past max_extend_at — terminal, else collateral freezes',
+            )
         if status == 'PendingAttestation':
             return self._decide_pending_attestation(swap, now)
         if status == 'Active':
-            # An Active swap never re-fetches the dest leg (no tx yet), so a missing dest provider would
-            # slip past the tri-state guard and TIMEOUT below on mere absence of a verifier. Same rule as
-            # _fetch_leg's None provider: unverifiable → SKIP, never slash an unsupported/disabled spoke.
-            if self.providers.get(swap.to_chain) is None:
-                return SwapAction(SwapDecision.SKIP, reason=f'no provider for dest {swap.to_chain} — cannot verify')
             # No-fault cancel for chains whose refusal is provable WITHOUT a delivery tx (Solana reserved
             # account, ERC-20 issuer freeze): an Active swap into such a dest cancels immediately — no point
             # waiting for a fulfillment that can never land. Native EVM has no tx yet, so this is None until

@@ -826,18 +826,18 @@ def test_the_flattened_swap_view_carries_the_backing_it_draws_against():
 
 class TestMissingProviderNeverSlashes:
     """A spoke with no provider on this validator (unsupported/disabled net, e.g. #678) is
-    UNVERIFIABLE, not payment-absent. A swap on that spoke reaching chain state must SKIP — never
-    slash on the absence of a verifier. _fetch_leg maps a None provider to 'down', same as an
-    unreachable RPC, and the Active branch (which never fetches) guards the dest the same way."""
+    UNVERIFIABLE, not payment-absent. Below the extension ceiling a swap on that spoke SKIPs (never slash
+    on the absence of a verifier); PAST max_extend_at it TIMEOUTs so the collateral can't freeze forever.
+    _fetch_leg maps a None provider to 'down' (like an unreachable RPC); decide() applies the ceiling."""
 
     def test_fetch_leg_missing_provider_is_down(self):
         loop, providers = loop_with(result=True)
         del providers['btc']  # loop.providers is the same dict
         assert loop._fetch_leg('btc', 'srctx', 'r', 1) == ('down', None)
 
-    def test_fulfilled_missing_dest_provider_skips_not_timeout(self):
-        # Same swap that TIMEOUTs when the dest tx is merely absent (test_fulfilled_overdue…) must
-        # instead SKIP when the dest PROVIDER is gone — absence of a verifier, not of a payment.
+    def test_fulfilled_missing_dest_provider_skips_below_ceiling(self):
+        # Dest tx merely absent → TIMEOUT; dest PROVIDER gone (before the ceiling) → SKIP: absence of a
+        # verifier, not of a payment. max_extend_at default (10_000) is well past now.
         loop, providers = loop_with(result=None)
         del providers['sol']
         assert loop.decide(make_swap(status='Fulfilled', timeout_at=1000), now=1500).decision == SwapDecision.SKIP
@@ -847,10 +847,24 @@ class TestMissingProviderNeverSlashes:
         del providers['btc']
         assert loop.decide(make_swap(status='PendingAttestation'), now=1500).decision == SwapDecision.SKIP
 
-    def test_active_overdue_missing_dest_provider_skips_not_timeout(self):
-        # The Active branch never calls _fetch_leg, so absent the guard a missing dest provider would
-        # fall straight through to the overdue TIMEOUT (slash). It must SKIP.
+    def test_active_missing_dest_provider_skips_below_ceiling(self):
+        # The Active branch never calls _fetch_leg; below the ceiling a missing dest provider must SKIP,
+        # not fall through to the overdue TIMEOUT.
         loop, providers = loop_with(result=True)
         del providers['sol']
-        swap = make_swap(status='Active', timeout_at=1000, max_extend_at=1200)  # overdue, past ceiling
+        swap = make_swap(status='Active', timeout_at=1000, max_extend_at=10_000)  # overdue, before ceiling
         assert loop.decide(swap, now=5000).decision == SwapDecision.SKIP
+
+    def test_active_missing_dest_provider_times_out_past_ceiling(self):
+        # A permanently-missing provider must not SKIP forever (freezing the taker deposit + miner
+        # collateral). Past max_extend_at it TIMEOUTs to free the collateral.
+        loop, providers = loop_with(result=True)
+        del providers['sol']
+        swap = make_swap(status='Active', timeout_at=1000, max_extend_at=1200)
+        assert loop.decide(swap, now=5000).decision == SwapDecision.TIMEOUT
+
+    def test_fulfilled_missing_dest_provider_times_out_past_ceiling(self):
+        loop, providers = loop_with(result=None)
+        del providers['sol']
+        swap = make_swap(status='Fulfilled', timeout_at=1000, max_extend_at=1200)
+        assert loop.decide(swap, now=5000).decision == SwapDecision.TIMEOUT
