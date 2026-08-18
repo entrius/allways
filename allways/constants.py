@@ -175,7 +175,10 @@ RECONCILE_QUIET_SECS = 600
 # Posting is block-aligned: every validator fires just after the same block boundary, so all
 # read the metagraph at ~the same stake snapshot and the quorum's hash-bound vectors converge.
 SECONDS_PER_BLOCK = 12
-WEIGHTS_STAKE_BUCKET_ALPHA = 50_000  # alpha per draw-weight unit; floor rounding
+# Alpha per draw-weight unit (floor rounding). 35k (from 50k) buys finer share resolution now that
+# weight also sets the stake-discounted reservation fee, at the cost of slightly more frequent
+# vector-change votes.
+WEIGHTS_STAKE_BUCKET_ALPHA = 35_000
 WEIGHTS_VOTE_INTERVAL_BLOCKS = 3_600  # ~12h — posting boundary cadence
 # Contract vote-round lifetime — mirrors constants.rs. A non-empty round older than this is
 # stale: record_vote clears and reopens it, and prior voters may legally vote again.

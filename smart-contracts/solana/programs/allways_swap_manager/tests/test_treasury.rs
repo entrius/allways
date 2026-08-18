@@ -6,7 +6,9 @@ use {
         prelude::Pubkey, solana_program::clock::Clock, solana_program::instruction::Instruction,
         AccountDeserialize, InstructionData, ToAccountMetas,
     },
-    allways_swap_manager::constants::{POOL_WINDOW_SECS, RESERVATION_FEE_LAMPORTS},
+    allways_swap_manager::constants::{
+        discounted_reservation_fee, POOL_WINDOW_SECS, RESERVATION_FEE_LAMPORTS,
+    },
     allways_swap_manager::state::{Pool, Treasury},
     litesvm::LiteSVM,
     solana_hash::Hash,
@@ -206,7 +208,8 @@ fn setup_with_fee() -> (LiteSVM, Keypair, u64) {
     confirm(&mut svm, &vals[1]);
 
     // treasury = reservation fee + the 1% confirm fee (quote creation is free).
-    (svm, admin, SOL_AMOUNT / 100 + RESERVATION_FEE_LAMPORTS)
+    // The opener is one of 3 weight-1 validators, so its reservation fee is stake-discounted.
+    (svm, admin, SOL_AMOUNT / 100 + discounted_reservation_fee(RESERVATION_FEE_LAMPORTS, 1, 3))
 }
 
 #[test]

@@ -1,7 +1,9 @@
 //! Upgrade cranks. A legacy account is shorter AND laid out differently, so the live types can't
 //! parse it: each crank reads it through a frozen mirror of the OLD layout, rebuilds it in the new one,
 //! and grows the allocation. Safe to re-run — gated on a marker the crank itself moves, moving no funds.
-//! v15 accepts THREE from-versions: v10 (mainnet, never took v3), v13 (testnet, v3 deployed) and v14.
+//! v16 accepts FOUR from-versions: v10 (mainnet, never took v3), v13 (testnet, v3 deployed), v14, and
+//! v15 — whose crank is a pure version stamp (the fee-discount shape is compile-time constants, so
+//! v15 and v16 share a layout).
 
 use anchor_lang::prelude::*;
 use anchor_lang::Discriminator;
@@ -21,6 +23,9 @@ const MIGRATE_FROM_V10: u32 = 10;
 const MIGRATE_FROM_V13: u32 = 13;
 /// v14 is the per-hub schema; v15 appends `vault_generation`.
 const MIGRATE_FROM_V14: u32 = 14;
+/// v15's layout IS the live layout (v16 changed fee semantics, not fields), so its crank only
+/// stamps the version.
+const MIGRATE_FROM_V15: u32 = 15;
 /// Byte offset of `Config.version` (discriminator + `admin`). Stable in every version, which is what
 /// lets the crank read the marker before committing to a layout.
 const CONFIG_VERSION_OFFSET: usize = 8 + 32;
@@ -129,6 +134,8 @@ enum LegacyConfig {
     V10(ConfigV10),
     /// v13 and v14 share a layout, so one frozen mirror parses both.
     V14(ConfigV14),
+    /// v15 shares the LIVE layout — parsed with the live type, only the version stamp moves.
+    V15(Config),
 }
 
 pub fn migrate_config(ctx: Context<MigrateConfig>) -> Result<()> {
@@ -154,7 +161,9 @@ pub fn migrate_config(ctx: Context<MigrateConfig>) -> Result<()> {
             msg!("config already at v{}", CONFIG_VERSION);
             return Ok(());
         }
-        if version == MIGRATE_FROM_V13 || version == MIGRATE_FROM_V14 {
+        if version == MIGRATE_FROM_V15 {
+            LegacyConfig::V15(Config::deserialize(&mut &data[8..])?)
+        } else if version == MIGRATE_FROM_V13 || version == MIGRATE_FROM_V14 {
             LegacyConfig::V14(ConfigV14::deserialize(&mut &data[8..])?)
         } else {
             require!(
@@ -171,8 +180,17 @@ pub fn migrate_config(ctx: Context<MigrateConfig>) -> Result<()> {
     let from_version = match &legacy {
         LegacyConfig::V10(_) => MIGRATE_FROM_V10,
         LegacyConfig::V14(cfg) => cfg.version,
+        LegacyConfig::V15(_) => MIGRATE_FROM_V15,
     };
     let legacy = match legacy {
+        // v15 -> v16 changed fee SEMANTICS only (compile-time discount shape + event fields), so
+        // the account neither grows nor rebuilds — the stamp just records which rules are live.
+        LegacyConfig::V15(mut cfg) => {
+            cfg.version = CONFIG_VERSION;
+            write_account(&info, &cfg)?;
+            msg!("config migrated v{} -> v{}", from_version, CONFIG_VERSION);
+            return Ok(());
+        }
         // v13/v14 -> v15 appends `vault_generation`, so the account grows by 8 bytes. Generation 0
         // is correct: the epochs already attested came from the vault in service when they landed.
         LegacyConfig::V14(cfg) => {

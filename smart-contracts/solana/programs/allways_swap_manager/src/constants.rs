@@ -70,10 +70,12 @@ pub const TREASURY_SEED: &[u8] = b"treasury";
 #[constant]
 pub const ATTEST_SEED: &[u8] = b"attest";
 
-/// On-chain schema/version for upgrade tracking, bumped as phases land. v14: v3.1 per-hub swap
-/// concurrency — per-hub transient state on MinerState, per-hub Pool/Reservation seeds. v13 = W2b
-/// quote-level backing; v12 = W2 bond attestation; v11 = W1 seam; v10 = A4 freshness replay.
-pub const CONFIG_VERSION: u32 = 15;
+/// On-chain schema/version for upgrade tracking, bumped as phases land. v16: stake-scaled
+/// reservation-fee discount (fee semantics + entry-event `fee_paid`; layout unchanged from v15).
+/// v15 appends `vault_generation`; v14: v3.1 per-hub swap concurrency — per-hub transient state on
+/// MinerState, per-hub Pool/Reservation seeds. v13 = W2b quote-level backing; v12 = W2 bond
+/// attestation; v11 = W1 seam; v10 = A4 freshness replay.
+pub const CONFIG_VERSION: u32 = 16;
 
 /// Max validators in the whitelist (bounds the Config `validators` Vec and a round's voters).
 pub const MAX_VALIDATORS: usize = 16;
@@ -261,6 +263,46 @@ const _: () = assert!(
     "seed reservation fee must satisfy its own floor"
 );
 
+// Stake-scaled reservation-fee discount: `fee = max(floor, base × (1 − min(cap, slope·share)))`,
+// where share is the router's fraction of the Config.validators draw weight — the same vector the
+// lottery reads, so routing weight and routing cost move together. COMPILE-TIME policy like
+// COLLATERAL_REQUIREMENT_BPS — deliberately NOT Config knobs: reshaping the discount is a program
+// upgrade, and the admin key can never crank it.
+
+/// Discount slope: bps of discount per bps of weight share (20_000 = k=2, so discount grows at
+/// twice the share). Weight-0 routers — plain users, unbound validators — pay full base.
+pub const FEE_DISCOUNT_SLOPE_BPS: u64 = 20_000;
+
+/// Discount ceiling (9_500 = 95%): with k=2, ≥47.5% share pays base×5%, clamped up to the lamport
+/// floor — so a pool-open is never free at ANY share and the anti-grief brake survives.
+pub const FEE_DISCOUNT_CAP_BPS: u64 = 9_500;
+
+/// Sanity lid on the slope (k=10): a future re-tune can steepen the curve, not ship a de-facto cliff.
+pub const FEE_DISCOUNT_SLOPE_BPS_MAX: u64 = 100_000;
+
+const _: () = assert!(
+    FEE_DISCOUNT_CAP_BPS <= BPS_DENOMINATOR && FEE_DISCOUNT_SLOPE_BPS <= FEE_DISCOUNT_SLOPE_BPS_MAX,
+    "fee-discount shape out of bounds (cap <= 100%, slope <= 10x)"
+);
+
+/// Effective reservation fee for a router holding `weight` of `total_weight` draw weight:
+/// `share_bps = 10_000·w/Σw` (floored — truncation only shrinks the discount), `discount_bps =
+/// min(cap, slope·share/10_000)`, `fee = max(RESERVATION_FEE_LAMPORTS_MIN, ceil(base·(10_000−
+/// discount)/10_000))`. Zero weight or an empty set ⇒ full base. Pure u128 integer math — no wrap
+/// even at u64::MAX weights.
+pub fn discounted_reservation_fee(base: u64, weight: u64, total_weight: u128) -> u64 {
+    if weight == 0 || total_weight == 0 {
+        return base;
+    }
+    let bps = BPS_DENOMINATOR as u128;
+    let share_bps = (weight as u128).saturating_mul(bps) / total_weight;
+    let discount_bps = (share_bps.saturating_mul(FEE_DISCOUNT_SLOPE_BPS as u128) / bps)
+        .min(FEE_DISCOUNT_CAP_BPS as u128);
+    // ceil-div: rounding can only push the fee UP, never below what the shape owes.
+    let fee = ((base as u128).saturating_mul(bps - discount_bps).saturating_add(bps - 1)) / bps;
+    fee.max(RESERVATION_FEE_LAMPORTS_MIN as u128).min(u64::MAX as u128) as u64
+}
+
 /// Initial reservation-lottery pooling window (seconds). Seeds `Config.pool_window_secs` — how long
 /// a pool gathers contending requests before the stake-weighted draw. Must stay well below the
 /// reservation TTL. Runtime-adjustable via `set_pool_window` (dev seeds 5s for fast swaps).
@@ -394,6 +436,40 @@ mod tests {
         assert_eq!(quote_update_fee(86_400), 0);
         // Clock skew (negative elapsed) → most-expensive tier, never free.
         assert_eq!(quote_update_fee(-100), QUOTE_UPDATE_FEE_TIER1_LAMPORTS);
+    }
+
+    #[test]
+    fn discounted_fee_shape_matches_the_decided_curve() {
+        let base = RESERVATION_FEE_LAMPORTS; // 0.02 SOL
+        // Weight-0 routers (plain users, unbound validators) and a weightless set pay full base.
+        assert_eq!(discounted_reservation_fee(base, 0, 100), base);
+        assert_eq!(discounted_reservation_fee(base, 0, 0), base);
+        assert_eq!(discounted_reservation_fee(base, 5, 0), base);
+        // 20% share → 40% discount at k=2 → 0.012 SOL (the doc's mid-curve example).
+        assert_eq!(discounted_reservation_fee(base, 20, 100), 12_000_000);
+        // 47.5% share hits the 95% cap exactly → base×5% = the 0.001 SOL floor.
+        assert_eq!(discounted_reservation_fee(base, 475, 1_000), RESERVATION_FEE_LAMPORTS_MIN);
+        // Past the cap nothing more is shaved — even a sole 100%-share router pays the floor, never 0.
+        assert_eq!(discounted_reservation_fee(base, 999, 1_000), RESERVATION_FEE_LAMPORTS_MIN);
+        assert_eq!(discounted_reservation_fee(base, 1, 1), RESERVATION_FEE_LAMPORTS_MIN);
+        // Equal thirds (the LiteSVM harness shape): share_bps floors to 3333 → keep 3334.
+        assert_eq!(discounted_reservation_fee(base, 1, 3), 6_668_000);
+    }
+
+    #[test]
+    fn discounted_fee_rounds_up_and_never_wraps() {
+        // Ceil-div: an inexact division rounds toward the treasury.
+        assert_eq!(discounted_reservation_fee(20_000_001, 1, 3), 6_668_001);
+        // A base already at the floor never goes below it, whatever the share.
+        assert_eq!(
+            discounted_reservation_fee(RESERVATION_FEE_LAMPORTS_MIN, 1, 2),
+            RESERVATION_FEE_LAMPORTS_MIN
+        );
+        // Extreme inputs clamp instead of wrapping: 100% share → ceil of base×5%.
+        assert_eq!(
+            discounted_reservation_fee(u64::MAX, u64::MAX, u64::MAX as u128),
+            u64::MAX / 20 + 1
+        );
     }
 
     #[test]

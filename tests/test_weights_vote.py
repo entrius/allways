@@ -73,10 +73,10 @@ def test_derive_buckets_floor_and_alignment():
     keys = [Keypair().pubkey() for _ in range(4)]
     validators = [_vali(k) for k in keys]
     attribution = {str(keys[0]): 'hkA', str(keys[1]): 'hkB', str(keys[2]): 'hkC'}  # keys[3] unbound
-    mg = _metagraph(['hkA', 'hkB', 'hkC'], [178_000.0, 49_999.0, 50_000.0])
+    mg = _metagraph(['hkA', 'hkB', 'hkC'], [178_000.0, 34_999.0, 35_000.0])
     # Sub-bucket but bound (hkB) floors to 1, not 0 — an all-zero vector makes the contract's
     # draw uniform and native bidders beat routed takers (QA finding P1). Unbound stays 0.
-    assert derive_weight_vector(validators, attribution, mg) == [3, 1, 1, 0]
+    assert derive_weight_vector(validators, attribution, mg) == [5, 1, 1, 0]
 
 
 def test_derive_hotkey_off_metagraph_is_zero():
@@ -101,7 +101,7 @@ def _whitelisted_setup(patch_attribution, stake=178_000.0, onchain_weight=1, las
 def test_bootstrap_votes_immediately(patch_attribution):
     client, vali = _whitelisted_setup(patch_attribution)
     maybe_vote_weights(vali, NOW)
-    assert client.voted == [[3]]
+    assert client.voted == [[5]]
     assert vali.weights_epoch_done is None  # done only once the quorum lands on-chain
 
 
@@ -129,7 +129,7 @@ def test_landed_this_epoch_marks_done(patch_attribution):
 def test_stale_update_before_boundary_is_due(patch_attribution):
     client, vali = _whitelisted_setup(patch_attribution, last_update=NOW - 500)  # before the boundary
     maybe_vote_weights(vali, NOW)
-    assert client.voted == [[3]]
+    assert client.voted == [[5]]
 
 
 def test_not_whitelisted_skips_epoch(patch_attribution):
@@ -142,7 +142,7 @@ def test_not_whitelisted_skips_epoch(patch_attribution):
 
 
 def test_unchanged_vector_skips(patch_attribution):
-    client, vali = _whitelisted_setup(patch_attribution, onchain_weight=3)  # derived == on-chain
+    client, vali = _whitelisted_setup(patch_attribution, onchain_weight=5)  # derived == on-chain
     maybe_vote_weights(vali, NOW)
     assert client.voted == []
     assert vali.weights_epoch_done == BLOCK // WEIGHTS_VOTE_INTERVAL_BLOCKS
