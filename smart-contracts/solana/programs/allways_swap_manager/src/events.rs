@@ -270,6 +270,9 @@ pub struct PoolOpened {
     pub collateral_chain: String,
     pub closes_at: i64,
     pub seed_slot: u64,
+    /// Effective (stake-discounted) reservation fee the opener paid, lamports — so treasury income
+    /// attribution can tell discounted from full fees. Appended last; prefix decoders keep working.
+    pub fee_paid: u64,
 }
 
 #[event]
@@ -278,6 +281,9 @@ pub struct ReservationRequested {
     pub router: Pubkey,
     /// Number of bids in the pool after this one.
     pub requests: u8,
+    /// Effective (stake-discounted) fee this entry paid, lamports. 0 = a same-router in-window bid
+    /// update, which is free. Appended last; prefix decoders keep working.
+    pub fee_paid: u64,
 }
 
 /// The seat winner filled its reservation: taker + amounts named, `reserved_until` set. Carries the

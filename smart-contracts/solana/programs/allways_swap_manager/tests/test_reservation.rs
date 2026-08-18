@@ -13,7 +13,10 @@ use {
         prelude::Pubkey, solana_program::clock::Clock, solana_program::instruction::Instruction,
         AccountDeserialize, InstructionData, ToAccountMetas,
     },
-    allways_swap_manager::constants::{FINALIZE_WINDOW_SECS, POOL_WINDOW_SECS, RESERVATION_FEE_LAMPORTS},
+    allways_swap_manager::constants::{
+        discounted_reservation_fee, FINALIZE_WINDOW_SECS, POOL_WINDOW_SECS,
+        RESERVATION_FEE_LAMPORTS, RESERVATION_FEE_LAMPORTS_MIN,
+    },
     allways_swap_manager::state::{MinerQuote, MinerState, Pool, Reservation, Treasury},
     litesvm::LiteSVM,
     solana_hash::Hash,
@@ -342,6 +345,12 @@ fn is_active(svm: &LiteSVM, miner: &Pubkey) -> bool {
     MinerState::try_deserialize(&mut a.data.as_slice()).unwrap().active
 }
 
+/// The fee a `setup()` validator pays on a fresh entry: each holds 1 of 3 total draw weight, so
+/// the stake discount lands at the 1/3-share point of the curve.
+fn setup_val_fee() -> u64 {
+    discounted_reservation_fee(RESERVATION_FEE_LAMPORTS, 1, 3)
+}
+
 /// init + 3 validators (weight 1) + a funded, active miner with a BTC→SOL quote posted. Clock at
 /// BASE_TS. Returns (svm, admin, validators, miner).
 fn setup(min_swap: u64, max_swap: u64) -> (LiteSVM, Keypair, Vec<Keypair>, Keypair) {
@@ -389,7 +398,7 @@ fn test_open_pins_quote_and_charges_fee() {
     assert_eq!(p.closes_at, BASE_TS + POOL_WINDOW_SECS);
     assert_eq!(p.requests.len(), 1);
     assert_eq!(p.requests[0].router, vals[0].pubkey());
-    assert_eq!(treasury(&svm), t0 + RESERVATION_FEE_LAMPORTS, "flat fee accrued to treasury");
+    assert_eq!(treasury(&svm), t0 + setup_val_fee(), "stake-discounted fee accrued to treasury");
 }
 
 #[test]
@@ -399,8 +408,34 @@ fn test_each_request_charges_fee() {
     let t0 = treasury(&svm);
     send(&mut svm, open_ix(&vals[0].pubkey(), &miner.pubkey(), "btc", "sol"), &vals[0].pubkey(), &vals[0]).expect("open");
     send(&mut svm, open_ix(&vals[1].pubkey(), &miner.pubkey(), "btc", "sol"), &vals[1].pubkey(), &vals[1]).expect("join");
-    assert_eq!(treasury(&svm), t0 + 2 * RESERVATION_FEE_LAMPORTS, "both opener and joiner pay");
+    assert_eq!(treasury(&svm), t0 + 2 * setup_val_fee(), "both opener and joiner pay");
     assert_eq!(pool(&svm, &miner.pubkey()).requests.len(), 2);
+}
+
+#[test]
+fn test_weight0_router_pays_the_full_base_fee() {
+    // Entry is permissionless, but a router with no draw weight (a plain user) earns no discount —
+    // the anti-grief brake stays at full strength exactly where griefing is cheapest to mount.
+    let (mut svm, _admin, _vals, miner) = setup(0, 0);
+    let user = Keypair::new();
+    svm.airdrop(&user.pubkey(), 10_000_000_000).unwrap();
+    let t0 = treasury(&svm);
+    send(&mut svm, open_ix(&user.pubkey(), &miner.pubkey(), "btc", "sol"), &user.pubkey(), &user).expect("open");
+    assert_eq!(treasury(&svm), t0 + RESERVATION_FEE_LAMPORTS, "weight-0 router pays full base");
+}
+
+#[test]
+fn test_majority_share_pays_the_floor_never_zero() {
+    // A validator holding 57 of 60 weight (95% share) is past the 47.5% cap point → pays exactly
+    // the lamport floor. The floor is the final clamp: no share makes a pool-open free.
+    let (mut svm, admin, _vals, miner) = setup(0, 0);
+    let whale = Keypair::new();
+    svm.airdrop(&whale.pubkey(), 10_000_000_000).unwrap();
+    send(&mut svm, add_validator_ix(&admin.pubkey(), whale.pubkey(), 57), &admin.pubkey(), &admin).expect("add whale");
+    let t0 = treasury(&svm);
+    send(&mut svm, open_ix(&whale.pubkey(), &miner.pubkey(), "btc", "sol"), &whale.pubkey(), &whale).expect("open");
+    assert_eq!(treasury(&svm), t0 + RESERVATION_FEE_LAMPORTS_MIN, "capped discount lands on the floor");
+    assert!(RESERVATION_FEE_LAMPORTS_MIN > 0, "a pool-open is never free");
 }
 
 #[test]
@@ -765,9 +800,9 @@ fn test_repeat_bid_is_free() {
     let (mut svm, _admin, vals, miner) = setup(0, 0);
     let t0 = treasury(&svm);
     send(&mut svm, open_ix(&vals[0].pubkey(), &miner.pubkey(), "btc", "sol"), &vals[0].pubkey(), &vals[0]).expect("open");
-    assert_eq!(treasury(&svm), t0 + RESERVATION_FEE_LAMPORTS, "first entry pays the fee");
+    assert_eq!(treasury(&svm), t0 + setup_val_fee(), "first entry pays the fee");
     send(&mut svm, open_ix(&vals[0].pubkey(), &miner.pubkey(), "btc", "sol"), &vals[0].pubkey(), &vals[0]).expect("repeat");
-    assert_eq!(treasury(&svm), t0 + RESERVATION_FEE_LAMPORTS, "in-window repeat bid is free (no extra fee)");
+    assert_eq!(treasury(&svm), t0 + setup_val_fee(), "in-window repeat bid is free (no extra fee)");
 }
 
 #[test]

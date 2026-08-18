@@ -3,8 +3,8 @@ use anchor_lang::system_program::{transfer, Transfer};
 
 use crate::backing;
 use crate::constants::{
-    ATTEST_SEED, CONFIG_SEED, MAX_CHAIN_LEN, MAX_VALIDATORS, MINER_SEED, POOL_SEED, QUOTE_SEED,
-    RESV_SEED, TREASURY_SEED,
+    discounted_reservation_fee, ATTEST_SEED, CONFIG_SEED, MAX_CHAIN_LEN, MAX_VALIDATORS,
+    MINER_SEED, POOL_SEED, QUOTE_SEED, RESV_SEED, TREASURY_SEED,
 };
 use crate::error::ErrorCode;
 use crate::events::{PoolOpened, ReservationRequested};
@@ -15,9 +15,10 @@ use crate::state::{
 /// Any account (validator OR plain user — entry is permissionless) opens or joins a per-miner
 /// reservation-lottery pool for one of the miner's quotes. First caller opens and pins that quote
 /// (pair, rate AND backing); later in-window callers add one request each against the same pinned
-/// offer. Every fresh entry pays a flat, non-refundable reservation fee (router -> treasury) — the
-/// anti-spam gate. A non-validator router gets lottery weight 0 (loses to validators / uniform among
-/// users) and, if it wins, flags down a validator to claim + attest (those are validator-gated).
+/// offer. Every fresh entry pays a non-refundable, stake-discounted reservation fee (router ->
+/// treasury) — the anti-spam gate; weight-0 routers pay the full base. A non-validator router gets
+/// lottery weight 0 (loses to validators / uniform among users) and, if it wins, flags down a
+/// validator to claim + attest (those are validator-gated).
 #[derive(Accounts)]
 #[instruction(from_chain: String, to_chain: String, collateral_chain: String)]
 pub struct OpenOrRequest<'info> {
@@ -154,18 +155,35 @@ pub fn handler(
     let pending_finalize = resv.reserved_until == 0 && resv.finalize_by != 0 && now <= resv.finalize_by;
     require!(!active_reservation && !pending_finalize, ErrorCode::MinerReserved);
 
-    // Flat, non-refundable anti-spam fee: router → treasury (subnet revenue). Charged only on a
-    // fresh entry (open or first join) — a same-router in-window bid UPDATE is free, so refining a
-    // bid against the pinned rate isn't taxed.
+    // Non-refundable anti-spam fee: router → treasury (subnet revenue), stake-discounted — the
+    // router's Config.validators draw weight (the same vector the lottery reads) earns a
+    // linear-to-cap discount off the base fee, floored so a pool-open is never free (see
+    // constants::discounted_reservation_fee). Charged only on a fresh entry (open or first join) —
+    // a same-router in-window bid UPDATE is free, so refining a bid against the pinned rate isn't
+    // taxed.
+    let router_key = ctx.accounts.router.key();
     let is_update = ctx.accounts.pool.opened_at != 0
         && ctx
             .accounts
             .pool
             .requests
             .iter()
-            .any(|r| r.router == ctx.accounts.router.key());
-    if !is_update {
-        let fee = ctx.accounts.config.reservation_fee_lamports;
+            .any(|r| r.router == router_key);
+    let fee_paid = if is_update {
+        0
+    } else {
+        let validators = &ctx.accounts.config.validators;
+        let total_weight: u128 = validators.iter().map(|v| v.weight as u128).sum();
+        let weight = validators
+            .iter()
+            .find(|v| v.key == router_key)
+            .map(|v| v.weight)
+            .unwrap_or(0);
+        let fee = discounted_reservation_fee(
+            ctx.accounts.config.reservation_fee_lamports,
+            weight,
+            total_weight,
+        );
         transfer(
             CpiContext::new(
                 ctx.accounts.system_program.key(),
@@ -182,10 +200,10 @@ pub fn handler(
             .total
             .checked_add(fee)
             .ok_or(ErrorCode::Overflow)?;
-    }
+        fee
+    };
 
     let miner_key = ctx.accounts.miner.key();
-    let router_key = ctx.accounts.router.key();
     let req = Request { router: router_key };
 
     let pool_bump = ctx.bumps.pool;
@@ -233,6 +251,7 @@ pub fn handler(
             collateral_chain,
             closes_at,
             seed_slot: 0, // armed later by resolve_pool; kept in the event for schema stability
+            fee_paid,
         });
     } else {
         // JOIN or UPDATE — must be within the window and match the pinned pair.
@@ -259,6 +278,7 @@ pub fn handler(
             miner: miner_key,
             router: router_key,
             requests: pool.requests.len() as u8,
+            fee_paid,
         });
     }
     Ok(())

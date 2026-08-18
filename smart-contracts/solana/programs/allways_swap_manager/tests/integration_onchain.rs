@@ -696,11 +696,25 @@ fn onchain_reservation_fee_to_treasury() {
     let before = read_treasury(&rpc).total;
     send(&rpc, open_ix(&vals[0].pubkey(), &miner.pubkey()), &vals[0].pubkey(), &vals[0])
         .expect("open pool");
-    let fee = allways_swap_manager::constants::RESERVATION_FEE_LAMPORTS;
+    // The opener's fee is stake-discounted off its share of the LIVE validator set's draw weight —
+    // computed from the on-chain Config, so the assertion holds however the shared set is seeded.
+    let cfg = read_config(&rpc);
+    let total_weight: u128 = cfg.validators.iter().map(|v| v.weight as u128).sum();
+    let weight = cfg
+        .validators
+        .iter()
+        .find(|v| v.key == vals[0].pubkey())
+        .map(|v| v.weight)
+        .unwrap_or(0);
+    let fee = allways_swap_manager::constants::discounted_reservation_fee(
+        cfg.reservation_fee_lamports,
+        weight,
+        total_weight,
+    );
     assert_eq!(
         read_treasury(&rpc).total,
         before + fee,
-        "flat reservation fee accrued to treasury"
+        "stake-discounted reservation fee accrued to treasury"
     );
 }
 

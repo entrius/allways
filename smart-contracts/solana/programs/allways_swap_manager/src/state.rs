@@ -2,8 +2,9 @@ use anchor_lang::prelude::*;
 
 use crate::constants::{MAX_ADDR_LEN, MAX_BACKING_SLOTS, MAX_CHAIN_LEN, MAX_TX_LEN, MAX_VALIDATORS};
 
-/// A whitelisted validator and its draw weight. `weight` (default 1, admin-set) is the
-/// stake-weight seam consumed ONLY by the reservation-lottery draw; consensus stays count-based.
+/// A whitelisted validator and its draw weight. `weight` (default 1, admin-set) is the stake-weight
+/// seam consumed by the reservation-lottery draw and the entry-fee discount
+/// (`discounted_reservation_fee`); consensus stays count-based.
 #[derive(AnchorSerialize, AnchorDeserialize, Clone, InitSpace)]
 pub struct ValidatorInfo {
     pub key: Pubkey,

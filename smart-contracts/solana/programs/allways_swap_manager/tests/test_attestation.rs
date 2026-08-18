@@ -1740,6 +1740,28 @@ fn test_migrate_config_stamps_a_v13_config_to_v14_in_place() {
 }
 
 #[test]
+fn test_migrate_config_stamps_a_v15_config_to_v16_in_place() {
+    let (mut svm, admin, _vals, _miner) = setup();
+    // v15 and v16 share a layout (the fee-discount shape is compile-time constants), so the crank
+    // is a pure version stamp. Unlike the v13/v14 arm it must NOT re-seed `vault_generation` —
+    // a retired vault's epoch namespace stays retired across the upgrade.
+    let mut cfg = config_acct(&svm);
+    cfg.version = 15;
+    cfg.vault_generation = 5; // sentinel: the stamp path must carry it verbatim
+    let mut buf = Vec::new();
+    cfg.try_serialize(&mut buf).unwrap();
+    overwrite(&mut svm, config_pda(), buf);
+
+    send(&mut svm, migrate_config_ix(&admin.pubkey()), &admin.pubkey(), &admin).expect("migrate");
+    let cfg = config_acct(&svm);
+    assert_eq!(cfg.version, CONFIG_VERSION);
+    assert_eq!(cfg.vault_generation, 5, "v15 path stamps the version and touches nothing else");
+
+    send(&mut svm, migrate_config_ix(&admin.pubkey()), &admin.pubkey(), &admin).expect("again");
+    assert_eq!(config_acct(&svm).vault_generation, 5, "idempotent re-run");
+}
+
+#[test]
 fn test_migrate_miner_state_seeds_an_inactive_miner_with_no_bits() {
     let (mut svm, admin, _vals, miner) = setup();
     let m = miner.pubkey();
