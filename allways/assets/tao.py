@@ -544,6 +544,10 @@ class Tao(Asset, Chain):
     # watcher tick — bounded by SCAN_LOOKBACK_BLOCKS on the first call or after a gap
     # (≈5 min of 12s blocks, mirroring the BTC scanner's window).
     SCAN_LOOKBACK_BLOCKS = 25
+    # A lost-hash send is only provably dead past the extrinsic's mortality: bittensor signs
+    # transfers with a 128-block era (DEFAULT_PERIOD), so a shorter deadline re-sends while the
+    # original can still include → double pay (the re-send takes nonce N+1 once it lands).
+    LOST_SEND_DEAD_BLOCKS = 130
     _MAX_SCAN_CURSORS = 64
 
     def find_recent_outgoing(self, from_addr: str, to_addr: str, amount: int) -> Optional[str]:
@@ -705,8 +709,8 @@ class Tao(Asset, Chain):
                 settled = self.settled_credit(block_num, ext_idx, to_addr)
                 if settled is not None and settled[1] >= int(amount):
                     return (ext_hash, block_num)
-        if head - int(seen_head) > self.SCAN_LOOKBACK_BLOCKS:
-            return None  # window elapsed and scanned clean: the lost extrinsic never landed
+        if head - int(seen_head) > self.LOST_SEND_DEAD_BLOCKS:
+            return None  # mortal era elapsed and scanned clean: the lost extrinsic can never land
         raise ProviderUnreachableError('prior TAO send (hash lost mid-submit) not yet resolvable — waiting a pass')
 
     def send_amount(

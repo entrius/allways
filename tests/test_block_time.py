@@ -250,7 +250,7 @@ def test_tao_lost_hash_skips_a_transfer_owned_by_another_obligation():
     # A hash recorded under any scope belongs to a DIFFERENT swap this process sent — adopting it
     # would report the same tx for two swaps. With the window elapsed, the lost send is dead.
     blocks = {100: _raw_transfer_block('0xother', 'userTAO', 5000, 'minerTAO')}
-    p = _scan_provider(head=150, blocks=blocks, readable_default=True)
+    p = _scan_provider(head=99 + Tao.LOST_SEND_DEAD_BLOCKS + 1, blocks=blocks, readable_default=True)
     p.broadcasted_txids['swapA'] = ('userTAO', 5000, '0xother', 100)
     assert p._lost_hash_prior_landed('minerTAO', 'userTAO', 5000, seen_head=99) is None
 
@@ -263,15 +263,23 @@ def test_tao_lost_hash_waits_while_the_inclusion_window_is_open():
 
 
 def test_tao_lost_hash_dead_after_window_scanned_clean():
-    # The full window since the attempt elapsed and every block read clean → provably never landed.
-    p = _scan_provider(head=100 + Tao.SCAN_LOOKBACK_BLOCKS + 1, blocks={}, readable_default=True)
+    # The full mortality window since the attempt elapsed and every block read clean → provably never landed.
+    p = _scan_provider(head=100 + Tao.LOST_SEND_DEAD_BLOCKS + 1, blocks={}, readable_default=True)
     assert p._lost_hash_prior_landed('minerTAO', 'userTAO', 5000, seen_head=100) is None
+
+
+def test_tao_lost_hash_waits_out_the_full_mortal_era():
+    # Past the scan window but inside the 128-block mortal era the extrinsic can STILL include —
+    # declaring it dead here re-sends into a double pay. Wait, don't clear.
+    p = _scan_provider(head=100 + Tao.SCAN_LOOKBACK_BLOCKS + 26, blocks={}, readable_default=True)
+    with pytest.raises(ProviderUnreachableError):
+        p._lost_hash_prior_landed('minerTAO', 'userTAO', 5000, seen_head=100)
 
 
 def test_tao_lost_hash_raises_when_a_block_is_unreadable():
     # Even past the window, an unreadable block could hide the landed transfer → keep waiting.
     blocks = {110: None}
-    p = _scan_provider(head=100 + Tao.SCAN_LOOKBACK_BLOCKS + 1, blocks=blocks, readable_default=True)
+    p = _scan_provider(head=100 + Tao.LOST_SEND_DEAD_BLOCKS + 1, blocks=blocks, readable_default=True)
     with pytest.raises(ProviderUnreachableError):
         p._lost_hash_prior_landed('minerTAO', 'userTAO', 5000, seen_head=100)
 
