@@ -1,4 +1,5 @@
 import math
+import os
 from dataclasses import dataclass
 
 from allways.constants import (
@@ -46,6 +47,10 @@ class ChainDefinition:
     # ABI signatures the issuer refuses delivery with: 'f()' stops the whole token, 'f(address)'
     # freezes one destination. Required on every token row; () claims no freeze surface at all.
     refusal_checks: tuple[str, ...] | None = None
+    # ABI signature of a `(uint256)->uint256` view returning the transfer fee an issuer would take
+    # on a given amount (PAXG's getFeeFor). Set only on tokens with an admin-settable fee; a live
+    # non-zero fee shaves every delivery below the pinned amount, so it's a no-fault cancel (V-M2).
+    fee_check: str | None = None
 
 
 # ─── Supported Chains ────────────────────────────────────
@@ -252,7 +257,7 @@ CHAIN_ETHUSDC = ChainDefinition(
     min_confirmations=32,
     # Rate sanity floor, not an economic guarantee: 5 USDC covers FiatToken's ~65k-gas transfer
     # only below ~41 gwei — miners price real gas into their quotes, and the per-swap lever is the
-    # contract's min_swap_amount. Above arbusdc's unit floor because L1 gas is not L2 gas.
+    # contract's min_swap_amount. L1 gas dwarfs L2 gas, so the floor sits well above bare dust.
     min_onchain_amount=5_000_000,
     # Ethereum's clock, as CHAIN_ETH: what this absorbs is hub-vs-spoke skew, and two assets on
     # one chain disagreeing about that chain's clock would be indefensible.
@@ -434,12 +439,10 @@ CHAIN_POLUSDC = ChainDefinition(
     # 600s default fulfillment grace. Pinned against CHAIN_POL by test, so neither can drift.
     seconds_per_block=1,
     min_confirmations=100,
-    # Rate sanity floor, not an economic guarantee: 0.01 USDC covers FiatToken's measured 79k-gas
-    # transfer below ~1700 gwei — ~7x the 230-260 gwei base fee Polygon has held for weeks. Priced
-    # on the COLD recipient (79k; a warm one is 61k), since a payout goes to a user's address that
-    # usually holds no USDC yet. Far under ethusdc's 5 USDC because Polygon gas costs cents, far
-    # over arbusdc's unit floor because it is not free either.
-    min_onchain_amount=10_000,
+    # 5 USDC, matching the other USDC spokes: min_onchain_amount doubles as the crown-eligibility
+    # floor in is_executable_rate, so a Polygon-cheap-gas send floor here would widen the crown band
+    # ~500x vs siblings. Polygon's low gas is priced into miner quotes, not this floor.
+    min_onchain_amount=5_000_000,
     # CHAIN_POL's clock, for the same reason its finality is: what this absorbs is hub-vs-spoke
     # skew, and two assets on one chain disagreeing about that chain's clock would be indefensible.
     replay_grace_secs=60,
@@ -483,6 +486,10 @@ CHAIN_PAXG = ChainDefinition(
     # surface here would make every probe raise, which defers each slash only as far as
     # max_extend_at (~2.6h) and then times out anyway — slashing and striking an honest miner.
     refusal_checks=('isFrozen(address)', 'paused()'),
+    # PAXG's fee is an admin-upgradeable proxy lever, currently 0. If Paxos ever sets feeRate>0,
+    # getFeeFor(amount) turns non-zero and every honest delivery's Transfer log falls below the
+    # pinned amount — probe it so the swap cancels no-fault instead of mass-slashing (V-M2).
+    fee_check='getFeeFor(uint256)',
 )
 
 SUPPORTED_CHAINS = {
@@ -504,6 +511,24 @@ SUPPORTED_CHAINS = {
     'polusdc': CHAIN_POLUSDC,
     'paxg': CHAIN_PAXG,
 }
+
+
+def apply_testnet_network_defaults() -> dict[str, str]:
+    """Default any unset spoke ``{PREFIX}_NETWORK`` to the chain's ``testnet_network``.
+
+    A testnet neuron that never set e.g. ``ETH_NETWORK`` otherwise falls through to the provider's
+    mainnet default (``evm.py``/``btc.py``) — verifying test swaps against mainnet, or broadcasting a
+    real mainnet payout for a test obligation. An explicitly-set env var always wins (set
+    ``ETH_NETWORK=mainnet`` to opt one spoke back). Returns the vars it set, for the caller to log."""
+    applied: dict[str, str] = {}
+    for chain in SUPPORTED_CHAINS.values():
+        if not chain.networks or not chain.testnet_network:
+            continue  # network isn't picked by name here, or shares another asset's prefix
+        env_var = f'{chain.env_prefix}_NETWORK'
+        if not os.environ.get(env_var):
+            os.environ[env_var] = chain.testnet_network
+            applied[env_var] = chain.testnet_network
+    return applied
 
 
 def get_chain_def(chain_id: str) -> ChainDefinition:

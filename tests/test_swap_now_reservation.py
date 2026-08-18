@@ -483,7 +483,9 @@ class _Gate:
     def __init__(self, reject=(), malformed=()):
         self.reject = set(reject)
         self.checked = []
-        self.chain = types.SimpleNamespace(is_valid_address=lambda addr: addr not in set(malformed))
+        self.chain = types.SimpleNamespace(
+            is_valid_address=lambda addr: addr not in set(malformed), normalize_address=lambda addr: addr
+        )
 
     def can_deliver_to(self, addr, amount, from_address=None):
         self.checked.append(addr)

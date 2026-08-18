@@ -9,7 +9,11 @@ from eth_utils import keccak, to_checksum_address
 from allways.assets.asset import ProviderUnreachableError, SendResult, TransactionInfo
 from allways.assets.evm import EVM_NETWORKS, FALLBACK_PRIORITY_FEE_WEI, EvmAsset, EvmChain
 from allways.chains import ChainDefinition
-from allways.constants import CANCEL_REASON_ERC20_BLACKLIST, CANCEL_REASON_ERC20_PAUSED
+from allways.constants import (
+    CANCEL_REASON_ERC20_BLACKLIST,
+    CANCEL_REASON_ERC20_FEE_ENABLED,
+    CANCEL_REASON_ERC20_PAUSED,
+)
 
 
 def _selector(signature: str) -> str:
@@ -114,6 +118,8 @@ class Erc20(EvmAsset):
         if chain_def.refusal_checks is None:
             raise ValueError(f'{chain_def.id} declares no refusal_checks — name the freeze surface, or ()')
         self._checks = tuple(_refusal_call(sig) for sig in chain_def.refusal_checks)
+        # A `(uint256)->uint256` fee view (PAXG's getFeeFor), None for tokens with no fee lever.
+        self._fee_selector = _selector(chain_def.fee_check) if chain_def.fee_check else None
         self._chain = EvmChain(EVM_NETWORKS[chain_def.host_chain], chain_def.env_prefix)
         EvmAsset.__init__(self)
         self.token_contract = _token_contract(chain_def, self.chain.network)
@@ -133,12 +139,32 @@ class Erc20(EvmAsset):
         data = selector + (_pad_addr(address) if address else '')
         return int(self.chain.eth_rpc('eth_call', [{'to': self.token_contract, 'data': data}, block]), 16)
 
+    def _fee_for(self, amount: int, block: str = 'latest') -> int:
+        """The issuer's transfer fee on ``amount`` via the row's declared ``fee_check`` view.
+        0 when the row declares none. Raises on RPC trouble (callers fail closed / defer)."""
+        if self._fee_selector is None:
+            return 0
+        data = self._fee_selector + f'{int(amount):064x}'
+        return int(self.chain.eth_rpc('eth_call', [{'to': self.token_contract, 'data': data}, block]), 16)
+
     def check_connection(self, require_send: bool = True) -> None:
         super().check_connection(require_send=require_send)
         try:
-            code = self.chain.eth_rpc('eth_getCode', [self.token_contract, 'latest']) or '0x'
+            code = self.chain.eth_rpc('eth_getCode', [self.token_contract, 'latest'])
         except Exception as e:
-            bt.logging.warning(f'{self._log} token contract probe failed: {e}')
+            # A probe we can't COMPLETE is transient (unreachable RPC / rate-limit storm) — degrade, never
+            # crash the whole validator at boot over one spoke's flaky endpoint (that takes the hub down too).
+            # The real config fault — a codeless/wrong contract — is a COMPLETED probe returning '0x' below.
+            bt.logging.warning(
+                f'{self.chain_def.id} token contract probe unreachable on {self.chain.network} ({e}) — degraded'
+            )
+            return
+        if not code:
+            # A null answer is a broken/lagging endpoint, not a codeless contract (the spec returns the
+            # string '0x' for that) — same transient treatment as the unreachable case above.
+            bt.logging.warning(
+                f'{self.chain_def.id} token contract probe returned null on {self.chain.network} — degraded'
+            )
             return
         if code == '0x':
             # A typo'd override or wrong network would otherwise surface as every send failing.
@@ -515,11 +541,18 @@ class Erc20(EvmAsset):
         selectors here would revert on every other token and silently yield no evidence — which
         slashes a miner for a destination its issuer froze. Returns CANCEL_REASON_ERC20_BLACKLIST
         for a per-address freeze, _PAUSED for a token-wide stop, else None. None on RPC trouble so
-        the caller waits rather than slashing."""
+        the caller waits rather than slashing.
+
+        _FEE_ENABLED covers a token whose issuer switched on a transfer fee (PAXG's admin lever):
+        the fee shaves every honest delivery's log below the pinned amount, so it's a hub-wide
+        no-fault condition, not a miner failure. Probed on ``amount`` (the expected delivery), so a
+        fee that floors to 0 for this size never spuriously cancels."""
         try:
             for selector, takes_address in self._checks:
                 if self._eth_call(selector, address if takes_address else ''):
                     return CANCEL_REASON_ERC20_BLACKLIST if takes_address else CANCEL_REASON_ERC20_PAUSED
+            if self._fee_for(amount) > 0:
+                return CANCEL_REASON_ERC20_FEE_ENABLED
         except Exception:
             return None
         return None

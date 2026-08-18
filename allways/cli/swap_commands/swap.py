@@ -402,6 +402,11 @@ def swap_now_command(
     user_from_addr = str(user) if from_chain == NUMERAIRE_CHAIN else (from_address_opt or '')
     if not user_from_addr:
         fail(f'--from-address (your source-chain address) is required for a non-{NUMERAIRE_CHAIN.upper()} source.')
+    # Canonical source form before anything commits it: the finalize hash + source-lock PDA are
+    # byte-keyed on this string (V-C2), so a cased variant would mint a divergent lock on-chain.
+    _src_gate = _gate_provider(from_chain, client, config)
+    if _src_gate is not None:
+        user_from_addr = _src_gate.chain.normalize_address(user_from_addr)
 
     cfg = client.get_config()
     bounds = bounds_from_config(cfg) if cfg else {}
@@ -946,6 +951,7 @@ def _reserve_self_represented(
             fill.from_amount,
             fill.to_amount,
             backing,
+            from_chain=from_chain,
         )
     except Exception as e:
         reason = contract_reject_reason(e)

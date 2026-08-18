@@ -113,11 +113,24 @@ def test_open_happy_path_persists_routed_request():
     store.close()
 
 
+def test_open_normalizes_the_source_address_at_intake():
+    # V-C2: the queued source address is the string later hashed into the source-lock PDA —
+    # canonicalize at intake so a checksummed EVM-style entry can't mint a divergent lock.
+    client = FakeClient()
+    validator = _validator(client)
+    validator.axon_assets = {'sol': SimpleNamespace(chain=SimpleNamespace(normalize_address=lambda a: a.lower()))}
+    r = reserve_on_behalf(validator, HOTKEY, 'sol', 'btc', USER_PK, 'MiXeDcAsE', 'userBTCaddr', 1_000_000_000)
+    assert r.ok
+    queued = validator.state_store.pending_routed_requests(str(MINER_PK), 'sol', 'btc')
+    assert queued[0]['user_from_addr'] == 'mixedcase'
+    validator.state_store.close()
+
+
 def _gate_asset(can_deliver, valid=lambda addr: True):
     """Duck-typed asset for the reserve deliverability gates (can_deliver_to + chain format check)."""
     return SimpleNamespace(
         can_deliver_to=lambda addr, amt, from_address=None: can_deliver(addr, amt),
-        chain=SimpleNamespace(is_valid_address=valid),
+        chain=SimpleNamespace(is_valid_address=valid, normalize_address=lambda addr: addr),
     )
 
 
@@ -152,6 +165,30 @@ def test_malformed_miner_receive_address_rejects():
     assert not result.ok
     assert 'miner receive address' in result.reason
     assert client.calls == []
+
+
+def test_user_to_addr_equal_miner_delivery_address_rejects():
+    # V-H1: user_to_addr == miner_to_addr makes every delivery a from==to self-transfer the anti-wash
+    # verifier rejects → the miner never confirms the leg and is force-slashed with no cancel escape.
+    # Bounce it at reserve before any bid.
+    client = FakeClient()
+    client.quote.miner_to_addr = 'minerBTCdeliver'
+    validator = _validator(client)
+    validator.axon_assets = {'btc': _gate_asset(lambda addr, amt: True)}
+    result = reserve_on_behalf(validator, HOTKEY, 'sol', 'btc', USER_PK, str(USER_PK), 'minerBTCdeliver', 10**9)
+    assert not result.ok
+    assert 'differ from the miner delivery address' in result.reason
+    assert client.calls == []
+
+
+def test_distinct_dest_addr_with_miner_to_addr_set_reserves():
+    # The guard must not over-reject: a normal dest address different from the miner's still reserves.
+    client = FakeClient()
+    client.quote.miner_to_addr = 'minerBTCdeliver'
+    validator = _validator(client)
+    validator.axon_assets = {'btc': _gate_asset(lambda addr, amt: True)}
+    result = reserve_on_behalf(validator, HOTKEY, 'sol', 'btc', USER_PK, str(USER_PK), 'userBTCaddr', 10**9)
+    assert result.ok
 
 
 def test_cased_chain_id_rejects_at_intake():
@@ -491,7 +528,7 @@ class _ConfirmClient(FakeClient):
         self.claims.append((swap_key, from_tx_hash, from_tx_block, backing))
         return 'claimsig'
 
-    def extend_reservation(self, miner, target_at, backing='sol'):
+    def extend_reservation(self, miner, target_at, backing='sol', *, from_chain=None, from_addr=None):
         if self.extend_raises:
             raise RuntimeError('rpc down')
         self.extensions.append(target_at)
@@ -500,10 +537,11 @@ class _ConfirmClient(FakeClient):
 
 
 class _FakeProvider:
-    def __init__(self, tx_info, *, unreachable=False, grace=0):
+    def __init__(self, tx_info, *, unreachable=False, grace=0, normalize=None):
         self._tx = tx_info
         self._unreachable = unreachable
         self._grace = grace
+        self._normalize = normalize or (lambda a: a)
 
     def verify_transaction(self, **kw):
         if self._unreachable:
@@ -513,6 +551,10 @@ class _FakeProvider:
     @property
     def chain_def(self):
         return SimpleNamespace(replay_grace_secs=self._grace)
+
+    @property
+    def chain(self):
+        return SimpleNamespace(normalize_address=self._normalize)
 
 
 def _confirm_reservation(**over):
@@ -599,6 +641,48 @@ def test_confirm_rejects_when_reservation_already_claimed():
 def test_confirm_provider_unreachable_resends_without_claim():
     r, client = _confirm(_confirm_reservation(), None, unreachable=True)
     assert not r.ok and not client.claims and 'unreachable' in r.reason.lower()
+
+
+def test_confirm_prefers_canonical_form_slot_over_case_variant():
+    # V-C2 residual: a case variant of a live source dodges the byte-keyed source lock. When one
+    # deposit content-matches two slots, the canonical-form (honest-lane) reservation wins the claim
+    # even when the variant slot is older — the variant can only come from bypassing our tooling.
+    variant = _confirm_reservation(from_addr='0xABC', created_at=500)
+    canonical = _confirm_reservation(from_addr='0xabc', created_at=900)
+    client = _ConfirmClient({'sol': variant, 'tao': canonical})
+    provider = _FakeProvider(
+        _tx(confirmed=True, block_time=CONFIRM_CREATED_AT + 5, confirmations=6), normalize=str.lower
+    )
+    validator = SimpleNamespace(solana_client=client, axon_assets={'btc': provider}, axon_lock=threading.RLock())
+    r = confirm_deposit(validator, HOTKEY, 'srctxhash')
+    assert r.ok and len(client.claims) == 1
+    assert client.claims[0][3] == 'tao'  # the canonical slot's backing claimed, not the variant's
+
+
+def test_confirm_prefers_the_oldest_slot_on_a_form_tie():
+    # Dual-backing (V-I1): the same source legitimately backs two hubs. Deterministic pick = oldest.
+    younger = _confirm_reservation(created_at=900)
+    older = _confirm_reservation(created_at=500)
+    client = _ConfirmClient({'sol': younger, 'tao': older})
+    provider = _FakeProvider(_tx(confirmed=True, block_time=CONFIRM_CREATED_AT + 5, confirmations=6))
+    validator = SimpleNamespace(solana_client=client, axon_assets={'btc': provider}, axon_lock=threading.RLock())
+    r = confirm_deposit(validator, HOTKEY, 'srctxhash')
+    assert r.ok and client.claims[0][3] == 'tao'
+
+
+def test_confirm_fresh_match_on_one_hub_survives_stale_match_on_another():
+    # A stale match is terminal for ITS hub only: a fresh match on the miner's other hub still claims
+    # (the old first-match-wins scan could fail the whole confirm on slot-scan order).
+    stale_hub = _confirm_reservation(created_at=CONFIRM_CREATED_AT)
+    fresh_hub = _confirm_reservation(from_chain='sol', created_at=CONFIRM_CREATED_AT)
+    client = _ConfirmClient({'sol': stale_hub, 'tao': fresh_hub})
+    providers = {
+        'btc': _FakeProvider(_tx(confirmed=True, block_time=CONFIRM_CREATED_AT - 1, confirmations=6)),
+        'sol': _FakeProvider(_tx(confirmed=True, block_time=CONFIRM_CREATED_AT + 5, confirmations=6)),
+    }
+    validator = SimpleNamespace(solana_client=client, axon_assets=providers, axon_lock=threading.RLock())
+    r = confirm_deposit(validator, HOTKEY, 'srctxhash')
+    assert r.ok and client.claims[0][3] == 'tao'
 
 
 # ── claim runway: a verified deposit must not lose its window mid-relay ──────
@@ -710,6 +794,10 @@ class _MatchingProvider:
     @property
     def chain_def(self):
         return SimpleNamespace(replay_grace_secs=0)
+
+    @property
+    def chain(self):
+        return SimpleNamespace(normalize_address=lambda a: a)
 
 
 def test_confirm_matches_the_right_hub_when_both_slots_are_live_unclaimed():

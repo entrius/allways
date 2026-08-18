@@ -12,6 +12,7 @@ from solders.keypair import Keypair
 from allways.assets.asset import ProviderUnreachableError
 from allways.assets.sol import RESERVED_ACCOUNTS, Sol
 from allways.chains import CHAIN_SOL
+from allways.solana.rpc import SolanaRpcError
 
 
 def make_tx(recipient, credit, sender='SENDER', slot=100, block_time=5000, err=None, extra_keys=None):
@@ -54,6 +55,108 @@ def provider_with(rpc, keypair=None):
     p = Sol(solana_rpc_url='fake://rpc', solana_keypair=keypair)
     p.rpc = rpc
     return p
+
+
+class DedupRpc:
+    """Programmable getSignatureStatuses[0] + getSlot for the own-broadcast dedup guard."""
+
+    def __init__(self, status, slot=1000, slot_fails=False):
+        self._status = status
+        self._slot = slot
+        self._slot_fails = slot_fails
+
+    def get_slot(self, commitment='confirmed'):
+        if self._slot_fails:
+            raise SolanaRpcError('getSlot down')
+        return self._slot
+
+    def get_signature_statuses(self, sigs):
+        return [self._status]
+
+
+class TestSendDedup:
+    """H2: a landed prior broadcast must be reused, never re-sent, so a confirm() timeout can't double-pay.
+    Q2/Q3: every branch where the RPC couldn't resolve the prior send must WAIT (raise), never re-send."""
+
+    WANT = ('RECIP', 5_000_000, 'swap1')
+
+    def _p(self, status, slot=1000, seen=1000, slot_fails=False):
+        p = provider_with(DedupRpc(status, slot, slot_fails))
+        p.broadcasted_txids['SIG'] = (*self.WANT, seen)
+        return p
+
+    def test_reuses_landed_prior(self):
+        p = self._p({'err': None, 'slot': 123, 'confirmationStatus': 'confirmed'})
+        assert p._prior_broadcast(self.WANT) == ('SIG', 123)
+
+    def test_reuses_finalized_prior(self):
+        p = self._p({'err': None, 'slot': 123, 'confirmationStatus': 'finalized'})
+        assert p._prior_broadcast(self.WANT) == ('SIG', 123)
+
+    def test_processed_only_prior_waits(self):
+        # Q3: `processed` can sit on a minority fork that never settles. Reusing it would mark the
+        # leg delivered while the user is never paid → slash. Wait for confirmed/finalized.
+        p = self._p({'err': None, 'slot': 50, 'confirmationStatus': 'processed'})
+        with pytest.raises(SolanaRpcError):
+            p._prior_broadcast(self.WANT)
+        assert 'SIG' in p.broadcasted_txids  # kept: re-probed next pass
+
+    def test_failed_at_processed_only_waits(self):
+        # A failure seen only at `processed` is as unsettled as a success there — don't evict yet.
+        p = self._p({'err': 'InstructionError', 'slot': 10, 'confirmationStatus': 'processed'})
+        with pytest.raises(SolanaRpcError):
+            p._prior_broadcast(self.WANT)
+        assert 'SIG' in p.broadcasted_txids
+
+    def test_failed_prior_dropped_allows_fresh_send(self):
+        p = self._p({'err': 'InstructionError', 'slot': 10, 'confirmationStatus': 'finalized'})
+        assert p._prior_broadcast(self.WANT) is None
+        assert 'SIG' not in p.broadcasted_txids
+
+    def test_pending_recent_prior_waits(self):
+        p = self._p(None, slot=1010)  # head 1010, seen 1000 → within TTL, not on chain → must wait
+        with pytest.raises(SolanaRpcError):
+            p._prior_broadcast(self.WANT)
+
+    def test_expired_unlanded_prior_allows_fresh_send(self):
+        p = self._p(None, slot=2000)  # head-seen = 1000 > 150 TTL → blockhash expired, never landed
+        assert p._prior_broadcast(self.WANT) is None
+        assert 'SIG' not in p.broadcasted_txids
+
+    def test_unknown_record_slot_waits_and_backfills(self):
+        # Q2: get_slot failed at record time (seen=0). head - 0 >> TTL must NOT read as "expired" —
+        # the tx may still be propagating. Backfill seen with the current head and wait.
+        p = self._p(None, slot=2000, seen=0)
+        with pytest.raises(SolanaRpcError):
+            p._prior_broadcast(self.WANT)
+        assert p.broadcasted_txids['SIG'] == (*self.WANT, 2000)
+
+    def test_backfilled_record_expires_after_a_real_ttl(self):
+        # After the backfill the TTL counts from the backfill head, so eviction still happens.
+        p = self._p(None, slot=2000, seen=0)
+        with pytest.raises(SolanaRpcError):
+            p._prior_broadcast(self.WANT)
+        p.rpc._slot = 2000 + p._BROADCAST_TTL_SLOTS + 1
+        assert p._prior_broadcast(self.WANT) is None
+        assert 'SIG' not in p.broadcasted_txids
+
+    def test_head_unreadable_pending_prior_waits(self):
+        # Q2: no status AND no head → nothing is resolvable; never evict, never re-send.
+        p = self._p(None, seen=0, slot_fails=True)
+        with pytest.raises(SolanaRpcError):
+            p._prior_broadcast(self.WANT)
+        assert p.broadcasted_txids['SIG'] == (*self.WANT, 0)  # no head to backfill from
+
+    def test_different_obligation_is_ignored(self):
+        p = self._p({'err': None, 'slot': 5})
+        assert p._prior_broadcast(('RECIP', 5_000_000, 'swapB')) is None  # different dedup scope
+
+
+class TestSendGuard:
+    def test_send_refuses_when_from_address_mismatches_key(self):
+        # H3: never broadcast from a wallet the validator's sender-pin would reject (wasted funds).
+        p = provider_with(FakeRpc(), keypair=Keypair())
+        assert p.send_amount('RECIPIENT', 1000, from_address='someOtherWallet') is None
 
 
 class TestFetchAndVerify:

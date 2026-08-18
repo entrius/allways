@@ -2,7 +2,8 @@
 //   cargo test -p allways_swap_manager --test test_binding
 //
 // bind_hotkey is miner-signed and per-miner (one Binding PDA). It only STORES the hotkey + sr25519
-// sig (the validator verifies off-chain) and overwrites in place on re-bind. The H3 squat gate
+// sig (the validator verifies off-chain); the hotkey is set-once (V-M1) — a re-bind may only refresh
+// the sig in place, never change the hotkey. The H3 squat gate
 // admits registered miners (MinerState with collateral >= min_collateral) and whitelisted
 // validators (no MinerState — they pass None and bind so peers can attribute their stake).
 use {
@@ -206,19 +207,28 @@ fn test_bind_none_miner_state_still_gated() {
 }
 
 #[test]
-fn test_rebind_overwrites_in_place() {
+fn test_rebind_refreshes_sig_but_never_the_hotkey() {
+    // V-M1 freeze: the forward binding is set-once. A same-hotkey re-bind (sig refresh) succeeds;
+    // a re-bind to a DIFFERENT hotkey — even a fresh, unclaimed one — is rejected, so a miner can
+    // never move its identity mid-swap to dodge a bond seizure.
     let mut svm = setup();
     let miner = registered_miner(&mut svm);
-    send(&mut svm, bind_ix(&miner.pubkey(), [1u8; 32], [1u8; 64]), &miner.pubkey(), &miner).expect("bind1");
-    // re-bind with a different hotkey/sig overwrites the same PDA
-    let hotkey2 = [2u8; 32];
-    let sig2 = [4u8; 64];
-    send(&mut svm, bind_ix(&miner.pubkey(), hotkey2, sig2), &miner.pubkey(), &miner).expect("bind2");
+    let hotkey = [1u8; 32];
+    send(&mut svm, bind_ix(&miner.pubkey(), hotkey, [1u8; 64]), &miner.pubkey(), &miner).expect("bind1");
 
+    // Same hotkey, new sig: allowed.
+    send(&mut svm, bind_ix(&miner.pubkey(), hotkey, [4u8; 64]), &miner.pubkey(), &miner).expect("sig refresh");
     let b = read_binding(&svm, &miner.pubkey());
-    assert_eq!(b.hotkey, hotkey2, "hotkey overwritten");
-    assert_eq!(b.hotkey_sig, sig2, "sig overwritten");
+    assert_eq!(b.hotkey, hotkey);
+    assert_eq!(b.hotkey_sig, [4u8; 64], "sig refreshed in place");
     assert_eq!(b.miner, miner.pubkey(), "miner identity stable");
+
+    // Different hotkey: rejected, binding untouched.
+    let res = send(&mut svm, bind_ix(&miner.pubkey(), [2u8; 32], [5u8; 64]), &miner.pubkey(), &miner);
+    assert!(res.is_err(), "a bound pubkey must not change its hotkey (V-M1)");
+    let b = read_binding(&svm, &miner.pubkey());
+    assert_eq!(b.hotkey, hotkey, "binding unchanged after the rejected change");
+    assert_eq!(b.hotkey_sig, [4u8; 64]);
 }
 
 #[test]

@@ -10,7 +10,9 @@ use crate::state::{Binding, Config, HotkeyBinding, MinerState};
 /// costly on-chain, so the validator verifies off-chain. Signed by the miner (proves the Solana side).
 /// The set-once `hotkey_binding` marker enforces hotkey→≤1 pubkey on-chain: the first pubkey to claim a
 /// hotkey owns it forever, so a struck pubkey can't rotate + re-bind the same hotkey to dodge strikes.
-/// The same miner may re-bind in place (refresh sig / change hotkey). Not halt-gated — identity, no value.
+/// The forward binding is ALSO set-once (V-M1): a bound pubkey may refresh its signature in place but
+/// never change its hotkey — a mutable hotkey let an attacker rebind mid-swap to dodge bond seizure.
+/// Legit rotation = new pubkey + new hotkey + re-posted collateral. Not halt-gated — identity, no value.
 ///
 /// Gated to registered miners (MinerState exists + collateral >= min_collateral) and whitelisted
 /// validators (Config.validators — they bind so peers can attribute their stake for the weights
@@ -89,6 +91,13 @@ pub fn handler(ctx: Context<BindHotkey>, hotkey: [u8; 32], hotkey_sig: [u8; 64])
     }
 
     let binding = &mut ctx.accounts.binding;
+    // Hotkey is set-once (same-hotkey sig refresh still allowed). A mutable hotkey let an
+    // attacker rebind mid-swap to dodge bond seizure (V-M1). Legit rotation = new pubkey +
+    // new hotkey + re-post collateral; funds never trapped (withdraw is pubkey-keyed).
+    require!(
+        binding.miner == Pubkey::default() || binding.hotkey == hotkey,
+        ErrorCode::HotkeyChangeForbidden
+    );
     if binding.miner == Pubkey::default() {
         binding.miner = miner;
         binding.bump = binding_bump;

@@ -27,6 +27,67 @@ def resolve_rpc_url(explicit: Optional[str] = None) -> str:
     return url
 
 
+# A Solana cluster is identified by its immutable genesis hash, not its RPC URL: a real paid
+# mainnet endpoint (Helius/QuickNode subdomain, bare IP, ?api-key= URL) rarely contains the
+# literal string "mainnet", so a substring check misses exactly the dangerous case. These three
+# are stable network constants (`solana genesis-hash` on each cluster).
+SOLANA_GENESIS_HASHES = {
+    '5eykt4UsFv8P8NJdTREpY1vzqKqZKvdpKuc147dw2N9d': 'mainnet',
+    'EtWTRABZaYq6iMfeYKouRu166VU2xqa1wcaWoxPkrZBG': 'devnet',
+    '4uhcVJyU9pJkvQyS88uRDiswHXSCkY3zQawwpjk2NsNY': 'testnet',
+}
+ALLOW_MAINNET_ON_TESTNET_ENV = 'ALLWAYS_ALLOW_MAINNET_ON_TESTNET'
+
+
+def classify_cluster(genesis_hash: str) -> str:
+    """Known public cluster name for a genesis hash, else 'unknown' (localnet / custom validator)."""
+    return SOLANA_GENESIS_HASHES.get(genesis_hash, 'unknown')
+
+
+def assert_cluster_safe(rpc: 'SolanaRpc', program_id, netuid: int, role: str = 'neuron') -> None:
+    """Fail-closed boot guard against the env misconfig that silently runs a testnet neuron on the
+    Solana MAINNET cluster (V-M3). The resolved cluster is classified *positively* by genesis hash —
+    immune to the 'mainnet'-substring blind spot — and the program is confirmed present on it.
+
+    Raises RuntimeError on (testnet neuron + mainnet cluster) or a program-id↔cluster mismatch;
+    ``ALLWAYS_ALLOW_MAINNET_ON_TESTNET=1`` overrides (the 'explicit env wins' convention). An
+    unreachable RPC only warns — a boot-time transport hiccup must not crash the process; the guard
+    is hard only against a positively identified fault, never a failed read."""
+    import bittensor as bt
+
+    from allways.constants import NETUID_FINNEY
+
+    if os.environ.get(ALLOW_MAINNET_ON_TESTNET_ENV) == '1':
+        bt.logging.warning(f'{ALLOW_MAINNET_ON_TESTNET_ENV}=1 — skipping the Solana cluster safety guard.')
+        return
+    try:
+        cluster = classify_cluster(rpc.get_genesis_hash())
+    except Exception as e:
+        bt.logging.warning(f'Solana cluster guard: genesis-hash read failed ({e}) — skipping (RPC transient).')
+        return
+    if int(netuid) != NETUID_FINNEY and cluster == 'mainnet':
+        raise RuntimeError(
+            f'testnet {role} (netuid {netuid}) is pointed at the Solana MAINNET cluster ({rpc.url}). '
+            f'This is an env misconfig — a test obligation would settle against mainnet. Fix '
+            f'SOLANA_RPC_URL, or set {ALLOW_MAINNET_ON_TESTNET_ENV}=1 to override.'
+        )
+    # Program existence, on a known public cluster only: a wrong program id (or the right id on the
+    # wrong cluster) otherwise reads every account as merely absent. Skipped on localnet/unknown —
+    # dev deploys are fluid and the program may not be up yet.
+    if cluster == 'unknown':
+        return
+    try:
+        exists = rpc.get_account_info(program_id) is not None
+    except Exception as e:
+        bt.logging.warning(f'Solana cluster guard: program probe failed ({e}) — skipping existence check.')
+        return
+    if not exists:
+        raise RuntimeError(
+            f'allways program {program_id} does not exist on the {cluster} cluster ({rpc.url}) — a '
+            f'program-id / cluster mismatch. Fix ALLWAYS_PROGRAM_ID or SOLANA_RPC_URL.'
+        )
+
+
 class SolanaRpcError(Exception):
     pass
 
@@ -144,6 +205,11 @@ class SolanaRpc:
 
     def get_slot(self, commitment: str = 'confirmed') -> int:
         return int(self._call('getSlot', [{'commitment': commitment}]))
+
+    def get_genesis_hash(self) -> str:
+        """The cluster's genesis hash — its immutable identity. Unlike the RPC URL (which can be any
+        custom/keyed endpoint), this positively identifies mainnet/devnet/testnet."""
+        return str(self._call('getGenesisHash', []))
 
     def get_balance(self, pubkey, commitment: str = 'confirmed') -> int:
         res = self._call('getBalance', [str(pubkey), {'commitment': commitment}])

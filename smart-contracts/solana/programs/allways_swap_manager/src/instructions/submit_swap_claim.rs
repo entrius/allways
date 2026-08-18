@@ -119,6 +119,7 @@ pub fn handler(
     swap.max_extend_at = 0;
     swap.fulfilled_at = 0;
     swap.bump = swap_bump;
+    swap.hotkey = [0u8; 32]; // pinned from the Binding at vote_initiate (V-M1)
 
     ctx.accounts.reservation.claimed_swap_key = swap_key;
 

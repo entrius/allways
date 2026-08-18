@@ -88,6 +88,57 @@ class TestIngestActivity:
         assert idx.get_activity_state_at(400) == {}  # completed → AVAILABLE
         store.close()
 
+    def test_unfilled_reservation_closed_frees_the_miner(self, tmp_path: Path):
+        """V-L8: the permissionless reap frees the miner on-chain; the crown index must free it too,
+        not leave it RESERVED until the synthetic RESERVE_EXPIRE fires."""
+        store = make_store(tmp_path)
+        idx = make_index(store, ttl=1000)  # synthetic expiry would land at 1200
+        idx.ingest(
+            [
+                rec('PoolResolved', miner='pk_a', block_time=200, winner='pk_router', user='pk_user', requests=1),
+                rec('UnfilledReservationClosed', miner='pk_a', block_time=400, router='pk_router'),
+            ],
+            ATTR,
+        )
+        assert idx.get_activity_state_at(300) == {'hk_a': _both(MinerActivity.RESERVED)}  # reserved before the reap
+        assert idx.get_activity_state_at(400) == {}  # reap → AVAILABLE, well before the synthetic 1200 expiry
+        store.close()
+
+    def test_reap_moves_the_guess_so_the_next_reservation_is_not_freed_early(self, tmp_path: Path):
+        """The reap must MOVE the draw+ttl guess, not insert a second expiry beside it: the leftover
+        guess fires later, inside the next reservation's pre-initiate window, freeing it early."""
+        store = make_store(tmp_path)
+        idx = make_index(store, ttl=1000)
+        idx.ingest(
+            [
+                rec('PoolResolved', miner='pk_a', block_time=200, winner='pk_router', user='pk_user', requests=1),
+                rec('UnfilledReservationClosed', miner='pk_a', block_time=400, router='pk_router'),
+                rec('PoolResolved', miner='pk_a', block_time=1100, winner='pk_router', user='pk_user', requests=1),
+            ],
+            ATTR,
+        )
+        assert idx.get_activity_state_at(1150) == {'hk_a': _both(MinerActivity.RESERVED)}
+        # The first reservation's stale guess (draw 200 + ttl 1000 = 1200) must not fire mid-reservation.
+        assert idx.get_activity_state_at(1300) == {'hk_a': _both(MinerActivity.RESERVED)}
+        store.close()
+
+    def test_restamp_never_drags_a_prior_reservations_fired_expiry(self, tmp_path: Path):
+        """A ReservationFilled whose own PoolResolved was dropped (fresh DB, no-TTL gap) must not move
+        the PREVIOUS reservation's already-fired expiry forward — that reads the miner busy across
+        the gap between the two reservations."""
+        store = make_store(tmp_path)
+        idx = make_index(store, ttl=100)
+        idx.ingest(
+            [
+                rec('PoolResolved', miner='pk_a', block_time=200, winner='pk_router', user='pk_user', requests=1),
+                rec('ReservationFilled', miner='pk_a', block_time=500, reserved_until=900),
+            ],
+            ATTR,
+        )
+        # The first reservation expired at 300; the orphaned Filled (its PoolResolved unseen) is a no-op.
+        assert idx.get_activity_state_at(600) == {}
+        store.close()
+
     def test_swap_cancelled_frees_the_hub(self, tmp_path: Path):
         """The no-fault cancel is a terminal like completion/timeout: without its FULFILL_END
         the hub stays FULFILLING (crownless) until an unrelated swap's terminal repairs it."""
@@ -152,6 +203,106 @@ class TestIngestActivity:
         assert idx.get_activity_state_at(500) == {}  # 200 + 300 ttl → AVAILABLE
         kinds = [e['kind'] for e in idx.get_activity_events_in_range(0, 1000)]
         assert kinds == [1, 3]  # RESERVE_START then synthetic RESERVE_EXPIRE
+        store.close()
+
+    def test_reservation_filled_restamps_expiry_so_late_initiate_stays_busy(self, tmp_path: Path):
+        """V-H5: PoolResolved's draw+ttl expiry is a guess. When SwapInitiated lands after it
+        (slow BTC confs), the miner must still be FULFILLING — not scored AVAILABLE and earning the
+        crown while busy. ReservationFilled carries the real reserved_until; we re-stamp the guess."""
+        store = make_store(tmp_path)
+        idx = make_index(store, ttl=30)  # tiny ttl → synthetic expiry at 230, before SwapInitiated
+        idx.ingest(
+            [
+                rec('PoolResolved', miner='pk_a', block_time=200, winner='pk_router', user='pk_user', requests=1),
+                rec('ReservationFilled', miner='pk_a', block_time=210, reserved_until=600),
+                rec('SwapInitiated', miner='pk_a', block_time=250),
+                rec(
+                    'SwapCompleted',
+                    miner='pk_a',
+                    block_time=400,
+                    from_chain='btc',
+                    to_chain='tao',
+                    from_amount=100_000,
+                    to_amount=500_000_000,
+                ),
+            ],
+            ATTR,
+        )
+        # Re-stamped to 600, so the miner is NOT freed at the old 230 guess.
+        assert idx.get_activity_state_at(230) == {'hk_a': _both(MinerActivity.RESERVED)}
+        # The bug regression: without the re-stamp this would be {} (AVAILABLE) — FULFILL_START
+        # would have hit AVAILABLE (no edge) and held there through the whole swap.
+        assert idx.get_activity_state_at(250) == {'hk_a': _both(MinerActivity.FULFILLING)}
+        assert idx.get_activity_state_at(399) == {'hk_a': _both(MinerActivity.FULFILLING)}
+        assert idx.get_activity_state_at(400) == {}  # completed → AVAILABLE
+        # The single RESERVE_EXPIRE row was moved (not duplicated) from 230 to 600.
+        expiries = [e['block'] for e in idx.get_activity_events_in_range(0, 2000) if e['kind'] == 3]
+        assert expiries == [600]
+        store.close()
+
+    def test_reservation_extended_pushes_expiry(self, tmp_path: Path):
+        """A claim-runway extend (validator slides reserved_until for slow source confs) emits
+        ReservationExtended — the expiry must follow it, else the miner is freed mid-fulfillment."""
+        store = make_store(tmp_path)
+        idx = make_index(store, ttl=30)
+        idx.ingest(
+            [
+                rec('PoolResolved', miner='pk_a', block_time=200, winner='pk_router', user='pk_user', requests=1),
+                rec('ReservationFilled', miner='pk_a', block_time=210, reserved_until=300),
+                rec('ReservationExtended', miner='pk_a', block_time=280, reserved_until=900, validator='pk_router'),
+                rec('SwapInitiated', miner='pk_a', block_time=350),  # past the pre-extend 300 deadline
+                rec(
+                    'SwapCompleted',
+                    miner='pk_a',
+                    block_time=600,
+                    from_chain='btc',
+                    to_chain='tao',
+                    from_amount=100_000,
+                    to_amount=500_000_000,
+                ),
+            ],
+            ATTR,
+        )
+        assert idx.get_activity_state_at(250) == {'hk_a': _both(MinerActivity.RESERVED)}
+        assert idx.get_activity_state_at(350) == {'hk_a': _both(MinerActivity.FULFILLING)}
+        assert idx.get_activity_state_at(600) == {}  # completed → AVAILABLE
+        expiries = [e['block'] for e in idx.get_activity_events_in_range(0, 2000) if e['kind'] == 3]
+        assert expiries == [900]  # one row, pushed guess(230)→fill(300)→extend(900)
+        store.close()
+
+    def test_restamp_targets_only_its_own_hub(self, tmp_path: Path):
+        """The re-stamp matches on hub, so a fill on one purse must not move the sibling's expiry."""
+        store = make_store(tmp_path)
+        idx = make_index(store, ttl=30)
+        idx.ingest(
+            [
+                rec(
+                    'PoolResolved',
+                    miner='pk_a',
+                    block_time=200,
+                    winner='pk_router',
+                    user='pk_user',
+                    requests=1,
+                    collateral_chain='sol',
+                ),
+                rec(
+                    'PoolResolved',
+                    miner='pk_a',
+                    block_time=200,
+                    winner='pk_router',
+                    user='pk_user',
+                    requests=1,
+                    collateral_chain='tao',
+                ),
+                rec('ReservationFilled', miner='pk_a', block_time=210, reserved_until=600, collateral_chain='tao'),
+            ],
+            ATTR,
+        )
+        # tao expiry moved to 600; sol expiry untouched at the 230 guess.
+        rows = idx.get_activity_events_in_range(0, 2000)
+        expiries = sorted((e['hub'], e['block']) for e in rows if e['kind'] == 3)
+        assert expiries == [('sol', 230), ('tao', 600)]
+        assert idx.get_activity_state_at(400) == {'hk_a': {'tao': MinerActivity.RESERVED}}  # sol freed, tao held
         store.close()
 
     def test_busy_miner_is_the_reserved_miner_not_the_router(self, tmp_path: Path):
@@ -475,6 +626,35 @@ class TestIngestSwapOutcomes:
         key = bytes(range(32))
         idx.ingest([rec('StaleClaimClosed', miner='pk_a', block_time=400, swap_key=key)], ATTR)
         assert store.get_swap_outcome(key.hex()) == 'expired'
+        store.close()
+
+    def test_unbound_miner_still_records_terminal_outcome(self, tmp_path: Path):
+        """V-M5: a miner that deregs mid-swap is unbound at ingest, but the terminal outcome +
+        delivery hash are keyed purely by swap_key — record them so /status can resolve, while
+        the UID-crediting clearing volume stays empty."""
+        store = make_store(tmp_path)
+        idx = SolanaEventIndex(store)
+        key = bytes(range(32))
+        n = idx.ingest(
+            [
+                rec('SwapFulfilled', miner='pk_c', block_time=390, swap_key=key, to_tx_hash='0xdead'),
+                rec(
+                    'SwapCompleted',
+                    miner='pk_c',  # unbound
+                    block_time=400,
+                    swap_key=key,
+                    from_chain='btc',
+                    to_chain='tao',
+                    from_amount=100,
+                    to_amount=200,
+                ),
+            ],
+            ATTR,
+        )
+        assert n == 2
+        assert store.get_swap_outcome(key.hex()) == 'completed'
+        assert store.get_swap_fulfillment(key.hex()) == '0xdead'
+        assert store.get_clearing_volumes(0, 1000) == {}  # no UID → no volume credited
         store.close()
 
     def test_reingest_of_same_event_is_a_noop_upsert(self, tmp_path: Path):

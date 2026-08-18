@@ -88,6 +88,7 @@ pub fn handler(ctx: Context<TimeoutSwap>, swap_key: [u8; 32]) -> Result<()> {
         let miner = ctx.accounts.swap.miner;
         let min_collateral = ctx.accounts.config.min_collateral;
         let collateral_chain = ctx.accounts.swap.collateral_chain.clone();
+        let hotkey = ctx.accounts.swap.hotkey;
 
         // v2 #4: a failed swap is penalized at the over-collateralization multiplier (1.10×), and
         // the entire slash is refunded to the wronged user (made more than whole). The 1.1× initiate
@@ -159,6 +160,7 @@ pub fn handler(ctx: Context<TimeoutSwap>, swap_key: [u8; 32]) -> Result<()> {
             penalty,
             reimbursement,
             payee,
+            hotkey,
         });
     }
     Ok(())

@@ -18,18 +18,25 @@ from typing import Any, Dict
 import bittensor as bt
 
 from allways import dev_signal
+from allways.validator.binding import hotkey_ss58
 from allways.vault import codec
 
 
 def record_verdict(relay, fields: Dict[str, Any], block_time: int) -> None:
-    """Persist a ``SwapTimedOut`` verdict as an obligation. The payee comes from the snapshot the
-    swap loop took while the swap was live; failing that, from the verdict itself (W3.1), which is
-    what lets a validator relay a swap it never saw."""
+    """Persist a ``SwapTimedOut`` verdict as an obligation. The payee and hotkey come from the
+    snapshot the swap loop took while the swap was live; failing that, from the verdict itself
+    (W3.1 payee, V-M1 hotkey), which is what lets a validator relay a swap it never saw."""
     swap_key = bytes(fields['swap_key']).hex()
     miner = str(fields['miner'])
     snapshot = relay.store.get_relay_swap(swap_key)
     user_addr = _payable(snapshot['user_addr']) if snapshot else ''
     hotkey = (snapshot.get('hotkey') if snapshot else None) or None
+    if hotkey is None:
+        # V-M1: the verdict carries the hotkey the swap pinned at initiate, so a validator with no
+        # snapshot still seizes the right bond. All-zeros = pre-pin swap / never-bound miner.
+        raw = bytes(fields.get('hotkey') or b'')
+        if any(raw):
+            hotkey = hotkey_ss58(raw)
     if not user_addr:
         # No snapshot (fresh state DB, or down for the swap's whole life): the event names the payee
         # itself, so history alone is enough to discharge this. Older verdicts predate the field and
@@ -100,8 +107,8 @@ def relay_verdicts(relay, now: int) -> bool:
 def _relay_one(relay, row: Dict[str, Any], now: int) -> bool:
     swap_key = row['swap_key']
     miner = row['miner']
-    # F1: the observe-time snapshot (H1) is authoritative; a rebind after acceptance must not move
-    # the seizure. Fall back to the live lookup only when no snapshot was taken (pre-F1 rows).
+    # The recorded hotkey (observe-time snapshot, else the verdict's V-M1 pin) is authoritative.
+    # The live lookup only covers pre-upgrade rows — and is safe now the binding is set-once.
     hotkey = row.get('hotkey') or relay.hotkey_for(miner)
     if hotkey is None:
         bt.logging.warning(f'relay: {miner[:8]} has no hotkey binding — cannot slash its bond')

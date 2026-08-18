@@ -68,9 +68,9 @@ class SolanaEventIndex:
 
     def ingest(self, records: List[EventRecord], attribution: Dict[str, str]) -> int:
         """Persist ``records`` (oldest-first) into the event tables, mapping each event's miner Solana
-        pubkey → bound hotkey via ``attribution`` (B3.2 ``build_attribution``). Events from an unbound
-        pubkey are dropped (no UID to credit); the per-round reconciles (``reconcile_live_state`` for
-        active/collateral, ``reconcile_live_quotes`` for rates) later heal the state they carried.
+        pubkey → bound hotkey via ``attribution`` (B3.2 ``build_attribution``). For an unbound pubkey
+        the crown-relevant effects are dropped (no UID to credit) and healed by the per-round
+        reconciles, but swap_key-keyed facts (terminal outcome, delivery hash) still record (V-M5).
         Records with no ``blockTime`` are skipped defensively — poll() already holds the cursor before
         unstamped txs, so none should reach here. Returns the count written."""
         written = 0
@@ -83,11 +83,36 @@ class SolanaEventIndex:
                 continue
             hotkey = attribution.get(miner_pk)
             if hotkey is None:
-                # Unbound (or invalid binding) miner — no UID to credit, so its events are dropped.
+                # Unbound (or invalid binding) miner — no UID to credit, so the crown-relevant
+                # effects (activity/collateral/quote/clearing) are dropped and healed by the
+                # per-round reconciles. But the swap's terminal outcome + delivery hash are keyed
+                # purely by swap_key, so still record them — else a dereg-mid-swap permanently
+                # strands /status at ``fulfilled`` (V-M5), since the cursor advances regardless.
+                if self._record_unattributed_outcome(rec, int(block_time)):
+                    written += 1
                 continue
             if self._apply(rec, hotkey, int(block_time)):
                 written += 1
         return written
+
+    def _record_unattributed_outcome(self, rec: EventRecord, block_time: int) -> bool:
+        """Persist only the swap_key-keyed terminal facts (delivery hash + terminal/stale outcome)
+        for an event whose miner pubkey is unbound at ingest. These rows credit no UID — they are
+        the seam's post-close truth read by /status — so they must land even when every
+        crown-relevant effect is dropped. Idempotent upserts, so a later re-bind + re-ingest is a
+        no-op. Returns True if a row was written."""
+        if rec.name == 'SwapFulfilled':
+            self.state_store.record_swap_fulfillment(
+                bytes(rec.fields['swap_key']).hex(), str(rec.fields['to_tx_hash']), block_time
+            )
+            return True
+        outcome = _OUTCOME_BY_EVENT.get(rec.name)
+        if outcome is not None:
+            swap_key = bytes(rec.fields['swap_key']).hex()
+            self.state_store.record_swap_outcome(swap_key, outcome, block_time)
+            dev_signal.emit('swap_outcome', swap_key=swap_key, outcome=outcome)
+            return True
+        return False
 
     def _apply(self, rec: EventRecord, hotkey: str, block_time: int) -> bool:
         name = rec.name
@@ -96,6 +121,14 @@ class SolanaEventIndex:
             return True
         if name == 'PoolResolved':
             return self._apply_reservation(hotkey, block_time, self._event_hub(rec))
+        if name in ('ReservationFilled', 'ReservationExtended'):
+            return self._apply_reservation_deadline(hotkey, rec, block_time)
+        if name == 'UnfilledReservationClosed':
+            # Permissionless reap of a drawn-but-unfilled reservation frees the miner on-chain; MOVE the
+            # synthetic RESERVE_EXPIRE (draw+ttl guess) to the reap block — inserting beside it leaves
+            # the stale guess to fire later, freeing the miner's NEXT reservation early.
+            self.state_store.restamp_reservation_expiry(hotkey, self._event_hub(rec), block_time, not_before=block_time)
+            return True
         if name == 'SwapFulfilled':
             # Persist the delivery hash for post-close receipts — the Swap PDA (and its
             # to_tx_hash) is gone once the swap completes, and the offering's receipt links
@@ -192,16 +225,27 @@ class SolanaEventIndex:
 
     def _apply_reservation(self, hotkey: str, block_time: int, hub: Optional[str]) -> bool:
         """PoolResolved → RESERVE_START now + a synthetic RESERVE_EXPIRE at
-        ``block_time + reservation_ttl_secs`` (``reserved_until`` isn't on the
-        event). Dropped if no TTL source is wired, so the reservation never opens
-        without its matching expiry. The expiry inherits the start's hub so the
-        pair opens and closes the same per-hub machine."""
+        ``block_time + reservation_ttl_secs`` — a guess, since ``reserved_until`` isn't on this
+        event; ReservationFilled/Extended later re-stamp it to the real deadline (drawn-unfilled
+        reservations keep the guess as their fallback expiry). Dropped if no TTL source is wired,
+        so the reservation never opens without an expiry. The expiry inherits the start's hub."""
         ttl = self._reservation_ttl()
         if ttl is None:
             bt.logging.warning('SolanaEventIndex: no reservation_ttl; dropping PoolResolved')
             return False
         self.state_store.insert_activity_event(block_time, hotkey, ActivityTransition.RESERVE_START, hub=hub)
         self.state_store.insert_activity_event(block_time + ttl, hotkey, ActivityTransition.RESERVE_EXPIRE, hub=hub)
+        return True
+
+    def _apply_reservation_deadline(self, hotkey: str, rec: EventRecord, block_time: int) -> bool:
+        """ReservationFilled/Extended carry the real ``reserved_until`` — re-stamp the synthetic
+        RESERVE_EXPIRE off PoolResolved's draw+ttl guess. Without this a busy miner is scored
+        AVAILABLE once SwapInitiated lands after the guess (slow BTC confs, or a claim-runway extend).
+        The event's block_time floors the move so a fired prior-reservation row is never dragged."""
+        reserved_until = int(rec.fields['reserved_until'])
+        if reserved_until <= 0:
+            return False
+        self.state_store.restamp_reservation_expiry(hotkey, self._event_hub(rec), reserved_until, not_before=block_time)
         return True
 
     @staticmethod

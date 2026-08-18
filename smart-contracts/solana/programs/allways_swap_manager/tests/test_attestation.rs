@@ -120,6 +120,9 @@ fn legacy_pool_pda(m: &Pubkey) -> Pubkey {
 fn swap_pda(key: &[u8; 32]) -> Pubkey {
     Pubkey::find_program_address(&[b"swap", key], &pid()).0
 }
+fn bind_pda(m: &Pubkey) -> Pubkey {
+    Pubkey::find_program_address(&[b"bind", m.as_ref()], &pid()).0
+}
 fn swap_key(from_tx_hash: &str) -> [u8; 32] {
     hashv(&[from_tx_hash.as_bytes()]).to_bytes()
 }
@@ -364,6 +367,7 @@ fn finalize_ix_b(
             collateral_amount,
             from_amount,
             to_amount,
+            from_addr_hash: hashv(&["userSrcAddr".as_bytes()]).to_bytes(),
         }
         .data(),
         allways_swap_manager::accounts::FinalizeReservation {
@@ -373,6 +377,17 @@ fn finalize_ix_b(
             miner_state: miner_pda(miner),
             reservation: resv_pda_b(miner, backing),
             attestation,
+            source_lock: Pubkey::find_program_address(
+                &[
+                    b"srclock",
+                    miner.as_ref(),
+                    (if backing == SOL { SPOKE_FROM } else { HUB_FROM }).as_bytes(),
+                    &hashv(&["userSrcAddr".as_bytes()]).to_bytes(),
+                ],
+                &pid(),
+            )
+            .0,
+            system_program: SYSTEM_PROGRAM,
         }
         .to_account_metas(None),
     )
@@ -419,16 +434,31 @@ fn initiate_ix_b(
     let key = swap_key(from_tx_hash);
     Instruction::new_with_bytes(
         pid(),
-        &allways_swap_manager::instruction::VoteInitiate { swap_key: key }.data(),
+        &allways_swap_manager::instruction::VoteInitiate {
+            swap_key: key,
+            from_addr_hash: hashv(&["userSrcAddr".as_bytes()]).to_bytes(),
+        }
+        .data(),
         allways_swap_manager::accounts::VoteInitiate {
             validator: *validator,
             config: config_pda(),
             miner: *miner,
             miner_state: miner_pda(miner),
             reservation: resv_pda_b(miner, backing),
+            source_lock: Pubkey::find_program_address(
+                &[
+                    b"srclock",
+                    miner.as_ref(),
+                    (if backing == SOL { SPOKE_FROM } else { HUB_FROM }).as_bytes(),
+                    &hashv(&["userSrcAddr".as_bytes()]).to_bytes(),
+                ],
+                &pid(),
+            )
+            .0,
             vote_round: vote_pda(REQ_INITIATE, &key),
             swap: swap_pda(&key),
             attestation,
+            binding: bind_pda(miner),
             system_program: SYSTEM_PROGRAM,
         }
         .to_account_metas(None),
@@ -2089,6 +2119,9 @@ fn test_a_forced_tao_deactivation_leaves_the_sol_cooldown_alone() {
 
 /// Bytes v3 added to each reused slot: one `collateral_chain` String at `MAX_CHAIN_LEN`.
 const LEGACY_SHRINK: usize = 4 + MAX_CHAIN_LEN;
+/// Swap grew past v10 by `collateral_chain` (v3) AND the pinned `hotkey` (V-M1) — its legacy
+/// allocation is smaller than the live one by both.
+const SWAP_LEGACY_SHRINK: usize = LEGACY_SHRINK + 32;
 
 /// The v10 `Pool` body — no `collateral_chain`, and its seeds are the SAME as the live one's, which is
 /// the whole reason a closer is needed at all.
@@ -2454,7 +2487,7 @@ fn test_close_legacy_swap_decodes_a_v10_layout_and_reaps_it() {
     // that keys on where the walk ends instead of the allocation length.
     let mut body = Vec::new();
     legacy.serialize(&mut body).unwrap();
-    plant_legacy(&mut svm, swap_pda(&key), &Swap::DISCRIMINATOR, body, 8 + Swap::INIT_SPACE - LEGACY_SHRINK);
+    plant_legacy(&mut svm, swap_pda(&key), &Swap::DISCRIMINATOR, body, 8 + Swap::INIT_SPACE - SWAP_LEGACY_SHRINK);
 
     // Put the miner into the stranded state a surviving v10 swap leaves behind: SOL hub in-flight,
     // busy, with the swap's reservation still held. Reaping must free all of it or the hub stays bricked.
@@ -2507,6 +2540,7 @@ fn test_close_legacy_swap_refuses_a_current_layout_swap() {
         max_extend_at: BASE_TS + 7_200,
         fulfilled_at: 0,
         bump: 255,
+        hotkey: [0u8; 32],
     };
     // Padded to the real current-layout allocation (longer than a v10 Swap by exactly collateral_chain),
     // so the length gate rejects it — the whole point being the closer only ever reaps a v10-length PDA.

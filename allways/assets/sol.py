@@ -12,7 +12,7 @@ from allways.assets.asset import Asset, ProviderUnreachableError, SendResult, Tr
 from allways.assets.chain import Chain
 from allways.chains import CHAIN_SOL, ChainDefinition
 from allways.constants import CANCEL_REASON_SOL_RESERVED
-from allways.solana.rpc import SolanaRpc, resolve_rpc_url
+from allways.solana.rpc import SolanaRpc, SolanaRpcError, resolve_rpc_url
 
 LOG_SOL = '[Solana]'
 
@@ -87,6 +87,9 @@ class Sol(Asset, Chain):
         self.rpc_url = resolve_rpc_url(solana_rpc_url)
         self.rpc = SolanaRpc(self.rpc_url, timeout=timeout)
         self.keypair = solana_keypair
+        # Own-broadcast dedup: sig -> (to, amount, dedup_scope, seen_slot). A confirm() timeout returns
+        # None even when the transfer landed; without this the next poll re-signs and double-pays.
+        self.broadcasted_txids: dict[str, tuple] = {}
 
     @property
     def chain_def(self) -> ChainDefinition:
@@ -316,6 +319,26 @@ class Sol(Asset, Chain):
         if self.keypair is None:
             bt.logging.error('SOL send_amount called on a read-only Sol (no keypair)')
             return None
+        # Never send from a key that can't satisfy the validator's sender pin: the leg would be rejected
+        # and the funds wasted. Refuse before broadcasting (mirrors the EVM/BTC providers).
+        if from_address is not None and str(self.keypair.pubkey()) != str(from_address):
+            bt.logging.error(
+                f'{LOG_SOL} committed sender {from_address} != wallet {self.keypair.pubkey()} — not sending'
+            )
+            return None
+
+        # Reuse a prior own broadcast for THIS obligation instead of paying twice: a confirm() timeout
+        # returns None even when the transfer landed, and the next poll would otherwise re-send.
+        want = (str(to_address), int(amount), dedup_key or '')
+        try:
+            prior = self._prior_broadcast(want)
+        except Exception as e:
+            bt.logging.error(f'{LOG_SOL} prior send unresolved ({e}) — not re-sending, would risk a double pay')
+            return None
+        if prior is not None:
+            bt.logging.info(f'{LOG_SOL} reusing prior tx {prior[0]} to {to_address} ({amount} lamports)')
+            return prior
+
         try:
             from solders.hash import Hash
             from solders.system_program import TransferParams, transfer
@@ -336,6 +359,9 @@ class Sol(Asset, Chain):
                 blockhash = Hash.from_string(self.rpc.get_latest_blockhash())
                 tx = Transaction.new_signed_with_payer([ix], self.keypair.pubkey(), [self.keypair], blockhash)
                 sig = self.rpc.send_transaction(base64.b64encode(bytes(tx)).decode())
+                # Record BEFORE confirm: if confirm() times out on a tx that actually landed, the next
+                # poll's _prior_broadcast finds this sig and reuses it rather than re-sending.
+                self._record_broadcast(sig, want)
                 status = self.rpc.confirm(sig)
                 slot = int(status.get('slot') or 0)
                 bt.logging.info(f'{LOG_SOL} sent {amount} lamports to {to_address} (sig: {sig}, slot: {slot})')
@@ -347,4 +373,49 @@ class Sol(Asset, Chain):
                 last_err = e
                 time.sleep(0.5)
         bt.logging.error(f'{LOG_SOL} send_amount failed after blockhash retries: {last_err}')
+        return None
+
+    _BROADCAST_TTL_SLOTS = 150  # a Solana blockhash expires well within ~60s; past this an unlanded sig is dead
+
+    def _record_broadcast(self, sig: str, want: tuple) -> None:
+        head = self._current_slot()
+        self.broadcasted_txids[sig] = (*want, head if head is not None else 0)
+        if len(self.broadcasted_txids) > 256:
+            self.broadcasted_txids.pop(next(iter(self.broadcasted_txids)))
+
+    def _current_slot(self) -> Optional[int]:
+        try:
+            return int(self.rpc.get_slot())
+        except Exception:
+            return None
+
+    def _prior_broadcast(self, want: tuple) -> Optional[SendResult]:
+        """Reusable (sig, slot) from a prior own broadcast for this (to, amount, dedup) obligation that
+        provably landed — so a confirm() timeout that returned None can never cause a second pay. None
+        when no prior send can have moved funds; RAISES when the prior send is unresolved (not yet
+        expired, or only at ``processed`` commitment) — the caller must wait, not re-send."""
+        head = self._current_slot()
+        for sig, (to, amt, scope, seen) in list(self.broadcasted_txids.items()):
+            if (to, amt, scope) != want:
+                continue
+            st = (self.rpc.get_signature_statuses([sig]) or [None])[0]
+            if st is not None:
+                if st.get('confirmationStatus') not in ('confirmed', 'finalized'):
+                    # processed-only: possibly a minority fork that never settles. Reusing it would
+                    # mark the leg delivered while the user is never paid; a failed status at
+                    # processed is equally unsettled. Either way: wait for majority commitment.
+                    raise SolanaRpcError(f'prior send {sig[:16]}... only processed — waiting for confirmed')
+                if st.get('err') is None:
+                    return (sig, int(st.get('slot') or 0))  # settled at majority commitment → reuse
+                del self.broadcasted_txids[sig]  # failed on-chain → moved nothing, a fresh send is safe
+                continue
+            if head is not None:
+                if int(seen) <= 0:
+                    # get_slot failed at record time, so the record's age is unknown: backfill with the
+                    # current head so the TTL counts from now — "can't tell" must read recent, never expired.
+                    self.broadcasted_txids[sig] = (to, amt, scope, head)
+                elif head - int(seen) > self._BROADCAST_TTL_SLOTS:
+                    del self.broadcasted_txids[sig]  # blockhash long expired unlanded → safe to resend
+                    continue
+            raise SolanaRpcError(f'prior send {sig[:16]}... not on-chain yet and not expired — waiting a pass')
         return None

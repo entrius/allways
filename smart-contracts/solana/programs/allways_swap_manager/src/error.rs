@@ -135,6 +135,12 @@ pub enum ErrorCode {
     SelfSwapNotAllowed,
     #[msg("Taker pubkey must not be the default address")]
     InvalidUser,
+    #[msg("Taker payout address must differ from the miner's delivery address")]
+    DestEqualsMinerAddr,
+    #[msg("This source address already backs a live reservation on this miner")]
+    DuplicateSourceAddr,
+    #[msg("from_addr_hash does not match keccak(user_from_addr)")]
+    SourceHashMismatch,
     #[msg("round_key does not match the keccak hash of the submitted weights snapshot")]
     WeightsRoundKeyMismatch,
 
@@ -167,4 +173,8 @@ pub enum ErrorCode {
     MigrationSwapNotDrained,
     #[msg("Attestation would lower the bond while a reservation/swap is live on this hub")]
     AttestationWouldStrandSwap,
+
+    // --- V-M1: hotkey-binding freeze ---
+    #[msg("Hotkey binding is set-once; a bound pubkey cannot change its hotkey")]
+    HotkeyChangeForbidden,
 }

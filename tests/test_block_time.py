@@ -92,7 +92,13 @@ def test_subtensor_get_block_time_none_on_error():
 # Substrate has no address index, so the scanner follows the head incrementally.
 
 
-def _scan_provider(head, blocks):
+def _empty_block():
+    """A readable block holding no transfers — what a real get_block returns for a quiet block.
+    (None from get_block means UNREADABLE, which the dedup resolvers must treat as 'wait'.)"""
+    return {'_raw': True, 'extrinsics': [], '_events': []}
+
+
+def _scan_provider(head, blocks, readable_default=False):
     p = Tao.__new__(Tao)  # skip __init__ (no real subtensor needed)
     p.subtensor = MagicMock()
     p.subtensor.get_current_block.return_value = head
@@ -100,7 +106,11 @@ def _scan_provider(head, blocks):
     p.block_hash_cache = {}
     p.events_cache = {}
     p.scan_cursors = {}
-    p.get_block = lambda n: blocks.get(n)
+    p.broadcasted_txids = {}
+    if readable_default:
+        p.get_block = lambda n: blocks.get(n, _empty_block())
+    else:
+        p.get_block = lambda n: blocks.get(n)
     p.get_block_hash = lambda n: f'0xblock{n}'
     p.get_block_events = lambda h: (blocks.get(int(h.removeprefix('0xblock'))) or {}).get('_events', [])
     return p
@@ -147,6 +157,178 @@ def _raw_transfer_block(txid, dest, amount, sender, settled=True):
         'extrinsics': [{'extrinsic_hash': txid, 'dest': dest, 'amount': amount, 'sender': sender}],
         '_events': [_transfer_event(dest, amount, sender)] if settled else _failed_dispatch_events(sender),
     }
+
+
+def test_tao_send_refuses_when_from_address_mismatches_wallet():
+    # H3: never broadcast from a wallet the validator's sender-pin would reject (wasted funds).
+    p = Tao.__new__(Tao)
+    p.wallet = MagicMock()
+    p.wallet.coldkeypub.ss58_address = 'minerTAO'
+    p.broadcasted_txids = {}
+    assert p.send_amount('userTAO', 1000, from_address='someoneElse') is None
+
+
+def test_tao_own_transfer_landed_matches_exact_hash():
+    # H2: reuse a prior payout only when THAT exact extrinsic is on-chain, so a confirm-timeout retry
+    # can't double-pay. (payout block: sender=miner, dest=user)
+    blocks = {100: _raw_transfer_block('0xpay', 'userTAO', 5000, 'minerTAO')}
+    p = _scan_provider(head=100, blocks=blocks, readable_default=True)
+    assert p._own_transfer_landed('0xpay', 'minerTAO', 'userTAO', 5000) == ('0xpay', 100)
+
+
+def test_tao_own_transfer_landed_ignores_a_different_extrinsic():
+    # A matching (to, amount) transfer from a DIFFERENT extrinsic must NOT be reused — no mis-attribution.
+    blocks = {100: _raw_transfer_block('0xpay', 'userTAO', 5000, 'minerTAO')}
+    p = _scan_provider(head=100, blocks=blocks, readable_default=True)
+    assert p._own_transfer_landed('0xNOTMINE', 'minerTAO', 'userTAO', 5000) is None
+
+
+def test_tao_own_transfer_landed_absent_returns_none():
+    # Genuine failure (a fully readable window with nothing in it) → None → the caller re-sends.
+    p = _scan_provider(head=100, blocks={}, readable_default=True)
+    assert p._own_transfer_landed('0xpay', 'minerTAO', 'userTAO', 5000) is None
+
+
+def test_tao_own_transfer_landed_raises_when_head_unreadable():
+    # Q4a: "couldn't read the head" is not "didn't land" — returning None here would green-light a
+    # re-send of a transfer that may be sitting on-chain → double pay. Must raise so the caller waits.
+    p = _scan_provider(head=100, blocks={}, readable_default=True)
+    p.subtensor.get_current_block.side_effect = RuntimeError('rpc down')
+    with pytest.raises(ProviderUnreachableError):
+        p._own_transfer_landed('0xpay', 'minerTAO', 'userTAO', 5000)
+
+
+def test_tao_own_transfer_landed_raises_when_a_block_in_the_window_is_unreadable():
+    # Q4a: skipping an unreadable block can skip the very block holding the landed transfer.
+    blocks = {90: None}  # one unreadable block mid-window; the rest are readable and empty
+    p = _scan_provider(head=100, blocks=blocks, readable_default=True)
+    with pytest.raises(ProviderUnreachableError):
+        p._own_transfer_landed('0xpay', 'minerTAO', 'userTAO', 5000)
+
+
+def test_tao_own_transfer_landed_anchors_the_scan_on_the_recorded_block():
+    # An RPC outage between polls must not slide the landed transfer out of the lookback window:
+    # the scan anchors on the block recorded at send time, not on today's head.
+    blocks = {100: _raw_transfer_block('0xpay', 'userTAO', 5000, 'minerTAO')}
+    p = _scan_provider(head=1000, blocks=blocks, readable_default=True)
+    assert p._own_transfer_landed('0xpay', 'minerTAO', 'userTAO', 5000, seen_head=100) == ('0xpay', 100)
+
+
+def test_tao_own_transfer_landed_rejects_an_included_but_failed_extrinsic():
+    # Inclusion is NOT settlement: the extrinsic is in the block and decodes to the intended dest/amount,
+    # but it dispatched with an error (fee taken, no Balances.Transfer). Reusing it would mark a swap paid
+    # that moved no funds → the miner never retries and rides to a slash. Must return None (safe re-send).
+    blocks = {100: _raw_transfer_block('0xpay', 'userTAO', 5000, 'minerTAO', settled=False)}
+    p = _scan_provider(head=100, blocks=blocks, readable_default=True)
+    assert p._own_transfer_landed('0xpay', 'minerTAO', 'userTAO', 5000) is None
+
+
+def test_tao_own_transfer_landed_raises_when_settlement_unreadable():
+    # The exact extrinsic is on-chain but its settlement events can't be read: RAISE so the caller waits
+    # rather than re-sending an unresolved transfer into a double pay (the send_amount except-branch).
+    block = {
+        '_raw': True,
+        'extrinsics': [{'extrinsic_hash': '0xpay', 'dest': 'userTAO', 'amount': 5000, 'sender': 'minerTAO'}],
+        '_events': [],  # settled_credit treats no-events-on-a-block-with-extrinsics as unreachable
+    }
+    p = _scan_provider(head=100, blocks={100: block}, readable_default=True)
+    with pytest.raises(ProviderUnreachableError):
+        p._own_transfer_landed('0xpay', 'minerTAO', 'userTAO', 5000)
+
+
+# ─── Q4b: a send whose extrinsic hash was lost mid-submit (transfer raised after submission) ─────
+
+
+def test_tao_lost_hash_prior_found_by_triple_scan():
+    # The hash is unknown, but a settled from→to transfer of the amount since the attempt IS the send.
+    blocks = {100: _raw_transfer_block('0xlost', 'userTAO', 5000, 'minerTAO')}
+    p = _scan_provider(head=105, blocks=blocks, readable_default=True)
+    assert p._lost_hash_prior_landed('minerTAO', 'userTAO', 5000, seen_head=99) == ('0xlost', 100)
+
+
+def test_tao_lost_hash_skips_a_transfer_owned_by_another_obligation():
+    # A hash recorded under any scope belongs to a DIFFERENT swap this process sent — adopting it
+    # would report the same tx for two swaps. With the window elapsed, the lost send is dead.
+    blocks = {100: _raw_transfer_block('0xother', 'userTAO', 5000, 'minerTAO')}
+    p = _scan_provider(head=99 + Tao.LOST_SEND_DEAD_BLOCKS + 1, blocks=blocks, readable_default=True)
+    p.broadcasted_txids['swapA'] = ('userTAO', 5000, '0xother', 100)
+    assert p._lost_hash_prior_landed('minerTAO', 'userTAO', 5000, seen_head=99) is None
+
+
+def test_tao_lost_hash_waits_while_the_inclusion_window_is_open():
+    # Nothing found yet, but the extrinsic could still include: raise-and-wait, never re-send.
+    p = _scan_provider(head=105, blocks={}, readable_default=True)
+    with pytest.raises(ProviderUnreachableError):
+        p._lost_hash_prior_landed('minerTAO', 'userTAO', 5000, seen_head=100)
+
+
+def test_tao_lost_hash_dead_after_window_scanned_clean():
+    # The full mortality window since the attempt elapsed and every block read clean → provably never landed.
+    p = _scan_provider(head=100 + Tao.LOST_SEND_DEAD_BLOCKS + 1, blocks={}, readable_default=True)
+    assert p._lost_hash_prior_landed('minerTAO', 'userTAO', 5000, seen_head=100) is None
+
+
+def test_tao_lost_hash_waits_out_the_full_mortal_era():
+    # Past the scan window but inside the 128-block mortal era the extrinsic can STILL include —
+    # declaring it dead here re-sends into a double pay. Wait, don't clear.
+    p = _scan_provider(head=100 + Tao.SCAN_LOOKBACK_BLOCKS + 26, blocks={}, readable_default=True)
+    with pytest.raises(ProviderUnreachableError):
+        p._lost_hash_prior_landed('minerTAO', 'userTAO', 5000, seen_head=100)
+
+
+def test_tao_lost_hash_raises_when_a_block_is_unreadable():
+    # Even past the window, an unreadable block could hide the landed transfer → keep waiting.
+    blocks = {110: None}
+    p = _scan_provider(head=100 + Tao.LOST_SEND_DEAD_BLOCKS + 1, blocks=blocks, readable_default=True)
+    with pytest.raises(ProviderUnreachableError):
+        p._lost_hash_prior_landed('minerTAO', 'userTAO', 5000, seen_head=100)
+
+
+def _send_provider(head, blocks):
+    p = _scan_provider(head=head, blocks=blocks, readable_default=True)
+    p.wallet = MagicMock()
+    p.wallet.coldkeypub.ss58_address = 'minerTAO'
+    return p
+
+
+def test_tao_send_records_attempt_before_transfer_can_raise():
+    # Q4b: subtensor.transfer raising post-submission (websocket drop during wait_for_inclusion) must
+    # leave a marker, or the next poll re-sends an extrinsic that may have included → double pay.
+    p = _send_provider(head=500, blocks={})
+    p.subtensor.transfer = MagicMock(side_effect=ConnectionError('ws dropped'))
+    assert p.send_amount('userTAO', 5000, dedup_key='swap1') is None
+    assert p.broadcasted_txids['swap1'] == ('userTAO', 5000, '', 500)
+
+
+def test_tao_send_resolves_a_lost_hash_marker_instead_of_resending():
+    # Next poll after the raise: the transfer DID land. It must be adopted and reused — no second send.
+    blocks = {501: _raw_transfer_block('0xlost', 'userTAO', 5000, 'minerTAO')}
+    p = _send_provider(head=505, blocks=blocks)
+    p.broadcasted_txids['swap1'] = ('userTAO', 5000, '', 500)
+    p.subtensor.transfer = MagicMock()
+    assert p.send_amount('userTAO', 5000, dedup_key='swap1') == ('0xlost', 501)
+    p.subtensor.transfer.assert_not_called()
+    assert p.broadcasted_txids['swap1'] == ('userTAO', 5000, '0xlost', 501)
+
+
+def test_tao_send_waits_on_an_unresolved_lost_hash_marker():
+    # Window still open and nothing found: send_amount returns None WITHOUT re-sending.
+    p = _send_provider(head=505, blocks={})
+    p.broadcasted_txids['swap1'] = ('userTAO', 5000, '', 500)
+    p.subtensor.transfer = MagicMock()
+    assert p.send_amount('userTAO', 5000, dedup_key='swap1') is None
+    p.subtensor.transfer.assert_not_called()
+
+
+def test_tao_send_backfills_an_unknown_attempt_head():
+    # Q2's TAO sibling: head was unreadable when the marker was recorded (seen 0). Backfill from the
+    # current head and wait — never treat "age unknown" as "expired, safe to re-send".
+    p = _send_provider(head=505, blocks={})
+    p.broadcasted_txids['swap1'] = ('userTAO', 5000, '', 0)
+    p.subtensor.transfer = MagicMock()
+    assert p.send_amount('userTAO', 5000, dedup_key='swap1') is None
+    p.subtensor.transfer.assert_not_called()
+    assert p.broadcasted_txids['swap1'] == ('userTAO', 5000, '', 505)
 
 
 def test_tao_scanner_finds_matching_transfer_in_new_blocks():

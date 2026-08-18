@@ -53,9 +53,17 @@ CANCEL_REASON_EVM_REVERT = 0
 CANCEL_REASON_ERC20_BLACKLIST = 1
 CANCEL_REASON_ERC20_PAUSED = 2
 CANCEL_REASON_SOL_RESERVED = 3
+# An issuer-enabled transfer fee shaves the delivered log below the pinned amount, so every
+# honest delivery on the token would false-slash — a hub-wide, no-fault condition (V-M2/PAXG).
+CANCEL_REASON_ERC20_FEE_ENABLED = 4
 CANCEL_REASON_OTHER = 255
 
 BTC_MIN_FEE_RATE = 5
+# Estimation-DOWN fallback (sat/vB), distinct from the mempool floor above: used only when
+# /fee-estimates fails both attempts. A silent drop to the 5 floor has stranded a real dest tx
+# (V-L5), so a failed estimate broadcasts at a survivable rate instead of the strand-prone floor —
+# without lifting the floor itself (calm-mempool sends still pay the real low rate).
+BTC_FALLBACK_FEE_RATE = 15
 # Modest pad on estimated fee rates (not on explicit user overrides) against
 # mempool conditions drifting between estimate and broadcast. Goal is
 # 'reliably confirms within ~30 min', not 'next block at any cost'.

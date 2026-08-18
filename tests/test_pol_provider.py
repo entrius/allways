@@ -283,7 +283,7 @@ class TestDeliveryGates:
         assert provider.can_deliver_to(RECIPIENT, 10**16) is True
 
         def refuse(params):
-            raise RuntimeError('rpc error execution reverted')
+            raise EvmRpcError('execution reverted', {'code': 3, 'message': 'execution reverted'})
 
         rpc_stub(provider, {'eth_getCode': '0x60806040', 'eth_estimateGas': refuse})
         assert provider.can_deliver_to(RECIPIENT, 10**16) is False

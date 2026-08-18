@@ -94,6 +94,13 @@ def pool_pda(miner, backing: str = BACKING_CHAIN_SOL, program_id: Optional[Pubke
     return _derive([b'pool', _pk_bytes(miner), backing.encode()], program_id)
 
 
+def source_lock_pda(miner, from_chain: str, from_addr_hash: bytes, program_id: Optional[Pubkey] = None) -> Pubkey:
+    """V-C2 source lock — one live-unclaimed reservation per (miner, from_chain, from_addr). NOT keyed by
+    backing, so a colliding reservation on any other hub sharing that source chain resolves the SAME PDA.
+    `from_addr_hash` is keccak(from_addr), mirroring finalize_reservation's on-chain seeds."""
+    return _derive([b'srclock', _pk_bytes(miner), from_chain.encode(), from_addr_hash], program_id)
+
+
 def legacy_reservation_pda(miner, program_id: Optional[Pubkey] = None) -> Pubkey:
     """The RETIRED pre-v3.1 per-miner address — only `close_legacy_reservation` resolves it now."""
     return _derive([b'resv', _pk_bytes(miner)], program_id)

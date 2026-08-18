@@ -3,13 +3,14 @@
 use {
     anchor_lang::{
         prelude::Pubkey, solana_program::clock::Clock, solana_program::instruction::Instruction,
-        AccountDeserialize, InstructionData, ToAccountMetas,
+        AccountDeserialize, AccountSerialize, InstructionData, Space, ToAccountMetas,
     },
     allways_swap_manager::constants::{
         FULFILL_GRACE_SOL_SECS, MAX_TOTAL_EXTENSION_SECS, POOL_WINDOW_SECS, RESERVATION_FEE_LAMPORTS,
     },
     allways_swap_manager::state::{MinerDirectionStats, MinerState, Pool, Reservation, Swap, SwapStatus, Treasury},
     litesvm::LiteSVM,
+    solana_account::Account,
     solana_hash::Hash,
     solana_keccak_hasher::hashv,
     solana_keypair::Keypair,
@@ -84,6 +85,16 @@ fn pool_pda(m: &Pubkey) -> Pubkey {
 }
 fn swap_pda(key: &[u8; 32]) -> Pubkey {
     Pubkey::find_program_address(&[b"swap", key], &pid()).0
+}
+fn bind_pda(m: &Pubkey) -> Pubkey {
+    Pubkey::find_program_address(&[b"bind", m.as_ref()], &pid()).0
+}
+fn srclock_pda(m: &Pubkey, from_chain: &str, from_addr: &str) -> Pubkey {
+    Pubkey::find_program_address(
+        &[b"srclock", m.as_ref(), from_chain.as_bytes(), &hashv(&[from_addr.as_bytes()]).to_bytes()],
+        &pid(),
+    )
+    .0
 }
 fn swap_key(from_tx_hash: &str) -> [u8; 32] {
     hashv(&[from_tx_hash.as_bytes()]).to_bytes()
@@ -267,6 +278,7 @@ fn finalize_ix(router: &Pubkey, miner: &Pubkey, user: &Pubkey) -> Instruction {
             collateral_amount: SOL_AMOUNT,
             from_amount: FROM_AMOUNT,
             to_amount: TO_AMOUNT,
+            from_addr_hash: hashv(&[FROM_ADDR.as_bytes()]).to_bytes(),
         }
         .data(),
         allways_swap_manager::accounts::FinalizeReservation {
@@ -276,6 +288,8 @@ fn finalize_ix(router: &Pubkey, miner: &Pubkey, user: &Pubkey) -> Instruction {
             miner_state: miner_pda(miner),
             reservation: resv_pda(miner),
             attestation: None,
+            source_lock: srclock_pda(miner, FROM_CHAIN, FROM_ADDR),
+            system_program: SYSTEM_PROGRAM,
         }
         .to_account_metas(None),
     )
@@ -322,16 +336,22 @@ fn initiate_ix(validator: &Pubkey, miner: &Pubkey, from_tx_hash: &str) -> Instru
     let key = swap_key(from_tx_hash);
     Instruction::new_with_bytes(
         pid(),
-        &allways_swap_manager::instruction::VoteInitiate { swap_key: key }.data(),
+        &allways_swap_manager::instruction::VoteInitiate {
+            swap_key: key,
+            from_addr_hash: hashv(&[FROM_ADDR.as_bytes()]).to_bytes(),
+        }
+        .data(),
         allways_swap_manager::accounts::VoteInitiate {
             validator: *validator,
             config: config_pda(),
             miner: *miner,
             miner_state: miner_pda(miner),
             reservation: resv_pda(miner),
+            source_lock: srclock_pda(miner, FROM_CHAIN, FROM_ADDR),
             vote_round: vote_pda(REQ_INITIATE, &key),
             swap: swap_pda(&key),
             attestation: None,
+            binding: bind_pda(miner),
             system_program: SYSTEM_PROGRAM,
         }
         .to_account_metas(None),
@@ -350,6 +370,70 @@ fn close_stale_claim_ix(caller: &Pubkey, miner: &Pubkey, from_tx_hash: &str) -> 
         }
         .to_account_metas(None),
     )
+}
+/// Like `close_stale_claim_ix` but lets the caller aim an ARBITRARY reservation account at the swap —
+/// the whole point of the V-C1 cross-hub reap (hand in the miner's OTHER-hub reservation).
+fn close_stale_claim_ix_with_resv(
+    caller: &Pubkey,
+    miner: &Pubkey,
+    from_tx_hash: &str,
+    reservation: Pubkey,
+) -> Instruction {
+    let key = swap_key(from_tx_hash);
+    Instruction::new_with_bytes(
+        pid(),
+        &allways_swap_manager::instruction::CloseStaleClaim { swap_key: key }.data(),
+        allways_swap_manager::accounts::CloseStaleClaim {
+            caller: *caller,
+            miner: *miner,
+            reservation,
+            swap: swap_pda(&key),
+        }
+        .to_account_metas(None),
+    )
+}
+/// Plant an initialized Reservation PDA for `miner` under a non-sol `backing` (the second hub of a
+/// dual-hub miner), so a test can hand it to `close_stale_claim`. `reserved_until`/`claimed` control
+/// whether the contract's staleness clause would fire absent the backing bind.
+fn plant_reservation(
+    svm: &mut LiteSVM,
+    miner: &Pubkey,
+    backing: &str,
+    claimed: [u8; 32],
+    reserved_until: i64,
+) -> Pubkey {
+    let (pda, bump) =
+        Pubkey::find_program_address(&[b"resv", miner.as_ref(), backing.as_bytes()], &pid());
+    let r = Reservation {
+        router: *miner,
+        from_addr: String::new(),
+        user: LOTTERY_USER,
+        user_to_addr: String::new(),
+        from_chain: String::new(),
+        to_chain: String::new(),
+        collateral_chain: backing.to_string(),
+        collateral_amount: 0,
+        from_amount: 0,
+        to_amount: 0,
+        miner_from_addr: String::new(),
+        miner_to_addr: String::new(),
+        rate: 0,
+        created_at: BASE_TS,
+        reserved_until,
+        finalize_by: 0,
+        max_extend_at: 0,
+        claimed_swap_key: claimed,
+        bump,
+    };
+    let mut data = Vec::new();
+    r.try_serialize(&mut data).unwrap();
+    data.resize(8 + Reservation::INIT_SPACE, 0);
+    svm.set_account(
+        pda,
+        Account { lamports: 10_000_000, data, owner: pid(), executable: false, rent_epoch: 0 },
+    )
+    .unwrap();
+    pda
 }
 fn fulfill_ix(miner: &Pubkey, from_tx_hash: &str) -> Instruction {
     let key = swap_key(from_tx_hash);
@@ -569,6 +653,112 @@ fn test_finalize_rejected_below_overcollateralization() {
 }
 
 #[test]
+fn test_finalize_rejects_dest_equal_to_miner_delivery_addr() {
+    // V-H1 on-chain backstop: user_to_addr == the miner's own delivery address (pinned on the reservation
+    // at draw) makes the miner "deliver to itself" — a self-represented taker (bypassing the validator's
+    // reserve-time gate) could poison it into a false non-delivery slash. Reject at finalize.
+    let mut svm = LiteSVM::new();
+    svm.add_program(pid(), include_bytes!("../../../target/deploy/allways_swap_manager.so")).unwrap();
+    set_clock(&mut svm, BASE_TS);
+    let admin = Keypair::new();
+    svm.airdrop(&admin.pubkey(), 100_000_000_000).unwrap();
+    send(&mut svm, init_ix(&admin.pubkey()), &admin.pubkey(), &admin).expect("init");
+    let mut vals = Vec::new();
+    for _ in 0..3 {
+        let v = Keypair::new();
+        svm.airdrop(&v.pubkey(), 100_000_000_000).unwrap();
+        send(&mut svm, add_validator_ix(&admin.pubkey(), v.pubkey()), &admin.pubkey(), &admin).expect("add val");
+        vals.push(v);
+    }
+    let miner = Keypair::new();
+    svm.airdrop(&miner.pubkey(), 100_000_000_000).unwrap();
+    send(&mut svm, post_ix(&miner.pubkey(), 10 * SOL_AMOUNT), &miner.pubkey(), &miner).expect("post");
+    send(&mut svm, vote_activate_ix(&vals[0].pubkey(), &miner.pubkey()), &vals[0].pubkey(), &vals[0]).expect("a0");
+    send(&mut svm, vote_activate_ix(&vals[1].pubkey(), &miner.pubkey()), &vals[1].pubkey(), &vals[1]).expect("a1");
+    send(&mut svm, set_quote_ix(&miner.pubkey()), &miner.pubkey(), &miner).expect("quote");
+    let user = Keypair::new().pubkey();
+    send(&mut svm, open_ix(&vals[0].pubkey(), &miner.pubkey()), &vals[0].pubkey(), &vals[0]).expect("bid");
+    set_clock(&mut svm, BASE_TS + POOL_WINDOW_SECS + 1);
+    arm_and_resolve(&mut svm, &vals[0], &miner.pubkey());
+    let poisoned = Instruction::new_with_bytes(
+        pid(),
+        &allways_swap_manager::instruction::FinalizeReservation {
+            user,
+            user_from_addr: FROM_ADDR.to_string(),
+            user_to_addr: MINER_TO.to_string(), // == the pinned miner delivery address
+            collateral_amount: SOL_AMOUNT,
+            from_amount: FROM_AMOUNT,
+            to_amount: TO_AMOUNT,
+            from_addr_hash: hashv(&[FROM_ADDR.as_bytes()]).to_bytes(),
+        }
+        .data(),
+        allways_swap_manager::accounts::FinalizeReservation {
+            router: vals[0].pubkey(),
+            config: config_pda(),
+            miner: miner.pubkey(),
+            miner_state: miner_pda(&miner.pubkey()),
+            reservation: resv_pda(&miner.pubkey()),
+            attestation: None,
+            source_lock: srclock_pda(&miner.pubkey(), FROM_CHAIN, FROM_ADDR),
+            system_program: SYSTEM_PROGRAM,
+        }
+        .to_account_metas(None),
+    );
+    assert!(
+        send(&mut svm, poisoned, &vals[0].pubkey(), &vals[0]).is_err(),
+        "finalize must reject user_to_addr == miner delivery address"
+    );
+}
+
+#[test]
+fn test_finalize_rejects_duplicate_live_source() {
+    // V-C2: a source (from_chain, from_addr) may back only ONE live reservation per miner. A completed
+    // swap RELEASES its lock at initiate quorum, so the same source refills immediately; against a LIVE
+    // lock the duplicate is refused. The live-sibling collision is cross-hub (the per-hub busy gate
+    // blocks a same-hub second seat), so the live lock is poked directly — the branch is hub-agnostic.
+    let (mut svm, vals, miner, _rent) = setup();
+    run_full_swap(&mut svm, &vals, &miner, "srctx1");
+    assert_eq!(srclock_reserved_until(&svm, &miner.pubkey()), 0, "completed swap released the lock");
+
+    let fb = reservation_acct(&svm, &miner.pubkey()).finalize_by;
+    let now = fb + 1;
+    set_clock(&mut svm, now);
+    send(&mut svm, open_ix(&vals[0].pubkey(), &miner.pubkey()), &vals[0].pubkey(), &vals[0]).expect("re-open");
+    set_clock(&mut svm, now + POOL_WINDOW_SECS + 1);
+    arm_and_resolve(&mut svm, &vals[0], &miner.pubkey());
+    send(&mut svm, finalize_ix(&vals[0].pubkey(), &miner.pubkey(), &LOTTERY_USER), &vals[0].pubkey(), &vals[0])
+        .expect("same source refills immediately after its swap completed — no TTL wait, no burned bid");
+
+    // Simulate a still-live sibling reservation holding the source (the cross-hub case): a live lock
+    // refuses the duplicate.
+    run_full_swap(&mut svm, &vals, &miner, "srctx2");
+    set_srclock_reserved_until(&mut svm, &miner.pubkey(), now + 100 * TTL);
+    let now2 = reservation_acct(&svm, &miner.pubkey()).finalize_by + 1;
+    set_clock(&mut svm, now2);
+    send(&mut svm, open_ix(&vals[0].pubkey(), &miner.pubkey()), &vals[0].pubkey(), &vals[0]).expect("re-open 2");
+    set_clock(&mut svm, now2 + POOL_WINDOW_SECS + 1);
+    arm_and_resolve(&mut svm, &vals[0], &miner.pubkey());
+    let res = send(&mut svm, finalize_ix(&vals[0].pubkey(), &miner.pubkey(), &LOTTERY_USER), &vals[0].pubkey(), &vals[0]);
+    assert!(res.is_err(), "a live lock (sibling reservation) still refuses the duplicate source (V-C2)");
+}
+
+fn set_srclock_reserved_until(svm: &mut LiteSVM, miner: &Pubkey, until: i64) {
+    use allways_swap_manager::state::SourceLock;
+    let pda = srclock_pda(miner, FROM_CHAIN, FROM_ADDR);
+    let old = svm.get_account(&pda).unwrap();
+    let mut lock = SourceLock::try_deserialize(&mut old.data.as_slice()).unwrap();
+    lock.reserved_until = until;
+    let mut data = Vec::new();
+    lock.try_serialize(&mut data).unwrap();
+    data.resize(old.data.len(), 0);
+    svm.set_account(
+        pda,
+        Account { lamports: old.lamports, data, owner: old.owner, executable: old.executable, rent_epoch: old.rent_epoch },
+    )
+    .unwrap();
+}
+
+#[test]
 fn test_claim_creates_pending() {
     // A claim records the source tx on-chain (PendingAttestation) with the pinned payout, obligates
     // nothing, and leaves the reservation live with its claim slot set.
@@ -633,6 +823,33 @@ fn test_stale_claim_reap() {
     assert!(svm.get_account(&swap_pda(&key)).is_none(), "stale claim closed");
     let r = Reservation::try_deserialize(&mut svm.get_account(&resv_pda(&miner.pubkey())).unwrap().data.as_slice()).unwrap();
     assert_eq!(r.claimed_swap_key, [0u8; 32], "claim slot freed");
+}
+
+#[test]
+fn test_cross_backing_reap_rejected() {
+    // Red-team V-C1 (F1): a dual-hub miner's OTHER-hub reservation must not reap a HEALTHY swap.
+    // The `reservation` PDA is seeded on its own collateral_chain, so a foreign (tao) reservation
+    // validates in `close_stale_claim`; without the backing bind it trivially satisfies the
+    // `claimed_swap_key != swap_key` staleness clause and closes a live sol swap → permanent taker
+    // strand (permissionless). The fix rejects on ChainMismatch before the staleness test.
+    let (mut svm, vals, miner, _rent) = setup();
+    send(&mut svm, claim_ix(&vals[0].pubkey(), &miner.pubkey(), "srctx1"), &vals[0].pubkey(), &vals[0]).expect("claim");
+    let key = swap_key("srctx1");
+    // Clock stays at BASE_TS: the sol reservation is LIVE, so its own slot is non-stale (the honest
+    // guard) — the cross-hub substitution is the ONLY way to force a reap here.
+    let tao_resv = plant_reservation(&mut svm, &miner.pubkey(), "tao", [0u8; 32], BASE_TS - 1);
+
+    let res = send(
+        &mut svm,
+        close_stale_claim_ix_with_resv(&vals[0].pubkey(), &miner.pubkey(), "srctx1", tao_resv),
+        &vals[0].pubkey(),
+        &vals[0],
+    );
+    assert!(res.is_err(), "cross-backing reap of a healthy swap must be rejected (ChainMismatch)");
+    // Healthy swap survives; the sol reservation still owns the claim.
+    assert!(svm.get_account(&swap_pda(&key)).is_some(), "healthy swap must survive the rejected reap");
+    let sol = reservation_acct(&svm, &miner.pubkey());
+    assert_eq!(sol.claimed_swap_key, key, "sol claim slot must be untouched");
 }
 
 fn read_swap(svm: &LiteSVM, key: &[u8; 32]) -> Swap {
@@ -919,7 +1136,7 @@ fn test_contract_no_longer_blocks_reused_tx() {
     // miner freed → re-reserve, re-claim + re-attest the SAME from_tx_hash → now permitted on-chain.
     // The consumed reservation blocks a re-open until its finalize window lapses; warp past it.
     let fb = reservation_acct(&svm, &miner.pubkey()).finalize_by;
-    set_clock(&mut svm, fb + 1);
+    set_clock(&mut svm, fb + TTL + 1); // +TTL clears the V-C2 source lock (held for the reservation TTL)
     do_reserve(&mut svm, &vals[0], &miner.pubkey());
     do_initiate(&mut svm, &vals, &miner.pubkey(), "srctx1");
     let s = Swap::try_deserialize(&mut svm.get_account(&swap_pda(&swap_key("srctx1"))).unwrap().data.as_slice()).unwrap();
@@ -943,7 +1160,7 @@ fn test_stats_accumulate_same_direction() {
     // miner freed → re-reserve via the lottery, run a second swap (different source tx) same direction.
     // The consumed reservation blocks a re-open until its finalize window lapses; warp past it.
     let fb = reservation_acct(&svm, &miner.pubkey()).finalize_by;
-    set_clock(&mut svm, fb + 1);
+    set_clock(&mut svm, fb + TTL + 1); // +TTL clears the V-C2 source lock (held for the reservation TTL)
     do_reserve(&mut svm, &vals[0], &miner.pubkey());
     run_full_swap(&mut svm, &vals, &miner, "srctx2");
 
@@ -1018,4 +1235,78 @@ fn test_finalize_refuses_a_reservation_already_consumed_by_initiate() {
 
 fn reservation_acct(svm: &LiteSVM, miner: &Pubkey) -> Reservation {
     Reservation::try_deserialize(&mut svm.get_account(&resv_pda(miner)).unwrap().data.as_slice()).unwrap()
+}
+
+// ── REVIEW PROBE (c15ae2b / V-C2 extension gap) ─────────────────────────────────────────────────
+// Demonstrates that `extend_reservation` slides a live-unclaimed reservation's `reserved_until`
+// forward but never touches its SourceLock, so the lock lapses while the reservation is still live —
+// re-opening the cross-hub collision window the C2 guard is meant to hold shut.
+fn extend_ix(validator: &Pubkey, miner: &Pubkey, target_at: i64) -> Instruction {
+    Instruction::new_with_bytes(
+        pid(),
+        &allways_swap_manager::instruction::ExtendReservation {
+            target_at,
+            from_addr_hash: hashv(&[FROM_ADDR.as_bytes()]).to_bytes(),
+        }
+        .data(),
+        allways_swap_manager::accounts::ExtendReservation {
+            validator: *validator,
+            config: config_pda(),
+            miner: *miner,
+            miner_state: miner_pda(miner),
+            reservation: resv_pda(miner),
+            source_lock: srclock_pda(miner, FROM_CHAIN, FROM_ADDR),
+        }
+        .to_account_metas(None),
+    )
+}
+
+fn srclock_reserved_until(svm: &LiteSVM, miner: &Pubkey) -> i64 {
+    use allways_swap_manager::state::SourceLock;
+    let acct = svm.get_account(&srclock_pda(miner, FROM_CHAIN, FROM_ADDR)).unwrap();
+    SourceLock::try_deserialize(&mut acct.data.as_slice()).unwrap().reserved_until
+}
+
+#[test]
+fn test_extend_slides_the_source_lock() {
+    // V-C2 under extension: extend_reservation slides the source lock forward in lockstep with
+    // reserved_until, so an extended, still-unclaimed reservation never outlives its lock and re-opens the
+    // cross-hub collision (a colliding finalize on another hub keeps finding a live lock).
+    let (mut svm, vals, miner, _rent) = setup();
+    let resv = reservation_acct(&svm, &miner.pubkey());
+    assert_eq!(
+        srclock_reserved_until(&svm, &miner.pubkey()),
+        resv.reserved_until,
+        "lock is aligned to the reservation at finalize"
+    );
+
+    let target = resv.reserved_until + 5_000; // still-unclaimed reservation extended (slow source deposit)
+    send(&mut svm, extend_ix(&vals[0].pubkey(), &miner.pubkey(), target), &vals[0].pubkey(), &vals[0])
+        .expect("extend");
+
+    assert_eq!(reservation_acct(&svm, &miner.pubkey()).reserved_until, target, "reservation slid forward");
+    assert_eq!(
+        srclock_reserved_until(&svm, &miner.pubkey()),
+        target,
+        "the source lock slid with it — no lapse window opens under extension"
+    );
+}
+
+#[test]
+fn test_initiate_releases_the_source_lock() {
+    // The deposit is hash-bound to the swap at initiate quorum, so the lock's job is done — release
+    // it with the reservation. Held to the old reserved_until, a repeat swap from the same source
+    // would burn a bid fee against a lock protecting nothing.
+    let (mut svm, _admin, vals, miner, _rr) = setup_full(COLLATERAL);
+    let finalize_by = reservation_acct(&svm, &miner.pubkey()).finalize_by;
+    set_clock(&mut svm, finalize_by - 5);
+    assert!(srclock_reserved_until(&svm, &miner.pubkey()) > 0, "lock live after finalize");
+
+    do_initiate(&mut svm, &vals, &miner.pubkey(), "srctx1");
+
+    assert_eq!(
+        srclock_reserved_until(&svm, &miner.pubkey()),
+        0,
+        "initiate quorum released the source lock with the reservation"
+    );
 }

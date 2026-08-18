@@ -14,10 +14,14 @@ from dataclasses import replace
 
 import pytest
 
-from allways.assets.erc20 import SEL_IS_BLACKLISTED, Erc20, _refusal_call
+from allways.assets.erc20 import SEL_IS_BLACKLISTED, Erc20, _refusal_call, _selector
 from allways.assets.evm import EvmRpcError
-from allways.chains import CHAIN_ETHUSDC
-from allways.constants import CANCEL_REASON_ERC20_BLACKLIST, CANCEL_REASON_ERC20_PAUSED
+from allways.chains import CHAIN_ETHUSDC, CHAIN_PAXG
+from allways.constants import (
+    CANCEL_REASON_ERC20_BLACKLIST,
+    CANCEL_REASON_ERC20_FEE_ENABLED,
+    CANCEL_REASON_ERC20_PAUSED,
+)
 
 RECIPIENT = '0x70997970C51812dc3A010C7d01b50e0d17dc79C8'
 DECLARED = CHAIN_ETHUSDC  # ('isBlacklisted(address)', 'paused()')
@@ -53,6 +57,46 @@ def test_an_undeclared_row_fails_at_construction():
     # "never refused" for every destination and slash honest miners.
     with pytest.raises(ValueError, match='refusal_checks'):
         Erc20(replace(DECLARED, refusal_checks=None))
+
+
+def test_check_connection_degrades_when_token_probe_unreachable():
+    # A probe we can't COMPLETE is transient (flaky RPC / rate-limit storm). It must NOT crash the whole
+    # validator at boot over one spoke — that takes the hub down too. Degrade (return), don't raise.
+    def rpc(method, params, **kw):
+        if method == 'eth_getCode':
+            raise EvmRpcError('token RPC unreachable')
+        return hex(1000)
+
+    provider = build(DECLARED, rpc)
+    provider.chain.connect_network = lambda: (1, 100)  # host chain reachable; isolate the token probe
+    provider.check_connection(require_send=False)  # no raise
+
+
+def test_check_connection_degrades_on_a_null_code_answer():
+    # `result: null` from a broken/lagging endpoint is not a codeless contract (the spec returns the
+    # string '0x' for that) — it must take the transient/degrade path, not the fatal config raise.
+    def rpc(method, params, **kw):
+        if method == 'eth_getCode':
+            return None
+        return hex(1000)
+
+    provider = build(DECLARED, rpc)
+    provider.chain.connect_network = lambda: (1, 100)
+    provider.check_connection(require_send=False)  # no raise
+
+
+def test_check_connection_raises_on_codeless_contract():
+    # The genuine config fault is a COMPLETED probe returning '0x' (typo'd / wrong-network contract) —
+    # that stays fatal, or every later send fails against a non-contract.
+    def rpc(method, params, **kw):
+        if method == 'eth_getCode':
+            return '0x'
+        return hex(1000)
+
+    provider = build(DECLARED, rpc)
+    provider.chain.connect_network = lambda: (1, 100)
+    with pytest.raises(ConnectionError, match='no code'):
+        provider.check_connection(require_send=False)
 
 
 class TestNoChecksNeverTouchTheRpc:
@@ -147,3 +191,37 @@ class TestCancelEvidenceReadsTheDeclaredSurface:
             raise ConnectionError('every endpoint is down')
 
         assert build(self.PAXOS, down).cancel_evidence(RECIPIENT, amount=1) is None
+
+
+class TestFeeEnabledYieldsCancelEvidence:
+    """V-M2: an issuer that switches on a transfer fee (PAXG's admin lever) shaves every honest
+    delivery's Transfer log below the pinned amount — a hub-wide, no-fault condition. The row's
+    ``fee_check`` (getFeeFor) turns it into a cancel instead of mass-slashing honest miners."""
+
+    FEE_SEL = _selector('getFeeFor(uint256)')  # CHAIN_PAXG's declared fee_check
+
+    def _rpc(self, fee):
+        # Refusal probes (isFrozen/paused) answer clean; only the fee view carries a value.
+        def rpc(method, params, **kw):
+            if params[0]['data'].startswith(self.FEE_SEL):
+                return f'0x{fee:064x}'
+            return f'0x{0:064x}'
+
+        return rpc
+
+    def test_a_live_fee_becomes_a_no_fault_cancel(self):
+        provider = build(CHAIN_PAXG, self._rpc(fee=7))
+        assert provider.cancel_evidence(RECIPIENT, amount=2_000_000_000_000_000) == CANCEL_REASON_ERC20_FEE_ENABLED
+
+    def test_a_zero_fee_yields_no_evidence(self):
+        # The live state today: Paxos feeRate==0, so getFeeFor floors to 0 and deliveries flow.
+        provider = build(CHAIN_PAXG, self._rpc(fee=0))
+        assert provider.cancel_evidence(RECIPIENT, amount=2_000_000_000_000_000) is None
+
+    def test_a_row_without_a_fee_lever_never_probes(self):
+        # A token declaring no fee_check must answer WITHOUT sending the fee selector.
+        def rpc(method, params, **kw):
+            assert not params[0]['data'].startswith(self.FEE_SEL), 'probed a fee on a fee-less row'
+            return f'0x{0:064x}'
+
+        assert build(CHAIN_ETHUSDC, rpc).cancel_evidence(RECIPIENT, amount=1) is None

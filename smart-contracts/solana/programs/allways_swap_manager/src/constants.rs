@@ -23,6 +23,12 @@ pub const VOTE_SEED: &[u8] = b"vote";
 #[constant]
 pub const RESV_SEED: &[u8] = b"resv";
 
+/// PDA seed prefix for the V-C2 source-address lock
+/// (`seeds = [SRCLOCK_SEED, miner_pubkey, from_chain, keccak(from_addr)]`) — one live-unclaimed
+/// reservation per `(miner, from_chain, from_addr)`, enforced for routed and self-represented alike.
+#[constant]
+pub const SRCLOCK_SEED: &[u8] = b"srclock";
+
 /// PDA seed prefix for a swap (`seeds = [SWAP_SEED, swap_key]`, swap_key = keccak(from_tx_hash)).
 #[constant]
 pub const SWAP_SEED: &[u8] = b"swap";
@@ -98,6 +104,9 @@ pub const CANCEL_REASON_EVM_REVERT: u8 = 0;
 pub const CANCEL_REASON_ERC20_BLACKLIST: u8 = 1;
 pub const CANCEL_REASON_ERC20_PAUSED: u8 = 2;
 pub const CANCEL_REASON_SOL_RESERVED: u8 = 3;
+/// An issuer-enabled ERC-20 transfer fee shaves every honest delivery's log below the pinned
+/// amount — a hub-wide no-fault condition, cancelled rather than slashed (V-M2/PAXG).
+pub const CANCEL_REASON_ERC20_FEE_ENABLED: u8 = 4;
 pub const CANCEL_REASON_OTHER: u8 = 255;
 
 /// Slots the draw's seed slot is pinned ahead of the arming crank. Three leader windows (4 slots

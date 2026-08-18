@@ -180,21 +180,24 @@ def _relay(vault=None, solana=None, store=None, attribution=None, **cfg):
     return relay
 
 
-def _timeout_event(swap_key=SWAP, miner=MINER, penalty=22 * RAO, reimbursement=22 * RAO, chain='tao', payee=''):
-    return SimpleNamespace(
-        name='SwapTimedOut',
-        block_time=NOW,
-        fields={
-            'swap_key': bytes.fromhex(swap_key),
-            'miner': miner,
-            'collateral_amount': 20 * RAO,
-            'slash': 0,
-            'collateral_chain': chain,
-            'penalty': penalty,
-            'reimbursement': reimbursement,
-            'payee': payee,
-        },
-    )
+def _timeout_event(
+    swap_key=SWAP, miner=MINER, penalty=22 * RAO, reimbursement=22 * RAO, chain='tao', payee='', hotkey=None
+):
+    fields = {
+        'swap_key': bytes.fromhex(swap_key),
+        'miner': miner,
+        'collateral_amount': 20 * RAO,
+        'slash': 0,
+        'collateral_chain': chain,
+        'penalty': penalty,
+        'reimbursement': reimbursement,
+        'payee': payee,
+    }
+    # V-M1: the verdict carries the initiate-pinned hotkey (raw bytes). None = a pre-upgrade event
+    # without the field, which the relay must keep tolerating.
+    if hotkey is not None:
+        fields['hotkey'] = hotkey
+    return SimpleNamespace(name='SwapTimedOut', block_time=NOW, fields=fields)
 
 
 def _completed_event(swap_key=SWAP2, miner=MINER, fee=2 * RAO, chain='tao'):
@@ -466,6 +469,26 @@ def test_a_pre_f1_snapshot_without_a_hotkey_falls_back_to_the_live_binding():
     relay.step(NOW)
     slash = next(c for c in relay.vault.calls if c[0] == 'vote_slash')
     assert slash[1] == HOTKEY
+
+
+def test_a_snapshotless_validator_reads_the_hotkey_from_the_verdict_itself():
+    # V-M1: no observe-time snapshot (down for the swap's whole life) — the verdict's pinned hotkey
+    # is the seizure target, taking precedence over the live binding lookup.
+    relay = _relay(attribution={MINER: HOTKEY2})  # live binding disagrees; the pin must win
+    relay.ingest_events([_timeout_event(payee=USER_TAO, hotkey=bytes([1] * 32))])
+    relay.step(NOW)
+    slash = next(c for c in relay.vault.calls if c[0] == 'vote_slash')
+    assert slash[1] == HOTKEY, 'the seizure targets the hotkey pinned on-chain at initiate'
+
+
+def test_a_zeroed_verdict_hotkey_is_treated_as_unbound_not_a_target():
+    # A pre-pin swap / never-bound miner emits [0]*32 — that must not become a vault AccountId; the
+    # relay falls back to the live lookup exactly as before the field existed.
+    relay = _relay()
+    relay.ingest_events([_timeout_event(payee=USER_TAO, hotkey=bytes(32))])
+    relay.step(NOW)
+    slash = next(c for c in relay.vault.calls if c[0] == 'vote_slash')
+    assert slash[1] == HOTKEY, 'zeros defer to the live binding'
 
 
 def test_the_hotkey_snapshot_round_trips_through_swap_and_slash():

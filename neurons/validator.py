@@ -24,16 +24,18 @@ import wandb  # noqa: E402
 
 from allways import __version__  # noqa: E402
 from allways.assets import create_assets  # noqa: E402
+from allways.chains import apply_testnet_network_defaults  # noqa: E402
 from allways.constants import (  # noqa: E402
     FEE_DIVISOR,
     FORWARD_STALL_THRESHOLD_SECONDS,
+    NETUID_FINNEY,
     SCORING_WINDOW_BLOCKS,
     SCORING_WINDOW_SECS,
 )
 from allways.solana import keys  # noqa: E402
 from allways.solana.client import AllwaysSolanaClient  # noqa: E402
 from allways.solana.events import SolanaEventIngest  # noqa: E402
-from allways.solana.rpc import resolve_rpc_url  # noqa: E402
+from allways.solana.rpc import assert_cluster_safe, resolve_rpc_url  # noqa: E402
 from allways.validator.axon_handlers import (  # noqa: E402
     blacklist_miner_activate,
     blacklist_swap_confirm,
@@ -75,6 +77,17 @@ class Validator(BaseValidatorNeuron):
     def __init__(self, config=None):
         super().__init__(config=config)
 
+        # A testnet neuron must not silently verify against mainnet spokes: unset {PREFIX}_NETWORK
+        # defaults to mainnet in the providers, so a test swap would be checked on mainnet. Default
+        # unset spokes to testnet here (an explicit env var still wins).
+        if int(self.config.netuid) != NETUID_FINNEY:
+            applied = apply_testnet_network_defaults()
+            if applied:
+                bt.logging.warning(
+                    f'testnet neuron (netuid {self.config.netuid}): defaulted unset spoke networks to '
+                    f'testnet {applied} — set {{PREFIX}}_NETWORK to override.'
+                )
+
         # One rpc-url source of truth shared by every SOL consumer: the chain
         # providers (source-leg verification) and the solana_client below.
         solana_rpc_url = resolve_rpc_url()
@@ -115,6 +128,9 @@ class Validator(BaseValidatorNeuron):
             bt.logging.warning('VALIDATOR_MODE=vote — Solana contract votes ON, set_weights OFF.')
         solana_read_only = mode == 'watch'
         self.solana_client = AllwaysSolanaClient(solana_rpc_url, keypair=keys.load_or_create())
+        # Fail closed if a testnet neuron is pointed at mainnet, or the program id is on the wrong
+        # cluster — positively classified by genesis hash, not the mainnet-substring blind spot.
+        assert_cluster_safe(self.solana_client.rpc, self.solana_client.program_id, self.config.netuid, role='validator')
         warn_if_unbound(self.solana_client)
         # `solana_config_cache` serves swap bounds + halt (and the relay's heartbeat freshness)
         # off one TTL-cached Config read, replacing the old substrate reads.

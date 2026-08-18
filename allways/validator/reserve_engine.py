@@ -110,6 +110,12 @@ def reserve_on_behalf(
     if from_chain not in SUPPORTED_CHAINS or to_chain not in SUPPORTED_CHAINS:
         return ReserveResult(False, f'unsupported chain pair {from_chain}->{to_chain} (chain ids are lowercase)')
 
+    # Canonical source form at intake: the finalize hash + source-lock PDA are byte-keyed on this
+    # string (V-C2), so a case variant of a live source would mint a second lock over one deposit.
+    src_asset = (getattr(validator, 'axon_assets', None) or {}).get(from_chain)
+    if src_asset is not None:
+        user_from_addr = src_asset.chain.normalize_address(user_from_addr)
+
     client = validator.solana_client
     miner_pk = resolve_miner_pubkey(validator, miner_hotkey)
     if miner_pk is None:
@@ -179,6 +185,14 @@ def reserve_on_behalf(
         # the delivery-time reverted-tx proof (cancel_swap). Fat-finger UX belongs in the client app.
         if not provider.chain.is_valid_address(user_to_addr):
             return ReserveResult(False, f'destination is not a valid {to_chain} address')
+        # Reject user_to_addr == the miner's committed delivery address. The miner must deliver FROM
+        # miner_to_addr, so this makes every delivery a from==to self-transfer that the anti-wash
+        # verifier rejects → the leg never confirms → the miner is force-slashed with no cancel escape.
+        miner_to_addr = getattr(miner_quote, 'miner_to_addr', '') if miner_quote else ''
+        if miner_to_addr and provider.chain.normalize_address(user_to_addr) == provider.chain.normalize_address(
+            miner_to_addr
+        ):
+            return ReserveResult(False, 'destination must differ from the miner delivery address')
     # Same gate, source side (T18): the miner's receive address must accept the user's funds —
     # a miner quoting a malformed/rejecting/blacklisted address griefs takers into a burned fee.
     src_provider = providers.get(from_chain)
@@ -273,7 +287,35 @@ def finalize_won_seats(validator, now: int) -> list:
                 bt.logging.info(f'routed sweep {miner[:8]}: reservation filled or window lapsed, dropping queue')
                 store.delete_routed_requests(miner, from_chain, to_chain, backing)
             continue
-        req = draw_pool_winner(queue)
+        # A source may back only ONE live-unclaimed reservation per miner: two reservations sharing
+        # (from_chain, from_addr) are both matchable by a single `>=`-amount deposit, so an attacker
+        # declaring a victim's from_addr on the miner's OTHER hub could siphon that deposit. Draw only from
+        # queued users whose source doesn't already back a live seat — skip a colliding entry, don't drop
+        # the whole queue (else one crafted front-of-queue request knocks out every honest queued user).
+        providers = getattr(validator, 'axon_assets', {})
+        src = providers.get(from_chain)
+        try:
+            live_slots, _ = _live_unclaimed_slots(client, Pubkey.from_string(miner), now)
+        except Exception as e:
+            bt.logging.warning(f'routed sweep {miner[:8]}: live-slot read failed, retrying next step: {e}')
+            continue
+
+        def _collides(addr: str) -> bool:
+            want = src.chain.normalize_address(addr) if src else addr
+            return any(
+                s.from_chain == from_chain
+                and (src.chain.normalize_address(s.from_addr) if src else s.from_addr) == want
+                for s, _b in live_slots
+            )
+
+        eligible = [q for q in queue if not _collides(q['user_from_addr'])]
+        if not eligible:
+            bt.logging.warning(
+                f'routed sweep {miner[:8]}: every queued source already backs a live seat — nothing to '
+                f'finalize this pass (TTL prunes stale colliders)'
+            )
+            continue
+        req = draw_pool_winner(eligible)
         if read_only:
             bt.logging.info(f'routed sweep {miner[:8]}: WOULD finalize for {req["user_pubkey"][:8]} (read-only)')
             continue
@@ -286,12 +328,15 @@ def finalize_won_seats(validator, now: int) -> list:
             client.finalize_reservation(
                 Pubkey.from_string(miner),
                 Pubkey.from_string(req['user_pubkey']),
-                req['user_from_addr'],
+                # Normalized again at commit: rows queued before the intake normalization shipped
+                # (or by an older validator) must still land canonical, or the lock PDA diverges.
+                src.chain.normalize_address(req['user_from_addr']) if src else req['user_from_addr'],
                 req['user_to_addr'],
                 fill.collateral_amount,
                 fill.from_amount,
                 fill.to_amount,
                 backing,
+                from_chain=from_chain,
             )
         except Exception as e:
             reason = contract_reject_reason(e) or (str(e) if isinstance(e, ValueError) else None)
@@ -389,7 +434,9 @@ def _extend_for_claim(client, miner_pk, reservation, backing) -> None:
     if target <= reserved_until:
         return  # already at the contract ceiling — nothing left to buy
     try:
-        client.extend_reservation(miner_pk, target, backing)
+        client.extend_reservation(
+            miner_pk, target, backing, from_chain=reservation.from_chain, from_addr=reservation.from_addr
+        )
         bt.logging.info(f'claim runway: extended reserved_until {reserved_until} -> {target} (+{target - now}s)')
     except Exception as e:  # noqa: BLE001 - never block the claim on a failed extension
         bt.logging.warning(f'claim runway: extend_reservation failed ({e}); attempting the claim anyway')
@@ -420,8 +467,8 @@ def confirm_deposit(validator, miner_hotkey: str, from_tx_hash: str, from_tx_blo
     # deposit's hub is not knowable up front. Verify the deposit against each slot and claim the one it
     # matches — picking the first live slot blindly would reject a TAO deposit whenever a SOL slot is
     # also live (V-1). `verify_transaction` is the authoritative matcher (pinned recipient/amount/sender).
-    reservation = backing = tx_info = None
-    unreachable = False
+    matches = []
+    unreachable = stale = False
     for resv, resv_backing in slots:
         provider = validator.axon_assets.get(resv.from_chain)
         if provider is None:
@@ -441,20 +488,27 @@ def confirm_deposit(validator, miner_hotkey: str, from_tx_hash: str, from_tx_blo
             continue  # absent or content-mismatch for this hub — try the next live slot
         # Deferred intake: accept a content-valid deposit pre-confirmation — the crank defers voting
         # until it confirms. A 0-conf mempool tx has no block_time, so its freshness is deferred too;
-        # only a mined tx is freshness-checked here. A matched-but-stale deposit is terminal for this
-        # hub (its params are pinned), so fast-fail rather than fall through to a different slot.
+        # only a mined tx is freshness-checked here. A matched-but-stale deposit is terminal for its
+        # hub (its params are pinned), so it never claims — but a fresh match on another hub still can.
         if candidate.block_time is not None:
             grace = getattr(provider.chain_def, 'replay_grace_secs', 0)
             if not is_tx_fresh(candidate, int(resv.created_at), grace):
-                return ConfirmResult(False, 'Source tx fails freshness — stale/replayed deposit')
-        reservation, backing, tx_info = resv, resv_backing, candidate
-        break
+                stale = True
+                continue
+        # Deterministic pick when one deposit matches several slots (normalize-equal senders): a
+        # canonical-form from_addr wins — honest lanes commit canonical, while a case variant is the
+        # source-lock dodge (V-C2) — then the oldest reservation (the one the variant was copied from).
+        canonical = resv.from_addr == provider.chain.normalize_address(resv.from_addr)
+        matches.append(((0 if canonical else 1, int(resv.created_at)), resv, resv_backing, candidate))
 
-    if reservation is None:
+    if not matches:
+        if stale:
+            return ConfirmResult(False, 'Source tx fails freshness — stale/replayed deposit')
         if unreachable:
             return ConfirmResult(False, 'Source-chain provider unreachable; resend shortly')
         # No live slot matched; fast-fail (no claim) so the short TTL frees the miner.
         return ConfirmResult(False, 'Source tx not visible or does not match the reservation')
+    _, reservation, backing, tx_info = min(matches, key=lambda m: m[0])
 
     # The taker's funds are already on the source chain and this deposit just verified against the
     # pinned reservation — but submit_swap_claim needs reserved_until >= now, and once it lapses there

@@ -767,7 +767,7 @@ class Bitcoin(Asset, Chain):
         if override is not None:
             return max(1, override)
 
-        from allways.constants import BTC_FEE_RATE_SAFETY_MULTIPLIER, BTC_MIN_FEE_RATE
+        from allways.constants import BTC_FALLBACK_FEE_RATE, BTC_FEE_RATE_SAFETY_MULTIPLIER, BTC_MIN_FEE_RATE
 
         for attempt in range(2):
             try:
@@ -782,7 +782,12 @@ class Bitcoin(Asset, Chain):
                 bt.logging.debug(f'estimate_fee_rate: attempt {attempt + 1} failed: {e}')
             if attempt == 0:
                 time.sleep(3)
-        return BTC_MIN_FEE_RATE
+        # Estimation failed both attempts — broadcast at the survivable fallback, not the strand-prone
+        # floor (V-L5). Warn (not debug): a real send is going out at a non-estimated rate.
+        bt.logging.warning(
+            f'estimate_fee_rate: /fee-estimates unavailable — using {BTC_FALLBACK_FEE_RATE} sat/vB fallback'
+        )
+        return BTC_FALLBACK_FEE_RATE
 
     def send_amount(
         self, to_address: str, amount: int, from_address: Optional[str] = None, dedup_key: Optional[str] = None

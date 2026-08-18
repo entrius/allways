@@ -90,6 +90,9 @@ class RecordingProvider:
     def is_valid_address(self, address):
         return self.valid_addr
 
+    def normalize_address(self, address):
+        return address.lower() if isinstance(address, str) else address  # mirror the EVM provider
+
     @property
     def chain_def(self):
         return SimpleNamespace(replay_grace_secs=self.grace)
@@ -289,6 +292,16 @@ def test_fulfilled_pending_dest_at_ceiling_overdue_times_out():
 def test_pending_attestation_source_ok_attests():
     loop, _ = loop_with(result=True)
     assert loop.decide(make_swap(status='PendingAttestation'), now=1500).decision == SwapDecision.ATTEST
+
+
+def test_pending_attestation_rejects_dest_equal_to_miner_delivery():
+    # V-H1 (chain-aware attest gate): user_to_addr NORMALIZE-equal to the miner's delivery address → never
+    # attest. Catches the EVM checksum-variant a self-represented taker uses to slip the on-chain raw
+    # compare (provider normalize lowercases). Poisoned dest → the miner must never be obligated.
+    loop, _ = loop_with(result=True)
+    swap = make_swap(status='PendingAttestation')
+    swap.user_to_addr = swap.miner_to_addr.upper()  # case-variant of the pinned miner delivery address
+    assert loop.decide(swap, now=1500).decision == SwapDecision.REJECT
 
 
 def test_pending_attestation_source_missing_waits():
@@ -516,7 +529,7 @@ class ExtendRecordingClient:
         self.calls = []
         self.keypair = SimpleNamespace(pubkey=lambda: 'VALIDATOR')
 
-    def extend_reservation(self, miner, target_at, backing='sol'):
+    def extend_reservation(self, miner, target_at, backing='sol', *, from_chain=None, from_addr=None):
         self.calls.append(('extend_reservation', miner, target_at))
         if self.reservation_exc:
             raise self.reservation_exc
@@ -606,7 +619,7 @@ class VoteRecordingClient:
     def has_voted(self, req_type, target, voter):
         return self.already_voted
 
-    def vote_initiate(self, swap_key, miner, backing='sol'):
+    def vote_initiate(self, swap_key, miner, from_chain, from_addr, backing='sol'):
         self.calls.append(('vote_initiate', swap_key, miner, backing))
 
     def confirm_swap(self, swap_key, miner, from_chain, to_chain):
@@ -822,3 +835,49 @@ def test_the_flattened_swap_view_carries_the_backing_it_draws_against():
         collateral_chain='tao',
     )
     assert swap_from_solana(acct).collateral_chain == 'tao'
+
+
+class TestMissingProviderNeverSlashes:
+    """A spoke with no provider on this validator (unsupported/disabled net, e.g. #678) is
+    UNVERIFIABLE, not payment-absent. Below the extension ceiling a swap on that spoke SKIPs (never slash
+    on the absence of a verifier); PAST max_extend_at it TIMEOUTs so the collateral can't freeze forever.
+    _fetch_leg maps a None provider to 'down' (like an unreachable RPC); decide() applies the ceiling."""
+
+    def test_fetch_leg_missing_provider_is_down(self):
+        loop, providers = loop_with(result=True)
+        del providers['btc']  # loop.providers is the same dict
+        assert loop._fetch_leg('btc', 'srctx', 'r', 1) == ('down', None)
+
+    def test_fulfilled_missing_dest_provider_skips_below_ceiling(self):
+        # Dest tx merely absent → TIMEOUT; dest PROVIDER gone (before the ceiling) → SKIP: absence of a
+        # verifier, not of a payment. max_extend_at default (10_000) is well past now.
+        loop, providers = loop_with(result=None)
+        del providers['sol']
+        assert loop.decide(make_swap(status='Fulfilled', timeout_at=1000), now=1500).decision == SwapDecision.SKIP
+
+    def test_pending_attestation_missing_source_provider_skips(self):
+        loop, providers = loop_with(result=True)
+        del providers['btc']
+        assert loop.decide(make_swap(status='PendingAttestation'), now=1500).decision == SwapDecision.SKIP
+
+    def test_active_missing_dest_provider_skips_below_ceiling(self):
+        # The Active branch never calls _fetch_leg; below the ceiling a missing dest provider must SKIP,
+        # not fall through to the overdue TIMEOUT.
+        loop, providers = loop_with(result=True)
+        del providers['sol']
+        swap = make_swap(status='Active', timeout_at=1000, max_extend_at=10_000)  # overdue, before ceiling
+        assert loop.decide(swap, now=5000).decision == SwapDecision.SKIP
+
+    def test_active_missing_dest_provider_times_out_past_ceiling(self):
+        # A permanently-missing provider must not SKIP forever (freezing the taker deposit + miner
+        # collateral). Past max_extend_at it TIMEOUTs to free the collateral.
+        loop, providers = loop_with(result=True)
+        del providers['sol']
+        swap = make_swap(status='Active', timeout_at=1000, max_extend_at=1200)
+        assert loop.decide(swap, now=5000).decision == SwapDecision.TIMEOUT
+
+    def test_fulfilled_missing_dest_provider_times_out_past_ceiling(self):
+        loop, providers = loop_with(result=None)
+        del providers['sol']
+        swap = make_swap(status='Fulfilled', timeout_at=1000, max_extend_at=1200)
+        assert loop.decide(swap, now=5000).decision == SwapDecision.TIMEOUT

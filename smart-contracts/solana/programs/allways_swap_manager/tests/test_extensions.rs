@@ -74,6 +74,9 @@ fn pool_pda(m: &Pubkey) -> Pubkey {
 fn swap_pda(key: &[u8; 32]) -> Pubkey {
     Pubkey::find_program_address(&[b"swap", key], &pid()).0
 }
+fn bind_pda(m: &Pubkey) -> Pubkey {
+    Pubkey::find_program_address(&[b"bind", m.as_ref()], &pid()).0
+}
 fn swap_key(from_tx_hash: &str) -> [u8; 32] {
     hashv(&[from_tx_hash.as_bytes()]).to_bytes()
 }
@@ -223,6 +226,7 @@ fn finalize_ix(router: &Pubkey, miner: &Pubkey, user: &Pubkey) -> Instruction {
             collateral_amount: SOL_AMOUNT,
             from_amount: 100_000,
             to_amount: SOL_AMOUNT as u128,
+            from_addr_hash: hashv(&[FROM_ADDR.as_bytes()]).to_bytes(),
         }
         .data(),
         allways_swap_manager::accounts::FinalizeReservation {
@@ -232,6 +236,12 @@ fn finalize_ix(router: &Pubkey, miner: &Pubkey, user: &Pubkey) -> Instruction {
             miner_state: miner_pda(miner),
             reservation: resv_pda(miner),
             attestation: None,
+            source_lock: Pubkey::find_program_address(
+                &[b"srclock", miner.as_ref(), FROM_CHAIN.as_bytes(), &hashv(&[FROM_ADDR.as_bytes()]).to_bytes()],
+                &pid(),
+            )
+            .0,
+            system_program: SYSTEM_PROGRAM,
         }
         .to_account_metas(None),
     )
@@ -278,16 +288,26 @@ fn initiate_ix(validator: &Pubkey, miner: &Pubkey, from_tx_hash: &str) -> Instru
     let key = swap_key(from_tx_hash);
     Instruction::new_with_bytes(
         pid(),
-        &allways_swap_manager::instruction::VoteInitiate { swap_key: key }.data(),
+        &allways_swap_manager::instruction::VoteInitiate {
+            swap_key: key,
+            from_addr_hash: hashv(&[FROM_ADDR.as_bytes()]).to_bytes(),
+        }
+        .data(),
         allways_swap_manager::accounts::VoteInitiate {
             validator: *validator,
             config: config_pda(),
             miner: *miner,
             miner_state: miner_pda(miner),
             reservation: resv_pda(miner),
+            source_lock: Pubkey::find_program_address(
+                &[b"srclock", miner.as_ref(), FROM_CHAIN.as_bytes(), &hashv(&[FROM_ADDR.as_bytes()]).to_bytes()],
+                &pid(),
+            )
+            .0,
             vote_round: vote_pda(REQ_INITIATE, &key),
             swap: swap_pda(&key),
             attestation: None,
+            binding: bind_pda(miner),
             system_program: SYSTEM_PROGRAM,
         }
         .to_account_metas(None),
@@ -310,13 +330,22 @@ fn fulfill_ix(miner: &Pubkey, from_tx_hash: &str) -> Instruction {
 fn extend_reservation_ix(validator: &Pubkey, miner: &Pubkey, target_at: i64) -> Instruction {
     Instruction::new_with_bytes(
         pid(),
-        &allways_swap_manager::instruction::ExtendReservation { target_at }.data(),
+        &allways_swap_manager::instruction::ExtendReservation {
+            target_at,
+            from_addr_hash: hashv(&[FROM_ADDR.as_bytes()]).to_bytes(),
+        }
+        .data(),
         allways_swap_manager::accounts::ExtendReservation {
             validator: *validator,
             config: config_pda(),
             miner: *miner,
             miner_state: miner_pda(miner),
             reservation: resv_pda(miner),
+            source_lock: Pubkey::find_program_address(
+                &[b"srclock", miner.as_ref(), FROM_CHAIN.as_bytes(), &hashv(&[FROM_ADDR.as_bytes()]).to_bytes()],
+                &pid(),
+            )
+            .0,
         }
         .to_account_metas(None),
     )

@@ -142,12 +142,13 @@ class SolanaSwapLoop:
         self, chain: str, tx_hash: str, recipient: str, amount: int, block_hint: int = 0, sender: str = ''
     ) -> Tuple[str, Any]:
         """Tri-state leg status: ('ok', info) confirmed match, ('pending', info) all details match but
-        awaiting confirmations (extendable), ('no', None) absent/mismatch/no-provider (slash-eligible),
-        ('down', None) provider unreachable this round."""
+        awaiting confirmations (extendable), ('no', None) absent/mismatch (slash-eligible), ('down', None)
+        unverifiable this round — provider unreachable OR no provider for the chain (never slash on absence
+        of a verifier; an unsupported/disabled spoke reaching chain state must SKIP, not TIMEOUT)."""
         provider = self.providers.get(chain)
         if provider is None:
-            bt.logging.warning(f'no chain provider for {chain}; cannot verify')
-            return ('no', None)
+            bt.logging.warning(f'no chain provider for {chain}; cannot verify — treating as unverifiable (down)')
+            return ('down', None)
         if not tx_hash:
             return ('no', None)
         try:
@@ -365,6 +366,16 @@ class SolanaSwapLoop:
         if expected_to == 0 or abs(int(swap.to_amount) - expected_to) > 1:
             self._reject_logged(swap, expected_to)
             return SwapAction(SwapDecision.REJECT, reason=f'to_amount {swap.to_amount} != pinned-rate {expected_to}')
+        # V-H1 (authoritative, chain-aware): never attest a swap whose payout address equals the miner's
+        # own delivery address — normalized per-chain, so it catches the EVM checksum-variants the on-chain
+        # raw compare misses. Equal addresses force a self-transfer the anti-wash verifier slashes; the
+        # taker poisoned it, so refuse before the miner is obligated (routed + self-represented alike).
+        to_provider = self.providers.get(swap.to_chain)
+        norm = to_provider.chain.normalize_address if to_provider is not None else (lambda a: a)
+        if swap.miner_to_addr and norm(swap.user_to_addr) == norm(swap.miner_to_addr):
+            return SwapAction(
+                SwapDecision.REJECT, reason='dest == miner delivery address (poisoned) — refusing to attest'
+            )
         # Source deposit must exist, confirm, be sent BY the reserved user, AND be fresh vs the
         # Reservation before we'd attest — sender pin matches the relay's confirm_deposit check.
         s_status, info = self._fetch_leg(
@@ -415,6 +426,16 @@ class SolanaSwapLoop:
         chain providers + the Reservation PDA."""
         status = _status_name(swap)
         overdue = now >= int(swap.timeout_at)
+        # No dest provider here → can't verify locally. SKIP below the ceiling (a re-enabled spoke or a
+        # provider-equipped peer still resolves it); past max_extend_at TIMEOUT so a permanently unverifiable
+        # pair frees the collateral instead of freezing it forever (only network-wide gaps reach quorum).
+        if status in ('Active', 'Fulfilled') and self.providers.get(swap.to_chain) is None:
+            if now < int(swap.max_extend_at):
+                return SwapAction(SwapDecision.SKIP, reason=f'no provider for dest {swap.to_chain} — cannot verify yet')
+            return SwapAction(
+                SwapDecision.TIMEOUT,
+                reason=f'no provider for dest {swap.to_chain} past max_extend_at — terminal, else collateral freezes',
+            )
         if status == 'PendingAttestation':
             return self._decide_pending_attestation(swap, now)
         if status == 'Active':
@@ -459,7 +480,9 @@ class SolanaSwapLoop:
                 if self.client.has_voted(pdas.REQ_INITIATE, swap_key, voter):
                     return False
                 backing = str(getattr(swap, 'collateral_chain', 'sol') or 'sol').lower()
-                sig = self.client.vote_initiate(swap_key, swap.miner, backing=backing)
+                sig = self.client.vote_initiate(
+                    swap_key, swap.miner, swap.from_chain, str(swap.user_from_addr), backing=backing
+                )
             elif decision == SwapDecision.CONFIRM:
                 if self.client.has_voted(pdas.REQ_CONFIRM, swap_key, voter):
                     return False
@@ -477,7 +500,13 @@ class SolanaSwapLoop:
                     return False
                 sig = self.client.cancel_swap(swap_key, swap.miner, action.reason_code or CANCEL_REASON_OTHER)
             elif decision == SwapDecision.EXTEND_RESERVATION:
-                sig = self.client.extend_reservation(swap.miner, action.target_at, str(swap.collateral_chain))
+                sig = self.client.extend_reservation(
+                    swap.miner,
+                    action.target_at,
+                    str(swap.collateral_chain),
+                    from_chain=swap.from_chain,
+                    from_addr=swap.user_from_addr,
+                )
             elif decision == SwapDecision.EXTEND_TIMEOUT:
                 sig = self.client.extend_timeout(swap_key, swap.miner, action.target_at)
             else:

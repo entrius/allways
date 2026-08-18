@@ -21,12 +21,13 @@ import bittensor as bt  # noqa: E402
 from bittensor import Keypair as BtKeypair  # noqa: E402
 
 from allways.assets import create_assets  # noqa: E402
-from allways.constants import FORWARD_STALL_THRESHOLD_SECONDS, NUMERAIRE_CHAIN  # noqa: E402
+from allways.chains import apply_testnet_network_defaults  # noqa: E402
+from allways.constants import FORWARD_STALL_THRESHOLD_SECONDS, NETUID_FINNEY, NUMERAIRE_CHAIN  # noqa: E402
 from allways.miner.fulfillment import SwapFulfiller  # noqa: E402
 from allways.miner.swap_poller import SwapPoller  # noqa: E402
 from allways.solana import keys  # noqa: E402
 from allways.solana.client import AllwaysSolanaClient  # noqa: E402
-from allways.solana.rpc import resolve_rpc_url  # noqa: E402
+from allways.solana.rpc import assert_cluster_safe, resolve_rpc_url  # noqa: E402
 from neurons.base.miner import BaseMinerNeuron  # noqa: E402
 
 
@@ -41,11 +42,25 @@ class Miner(BaseMinerNeuron):
     def __init__(self, config=None):
         super().__init__(config=config)
 
+        # A testnet neuron must not silently run mainnet spokes: unset {PREFIX}_NETWORK defaults to
+        # mainnet in the providers, so a miner with real keys could broadcast a mainnet payout for a
+        # test obligation. Default unset spokes to testnet here (an explicit env var still wins).
+        if int(self.config.netuid) != NETUID_FINNEY:
+            applied = apply_testnet_network_defaults()
+            if applied:
+                bt.logging.warning(
+                    f'testnet neuron (netuid {self.config.netuid}): defaulted unset spoke networks to '
+                    f'testnet {applied} — set {{PREFIX}}_NETWORK to override.'
+                )
+
         self.unlock_coldkey()
 
         # Solana program client (signer = the miner's Solana keypair; separate from the bt wallet).
         solana_rpc_url = resolve_rpc_url()
         self.solana_client = AllwaysSolanaClient(solana_rpc_url, keypair=keys.load_or_create())
+        # Fail closed if a testnet neuron is pointed at mainnet, or the program id is on the wrong
+        # cluster — positively classified by genesis hash, not the mainnet-substring blind spot.
+        assert_cluster_safe(self.solana_client.rpc, self.solana_client.program_id, self.config.netuid, role='miner')
         self.solana_pubkey = self.solana_client.keypair.pubkey()
         # SOL swap-leg provider signs the dest leg with the same Solana keypair (peer-to-peer
         # user↔miner transfer; separate from the program client that never custodies swap assets).

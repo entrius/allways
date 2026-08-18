@@ -225,7 +225,9 @@ fn open_ix(router: &Pubkey, miner: &Pubkey, f: &str, t: &str) -> Instruction {
 }
 /// The seat winner names the fill (taker + amounts), making the reservation live.
 #[allow(clippy::too_many_arguments)]
+#[allow(clippy::too_many_arguments)]
 fn finalize_ix(
+    from_chain: &str,
     router: &Pubkey,
     miner: &Pubkey,
     user: &Pubkey,
@@ -244,6 +246,7 @@ fn finalize_ix(
             collateral_amount,
             from_amount,
             to_amount,
+            from_addr_hash: hashv(&[ufrom.as_bytes()]).to_bytes(),
         }
         .data(),
         allways_swap_manager::accounts::FinalizeReservation {
@@ -253,6 +256,12 @@ fn finalize_ix(
             miner_state: miner_pda(miner),
             reservation: resv_pda(miner),
             attestation: None,
+            source_lock: Pubkey::find_program_address(
+                &[b"srclock", miner.as_ref(), from_chain.as_bytes(), &hashv(&[ufrom.as_bytes()]).to_bytes()],
+                &pid(),
+            )
+            .0,
+            system_program: SYSTEM_PROGRAM,
         }
         .to_account_metas(None),
     )
@@ -269,7 +278,7 @@ fn finalize_btc_sol(
     collateral_amount: u64,
     from_amount: u128,
 ) -> Result<(), String> {
-    let ix = finalize_ix(&winner.pubkey(), miner, user, ufrom, uto, collateral_amount, from_amount, collateral_amount as u128);
+    let ix = finalize_ix("btc", &winner.pubkey(), miner, user, ufrom, uto, collateral_amount, from_amount, collateral_amount as u128);
     send(svm, ix, &winner.pubkey(), winner)
 }
 /// arm+resolve a single-bidder pool (the sole bidder is the winner) then finalize a BTC→SOL fill.
@@ -936,7 +945,7 @@ fn test_finalize_rejects_non_router_signer() {
     bid_and_draw(&mut svm, &vals, &miner.pubkey());
     let user = Keypair::new().pubkey();
     // vals[1] did not win the seat — it must not be able to fill vals[0]'s reservation.
-    let ix = finalize_ix(&vals[1].pubkey(), &miner.pubkey(), &user, "u", "uSOL", 2_000_000_000, 1, 2_000_000_000);
+    let ix = finalize_ix("btc", &vals[1].pubkey(), &miner.pubkey(), &user, "u", "uSOL", 2_000_000_000, 1, 2_000_000_000);
     let e = send(&mut svm, ix, &vals[1].pubkey(), &vals[1]);
     assert!(e.is_err(), "only reservation.router may finalize");
     assert_eq!(reservation(&svm, &miner.pubkey()).reserved_until, 0, "still unfilled");
@@ -988,10 +997,10 @@ fn test_collateral_bind_rejects_mismatch_spoke_to_sol() {
     bid_and_draw(&mut svm, &vals, &miner.pubkey());
     let user = Keypair::new().pubkey();
     // collateral_amount=2e9 but to_amount=1 (mismatch) → rejected.
-    let bad = finalize_ix(&vals[0].pubkey(), &miner.pubkey(), &user, "u", "uSOL", 2_000_000_000, 5, 1);
+    let bad = finalize_ix("btc", &vals[0].pubkey(), &miner.pubkey(), &user, "u", "uSOL", 2_000_000_000, 5, 1);
     assert!(send(&mut svm, bad, &vals[0].pubkey(), &vals[0]).is_err(), "collateral_amount must equal the SOL (to) leg");
     // matching triple succeeds.
-    let ok = finalize_ix(&vals[0].pubkey(), &miner.pubkey(), &user, "u", "uSOL", 2_000_000_000, 5, 2_000_000_000);
+    let ok = finalize_ix("btc", &vals[0].pubkey(), &miner.pubkey(), &user, "u", "uSOL", 2_000_000_000, 5, 2_000_000_000);
     send(&mut svm, ok, &vals[0].pubkey(), &vals[0]).expect("matching bind fills");
 }
 
@@ -1007,10 +1016,10 @@ fn test_collateral_bind_rejects_mismatch_sol_to_spoke() {
     arm_and_resolve(&mut svm, &vals[0], &miner.pubkey()).expect("resolve");
     let user = Keypair::new().pubkey();
     // collateral_amount=2e9 but from_amount=1 (mismatch) → rejected.
-    let bad = finalize_ix(&vals[0].pubkey(), &miner.pubkey(), &user, "uSOL", "uBTC", 2_000_000_000, 1, 9);
+    let bad = finalize_ix("sol", &vals[0].pubkey(), &miner.pubkey(), &user, "uSOL", "uBTC", 2_000_000_000, 1, 9);
     assert!(send(&mut svm, bad, &vals[0].pubkey(), &vals[0]).is_err(), "collateral_amount must equal the sol (from) leg");
     // matching triple succeeds.
-    let ok = finalize_ix(&vals[0].pubkey(), &miner.pubkey(), &user, "uSOL", "uBTC", 2_000_000_000, 2_000_000_000, 9);
+    let ok = finalize_ix("sol", &vals[0].pubkey(), &miner.pubkey(), &user, "uSOL", "uBTC", 2_000_000_000, 2_000_000_000, 9);
     send(&mut svm, ok, &vals[0].pubkey(), &vals[0]).expect("matching bind fills");
 }
 

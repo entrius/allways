@@ -349,6 +349,21 @@ pub struct Reservation {
     pub bump: u8,
 }
 
+/// V-C2 on-chain source-address lock (`seeds = [SRCLOCK_SEED, miner, from_chain, keccak(from_addr)]`).
+/// `finalize_reservation` claims it so a live-unclaimed reservation holds a `(from_chain, from_addr)`
+/// exclusively per miner — a second reservation (any backing/hub) declaring the same source finds a live
+/// lock and reverts. `reserved_until` mirrors the holding reservation's `reserved_until` and is slid
+/// forward by `extend_reservation` in lockstep, so an extended reservation can't outlive its lock; a lock
+/// whose `reserved_until < now` is free to reclaim, so a lapsed reservation never permanently strands its source.
+/// Reused across rounds (never closed).
+#[account]
+#[derive(InitSpace)]
+pub struct SourceLock {
+    /// The holding reservation's `reserved_until`; a lock `< now` is stale and reclaimable.
+    pub reserved_until: i64,
+    pub bump: u8,
+}
+
 /// Swap lifecycle status. `PendingAttestation` = source-tx claim recorded, not yet attested (no miner
 /// obligation). Terminal states (Completed/TimedOut) aren't stored — the Swap PDA is closed on
 /// confirm/timeout. New variant appended last to keep Active/Fulfilled discriminants stable.
@@ -360,8 +375,9 @@ pub enum SwapStatus {
 }
 
 /// An in-flight swap (`seeds = [SWAP_SEED, swap_key]`, swap_key = keccak(from_tx_hash)).
-/// Created by `vote_initiate` on quorum; closed by `confirm_swap` / `timeout_swap`. Chains/amounts/
-/// miner-quote copied from the immutable Reservation; user-side fields from the hash-bound initiate vote.
+/// Created by `submit_swap_claim` (PendingAttestation), activated by `vote_initiate` on quorum, closed
+/// by `confirm_swap` / `timeout_swap`. Chains/amounts/miner-quote copied from the immutable Reservation;
+/// user-side fields from the hash-bound initiate vote.
 #[account]
 #[derive(InitSpace)]
 pub struct Swap {
@@ -403,6 +419,9 @@ pub struct Swap {
     pub max_extend_at: i64,
     pub fulfilled_at: i64,
     pub bump: u8,
+    /// Bittensor hotkey pinned from the miner's Binding at initiate ([0;32] = never bound), so the
+    /// timeout verdict names the bonded hotkey itself (V-M1). Appended last (Config precedent).
+    pub hotkey: [u8; 32],
 }
 
 // (Removed: the permanent `TxMarker` source-replay marker — A4. Source replay is now blocked by a
@@ -480,7 +499,7 @@ pub struct MinerDirectionStats {
 /// Bittensor hotkey. `hotkey_sig` is an sr25519 signature by the hotkey over the miner's Solana pubkey;
 /// the contract only STORES it (sr25519 verify is too costly on-chain) — the validator verifies it
 /// off-chain. This PDA enforces pubkey→≤1 hotkey structurally; the reverse (hotkey→≤1 pubkey) is enforced
-/// by the `HotkeyBinding` marker below. The miner may re-bind in place (refresh sig / change hotkey).
+/// by the `HotkeyBinding` marker below. The hotkey is set-once (V-M1); only the sig may refresh in place.
 #[account]
 #[derive(InitSpace)]
 pub struct Binding {

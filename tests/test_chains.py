@@ -289,3 +289,44 @@ class TestReplayGrace:
         grace = CHAIN_ETH.replay_grace_secs
         assert is_tx_fresh(SimpleNamespace(block_time=floor - grace), floor, grace)
         assert not is_tx_fresh(SimpleNamespace(block_time=floor - grace - 1), floor, grace)
+
+
+class TestApplyTestnetNetworkDefaults:
+    """A testnet neuron must never fall through to a provider's mainnet default for an unset
+    {PREFIX}_NETWORK — that verifies test swaps against mainnet or spends real mainnet funds."""
+
+    def test_unset_spokes_default_to_testnet(self, monkeypatch):
+        from allways.chains import apply_testnet_network_defaults
+
+        for chain in SUPPORTED_CHAINS.values():
+            if chain.networks:
+                monkeypatch.delenv(f'{chain.env_prefix}_NETWORK', raising=False)
+        applied = apply_testnet_network_defaults()
+        # BTC's testnet is testnet4; ETH's is sepolia — a representative name-selected pair.
+        assert applied['BTC_NETWORK'] == CHAIN_BTC.testnet_network == 'testnet4'
+        assert applied['ETH_NETWORK'] == CHAIN_ETH.testnet_network == 'sepolia'
+        import os
+
+        assert os.environ['BTC_NETWORK'] == 'testnet4'
+
+    def test_explicit_env_var_wins(self, monkeypatch):
+        from allways.chains import apply_testnet_network_defaults
+
+        monkeypatch.setenv('ETH_NETWORK', 'mainnet')  # operator opts one spoke back to mainnet
+        applied = apply_testnet_network_defaults()
+        assert 'ETH_NETWORK' not in applied
+        import os
+
+        assert os.environ['ETH_NETWORK'] == 'mainnet'
+
+    def test_skips_chains_without_a_named_testnet(self, monkeypatch):
+        # sol/tao pick their network by RPC/bittensor, not {PREFIX}_NETWORK; a shared-prefix
+        # secondary (polusdc under POL) carries no networks of its own. Neither is touched.
+        from allways.chains import apply_testnet_network_defaults
+
+        monkeypatch.delenv('POL_NETWORK', raising=False)
+        applied = apply_testnet_network_defaults()
+        assert CHAIN_TAO.env_prefix + '_NETWORK' not in applied
+        assert CHAIN_POLUSDC.env_prefix + '_NETWORK' in applied  # POL (its own row) IS named
+        # polusdc itself contributes no separate var — POL owns the prefix.
+        assert CHAIN_POLUSDC.networks == ()

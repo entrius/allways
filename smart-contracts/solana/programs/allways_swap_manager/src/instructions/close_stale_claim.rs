@@ -38,6 +38,14 @@ pub fn handler(ctx: Context<CloseStaleClaim>, swap_key: [u8; 32]) -> Result<()> 
         ctx.accounts.swap.status == SwapStatus::PendingAttestation,
         ErrorCode::NotPending
     );
+    // The `reservation` PDA is seeded on its OWN `collateral_chain`, so any of the miner's reservations
+    // (e.g. the other hub of a dual-hub miner) validates here. Bind it to the swap's backing: without
+    // this, a foreign reservation trivially satisfies the `claimed_swap_key != swap_key` staleness clause
+    // below and reaps a HEALTHY swap → permanent taker fund-strand (permissionless).
+    require!(
+        ctx.accounts.reservation.collateral_chain == ctx.accounts.swap.collateral_chain,
+        ErrorCode::ChainMismatch
+    );
 
     let now = Clock::get()?.unix_timestamp;
     {
