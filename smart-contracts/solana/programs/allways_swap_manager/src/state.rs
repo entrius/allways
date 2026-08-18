@@ -354,7 +354,7 @@ pub struct Reservation {
 /// exclusively per miner — a second reservation (any backing/hub) declaring the same source finds a live
 /// lock and reverts. `reserved_until` mirrors the holding reservation's `reserved_until` and is slid
 /// forward by `extend_reservation` in lockstep, so an extended reservation can't outlive its lock; a lock
-/// at or past `now` is free to reclaim, so a lapsed reservation never permanently strands its source.
+/// whose `reserved_until < now` is free to reclaim, so a lapsed reservation never permanently strands its source.
 /// Reused across rounds (never closed).
 #[account]
 #[derive(InitSpace)]
@@ -375,8 +375,9 @@ pub enum SwapStatus {
 }
 
 /// An in-flight swap (`seeds = [SWAP_SEED, swap_key]`, swap_key = keccak(from_tx_hash)).
-/// Created by `vote_initiate` on quorum; closed by `confirm_swap` / `timeout_swap`. Chains/amounts/
-/// miner-quote copied from the immutable Reservation; user-side fields from the hash-bound initiate vote.
+/// Created by `submit_swap_claim` (PendingAttestation), activated by `vote_initiate` on quorum, closed
+/// by `confirm_swap` / `timeout_swap`. Chains/amounts/miner-quote copied from the immutable Reservation;
+/// user-side fields from the hash-bound initiate vote.
 #[account]
 #[derive(InitSpace)]
 pub struct Swap {
