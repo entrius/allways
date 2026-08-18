@@ -55,8 +55,9 @@ class Chain(ABC):
         """Canonical comparison form for this chain's addresses (identity by default).
 
         Chains whose address encoding is case-insensitive (ETH hex / EIP-55 checksum casing)
-        override this so equality checks never fail on casing alone. Comparison only — never
-        feed the normalized form back on-chain or into display."""
+        override this so equality checks never fail on casing alone. SOURCE addresses commit
+        on-chain in this form (the source-lock PDA is byte-keyed on it — V-C2); delivery
+        addresses stay as given (EVM sends re-checksum at signing)."""
         return address
 
     @abstractmethod

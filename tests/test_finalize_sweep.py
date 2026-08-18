@@ -96,6 +96,19 @@ def test_won_seat_finalizes_fifo_user_at_pinned_rate(tmp_path):
     v.state_store.close()
 
 
+def test_finalize_commits_the_canonical_source_form(tmp_path):
+    # V-C2: the finalize hash + source-lock PDA are byte-keyed on this string, so a cased variant
+    # (queued pre-normalization or by an older validator) must land canonical at commit time.
+    client = SweepClient(None)
+    client._reservation = _drawn_seat(client)
+    v = _validator(tmp_path, client)
+    v.axon_assets = {'sol': SimpleNamespace(chain=SimpleNamespace(normalize_address=lambda a: a.lower()))}
+    v.state_store.upsert_routed_request(MINER, 'sol', 'btc', 'sol', USER_A, '0xAbCsrc', 'dst', 1_000_000_000, NOW - 10)
+    assert finalize_won_seats(v, NOW) == [MINER]
+    assert client.finalized[0][2] == '0xabcsrc'
+    v.state_store.close()
+
+
 def _live_sibling(*, from_chain='sol', from_addr='', reserved_until=NOW + 300):
     """A live-unclaimed reservation on the miner's OTHER hub, for the duplicate-source guard."""
     return SimpleNamespace(

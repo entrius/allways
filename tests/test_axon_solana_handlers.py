@@ -96,6 +96,10 @@ class FakeProvider:
     def chain_def(self):
         return SimpleNamespace(replay_grace_secs=self.grace)
 
+    @property
+    def chain(self):
+        return SimpleNamespace(normalize_address=lambda a: a)
+
     def verify_transaction(self, **kw):
         return self.tx_info
 

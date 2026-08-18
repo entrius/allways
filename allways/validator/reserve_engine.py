@@ -110,6 +110,12 @@ def reserve_on_behalf(
     if from_chain not in SUPPORTED_CHAINS or to_chain not in SUPPORTED_CHAINS:
         return ReserveResult(False, f'unsupported chain pair {from_chain}->{to_chain} (chain ids are lowercase)')
 
+    # Canonical source form at intake: the finalize hash + source-lock PDA are byte-keyed on this
+    # string (V-C2), so a case variant of a live source would mint a second lock over one deposit.
+    src_asset = (getattr(validator, 'axon_assets', None) or {}).get(from_chain)
+    if src_asset is not None:
+        user_from_addr = src_asset.chain.normalize_address(user_from_addr)
+
     client = validator.solana_client
     miner_pk = resolve_miner_pubkey(validator, miner_hotkey)
     if miner_pk is None:
@@ -322,7 +328,9 @@ def finalize_won_seats(validator, now: int) -> list:
             client.finalize_reservation(
                 Pubkey.from_string(miner),
                 Pubkey.from_string(req['user_pubkey']),
-                req['user_from_addr'],
+                # Normalized again at commit: rows queued before the intake normalization shipped
+                # (or by an older validator) must still land canonical, or the lock PDA diverges.
+                src.chain.normalize_address(req['user_from_addr']) if src else req['user_from_addr'],
                 req['user_to_addr'],
                 fill.collateral_amount,
                 fill.from_amount,
@@ -459,8 +467,8 @@ def confirm_deposit(validator, miner_hotkey: str, from_tx_hash: str, from_tx_blo
     # deposit's hub is not knowable up front. Verify the deposit against each slot and claim the one it
     # matches — picking the first live slot blindly would reject a TAO deposit whenever a SOL slot is
     # also live (V-1). `verify_transaction` is the authoritative matcher (pinned recipient/amount/sender).
-    reservation = backing = tx_info = None
-    unreachable = False
+    matches = []
+    unreachable = stale = False
     for resv, resv_backing in slots:
         provider = validator.axon_assets.get(resv.from_chain)
         if provider is None:
@@ -480,20 +488,27 @@ def confirm_deposit(validator, miner_hotkey: str, from_tx_hash: str, from_tx_blo
             continue  # absent or content-mismatch for this hub — try the next live slot
         # Deferred intake: accept a content-valid deposit pre-confirmation — the crank defers voting
         # until it confirms. A 0-conf mempool tx has no block_time, so its freshness is deferred too;
-        # only a mined tx is freshness-checked here. A matched-but-stale deposit is terminal for this
-        # hub (its params are pinned), so fast-fail rather than fall through to a different slot.
+        # only a mined tx is freshness-checked here. A matched-but-stale deposit is terminal for its
+        # hub (its params are pinned), so it never claims — but a fresh match on another hub still can.
         if candidate.block_time is not None:
             grace = getattr(provider.chain_def, 'replay_grace_secs', 0)
             if not is_tx_fresh(candidate, int(resv.created_at), grace):
-                return ConfirmResult(False, 'Source tx fails freshness — stale/replayed deposit')
-        reservation, backing, tx_info = resv, resv_backing, candidate
-        break
+                stale = True
+                continue
+        # Deterministic pick when one deposit matches several slots (normalize-equal senders): a
+        # canonical-form from_addr wins — honest lanes commit canonical, while a case variant is the
+        # source-lock dodge (V-C2) — then the oldest reservation (the one the variant was copied from).
+        canonical = resv.from_addr == provider.chain.normalize_address(resv.from_addr)
+        matches.append(((0 if canonical else 1, int(resv.created_at)), resv, resv_backing, candidate))
 
-    if reservation is None:
+    if not matches:
+        if stale:
+            return ConfirmResult(False, 'Source tx fails freshness — stale/replayed deposit')
         if unreachable:
             return ConfirmResult(False, 'Source-chain provider unreachable; resend shortly')
         # No live slot matched; fast-fail (no claim) so the short TTL frees the miner.
         return ConfirmResult(False, 'Source tx not visible or does not match the reservation')
+    _, reservation, backing, tx_info = min(matches, key=lambda m: m[0])
 
     # The taker's funds are already on the source chain and this deposit just verified against the
     # pinned reservation — but submit_swap_claim needs reserved_until >= now, and once it lapses there
