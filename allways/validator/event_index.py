@@ -127,9 +127,7 @@ class SolanaEventIndex:
             # Permissionless reap of a drawn-but-unfilled reservation frees the miner on-chain; MOVE the
             # synthetic RESERVE_EXPIRE (draw+ttl guess) to the reap block — inserting beside it leaves
             # the stale guess to fire later, freeing the miner's NEXT reservation early.
-            self.state_store.restamp_reservation_expiry(
-                hotkey, self._event_hub(rec), block_time, not_before=block_time
-            )
+            self.state_store.restamp_reservation_expiry(hotkey, self._event_hub(rec), block_time, not_before=block_time)
             return True
         if name == 'SwapFulfilled':
             # Persist the delivery hash for post-close receipts — the Swap PDA (and its
@@ -247,9 +245,7 @@ class SolanaEventIndex:
         reserved_until = int(rec.fields['reserved_until'])
         if reserved_until <= 0:
             return False
-        self.state_store.restamp_reservation_expiry(
-            hotkey, self._event_hub(rec), reserved_until, not_before=block_time
-        )
+        self.state_store.restamp_reservation_expiry(hotkey, self._event_hub(rec), reserved_until, not_before=block_time)
         return True
 
     @staticmethod

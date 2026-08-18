@@ -232,7 +232,9 @@ class ValidatorStateStore:
             (block_num, hotkey, int(transition), hub),
         )
 
-    def restamp_reservation_expiry(self, hotkey: str, hub: Optional[str], new_block_num: int, not_before: int = 0) -> None:
+    def restamp_reservation_expiry(
+        self, hotkey: str, hub: Optional[str], new_block_num: int, not_before: int = 0
+    ) -> None:
         """Move the miner's most-recent synthetic RESERVE_EXPIRE (this hub) to the chain's real
         ``reserved_until``. PoolResolved stamps a draw+ttl guess before the true deadline is known;
         ReservationFilled/Extended carry it, so a busy miner isn't freed before its swap initiates.
