@@ -232,20 +232,22 @@ class ValidatorStateStore:
             (block_num, hotkey, int(transition), hub),
         )
 
-    def restamp_reservation_expiry(self, hotkey: str, hub: Optional[str], new_block_num: int) -> None:
+    def restamp_reservation_expiry(self, hotkey: str, hub: Optional[str], new_block_num: int, not_before: int = 0) -> None:
         """Move the miner's most-recent synthetic RESERVE_EXPIRE (this hub) to the chain's real
         ``reserved_until``. PoolResolved stamps a draw+ttl guess before the true deadline is known;
-        ReservationFilled/Extended carry it, so a busy miner isn't freed before its swap initiates."""
+        ReservationFilled/Extended carry it, so a busy miner isn't freed before its swap initiates.
+        ``not_before`` bounds the move: a row already fired before the triggering event belongs to a
+        PRIOR reservation (this one's PoolResolved was dropped) — clobbering it strands the hub busy."""
         self._execute(
             """
             UPDATE activity_events SET block_num = ?
             WHERE id = (
                 SELECT id FROM activity_events
-                WHERE hotkey = ? AND kind = ? AND hub IS ?
+                WHERE hotkey = ? AND kind = ? AND hub IS ? AND block_num >= ?
                 ORDER BY id DESC LIMIT 1
             )
             """,
-            (int(new_block_num), hotkey, int(ActivityTransition.RESERVE_EXPIRE), hub),
+            (int(new_block_num), hotkey, int(ActivityTransition.RESERVE_EXPIRE), hub, int(not_before)),
         )
 
     def load_all_active_events(self) -> List[dict]:

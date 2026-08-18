@@ -68,9 +68,9 @@ class SolanaEventIndex:
 
     def ingest(self, records: List[EventRecord], attribution: Dict[str, str]) -> int:
         """Persist ``records`` (oldest-first) into the event tables, mapping each event's miner Solana
-        pubkey → bound hotkey via ``attribution`` (B3.2 ``build_attribution``). Events from an unbound
-        pubkey are dropped (no UID to credit); the per-round reconciles (``reconcile_live_state`` for
-        active/collateral, ``reconcile_live_quotes`` for rates) later heal the state they carried.
+        pubkey → bound hotkey via ``attribution`` (B3.2 ``build_attribution``). For an unbound pubkey
+        the crown-relevant effects are dropped (no UID to credit) and healed by the per-round
+        reconciles, but swap_key-keyed facts (terminal outcome, delivery hash) still record (V-M5).
         Records with no ``blockTime`` are skipped defensively — poll() already holds the cursor before
         unstamped txs, so none should reach here. Returns the count written."""
         written = 0
@@ -122,13 +122,13 @@ class SolanaEventIndex:
         if name == 'PoolResolved':
             return self._apply_reservation(hotkey, block_time, self._event_hub(rec))
         if name in ('ReservationFilled', 'ReservationExtended'):
-            return self._apply_reservation_deadline(hotkey, rec)
+            return self._apply_reservation_deadline(hotkey, rec, block_time)
         if name == 'UnfilledReservationClosed':
-            # Permissionless reap of a drawn-but-unfilled reservation frees the miner on-chain; the
-            # crown index must free it too or the miner stays reserved until the synthetic
-            # RESERVE_EXPIRE. Insert a RESERVE_EXPIRE at the event's block_time on its own hub.
-            self.state_store.insert_activity_event(
-                block_time, hotkey, ActivityTransition.RESERVE_EXPIRE, hub=self._event_hub(rec)
+            # Permissionless reap of a drawn-but-unfilled reservation frees the miner on-chain; MOVE the
+            # synthetic RESERVE_EXPIRE (draw+ttl guess) to the reap block — inserting beside it leaves
+            # the stale guess to fire later, freeing the miner's NEXT reservation early.
+            self.state_store.restamp_reservation_expiry(
+                hotkey, self._event_hub(rec), block_time, not_before=block_time
             )
             return True
         if name == 'SwapFulfilled':
@@ -239,14 +239,17 @@ class SolanaEventIndex:
         self.state_store.insert_activity_event(block_time + ttl, hotkey, ActivityTransition.RESERVE_EXPIRE, hub=hub)
         return True
 
-    def _apply_reservation_deadline(self, hotkey: str, rec: EventRecord) -> bool:
+    def _apply_reservation_deadline(self, hotkey: str, rec: EventRecord, block_time: int) -> bool:
         """ReservationFilled/Extended carry the real ``reserved_until`` — re-stamp the synthetic
         RESERVE_EXPIRE off PoolResolved's draw+ttl guess. Without this a busy miner is scored
-        AVAILABLE once SwapInitiated lands after the guess (slow BTC confs, or a claim-runway extend)."""
+        AVAILABLE once SwapInitiated lands after the guess (slow BTC confs, or a claim-runway extend).
+        The event's block_time floors the move so a fired prior-reservation row is never dragged."""
         reserved_until = int(rec.fields['reserved_until'])
         if reserved_until <= 0:
             return False
-        self.state_store.restamp_reservation_expiry(hotkey, self._event_hub(rec), reserved_until)
+        self.state_store.restamp_reservation_expiry(
+            hotkey, self._event_hub(rec), reserved_until, not_before=block_time
+        )
         return True
 
     @staticmethod

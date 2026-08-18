@@ -104,6 +104,41 @@ class TestIngestActivity:
         assert idx.get_activity_state_at(400) == {}  # reap → AVAILABLE, well before the synthetic 1200 expiry
         store.close()
 
+    def test_reap_moves_the_guess_so_the_next_reservation_is_not_freed_early(self, tmp_path: Path):
+        """The reap must MOVE the draw+ttl guess, not insert a second expiry beside it: the leftover
+        guess fires later, inside the next reservation's pre-initiate window, freeing it early."""
+        store = make_store(tmp_path)
+        idx = make_index(store, ttl=1000)
+        idx.ingest(
+            [
+                rec('PoolResolved', miner='pk_a', block_time=200, winner='pk_router', user='pk_user', requests=1),
+                rec('UnfilledReservationClosed', miner='pk_a', block_time=400, router='pk_router'),
+                rec('PoolResolved', miner='pk_a', block_time=1100, winner='pk_router', user='pk_user', requests=1),
+            ],
+            ATTR,
+        )
+        assert idx.get_activity_state_at(1150) == {'hk_a': _both(MinerActivity.RESERVED)}
+        # The first reservation's stale guess (draw 200 + ttl 1000 = 1200) must not fire mid-reservation.
+        assert idx.get_activity_state_at(1300) == {'hk_a': _both(MinerActivity.RESERVED)}
+        store.close()
+
+    def test_restamp_never_drags_a_prior_reservations_fired_expiry(self, tmp_path: Path):
+        """A ReservationFilled whose own PoolResolved was dropped (fresh DB, no-TTL gap) must not move
+        the PREVIOUS reservation's already-fired expiry forward — that reads the miner busy across
+        the gap between the two reservations."""
+        store = make_store(tmp_path)
+        idx = make_index(store, ttl=100)
+        idx.ingest(
+            [
+                rec('PoolResolved', miner='pk_a', block_time=200, winner='pk_router', user='pk_user', requests=1),
+                rec('ReservationFilled', miner='pk_a', block_time=500, reserved_until=900),
+            ],
+            ATTR,
+        )
+        # The first reservation expired at 300; the orphaned Filled (its PoolResolved unseen) is a no-op.
+        assert idx.get_activity_state_at(600) == {}
+        store.close()
+
     def test_swap_cancelled_frees_the_hub(self, tmp_path: Path):
         """The no-fault cancel is a terminal like completion/timeout: without its FULFILL_END
         the hub stays FULFILLING (crownless) until an unrelated swap's terminal repairs it."""
