@@ -14,7 +14,7 @@ from construct import Bytes as _Raw
 
 # `Config.version` the deployed program writes (constants.rs CONFIG_VERSION). Mirrored here so a schema
 # bump is one edit on each side rather than a literal buried in a test.
-CONFIG_VERSION = 15
+CONFIG_VERSION = 16
 
 # Width of MinerState's per-hub transient arrays (constants.rs MAX_BACKING_SLOTS) — one slot per
 # `active_backings` bit, indexed by bit position.
@@ -364,6 +364,7 @@ EVENT_LAYOUTS = {
         'collateral_chain' / String,
         'closes_at' / I64,
         'seed_slot' / U64,
+        'fee_paid' / U64,
     ),
     'PoolDrawArmed': CStruct('miner' / Pubkey32, 'seed_slot' / U64, 'collateral_chain' / String),
     'PoolResolved': CStruct('miner' / Pubkey32, 'winner' / Pubkey32, 'requests' / U8, 'collateral_chain' / String),
@@ -399,7 +400,7 @@ EVENT_LAYOUTS = {
         'reserved_until' / I64,
         'collateral_chain' / String,
     ),
-    'ReservationRequested': CStruct('miner' / Pubkey32, 'router' / Pubkey32, 'requests' / U8),
+    'ReservationRequested': CStruct('miner' / Pubkey32, 'router' / Pubkey32, 'requests' / U8, 'fee_paid' / U64),
     'StaleClaimClosed': CStruct('swap_key' / Hash32, 'miner' / Pubkey32),
     'UnfilledReservationClosed': CStruct('miner' / Pubkey32, 'router' / Pubkey32, 'collateral_chain' / String),
     'SwapClaimed': CStruct(

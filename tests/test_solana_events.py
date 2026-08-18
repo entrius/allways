@@ -55,6 +55,37 @@ def test_decode_quote_set_roundtrip():
     assert f.rate == 345 * 10**18 and f.updated_at == 1_700_000_000
 
 
+def test_decode_pool_entry_events_carry_the_effective_fee():
+    # v16: both pool-entry events append `fee_paid` (the stake-discounted fee actually charged),
+    # so treasury attribution can tell discounted from full fees without re-deriving weights.
+    miner, router = Keypair().pubkey(), Keypair().pubkey()
+    raw = _encode(
+        'PoolOpened',
+        {
+            'miner': bytes(miner),
+            'opener': bytes(router),
+            'from_chain': 'btc',
+            'to_chain': 'sol',
+            'collateral_chain': 'sol',
+            'closes_at': 1_700_000_030,
+            'seed_slot': 0,
+            'fee_paid': 6_668_000,
+        },
+    )
+    name, f = decode_event(raw)
+    assert name == 'PoolOpened'
+    assert f.opener == router and f.fee_paid == 6_668_000
+
+    raw = _encode(
+        'ReservationRequested',
+        {'miner': bytes(miner), 'router': bytes(router), 'requests': 2, 'fee_paid': 0},
+    )
+    name, f = decode_event(raw)
+    assert name == 'ReservationRequested'
+    assert f.requests == 2
+    assert f.fee_paid == 0, 'a same-router in-window bid update is free'
+
+
 def test_decode_bond_attested_roundtrip():
     miner = Keypair().pubkey()
     raw = _encode(
