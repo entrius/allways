@@ -150,13 +150,20 @@ class Erc20(EvmAsset):
     def check_connection(self, require_send: bool = True) -> None:
         super().check_connection(require_send=require_send)
         try:
-            code = self.chain.eth_rpc('eth_getCode', [self.token_contract, 'latest']) or '0x'
+            code = self.chain.eth_rpc('eth_getCode', [self.token_contract, 'latest'])
         except Exception as e:
             # A probe we can't COMPLETE is transient (unreachable RPC / rate-limit storm) — degrade, never
             # crash the whole validator at boot over one spoke's flaky endpoint (that takes the hub down too).
             # The real config fault — a codeless/wrong contract — is a COMPLETED probe returning '0x' below.
             bt.logging.warning(
                 f'{self.chain_def.id} token contract probe unreachable on {self.chain.network} ({e}) — degraded'
+            )
+            return
+        if not code:
+            # A null answer is a broken/lagging endpoint, not a codeless contract (the spec returns the
+            # string '0x' for that) — same transient treatment as the unreachable case above.
+            bt.logging.warning(
+                f'{self.chain_def.id} token contract probe returned null on {self.chain.network} — degraded'
             )
             return
         if code == '0x':

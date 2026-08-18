@@ -72,6 +72,19 @@ def test_check_connection_degrades_when_token_probe_unreachable():
     provider.check_connection(require_send=False)  # no raise
 
 
+def test_check_connection_degrades_on_a_null_code_answer():
+    # `result: null` from a broken/lagging endpoint is not a codeless contract (the spec returns the
+    # string '0x' for that) — it must take the transient/degrade path, not the fatal config raise.
+    def rpc(method, params, **kw):
+        if method == 'eth_getCode':
+            return None
+        return hex(1000)
+
+    provider = build(DECLARED, rpc)
+    provider.chain.connect_network = lambda: (1, 100)
+    provider.check_connection(require_send=False)  # no raise
+
+
 def test_check_connection_raises_on_codeless_contract():
     # The genuine config fault is a COMPLETED probe returning '0x' (typo'd / wrong-network contract) —
     # that stays fatal, or every later send fails against a non-contract.
