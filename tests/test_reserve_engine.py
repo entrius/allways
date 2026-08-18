@@ -650,7 +650,9 @@ def test_confirm_prefers_canonical_form_slot_over_case_variant():
     variant = _confirm_reservation(from_addr='0xABC', created_at=500)
     canonical = _confirm_reservation(from_addr='0xabc', created_at=900)
     client = _ConfirmClient({'sol': variant, 'tao': canonical})
-    provider = _FakeProvider(_tx(confirmed=True, block_time=CONFIRM_CREATED_AT + 5, confirmations=6), normalize=str.lower)
+    provider = _FakeProvider(
+        _tx(confirmed=True, block_time=CONFIRM_CREATED_AT + 5, confirmations=6), normalize=str.lower
+    )
     validator = SimpleNamespace(solana_client=client, axon_assets={'btc': provider}, axon_lock=threading.RLock())
     r = confirm_deposit(validator, HOTKEY, 'srctxhash')
     assert r.ok and len(client.claims) == 1
