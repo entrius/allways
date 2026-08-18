@@ -480,7 +480,9 @@ class SolanaSwapLoop:
                 if self.client.has_voted(pdas.REQ_INITIATE, swap_key, voter):
                     return False
                 backing = str(getattr(swap, 'collateral_chain', 'sol') or 'sol').lower()
-                sig = self.client.vote_initiate(swap_key, swap.miner, backing=backing)
+                sig = self.client.vote_initiate(
+                    swap_key, swap.miner, swap.from_chain, str(swap.user_from_addr), backing=backing
+                )
             elif decision == SwapDecision.CONFIRM:
                 if self.client.has_voted(pdas.REQ_CONFIRM, swap_key, voter):
                     return False

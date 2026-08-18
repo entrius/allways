@@ -1,13 +1,14 @@
 use anchor_lang::prelude::*;
+use solana_keccak_hasher::hashv;
 
 use crate::consensus::{record_vote, swap_request_hash};
 use crate::constants::{
-    ATTEST_SEED, BIND_SEED, CONFIG_SEED, MINER_SEED, REQ_INITIATE, RESV_SEED, SWAP_SEED, VOTE_SEED,
+    ATTEST_SEED, BIND_SEED, CONFIG_SEED, MINER_SEED, REQ_INITIATE, RESV_SEED, SRCLOCK_SEED, SWAP_SEED, VOTE_SEED,
 };
 use crate::error::ErrorCode;
 use crate::events::SwapInitiated;
 use crate::state::{
-    Binding, BondAttestation, Config, MinerState, Reservation, Swap, SwapStatus, VoteRound,
+    Binding, BondAttestation, Config, MinerState, Reservation, SourceLock, Swap, SwapStatus, VoteRound,
 };
 
 /// Validators attest a `PendingAttestation` claim: confirm the source-chain deposit is real and, on
@@ -15,7 +16,7 @@ use crate::state::{
 /// are already on the claim-created Swap (copied from the immutable reservation), so the bound hash is
 /// trivial (`swap_key`) and no payout can be redirected at attestation.
 #[derive(Accounts)]
-#[instruction(swap_key: [u8; 32])]
+#[instruction(swap_key: [u8; 32], from_addr_hash: [u8; 32])]
 pub struct VoteInitiate<'info> {
     #[account(mut)]
     pub validator: Signer<'info>,
@@ -40,6 +41,16 @@ pub struct VoteInitiate<'info> {
         bump,
     )]
     pub reservation: Box<Account<'info, Reservation>>,
+
+    /// V-C2: this reservation's source lock (created at finalize). Released at initiate quorum — the
+    /// deposit is hash-bound to the swap, so a repeat swap from the same source needn't wait out the
+    /// original reserved_until. The clock stays the backstop for reservations that never initiate.
+    #[account(
+        mut,
+        seeds = [SRCLOCK_SEED, miner.key().as_ref(), reservation.from_chain.as_bytes(), from_addr_hash.as_ref()],
+        bump = source_lock.bump,
+    )]
+    pub source_lock: Account<'info, SourceLock>,
 
     /// Keyed by swap_key like the confirm/timeout rounds (v3.1): per-hub for free (a swap pins its
     /// backing), and closable at quorum since the unique seed is never reused.
@@ -76,7 +87,7 @@ pub struct VoteInitiate<'info> {
     pub system_program: Program<'info, System>,
 }
 
-pub fn handler(ctx: Context<VoteInitiate>, swap_key: [u8; 32]) -> Result<()> {
+pub fn handler(ctx: Context<VoteInitiate>, swap_key: [u8; 32], from_addr_hash: [u8; 32]) -> Result<()> {
     require!(
         ctx.accounts.swap.status == SwapStatus::PendingAttestation,
         ErrorCode::NotPending
@@ -93,6 +104,11 @@ pub fn handler(ctx: Context<VoteInitiate>, swap_key: [u8; 32]) -> Result<()> {
             ErrorCode::NoReservation
         );
         require!(resv.claimed_swap_key == swap_key, ErrorCode::NotPending);
+        // Bind from_addr_hash to the reservation's real source before it targets the lock (swap_key idiom).
+        require!(
+            from_addr_hash == hashv(&[resv.from_addr.as_bytes()]).to_bytes(),
+            ErrorCode::SourceHashMismatch
+        );
         // Never obligate a removed miner (defense-in-depth; resolve_pool also refuses an inactive miner).
         require!(ctx.accounts.miner_state.active, ErrorCode::MinerNotActive);
         // Self-dealing backstop (finalize_reservation is the primary guard; this also covers
@@ -172,6 +188,9 @@ pub fn handler(ctx: Context<VoteInitiate>, swap_key: [u8; 32]) -> Result<()> {
             .add_reserved(bit, crate::constants::required_collateral(collateral_amount))?;
         ctx.accounts.reservation.reserved_until = 0; // consume the reservation
         ctx.accounts.reservation.claimed_swap_key = [0u8; 32];
+        // V-C2: the deposit is now hash-bound to the swap — release the source lock with the
+        // reservation, so a repeat swap from this source needn't wait out the old deadline.
+        ctx.accounts.source_lock.reserved_until = 0;
         // Unique swap_key seed → the round is never reused; close it and refund rent, like the
         // confirm/timeout rounds. A straggler's late vote reverts on the NotPending status gate
         // above before it could re-create the round.

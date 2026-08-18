@@ -336,13 +336,18 @@ fn initiate_ix(validator: &Pubkey, miner: &Pubkey, from_tx_hash: &str) -> Instru
     let key = swap_key(from_tx_hash);
     Instruction::new_with_bytes(
         pid(),
-        &allways_swap_manager::instruction::VoteInitiate { swap_key: key }.data(),
+        &allways_swap_manager::instruction::VoteInitiate {
+            swap_key: key,
+            from_addr_hash: hashv(&[FROM_ADDR.as_bytes()]).to_bytes(),
+        }
+        .data(),
         allways_swap_manager::accounts::VoteInitiate {
             validator: *validator,
             config: config_pda(),
             miner: *miner,
             miner_state: miner_pda(miner),
             reservation: resv_pda(miner),
+            source_lock: srclock_pda(miner, FROM_CHAIN, FROM_ADDR),
             vote_round: vote_pda(REQ_INITIATE, &key),
             swap: swap_pda(&key),
             attestation: None,
@@ -707,31 +712,50 @@ fn test_finalize_rejects_dest_equal_to_miner_delivery_addr() {
 
 #[test]
 fn test_finalize_rejects_duplicate_live_source() {
-    // V-C2: a source (from_chain, from_addr) may back only ONE live reservation per miner within its TTL
-    // window. After a completed swap from FROM_ADDR, re-reserving and re-filling the SAME source before its
-    // source_lock lapses is refused — the on-chain half of the dup-source guard (covers the self-
-    // represented lane, which bypasses the validator's off-chain check). A second UNCLAIMED reservation
-    // matchable by one deposit is the deposit-siphon the guard closes.
+    // V-C2: a source (from_chain, from_addr) may back only ONE live reservation per miner. A completed
+    // swap RELEASES its lock at initiate quorum, so the same source refills immediately; against a LIVE
+    // lock the duplicate is refused. The live-sibling collision is cross-hub (the per-hub busy gate
+    // blocks a same-hub second seat), so the live lock is poked directly — the branch is hub-agnostic.
     let (mut svm, vals, miner, _rent) = setup();
     run_full_swap(&mut svm, &vals, &miner, "srctx1");
-    // Re-open past the consumed reservation's finalize window — but NOT past the source_lock (finalize +
-    // TTL), so the same source is still held.
+    assert_eq!(srclock_reserved_until(&svm, &miner.pubkey()), 0, "completed swap released the lock");
+
     let fb = reservation_acct(&svm, &miner.pubkey()).finalize_by;
     let now = fb + 1;
     set_clock(&mut svm, now);
     send(&mut svm, open_ix(&vals[0].pubkey(), &miner.pubkey()), &vals[0].pubkey(), &vals[0]).expect("re-open");
     set_clock(&mut svm, now + POOL_WINDOW_SECS + 1);
     arm_and_resolve(&mut svm, &vals[0], &miner.pubkey());
-    let res = send(&mut svm, finalize_ix(&vals[0].pubkey(), &miner.pubkey(), &LOTTERY_USER), &vals[0].pubkey(), &vals[0]);
-    assert!(res.is_err(), "a second live reservation from the same source must be refused (V-C2)");
-    // And once the lock lapses (past the reservation's reserved_until — base TTL here, since it was never
-    // extended), the same source is free again.
-    set_clock(&mut svm, now + TTL + 1);
-    send(&mut svm, open_ix(&vals[0].pubkey(), &miner.pubkey()), &vals[0].pubkey(), &vals[0]).expect("re-open after lapse");
-    set_clock(&mut svm, now + TTL + POOL_WINDOW_SECS + 2);
-    arm_and_resolve(&mut svm, &vals[0], &miner.pubkey());
     send(&mut svm, finalize_ix(&vals[0].pubkey(), &miner.pubkey(), &LOTTERY_USER), &vals[0].pubkey(), &vals[0])
-        .expect("same source finalizes once its prior lock has lapsed");
+        .expect("same source refills immediately after its swap completed — no TTL wait, no burned bid");
+
+    // Simulate a still-live sibling reservation holding the source (the cross-hub case): a live lock
+    // refuses the duplicate.
+    run_full_swap(&mut svm, &vals, &miner, "srctx2");
+    set_srclock_reserved_until(&mut svm, &miner.pubkey(), now + 100 * TTL);
+    let now2 = reservation_acct(&svm, &miner.pubkey()).finalize_by + 1;
+    set_clock(&mut svm, now2);
+    send(&mut svm, open_ix(&vals[0].pubkey(), &miner.pubkey()), &vals[0].pubkey(), &vals[0]).expect("re-open 2");
+    set_clock(&mut svm, now2 + POOL_WINDOW_SECS + 1);
+    arm_and_resolve(&mut svm, &vals[0], &miner.pubkey());
+    let res = send(&mut svm, finalize_ix(&vals[0].pubkey(), &miner.pubkey(), &LOTTERY_USER), &vals[0].pubkey(), &vals[0]);
+    assert!(res.is_err(), "a live lock (sibling reservation) still refuses the duplicate source (V-C2)");
+}
+
+fn set_srclock_reserved_until(svm: &mut LiteSVM, miner: &Pubkey, until: i64) {
+    use allways_swap_manager::state::SourceLock;
+    let pda = srclock_pda(miner, FROM_CHAIN, FROM_ADDR);
+    let old = svm.get_account(&pda).unwrap();
+    let mut lock = SourceLock::try_deserialize(&mut old.data.as_slice()).unwrap();
+    lock.reserved_until = until;
+    let mut data = Vec::new();
+    lock.try_serialize(&mut data).unwrap();
+    data.resize(old.data.len(), 0);
+    svm.set_account(
+        pda,
+        Account { lamports: old.lamports, data, owner: old.owner, executable: old.executable, rent_epoch: old.rent_epoch },
+    )
+    .unwrap();
 }
 
 #[test]
@@ -1265,5 +1289,24 @@ fn test_extend_slides_the_source_lock() {
         srclock_reserved_until(&svm, &miner.pubkey()),
         target,
         "the source lock slid with it — no lapse window opens under extension"
+    );
+}
+
+#[test]
+fn test_initiate_releases_the_source_lock() {
+    // The deposit is hash-bound to the swap at initiate quorum, so the lock's job is done — release
+    // it with the reservation. Held to the old reserved_until, a repeat swap from the same source
+    // would burn a bid fee against a lock protecting nothing.
+    let (mut svm, _admin, vals, miner, _rr) = setup_full(COLLATERAL);
+    let finalize_by = reservation_acct(&svm, &miner.pubkey()).finalize_by;
+    set_clock(&mut svm, finalize_by - 5);
+    assert!(srclock_reserved_until(&svm, &miner.pubkey()) > 0, "lock live after finalize");
+
+    do_initiate(&mut svm, &vals, &miner.pubkey(), "srctx1");
+
+    assert_eq!(
+        srclock_reserved_until(&svm, &miner.pubkey()),
+        0,
+        "initiate quorum released the source lock with the reservation"
     );
 }

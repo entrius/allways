@@ -632,18 +632,22 @@ class AllwaysSolanaClient:
         ]
         return self._send([self._ix('submit_swap_claim', args, metas)])
 
-    def vote_initiate(self, swap_key: bytes, miner, backing: str = 'sol') -> str:
+    def vote_initiate(self, swap_key: bytes, miner, from_chain: str, from_addr: str, backing: str = 'sol') -> str:
         """Vote to attest a PendingAttestation swap; on quorum it transitions to Active.
         `backing` must be the swap's pinned `collateral_chain` — it selects the purse the obligation
-        gate reads (and hence which BondAttestation account travels with the vote)."""
+        gate reads (and hence which BondAttestation account travels with the vote). `from_chain` +
+        `from_addr` (the reservation's committed source) target the SourceLock the quorum releases
+        (V-C2); the program verifies the hash against the reservation before touching it."""
         validator = self.keypair.pubkey()
         m = _as_pubkey(miner)
+        from_addr_hash = keccak.new(data=from_addr.encode(), digest_bits=256).digest()
         metas = [
             AccountMeta(validator, True, True),
             AccountMeta(pdas.config_pda(self.program_id), False, False),
             AccountMeta(m, False, False),
             AccountMeta(pdas.miner_state_pda(m, self.program_id), False, True),
             AccountMeta(pdas.reservation_pda(m, backing, self.program_id), False, True),
+            AccountMeta(pdas.source_lock_pda(m, from_chain, from_addr_hash, self.program_id), False, True),
             AccountMeta(pdas.vote_round_pda(pdas.REQ_INITIATE, swap_key, self.program_id), False, True),
             AccountMeta(pdas.swap_pda(swap_key, self.program_id), False, True),
             AccountMeta(self._attestation_meta(m, backing), False, False),
@@ -652,7 +656,7 @@ class AllwaysSolanaClient:
             AccountMeta(pdas.binding_pda(m, self.program_id), False, False),
             AccountMeta(SYSTEM_PROGRAM, False, False),
         ]
-        args = layouts.IX_SWAP_KEY_ARGS.build({'swap_key': swap_key})
+        args = layouts.IX_VOTE_INITIATE_ARGS.build({'swap_key': swap_key, 'from_addr_hash': from_addr_hash})
         return self._send([self._ix('vote_initiate', args, metas)])
 
     def confirm_swap(self, swap_key: bytes, miner, from_chain: str, to_chain: str) -> str:

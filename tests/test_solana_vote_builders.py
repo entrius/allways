@@ -91,16 +91,18 @@ def test_submit_swap_claim_ix(client):
 
 def test_vote_initiate_ix(client):
     miner = Keypair().pubkey()
-    client.vote_initiate(SK, miner)
+    client.vote_initiate(SK, miner, 'btc', 'userBTCaddr')
     ix = _ix(client)
+    from_addr_hash = keccak_lib.new(data=b'userBTCaddr', digest_bits=256).digest()
     assert ix.data[:8] == layouts.IX_DISCRIMINATORS['vote_initiate']
-    assert ix.data[8:] == SK
+    assert ix.data[8:] == SK + from_addr_hash
     assert _metas(ix) == [
         (client.keypair.pubkey(), True, True),
         (pdas.config_pda(PID), False, False),
         (miner, False, False),
         (pdas.miner_state_pda(miner, PID), False, True),
         (pdas.reservation_pda(miner, 'sol', PID), False, True),
+        (pdas.source_lock_pda(miner, 'btc', from_addr_hash, PID), False, True),
         (pdas.vote_round_pda(pdas.REQ_INITIATE, SK, PID), False, True),
         (pdas.swap_pda(SK, PID), False, True),
         (PID, False, False),  # absent optional BondAttestation — a "sol"-backed swap has no bond

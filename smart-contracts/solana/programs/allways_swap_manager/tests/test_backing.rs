@@ -343,17 +343,26 @@ fn claim_ix(caller: &Pubkey, miner: &Pubkey, from_tx_hash: &str) -> Instruction 
         .to_account_metas(None),
     )
 }
-fn initiate_ix(validator: &Pubkey, miner: &Pubkey, from_tx_hash: &str) -> Instruction {
+fn initiate_ix(validator: &Pubkey, miner: &Pubkey, from_tx_hash: &str, from_chain: &str) -> Instruction {
     let key = swap_key(from_tx_hash);
     Instruction::new_with_bytes(
         pid(),
-        &allways_swap_manager::instruction::VoteInitiate { swap_key: key }.data(),
+        &allways_swap_manager::instruction::VoteInitiate {
+            swap_key: key,
+            from_addr_hash: hashv(&["userSrcAddr".as_bytes()]).to_bytes(),
+        }
+        .data(),
         allways_swap_manager::accounts::VoteInitiate {
             validator: *validator,
             config: config_pda(),
             miner: *miner,
             miner_state: miner_pda(miner),
             reservation: resv_pda(miner),
+            source_lock: Pubkey::find_program_address(
+                &[b"srclock", miner.as_ref(), from_chain.as_bytes(), &hashv(&["userSrcAddr".as_bytes()]).to_bytes()],
+                &pid(),
+            )
+            .0,
             vote_round: vote_pda(REQ_INITIATE, &key),
             swap: swap_pda(&key),
             attestation: None,
@@ -550,10 +559,10 @@ fn reserve_spoke(svm: &mut LiteSVM, val: &Keypair, miner: &Pubkey) {
     .expect("finalize");
 }
 
-fn do_initiate(svm: &mut LiteSVM, vals: &[Keypair], miner: &Pubkey, tx: &str) {
+fn do_initiate(svm: &mut LiteSVM, vals: &[Keypair], miner: &Pubkey, tx: &str, from_chain: &str) {
     send(svm, claim_ix(&vals[0].pubkey(), miner, tx), &vals[0].pubkey(), &vals[0]).expect("claim");
-    send(svm, initiate_ix(&vals[0].pubkey(), miner, tx), &vals[0].pubkey(), &vals[0]).expect("i0");
-    send(svm, initiate_ix(&vals[1].pubkey(), miner, tx), &vals[1].pubkey(), &vals[1]).expect("i1");
+    send(svm, initiate_ix(&vals[0].pubkey(), miner, tx, from_chain), &vals[0].pubkey(), &vals[0]).expect("i0");
+    send(svm, initiate_ix(&vals[1].pubkey(), miner, tx, from_chain), &vals[1].pubkey(), &vals[1]).expect("i1");
 }
 
 #[test]
@@ -579,8 +588,8 @@ fn test_backing_defaults_to_sol_and_is_pinned_through_the_swap() {
 
     let key = swap_key("srctx1");
     assert_eq!(swap_acct(&svm, &key).collateral_chain, "sol", "copied Reservation → Swap");
-    send(&mut svm, initiate_ix(&vals[0].pubkey(), &miner.pubkey(), "srctx1"), &vals[0].pubkey(), &vals[0]).expect("i0");
-    send(&mut svm, initiate_ix(&vals[1].pubkey(), &miner.pubkey(), "srctx1"), &vals[1].pubkey(), &vals[1]).expect("i1");
+    send(&mut svm, initiate_ix(&vals[0].pubkey(), &miner.pubkey(), "srctx1", SPOKE_FROM), &vals[0].pubkey(), &vals[0]).expect("i0");
+    send(&mut svm, initiate_ix(&vals[1].pubkey(), &miner.pubkey(), "srctx1", SPOKE_FROM), &vals[1].pubkey(), &vals[1]).expect("i1");
     assert_eq!(swap_acct(&svm, &key).collateral_chain, "sol", "immutable across attestation");
 }
 
@@ -591,7 +600,7 @@ fn test_sol_backed_timeout_still_slashes_refunds_and_frees() {
     let (mut svm, _admin, vals, miner) = setup();
     reserve_spoke(&mut svm, &vals[0], &miner.pubkey());
     let initiated_at = now_ts(&svm);
-    do_initiate(&mut svm, &vals, &miner.pubkey(), "srctx1");
+    do_initiate(&mut svm, &vals, &miner.pubkey(), "srctx1", SPOKE_FROM);
 
     set_clock(&mut svm, initiated_at + TIMEOUT_SECS + 1);
     let coll_before = miner_state(&svm, &miner.pubkey()).collateral;
@@ -631,7 +640,7 @@ fn test_non_sol_backed_timeout_is_verdict_only_and_holds_the_miner() {
     let (mut svm, _admin, vals, miner) = setup();
     reserve_spoke(&mut svm, &vals[0], &miner.pubkey());
     let initiated_at = now_ts(&svm);
-    do_initiate(&mut svm, &vals, &miner.pubkey(), "srctx1");
+    do_initiate(&mut svm, &vals, &miner.pubkey(), "srctx1", SPOKE_FROM);
     set_swap_backing(&mut svm, &swap_key("srctx1"), "tao");
 
     let timeout_ts = initiated_at + TIMEOUT_SECS + 1;
@@ -686,7 +695,7 @@ fn test_the_verdict_names_the_payee_on_the_backing_chain() {
     )
     .expect("finalize the hub pair");
     let initiated_at = now_ts(&svm);
-    do_initiate(&mut svm, &vals, &miner.pubkey(), "srctx1");
+    do_initiate(&mut svm, &vals, &miner.pubkey(), "srctx1", HUB_FROM);
     set_swap_backing(&mut svm, &swap_key("srctx1"), "tao");
 
     set_clock(&mut svm, initiated_at + TIMEOUT_SECS + 1);
@@ -710,7 +719,7 @@ fn test_timeout_verdict_carries_the_hotkey_pinned_at_initiate() {
 
     reserve_spoke(&mut svm, &vals[0], &miner.pubkey());
     let initiated_at = now_ts(&svm);
-    do_initiate(&mut svm, &vals, &miner.pubkey(), "srctx1");
+    do_initiate(&mut svm, &vals, &miner.pubkey(), "srctx1", SPOKE_FROM);
     let key = swap_key("srctx1");
     assert_eq!(swap_acct(&svm, &key).hotkey, hotkey, "hotkey pinned onto the swap at initiate");
     set_swap_backing(&mut svm, &key, "tao");
@@ -733,7 +742,7 @@ fn test_unbound_miner_swap_pins_a_zeroed_hotkey() {
     let (mut svm, _admin, vals, miner) = setup();
     reserve_spoke(&mut svm, &vals[0], &miner.pubkey());
     let initiated_at = now_ts(&svm);
-    do_initiate(&mut svm, &vals, &miner.pubkey(), "srctx1");
+    do_initiate(&mut svm, &vals, &miner.pubkey(), "srctx1", SPOKE_FROM);
     assert_eq!(swap_acct(&svm, &swap_key("srctx1")).hotkey, [0u8; 32]);
 
     set_clock(&mut svm, initiated_at + TIMEOUT_SECS + 1);
@@ -884,7 +893,7 @@ fn test_unsupported_backing_is_refused_at_finalize_and_at_initiate() {
     reserve_spoke(&mut svm, &vals[0], &miner.pubkey());
     send(&mut svm, claim_ix(&vals[0].pubkey(), &miner.pubkey(), "srctx1"), &vals[0].pubkey(), &vals[0]).expect("claim");
     set_swap_backing(&mut svm, &swap_key("srctx1"), "btc");
-    let err = send(&mut svm, initiate_ix(&vals[0].pubkey(), &miner.pubkey(), "srctx1"), &vals[0].pubkey(), &vals[0])
+    let err = send(&mut svm, initiate_ix(&vals[0].pubkey(), &miner.pubkey(), "srctx1", SPOKE_FROM), &vals[0].pubkey(), &vals[0])
         .expect_err("initiate must refuse an unsupported backing");
     assert!(err.contains("BackingNotSupported"), "{err}");
 }

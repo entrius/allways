@@ -584,7 +584,9 @@ IX_SET_QUOTE_ARGS = CStruct(
 IX_AMOUNT_ARGS = CStruct('amount' / U64)
 
 # B2 swap-lifecycle args. `swap_key` is a borsh `[u8; 32]` (fixed array → raw 32 bytes, no len prefix).
-IX_SWAP_KEY_ARGS = CStruct('swap_key' / Hash32)  # vote_initiate, timeout_swap, close_stale_claim
+IX_SWAP_KEY_ARGS = CStruct('swap_key' / Hash32)  # timeout_swap, close_stale_claim
+# V-C2: initiate quorum releases the source lock; the hash targets it (verified vs reservation.from_addr).
+IX_VOTE_INITIATE_ARGS = CStruct('swap_key' / Hash32, 'from_addr_hash' / Hash32)
 IX_CANCEL_SWAP_ARGS = CStruct('swap_key' / Hash32, 'reason' / U8)  # cancel_swap (reason is advisory)
 IX_SUBMIT_CLAIM_ARGS = CStruct('swap_key' / Hash32, 'from_tx_hash' / String, 'from_tx_block' / U32)
 IX_CONFIRM_SWAP_ARGS = CStruct('swap_key' / Hash32, 'from_chain' / String, 'to_chain' / String)

@@ -233,8 +233,8 @@ pub mod allways_swap_manager {
     }
     /// Validators attest a pending claim (`PendingAttestation` → `Active` on quorum); the miner's
     /// obligation deadline starts here.
-    pub fn vote_initiate(ctx: Context<VoteInitiate>, swap_key: [u8; 32]) -> Result<()> {
-        vote_initiate::handler(ctx, swap_key)
+    pub fn vote_initiate(ctx: Context<VoteInitiate>, swap_key: [u8; 32], from_addr_hash: [u8; 32]) -> Result<()> {
+        vote_initiate::handler(ctx, swap_key, from_addr_hash)
     }
     /// Permissionless: reap an orphaned `PendingAttestation` claim whose reservation expired (rent →
     /// caller; frees the reservation's claim slot).

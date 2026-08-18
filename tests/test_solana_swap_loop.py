@@ -619,7 +619,7 @@ class VoteRecordingClient:
     def has_voted(self, req_type, target, voter):
         return self.already_voted
 
-    def vote_initiate(self, swap_key, miner, backing='sol'):
+    def vote_initiate(self, swap_key, miner, from_chain, from_addr, backing='sol'):
         self.calls.append(('vote_initiate', swap_key, miner, backing))
 
     def confirm_swap(self, swap_key, miner, from_chain, to_chain):
