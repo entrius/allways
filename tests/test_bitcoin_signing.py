@@ -292,19 +292,13 @@ class TestIsValidAddress:
     addresses, blocking TAO->BTC payouts to Taproot wallets (issue #448).
     """
 
-    # mainnet / testnet / regtest × P2PKH / P2SH / P2WPKH / P2WSH / P2TR
+    # mainnet P2PKH / P2SH / P2WPKH / P2WSH / P2TR
     VALID = [
         '1BvBMSEYstWetqTFn5Au4m4GFg7xJaNVN2',  # mainnet P2PKH
         '3J98t1WpEZ73CNmQviecrnyiWrnqRhWNLy',  # mainnet P2SH
         'bc1qw508d6qejxtdg4y5r3zarvary0c5xw7kv8f3t4',  # mainnet P2WPKH
         'bc1qrp33g0q5c5txsp9arysrx4k6zdkfs4nce4xj0gdcccefvpysxf3qccfmv3',  # mainnet P2WSH
         'bc1p5cyxnuxmeuwuvkwfem96lqzszd02n6xdcjrs20cac6yqjjwudpxqkedrcr',  # mainnet P2TR
-        'mipcBbFg9gMiCh81Kj8tqqdgoZub1ZJRfn',  # testnet P2PKH
-        '2MzQwSSnBHWHqSAqtTVQ6v47XtaisrJa1Vc',  # testnet P2SH
-        'tb1qw508d6qejxtdg4y5r3zarvary0c5xw7kxpjzsx',  # testnet P2WPKH
-        'tb1pqqqqp399et2xygdj5xreqhjjvcmzhxw4aywxecjdzew6hylgvsesf3hn0c',  # testnet P2TR (BIP-350)
-        'bcrt1qw508d6qejxtdg4y5r3zarvary0c5xw7kygt080',  # regtest P2WPKH
-        'bcrt1p0xlxvlhemja6c4dqv22uapctqupfhlxm9h8z3k2e72q4k9hcz7vqc8gma6',  # regtest P2TR
     ]
 
     INVALID = [
@@ -317,8 +311,27 @@ class TestIsValidAddress:
 
     def test_accepts_all_standard_types(self):
         provider = make_lightweight_provider()
+        provider.network = 'mainnet'
         for addr in self.VALID:
             assert provider.is_valid_address(addr), f'should accept {addr}'
+
+    def test_enforces_network(self):
+        provider = make_lightweight_provider()
+        addresses = {
+            'mainnet': self.VALID[2],
+            'testnet4': 'tb1qw508d6qejxtdg4y5r3zarvary0c5xw7kxpjzsx',
+            'regtest': 'bcrt1qw508d6qejxtdg4y5r3zarvary0c5xw7kygt080',
+        }
+        for network, address in addresses.items():
+            provider.network = network
+            assert provider.is_valid_address(address)
+            assert all(not provider.is_valid_address(other) for other in addresses.values() if other != address)
+
+    def test_bech32_case(self):
+        provider = make_lightweight_provider()
+        address = self.VALID[2]
+        assert provider.is_valid_address(address.upper())
+        assert not provider.is_valid_address('b' + address[1:].upper())
 
     def test_accepts_taproot(self):
         """Explicit #448 guard: Taproot payout addresses must validate."""

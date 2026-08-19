@@ -160,8 +160,15 @@ class Bitcoin(Asset, Chain):
         """bech32 is case-insensitive (BIP-173); base58 legacy addresses are not — lowercase bech32 only."""
         if not isinstance(address, str):
             return address
+        if address not in (address.lower(), address.upper()):
+            return address
         lowered = address.lower()
         return lowered if detect_address_type(lowered) in (ADDR_TYPE_P2WPKH, ADDR_TYPE_P2TR) else address
+
+    def _embit_network(self) -> dict:
+        if self.network in TESTNET_ENCODINGS:
+            return NETWORKS['test']
+        return NETWORKS['regtest'] if self.network == 'regtest' else NETWORKS['main']
 
     def can_send_from(self, address: str) -> bool:
         """True iff BTC_PRIVATE_KEY derives ``address`` (any of its p2wpkh / p2sh-p2wpkh / p2pkh
@@ -171,10 +178,9 @@ class Bitcoin(Asset, Chain):
             return False
         try:
             from embit.ec import PrivateKey as EmbitPrivateKey
-            from embit.networks import NETWORKS
             from embit.script import p2pkh, p2sh, p2wpkh
 
-            net = NETWORKS['test'] if self.network in TESTNET_ENCODINGS else NETWORKS['main']
+            net = self._embit_network()
             pub = EmbitPrivateKey.from_wif(wif).get_public_key()
             seg = p2wpkh(pub)
             return self.normalize_address(address) in {
@@ -433,11 +439,13 @@ class Bitcoin(Asset, Chain):
             return 0
 
     def is_valid_address(self, address: str) -> bool:
-        """Validate BTC address format without RPC (embit decode; all types incl. Taproot)."""
+        """Validate BTC address format and network without RPC."""
         if not address or not isinstance(address, str):
             return False
         try:
-            return address_to_scriptpubkey(address) is not None
+            normalized = self.normalize_address(address)
+            script = address_to_scriptpubkey(normalized)
+            return script.address(self._embit_network()) == normalized
         except Exception:
             return False
 
