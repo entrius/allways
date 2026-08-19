@@ -145,6 +145,17 @@ def test_reserve_does_not_predict_dest_deliverability():
     assert 'rejects incoming transfers' not in (result.reason or '')
 
 
+def test_missing_spoke_provider_rejects_before_bid():
+    client = FakeClient()
+    validator = _validator(client)
+    validator.axon_assets = {'sol': _gate_asset(lambda addr, amt: True)}
+    validator.assets = {'sol': object()}
+    result = reserve_on_behalf(validator, HOTKEY, 'sol', 'btc', USER_PK, str(USER_PK), 'userBTCaddr', 10**9)
+    assert not result.ok
+    assert 'cannot verify btc' in result.reason
+    assert client.calls == []
+
+
 def test_malformed_destination_address_rejects_before_any_bid():
     # F4: address FORMAT is screened first — offline, and a malformed dest can never deliver.
     client = FakeClient()

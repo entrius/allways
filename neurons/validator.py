@@ -28,6 +28,7 @@ from allways.chains import apply_testnet_network_defaults  # noqa: E402
 from allways.constants import (  # noqa: E402
     FEE_DIVISOR,
     FORWARD_STALL_THRESHOLD_SECONDS,
+    HUB_CHAINS,
     NETUID_FINNEY,
     SCORING_WINDOW_BLOCKS,
     SCORING_WINDOW_SECS,
@@ -92,7 +93,11 @@ class Validator(BaseValidatorNeuron):
         # providers (source-leg verification) and the solana_client below.
         solana_rpc_url = resolve_rpc_url()
         self.assets = create_assets(
-            check=True, require_send=False, subtensor=self.subtensor, solana_rpc_url=solana_rpc_url
+            check=True,
+            require_send=False,
+            required_chains=set(HUB_CHAINS),
+            subtensor=self.subtensor,
+            solana_rpc_url=solana_rpc_url,
         )
         self.fee_divisor = FEE_DIVISOR
 
@@ -184,7 +189,8 @@ class Validator(BaseValidatorNeuron):
         # handler, and running it unlocked would race the locked reads' recv (#456).
         self.axon_lock = threading.RLock()
         self.axon_subtensor = bt.Subtensor(config=self.config)
-        self.axon_assets = create_assets(subtensor=bt.Subtensor(config=self.config), solana_rpc_url=solana_rpc_url)
+        axon_assets = create_assets(subtensor=bt.Subtensor(config=self.config), solana_rpc_url=solana_rpc_url)
+        self.axon_assets = {chain: provider for chain, provider in axon_assets.items() if chain in self.assets}
         bt.logging.debug(f'Validator components: fee_divisor={self.fee_divisor}')
 
         # Attach synapse handlers to axon
