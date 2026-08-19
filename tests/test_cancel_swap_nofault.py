@@ -41,8 +41,8 @@ def _stub(provider, tx, receipt):
     return provider
 
 
-def _tx(to=DEST, value=AMOUNT, gas=100_000, from_=MINER):
-    return {'from': from_, 'to': to, 'value': hex(value), 'gas': hex(gas)}
+def _tx(to=DEST, value=AMOUNT, gas=100_000, from_=MINER, **extra):
+    return {'from': from_, 'to': to, 'value': hex(value), 'gas': hex(gas), **extra}
 
 
 class TestEvmCancelEvidence:
@@ -65,6 +65,15 @@ class TestEvmCancelEvidence:
     def test_under_gassed_is_not_accepted_as_refusal(self, monkeypatch):
         # The load-bearing anti-fake clause: a miner must not under-gas to manufacture a "refused" verdict.
         p = _stub(_evm(monkeypatch), _tx(gas=90_000), {'status': '0x0'})
+        assert p.cancel_evidence(DEST, AMOUNT, TX) is None
+
+    def test_calldata_is_not_accepted_as_refusal(self, monkeypatch):
+        p = _stub(_evm(monkeypatch), _tx(input='0x00'), {'status': '0x0'})
+        assert p.cancel_evidence(DEST, AMOUNT, TX) is None
+
+    def test_access_list_is_not_accepted_as_refusal(self, monkeypatch):
+        access = [{'address': DEST, 'storageKeys': []}]
+        p = _stub(_evm(monkeypatch), _tx(accessList=access), {'status': '0x0'})
         assert p.cancel_evidence(DEST, AMOUNT, TX) is None
 
     def test_from_committed_miner_is_evidence(self, monkeypatch):

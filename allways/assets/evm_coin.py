@@ -361,6 +361,8 @@ class EvmCoin(EvmAsset):
             return None  # under-paid — not a good-faith attempt
         if int(tx.get('gas') or '0x0', 16) < ETH_FULFILL_GAS_FLOOR:
             return None  # under-gassed — could be manufactured; never accept as refusal
+        if (tx.get('input') or '0x') != '0x' or tx.get('accessList'):
+            return None  # calldata/access-list intrinsic gas can manufacture OOG
         return CANCEL_REASON_EVM_REVERT
 
     # Plain JSON-RPC has no address→tx index, so the scanner walks the head incrementally: each
