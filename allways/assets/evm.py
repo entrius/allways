@@ -85,7 +85,8 @@ ARBITRUM = EvmNetwork(
     label='Arbitrum',
     chain_ids={'mainnet': 42_161, 'sepolia': 421_614},
     rpc_urls={
-        'mainnet': ('https://arbitrum-one-rpc.publicnode.com', 'https://arbitrum.drpc.org'),
+        # Keyless rungs: only arb1 serves eth_getLogs.
+        'mainnet': ('https://arb1.arbitrum.io/rpc', 'https://arbitrum-one-rpc.publicnode.com'),
         'sepolia': ('https://arbitrum-sepolia-rpc.publicnode.com', 'https://arbitrum-sepolia.drpc.org'),
     },
 )
