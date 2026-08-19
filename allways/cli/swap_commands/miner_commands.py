@@ -257,9 +257,7 @@ def miner_activate(backing: str):
         synapse = MinerActivateSynapse(hotkey=hotkey, signature=signature, message=message, backing=backing)
 
         with loading(f'Broadcasting activation to {len(validator_axons)} validators...'):
-            responses = broadcast_until_quorum(
-                dendrite, validator_axons, synapse, needed=needed_votes, timeout=timeout
-            )
+            responses = broadcast_until_quorum(dendrite, validator_axons, synapse, needed=needed_votes, timeout=timeout)
 
         info = render_and_aggregate(console, responses, label='V', context={'miner_hotkey': hotkey})
         skipped = len(validator_axons) - len(responses)
