@@ -322,7 +322,8 @@ class EvmCoin(EvmAsset):
         getCode is dest-only (miner can't influence it) where a simulation is gameable by
         either side. Raises when the chain view is unavailable (caller defers)."""
         tip = int(self.chain.eth_rpc('eth_blockNumber', []), 16)
-        span = self.chain_def.blocks_for_seconds(int(time.time()) - int(since_unix))
+        # Probe depth clamped to what non-archive public nodes serve (~128 blocks).
+        span = min(120, max(0, int(time.time()) - int(since_unix)) // self.chain_def.seconds_per_block)
         probes = ['latest'] + [hex(max(0, tip - span // d)) for d in (1, 2)]
         return any((self.chain.eth_rpc('eth_getCode', [address, b]) or '0x') != '0x' for b in probes)
 
