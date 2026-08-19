@@ -179,6 +179,13 @@ def reserve_on_behalf(
     providers = getattr(validator, 'axon_assets', {})
     provider = providers.get(to_chain)
     miner_quote = quote or client.get_quote(miner_pk, from_chain, to_chain, backing)
+    verified = getattr(validator, 'assets', None)
+    if verified is not None:
+        missing = next(
+            (chain for chain in (from_chain, to_chain) if chain not in verified or chain not in providers), None
+        )
+        if missing:
+            return ReserveResult(False, f'this validator cannot verify {missing} right now')
     if provider is not None:
         # Validity only: NOT a deliverability prediction. Reserve-time deliverability isn't a security
         # boundary (a dest can pass here then revert later via 7702/conditional code); the sound check is

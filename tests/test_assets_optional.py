@@ -4,6 +4,7 @@ chains still fail hard — a tao<->sol miner must start without BTC creds, a btc
 import pytest
 
 from allways import assets as cp
+from allways.constants import HUB_CHAINS
 
 
 class _Boom:
@@ -42,6 +43,12 @@ def test_required_failure_still_raises(registry):
 def test_none_means_all_required(registry):
     with pytest.raises(RuntimeError, match='failed startup check'):
         cp.create_assets(check=True)
+
+
+def test_validator_requires_hubs_only(monkeypatch):
+    monkeypatch.setattr(cp, 'ASSET_REGISTRY', (('btc', _Boom, ()), ('sol', _Ok, ()), ('tao', _Ok, ())))
+    providers = cp.create_assets(check=True, required_chains=set(HUB_CHAINS))
+    assert set(providers) == {'sol', 'tao'}
 
 
 class _NoTestnet:
