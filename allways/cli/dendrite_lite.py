@@ -159,6 +159,61 @@ def broadcast_synapse(
     return responses
 
 
+def broadcast_until_quorum(
+    dendrite: bt.Dendrite,
+    axons: List[bt.AxonInfo],
+    synapse: bt.Synapse,
+    needed: int,
+    timeout: float,
+) -> list:
+    """Broadcast to all axons but stop waiting once ``needed`` of them accept.
+
+    Foreign or dead validators can't hold the caller for the full timeout when the
+    accepting responses already meet the on-chain consensus headcount. Returns only
+    the responses that completed; the on-chain state stays the authority."""
+    import asyncio
+
+    needed = max(1, needed)
+
+    async def _run() -> list:
+        tasks = [
+            asyncio.ensure_future(
+                dendrite.call(target_axon=axon, synapse=synapse.model_copy(), timeout=timeout, deserialize=False)
+            )
+            for axon in axons
+        ]
+        responses: list = []
+        accepted = 0
+        pending = set(tasks)
+        while pending:
+            done, pending = await asyncio.wait(pending, return_when=asyncio.FIRST_COMPLETED)
+            for task in done:
+                try:
+                    response = task.result()
+                except Exception:
+                    continue  # dendrite.call maps transport errors into the synapse; anything else counts as no response
+                responses.append(response)
+                accepted += bool(getattr(response, 'accepted', None))
+            if accepted >= needed:
+                for task in pending:
+                    task.cancel()
+                if pending:
+                    await asyncio.gather(*pending, return_exceptions=True)
+                break
+        return responses
+
+    # A persistent loop (not a fresh one per call): the caller may broadcast repeatedly with
+    # the same dendrite, whose aiohttp session stays bound to the loop it first ran on.
+    try:
+        loop = asyncio.get_event_loop_policy().get_event_loop()
+        if loop.is_closed():
+            raise RuntimeError('event loop is closed')
+    except RuntimeError:
+        loop = asyncio.new_event_loop()
+        asyncio.set_event_loop(loop)
+    return loop.run_until_complete(_run())
+
+
 def resolve_dendrite_timeout(default: float) -> float:
     """Honor ALW_DENDRITE_TIMEOUT as an override for slow chains (e.g. testnet)."""
     import os

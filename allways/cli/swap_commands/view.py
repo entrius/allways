@@ -35,6 +35,7 @@ from allways.cli.swap_commands.helpers import (
     safe_read,
     secs_str,
     set_json_output,
+    votes_needed,
 )
 from allways.cli.swap_commands.swap_intake import backing_purse, rate_display_from_fixed
 from allways.constants import FEE_DIVISOR
@@ -458,15 +459,8 @@ def _tao_or(rao: int, zero_label: str) -> str:
     return f'{from_rao(rao):.4f} τ' + (f' ({zero_label})' if rao == 0 else '')
 
 
-def _votes_needed(cfg) -> int:
-    """Votes required for consensus — mirrors the program's headcount check
-    (consensus.rs: votes*100 >= threshold*total), i.e. ceil(threshold*total/100)."""
-    total = len(cfg.validators)
-    return -(-cfg.consensus_threshold_percent * total // 100)
-
-
 def _threshold_line(cfg) -> str:
-    return f'{cfg.consensus_threshold_percent}% ({_votes_needed(cfg)} of {len(cfg.validators)} validator votes)'
+    return f'{cfg.consensus_threshold_percent}% ({votes_needed(cfg)} of {len(cfg.validators)} validator votes)'
 
 
 @view_group.command('config')
@@ -488,7 +482,7 @@ def view_config(as_json):
                 'version': cfg.version,
                 'halted': bool(cfg.halted),
                 'consensus_threshold_percent': cfg.consensus_threshold_percent,
-                'votes_needed': _votes_needed(cfg),
+                'votes_needed': votes_needed(cfg),
                 'reservation_fee_sol': from_lamports(cfg.reservation_fee_lamports),
                 'min_collateral_sol': from_lamports(cfg.min_collateral),
                 'max_collateral_sol': from_lamports(cfg.max_collateral),
@@ -549,7 +543,7 @@ def view_validators(as_json):
         print_json(
             {
                 'consensus_threshold_percent': cfg.consensus_threshold_percent,
-                'votes_needed': _votes_needed(cfg),
+                'votes_needed': votes_needed(cfg),
                 'validators': validators,
             }
         )

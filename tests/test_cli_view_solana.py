@@ -94,10 +94,10 @@ def test_view_config_json_carries_the_tao_hub_bounds(monkeypatch):
 def test_votes_needed_mirrors_contract_headcount_math():
     """consensus.rs: votes*100 >= threshold*total. Note 67% of 3 needs ALL 3 (2/3 = 66.7% < 67%)."""
     one = types.SimpleNamespace(key=b'', weight=1)
-    assert view._votes_needed(_config(consensus_threshold_percent=67, validators=[one])) == 1
-    assert view._votes_needed(_config(consensus_threshold_percent=67, validators=[one] * 3)) == 3
-    assert view._votes_needed(_config(consensus_threshold_percent=66, validators=[one] * 3)) == 2
-    assert view._votes_needed(_config(consensus_threshold_percent=51, validators=[one] * 4)) == 3
+    assert view.votes_needed(_config(consensus_threshold_percent=67, validators=[one])) == 1
+    assert view.votes_needed(_config(consensus_threshold_percent=67, validators=[one] * 3)) == 3
+    assert view.votes_needed(_config(consensus_threshold_percent=66, validators=[one] * 3)) == 2
+    assert view.votes_needed(_config(consensus_threshold_percent=51, validators=[one] * 4)) == 3
 
 
 def test_view_config_shows_effective_votes(monkeypatch):

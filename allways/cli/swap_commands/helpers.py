@@ -145,6 +145,13 @@ def quote_update_fee_lamports(elapsed_secs: int) -> int:
     return 0
 
 
+def votes_needed(cfg) -> int:
+    """Votes required for consensus — mirrors the program's headcount check
+    (consensus.rs: votes*100 >= threshold*total), i.e. ceil(threshold*total/100)."""
+    total = len(cfg.validators)
+    return -(-cfg.consensus_threshold_percent * total // 100)
+
+
 console = Console()
 
 
