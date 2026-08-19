@@ -143,6 +143,7 @@ def test_on_record_or_unknown_network_vault_address_stays_quiet(capsys):
     from allways.constants import TAO_HUB_VAULT_ADDRESSES
 
     vault_cli._warn_if_off_record(TAO_HUB_VAULT_ADDRESSES['test'], 'test')
-    vault_cli._warn_if_off_record('5AnyVault', 'finney')  # no of-record entry yet
+    vault_cli._warn_if_off_record(TAO_HUB_VAULT_ADDRESSES['finney'], 'finney')
+    vault_cli._warn_if_off_record('5AnyVault', 'local')  # no of-record entry
     vault_cli._warn_if_off_record('5AnyVault', None)
     assert capsys.readouterr().out == ''

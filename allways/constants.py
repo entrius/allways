@@ -208,11 +208,9 @@ RELAY_SWAP_RETENTION_SECS = 7 * 86400
 # `alw config set vault-address`; this map is the reference record, keyed by subtensor network,
 # and the vault CLI warns when a configured address strays from it — a bond posted to a vault no
 # validator watches reads back healthy but is never attested.
-# test: SN19, deployed 2026-08-12. Replaces 5GAE4JD8…BEcD, whose immutable code still carried the
-# lock_bond validator floor (#653) — it cannot lock a bond at our n=1 launch set, so it was re-instantiated.
 TAO_HUB_VAULT_ADDRESSES = {
-    'test': '5Fkn2rNGvWxZ3cMNWbbT3FVrsyBjWmpE5fU4yYGDCrKAfLhs',
-    # 'finney': '',  # fill when prod is deployed
+    'test': '5Fkn2rNGvWxZ3cMNWbbT3FVrsyBjWmpE5fU4yYGDCrKAfLhs',  # SN19
+    'finney': '5EejtudSLREHj8pAvNLcDg3gm1skP1RZGtVuoDQpVVUwpWJJ',  # SN7
 }
 
 # ─── Swap outcome retention ──────────────────────────────
