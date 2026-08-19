@@ -256,3 +256,57 @@ def test_view_rates_shows_the_quotes_backing_purse(monkeypatch):
     payload = json.loads(CliRunner().invoke(view.view_group, ['rates', '--json']).output)[0]
     assert payload['collateral_tao'] == 1.0
     assert 'collateral_sol' not in payload
+
+
+def _swap(**over):
+    fields = dict(
+        key_hex='cd' * 32,
+        status='Fulfilled',
+        from_chain='sol',
+        to_chain='pol',
+        miner=Keypair().pubkey(),
+        user=Keypair().pubkey(),
+        from_amount=100_000_000,
+        to_amount=50 * 10**18,
+        user_from_addr='USERSOL',
+        user_to_addr='0xUSERPOL',
+        miner_from_addr='MINERSOL',
+        miner_to_addr='0xMINERPOL',
+        from_tx_hash='srctx',
+        to_tx_hash='dsttx',
+        initiated_at=1,
+        timeout_at=2,
+        fulfilled_at=3,
+    )
+    fields.update(over)
+    return types.SimpleNamespace(**fields)
+
+
+def test_view_swap_shows_the_amount_that_actually_lands(monkeypatch):
+    """`to_amount` is the gross pinned payout; the miner sends and the validator verifies it net of
+    the 1% fee. Rendering the gross told the user they receive 1% more than they ever can."""
+    client = MagicMock()
+    client.get_swap.return_value = object()
+    _patch_client(monkeypatch, client)
+    monkeypatch.setattr(view, 'swap_from_solana', lambda acct, key: _swap())
+
+    result = CliRunner().invoke(view.view_group, ['swap', 'cd' * 32])
+
+    assert result.exit_code == 0, result.output
+    assert '49.5 POL' in result.output
+    assert '50 POL' not in result.output
+
+
+def test_view_swap_names_both_legs_end_to_end(monkeypatch):
+    """The payout address (`user_to_addr`) is the one address a taker must check. It used to be
+    absent, while `miner_to_addr` — a sender — was labelled "Miner to"."""
+    client = MagicMock()
+    client.get_swap.return_value = object()
+    _patch_client(monkeypatch, client)
+    monkeypatch.setattr(view, 'swap_from_solana', lambda acct, key: _swap())
+
+    result = CliRunner().invoke(view.view_group, ['swap', 'cd' * 32])
+
+    assert result.exit_code == 0, result.output
+    assert 'USERSOL → MINERSOL' in result.output
+    assert '0xMINERPOL → 0xUSERPOL' in result.output
