@@ -210,9 +210,10 @@ RELAY_SWAP_RETENTION_SECS = 7 * 86400
 # validator watches reads back healthy but is never attested.
 # test: SN19, deployed 2026-08-12. Replaces 5GAE4JD8…BEcD, whose immutable code still carried the
 # lock_bond validator floor (#653) — it cannot lock a bond at our n=1 launch set, so it was re-instantiated.
+# finney: SN7, deployed 2026-08-19 (min 1 τ / max 100 τ / threshold 66 / ttl 600 / n=1 seed set).
 TAO_HUB_VAULT_ADDRESSES = {
     'test': '5Fkn2rNGvWxZ3cMNWbbT3FVrsyBjWmpE5fU4yYGDCrKAfLhs',
-    # 'finney': '',  # fill when prod is deployed
+    'finney': '5EejtudSLREHj8pAvNLcDg3gm1skP1RZGtVuoDQpVVUwpWJJ',
 }
 
 # ─── Swap outcome retention ──────────────────────────────
