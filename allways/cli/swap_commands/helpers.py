@@ -4,6 +4,7 @@ import os
 import sys
 import time
 from dataclasses import dataclass, field
+from decimal import Decimal, InvalidOperation
 from pathlib import Path
 from typing import Callable, List, Optional, Tuple
 
@@ -183,6 +184,24 @@ class FiniteFloatType(click.ParamType):
 
 
 FINITE_FLOAT = FiniteFloatType()
+
+
+class FiniteDecimalType(click.ParamType):
+    """A finite decimal for asset amounts that must retain every entered digit."""
+
+    name = 'decimal'
+
+    def convert(self, value, param, ctx):
+        try:
+            number = Decimal(str(value))
+        except (InvalidOperation, ValueError):
+            self.fail(f'{value!r} is not a decimal number', param, ctx)
+        if not number.is_finite():
+            self.fail(f'{value!r} must be a finite number (not nan/inf)', param, ctx)
+        return number
+
+
+FINITE_DECIMAL = FiniteDecimalType()
 
 
 def fail(message: str, code: int = 1) -> None:
