@@ -167,7 +167,7 @@ class SwapFulfiller:
         Returns the refusal reason, or None when funded (or when no balance view exists — the send
         path still fails loudly on a genuine shortfall)."""
         provider = self.providers.get(swap.to_chain)
-        from_address = self.my_addresses.get(swap.to_chain)
+        from_address = swap.miner_to_addr or None
         if provider is None or not from_address:
             return None
         pending = 0
