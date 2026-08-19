@@ -1,5 +1,6 @@
 """D6 — `alw view config` / `alw view validators` render the on-chain Config (mocked, no chain)."""
 
+import json
 import types
 from unittest.mock import MagicMock
 
@@ -219,3 +220,39 @@ def test_miner_runtime_status_reads_per_hub_when_backing_given():
     assert miner_runtime_status(state, None, 1000) == 'in-swap'  # OR view
     assert miner_runtime_status(state, None, 1000, backing='sol') == 'in-swap'
     assert miner_runtime_status(state, None, 1000, backing='tao') == 'available'
+
+
+def test_view_rates_shows_the_quotes_backing_purse(monkeypatch):
+    miner = Keypair().pubkey()
+    state = types.SimpleNamespace(active=True, collateral=2_700_000_000, has_active_swap=False, busy_until=0)
+    quote = types.SimpleNamespace(
+        miner=miner,
+        from_chain='tao',
+        to_chain='btc',
+        rate=10**18,
+        collateral_chain='tao',
+        miner_from_addr='5miner',
+        miner_to_addr='bc1miner',
+    )
+    entry = types.SimpleNamespace(
+        miner=miner,
+        pubkey_str=str(miner),
+        collateral=state.collateral,
+        state=state,
+        reservation=None,
+        quotes=[quote],
+    )
+    client = MagicMock()
+    client.get_bond_attestation.return_value = types.SimpleNamespace(locked=True, effective_balance=1_000_000_000)
+    _patch_client(monkeypatch, client)
+    monkeypatch.setattr(view, 'load_miner_book', lambda client, with_reservation=True: [entry])
+
+    result = CliRunner().invoke(view.view_group, ['rates'])
+
+    assert result.exit_code == 0, result.output
+    assert '1.0000 TAO' in result.output
+    assert '2.7000 SOL' not in result.output
+
+    payload = json.loads(CliRunner().invoke(view.view_group, ['rates', '--json']).output)[0]
+    assert payload['collateral_tao'] == 1.0
+    assert 'collateral_sol' not in payload

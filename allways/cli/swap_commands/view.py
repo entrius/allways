@@ -36,7 +36,7 @@ from allways.cli.swap_commands.helpers import (
     secs_str,
     set_json_output,
 )
-from allways.cli.swap_commands.swap_intake import rate_display_from_fixed
+from allways.cli.swap_commands.swap_intake import backing_purse, rate_display_from_fixed
 from allways.solana.client import swap_from_solana
 from allways.utils.rate import directional_rate
 
@@ -98,7 +98,7 @@ def _max_rate(entry) -> float:
     help='Only show miners in a given runtime state.',
 )
 @click.option(
-    '--min-capacity', type=FINITE_FLOAT, default=None, help='Only show miners with at least this much collateral (SOL).'
+    '--min-capacity', type=FINITE_FLOAT, default=None, help='Only show quotes with at least this much backing asset.'
 )
 @click.option(
     '--search',
@@ -229,11 +229,9 @@ def view_rates(pair, full, sort_by, min_capacity, search, as_json):
     now = int(time.time())
     book = load_miner_book(client, with_reservation=True)
 
-    rows = []  # (entry, quote, status)
+    rows = []  # (entry, quote, status, purse)
     for e in book:
         status = miner_runtime_status(e.state, e.reservation, now)
-        if min_capacity is not None and from_lamports(e.collateral) < min_capacity:
-            continue
         for q in e.quotes:
             if want and (q.from_chain, q.to_chain) != want:
                 continue
@@ -242,12 +240,19 @@ def view_rates(pair, full, sort_by, min_capacity, search, as_json):
                 hay = f'{e.pubkey_str} {q.miner_from_addr} {q.miner_to_addr}'.lower()
                 if needle not in hay:
                     continue
-            rows.append((e, q, status))
+            backing = getattr(q, 'collateral_chain', None) or 'sol'
+            purse = backing_purse(client, q.miner, e.state, backing)
+            if purse is None:
+                continue
+            capacity = from_rao(purse) if backing == 'tao' else from_lamports(purse)
+            if min_capacity is not None and capacity < min_capacity:
+                continue
+            rows.append((e, q, status, purse))
 
     if sort_by == 'rate':
         rows.sort(key=lambda r: float(_rate(r[1]) or 0), reverse=True)
     elif sort_by == 'capacity':
-        rows.sort(key=lambda r: r[0].collateral, reverse=True)
+        rows.sort(key=lambda r: r[3], reverse=True)
     elif sort_by == 'pair':
         rows.sort(key=lambda r: (r[1].from_chain, r[1].to_chain))
     elif sort_by == 'uid':
@@ -263,12 +268,16 @@ def view_rates(pair, full, sort_by, min_capacity, search, as_json):
                     'rate': _rate(q),
                     # Which purse answers a failed swap — the guarantee attached to this offer.
                     'backing': getattr(q, 'collateral_chain', None),
-                    'collateral_sol': from_lamports(e.collateral),
+                    **(
+                        {'collateral_tao': from_rao(purse)}
+                        if getattr(q, 'collateral_chain', 'sol') == 'tao'
+                        else {'collateral_sol': from_lamports(purse)}
+                    ),
                     'status': status,
                     'miner_from_addr': q.miner_from_addr,
                     'miner_to_addr': q.miner_to_addr,
                 }
-                for e, q, status in rows
+                for e, q, status, purse in rows
             ]
         )
         return
@@ -286,13 +295,14 @@ def view_rates(pair, full, sort_by, min_capacity, search, as_json):
     table.add_column('Status')
     if full:
         table.add_column('Addresses', style='dim')
-    for e, q, status in rows:
+    for e, q, status, purse in rows:
+        backing = getattr(q, 'collateral_chain', None) or 'sol'
         cells = [
             _quote_dir(q),
             backing_label(getattr(q, 'collateral_chain', None)),
             _rate(q),
             _short(e.pubkey_str, full),
-            f'{from_lamports(e.collateral):.4f} SOL',
+            f'{from_rao(purse):.4f} TAO' if backing == 'tao' else f'{from_lamports(purse):.4f} SOL',
             Text(status, style=STATUS_STYLES.get(status, 'white')),
         ]
         if full:
