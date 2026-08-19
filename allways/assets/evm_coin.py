@@ -351,8 +351,12 @@ class EvmCoin(EvmAsset):
         if not tx or not receipt:
             return None
         norm = self.chain.normalize_address
-        if int(receipt.get('status') or '0x0', 16) != 0:
-            return None  # succeeded (or unreadable status) — a delivered tx is not a refusal
+        try:
+            status = int(receipt['status'], 16)
+        except (KeyError, TypeError, ValueError):
+            return None
+        if status != 0:
+            return None  # a delivered tx is not a refusal
         if from_address and norm(tx.get('from') or '') != norm(from_address):
             return None  # not the committed miner's own attempt — could be a throwaway-sender ruse
         if norm(tx.get('to') or '') != norm(address):

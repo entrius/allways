@@ -10,6 +10,8 @@ strong enough that a wrong verdict can't hand a defaulting miner a free pass:
   - passive chains (BTC/TAO) and the base default: never — they can't refuse a payout.
 """
 
+import pytest
+
 from allways.assets.eth import Ether
 from allways.assets.ethusdc import EthUsdc
 from allways.assets.sol import RESERVED_ACCOUNTS, Sol
@@ -83,6 +85,11 @@ class TestEvmCancelEvidence:
 
     def test_missing_receipt_is_none(self, monkeypatch):
         p = _stub(_evm(monkeypatch), _tx(), None)
+        assert p.cancel_evidence(DEST, AMOUNT, TX) is None
+
+    @pytest.mark.parametrize('receipt', [{}, {'status': None}, {'status': 'unknown'}])
+    def test_unreadable_status_is_none(self, monkeypatch, receipt):
+        p = _stub(_evm(monkeypatch), _tx(), receipt)
         assert p.cancel_evidence(DEST, AMOUNT, TX) is None
 
 
