@@ -29,6 +29,9 @@ class ChainDefinition:
     # supported one, so the choice must survive reordering the list.
     testnet_network: str = ''
     seconds_per_block: int = 12  # Average block time on this chain
+    # Exact rate for wall-time history. Fast chains keep ``seconds_per_block`` rounded for
+    # integer deadline math, but evidence scans must not shorten their time window.
+    observed_seconds_per_block: float | None = None
     min_confirmations: int = 1  # Minimum confirmations before accepting a transaction
     # Smallest amount that can actually exist/move on-chain, in native units
     # (BTC dust floor, TAO existential deposit). 1 = no floor.
@@ -51,6 +54,9 @@ class ChainDefinition:
     # on a given amount (PAXG's getFeeFor). Set only on tokens with an admin-settable fee; a live
     # non-zero fee shaves every delivery below the pinned amount, so it's a no-fault cancel (V-M2).
     fee_check: str | None = None
+
+    def blocks_for_seconds(self, seconds: int) -> int:
+        return math.ceil(max(0, seconds) / (self.observed_seconds_per_block or self.seconds_per_block))
 
 
 # ─── Supported Chains ────────────────────────────────────
@@ -176,6 +182,7 @@ CHAIN_BNB = ChainDefinition(
     # Fermi (Jan 2026) cut blocks to 0.45s — measured 0.4502s over the last 100k mainnet blocks.
     # 1 is the integer floor, so every derived bound is conservative in wall time, never short.
     seconds_per_block=1,
+    observed_seconds_per_block=0.45,
     # BEP-126 finalizes a block once it and its direct child carry >2/3 attestations (~2 blocks).
     # Below that quorum — e.g. across an epoch's validator-set rotation — BSC falls back to its
     # longest-chain rule, where what bounds one dishonest proposer is turn_length: the run of
@@ -306,6 +313,7 @@ CHAIN_ASTER = ChainDefinition(
     # duplicate CLI row writing the same var.
     networks=(),
     seconds_per_block=1,
+    observed_seconds_per_block=0.45,
     # CHAIN_BNB's finality, deliberately identical — two assets on one chain must not disagree
     # about its reorg depth. See CHAIN_BNB for the derivation (BEP-126 quorum, BEP-341
     # turn_length 8). 15 × 1s, inside the program's 600s default fulfillment grace.

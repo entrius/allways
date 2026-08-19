@@ -518,9 +518,7 @@ class Erc20(EvmAsset):
         if self._refused_at(address):
             return True
         tip = int(self.chain.eth_rpc('eth_blockNumber', []), 16)
-        # Span is in blocks; seconds_per_block floors to 1 on sub-second chains, so this reaches
-        # ~4× fewer wall-seconds than it reads. Fine here — the latest probe above is load-bearing.
-        span = min(60, max(0, int(time.time()) - int(since_unix)) // self.chain_def.seconds_per_block)
+        span = self.chain_def.blocks_for_seconds(int(time.time()) - int(since_unix))
         for probe in dict.fromkeys(hex(max(0, tip - span // d)) for d in (1, 2)):
             try:
                 if self._refused_at(address, probe):
