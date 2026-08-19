@@ -1,13 +1,12 @@
 """alw miner - Miner dashboard commands."""
 
-import asyncio
 import time
 
 import click
 from rich.table import Table
 
 from allways.chains import SUPPORTED_CHAINS
-from allways.cli.dendrite_lite import discover_validators, resolve_dendrite_timeout
+from allways.cli.dendrite_lite import broadcast_until_quorum, discover_validators, resolve_dendrite_timeout
 from allways.cli.help import StyledGroup
 from allways.cli.swap_commands.helpers import (
     activation_prerequisites,
@@ -21,6 +20,7 @@ from allways.cli.swap_commands.helpers import (
     loading,
     purse_states,
     resolve_activation_backing,
+    votes_needed,
 )
 from allways.cli.swap_commands.swap_intake import rate_display_from_fixed
 from allways.cli.validator_rejections import render_and_aggregate
@@ -226,7 +226,8 @@ def miner_activate(backing: str):
     try:
         with loading('Reading your purses...'):
             miner_state = client.get_miner_state(miner_pk)
-            states = purse_states(client, miner_pk, miner_state, client.get_config())
+            cfg = client.get_config()
+            states = purse_states(client, miner_pk, miner_state, cfg)
     except SolanaClientError as e:
         fail(f'Failed to read miner data: {e}')
     if miner_state is None:
@@ -246,7 +247,8 @@ def miner_activate(backing: str):
     # Broadcast, re-signing a fresh timestamp each attempt. On a 429 the request
     # was rejected at the edge proxy and never reached the validator — back off
     # and retry rather than surfacing a transient rate-limit as a failure.
-    timeout = resolve_dendrite_timeout(60.0)
+    timeout = resolve_dendrite_timeout(30.0)
+    needed_votes = votes_needed(cfg)
     activate_max_retries = 2
     for attempt in range(activate_max_retries + 1):
         timestamp = str(int(time.time()))
@@ -255,11 +257,14 @@ def miner_activate(backing: str):
         synapse = MinerActivateSynapse(hotkey=hotkey, signature=signature, message=message, backing=backing)
 
         with loading(f'Broadcasting activation to {len(validator_axons)} validators...'):
-            responses = asyncio.get_event_loop().run_until_complete(
-                dendrite(axons=validator_axons, synapse=synapse, deserialize=False, timeout=timeout)
+            responses = broadcast_until_quorum(
+                dendrite, validator_axons, synapse, needed=needed_votes, timeout=timeout
             )
 
         info = render_and_aggregate(console, responses, label='V', context={'miner_hotkey': hotkey})
+        skipped = len(validator_axons) - len(responses)
+        if skipped > 0:
+            console.print(f'[dim]Quorum reached — stopped waiting on {skipped} slower validator(s).[/dim]')
 
         if info.category == 'rate_limited' and attempt < activate_max_retries:
             backoff_s = 6
