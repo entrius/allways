@@ -235,6 +235,12 @@ class TestTotalObligationGate:
         f, _earlier, later, payout = self._dual(balance=900_000_000)
         assert f.unfunded_obligation_reason(later, payout) is None
 
+    def test_balance_check_uses_the_pinned_sender(self):
+        f, _earlier, later, payout = self._dual(balance=900_000_000)
+        f.my_addresses['tao'] = 'STALE-cache-addr'
+        assert f.unfunded_obligation_reason(later, payout) is None
+        f.providers['tao'].get_balance.assert_called_once_with('5miner')
+
     def test_already_sent_obligations_do_not_double_count(self):
         f, earlier, later, payout = self._dual(balance=500_000_000)
         f.sent[earlier.key_hex] = SentSwap('tx', 1, marked_fulfilled=False, timeout_at=5000)
