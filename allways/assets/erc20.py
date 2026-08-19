@@ -39,6 +39,11 @@ MAX_TOKEN_TRANSFER_GAS = 150_000
 # Estimator-down fallback: covers FiatToken's worst case while staying under the cap.
 DEFAULT_TOKEN_TRANSFER_GAS = 120_000
 
+# Widest address-pinned eth_getLogs span the free rungs actually serve (measured 2026-08-19:
+# arbitrum publicnode and drpc both refuse 300). SCAN_LOOKBACK_BLOCKS derives from block TIME, so a
+# 1s chain asks 12x what a 12s chain does — the scan must be bounded in blocks, independent of that.
+MAX_LOG_SPAN_BLOCKS = 100
+
 # Testnet deployments per (asset id, network). The canonical mainnet deployment is the
 # registry row's asset_locator; {ASSET_ID}_TOKEN_CONTRACT overrides either (e2e fakes,
 # emergency repoint) — each address lives exactly once. Keyed by asset, not by network
@@ -571,13 +576,15 @@ class Erc20(EvmAsset):
         start = max(self.scan_cursors.get(key, floor), floor) + 1
         if start > head:
             return None
+        # One bounded chunk per call; the cursor carries the rest into the next pass.
+        end = min(head, start + MAX_LOG_SPAN_BLOCKS - 1)
         try:
             logs = self.chain.eth_rpc(
                 'eth_getLogs',
                 [
                     {
                         'fromBlock': hex(start),
-                        'toBlock': hex(head),
+                        'toBlock': hex(end),
                         'address': self.token_contract,
                         'topics': [TRANSFER_TOPIC0, '0x' + _pad_addr(from_addr), '0x' + _pad_addr(to_addr)],
                     }
@@ -594,5 +601,5 @@ class Erc20(EvmAsset):
             if value >= int(amount) and log.get('transactionHash'):
                 self.scan_cursors.pop(key, None)
                 return log['transactionHash']
-        self._set_cursor(key, head)
+        self._set_cursor(key, end)
         return None

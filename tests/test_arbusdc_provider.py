@@ -13,6 +13,7 @@ import pytest
 from allways.assets.arbusdc import ArbUsdc
 from allways.assets.asset import ProviderUnreachableError
 from allways.assets.erc20 import (
+    MAX_LOG_SPAN_BLOCKS,
     SEL_BALANCE_OF,
     SEL_IS_BLACKLISTED,
     SEL_PAUSED,
@@ -476,7 +477,25 @@ class TestScanner:
         rpc_stub(provider, {'eth_blockNumber': hex(1000), 'eth_getLogs': [{'data': hex(1), 'transactionHash': TX}]})
         assert provider.find_recent_outgoing(TEST_ADDR, RECIPIENT, AMOUNT) is None
         key = (TEST_ADDR.lower(), RECIPIENT.lower(), AMOUNT)
-        assert provider.scan_cursors[key] == 1000
+        # One capped chunk per call, so the cursor lands on the chunk end, not on head.
+        assert provider.scan_cursors[key] == 1000 - provider.SCAN_LOOKBACK_BLOCKS + MAX_LOG_SPAN_BLOCKS
+
+    def test_the_span_is_capped_and_the_cursor_walks_the_rest(self, provider):
+        """arbusdc is a 1s chain, so SCAN_LOOKBACK_BLOCKS is 300 — a span both free Arbitrum rungs
+        refuse (measured 2026-08-19). Ask for at most MAX_LOG_SPAN_BLOCKS and let the cursor carry
+        the remainder into the next pass, so the bound never depends on the chain's block time."""
+        spans = []
+
+        def logs(params):
+            spans.append(int(params[0]['toBlock'], 16) - int(params[0]['fromBlock'], 16) + 1)
+            return []
+
+        rpc_stub(provider, {'eth_blockNumber': hex(1000), 'eth_getLogs': logs})
+        assert provider.SCAN_LOOKBACK_BLOCKS > MAX_LOG_SPAN_BLOCKS  # else this proves nothing
+        for _ in range(4):
+            provider.find_recent_outgoing(TEST_ADDR, RECIPIENT, AMOUNT)
+        assert max(spans) <= MAX_LOG_SPAN_BLOCKS
+        assert provider.scan_cursors[(TEST_ADDR.lower(), RECIPIENT.lower(), AMOUNT)] == 1000  # caught up
 
     def test_failed_range_parks_cursor(self, provider):
         def boom(params):
