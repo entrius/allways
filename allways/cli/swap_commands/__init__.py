@@ -6,7 +6,6 @@ from allways.cli.swap_commands.numeraire import quotes_command
 from allways.cli.swap_commands.pair import post_pair
 from allways.cli.swap_commands.post_tx import post_tx_command
 from allways.cli.swap_commands.quote import quote_command
-from allways.cli.swap_commands.resume import resume_reservation_command
 from allways.cli.swap_commands.status import status_command
 from allways.cli.swap_commands.swap import swap_group
 from allways.cli.swap_commands.vault import vault_group
@@ -18,10 +17,9 @@ miner_group.add_command(quotes_command, 'quotes')
 # bind-hotkey is role-agnostic (miners and validators); the miner alias is kept for compatibility.
 miner_group.add_command(bind_hotkey_command, 'bind-hotkey')
 
-# Register post-tx, quote, resume-reservation under the swap group
+# Register post-tx + quote under the swap group
 swap_group.add_command(post_tx_command, 'post-tx')
 swap_group.add_command(quote_command, 'quote')
-swap_group.add_command(resume_reservation_command, 'resume-reservation')
 
 
 def register_commands(cli):

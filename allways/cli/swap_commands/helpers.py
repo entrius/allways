@@ -152,10 +152,6 @@ class CliError(Exception):
     """Local CLI/Solana error type — replaces the deleted ink! contract error."""
 
 
-# NOT_IMPLEMENTED_EXIT: distinct from Click's usage-error code (2) so a script can tell "deferred CLI
-# path" apart from "you passed bad args". EX_UNAVAILABLE (sysexits.h) = 69.
-NOT_IMPLEMENTED_EXIT = 69
-
 # When a --json command is running, errors must stay machine-readable — `fail()` emits `{"error": ...}`
 # instead of Rich text so a consumer piping --json never chokes on a plain-text error. Set per command.
 _JSON_OUTPUT = False
@@ -213,19 +209,6 @@ def fail(message: str, code: int = 1) -> None:
         click.echo(json.dumps({'error': message}))
     else:
         console.print(f'[red]{message}[/red]')
-    raise SystemExit(code)
-
-
-def not_implemented(what: str, code: int = NOT_IMPLEMENTED_EXIT) -> None:
-    """Honest exit for deferred CLI paths that need chain-provider deposit verification.
-
-    Exits with EX_UNAVAILABLE (69, not Click's usage-error 2) so scripts can tell a deferred path
-    apart from bad args."""
-    console.print(
-        f'[yellow]{what} is not available from the CLI yet.[/yellow]\n'
-        f'[dim]Inspect the reservation with `alw view reservation --miner <pubkey>`; if you already sent the '
-        f'deposit, relay it with `alw swap post-tx`.[/dim]'
-    )
     raise SystemExit(code)
 
 
