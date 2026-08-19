@@ -36,6 +36,9 @@ def test_to_smallest_units():
     assert to_smallest_units(1.0, 'sol') == SOL
     assert to_smallest_units(0.5, 'btc') == 50_000_000  # 8 dec
     assert to_smallest_units(2.0, 'tao') == 2_000_000_000  # 9 dec
+    # 18 dec: float would pin 1100000000000000128 (over — leg never verifies) and ...9999999744.
+    assert to_smallest_units(1.1, 'eth') == 1_100_000_000_000_000_000
+    assert to_smallest_units(2.3, 'eth') == 2_300_000_000_000_000_000
 
 
 def test_sol_to_btc_amounts():
