@@ -37,8 +37,9 @@ from allways.cli.swap_commands.helpers import (
     set_json_output,
 )
 from allways.cli.swap_commands.swap_intake import backing_purse, rate_display_from_fixed
+from allways.constants import FEE_DIVISOR
 from allways.solana.client import swap_from_solana
-from allways.utils.rate import directional_rate
+from allways.utils.rate import apply_fee_deduction, directional_rate
 
 MINER_SORT_FIELDS = ['uid', 'rate', 'capacity', 'status']
 MINER_STATUS_CHOICES = ['available', 'offline', 'in-swap', 'reserved', 'cooldown']
@@ -381,9 +382,12 @@ def _render_swap_detail(s):
     console.print(f'  Miner:       {s.miner}')
     console.print(f'  User:        {s.user}')
     console.print(f'  Send:        {s.from_amount / 10**from_dec:g} {s.from_chain.upper()}')
-    console.print(f'  Receive:     {s.to_amount / 10**to_dec:g} {s.to_chain.upper()} (pinned payout)')
-    console.print(f'  User from:   {s.user_from_addr}')
-    console.print(f'  Miner to:    {s.miner_to_addr}')
+    # `to_amount` is the gross pinned payout; the miner sends — and the validator verifies — the
+    # fee-deducted amount, so show what actually lands.
+    receives = apply_fee_deduction(s.to_amount, FEE_DIVISOR)
+    console.print(f'  Receive:     {receives / 10**to_dec:g} {s.to_chain.upper()} (after {100 / FEE_DIVISOR:g}% fee)')
+    console.print(f'  Source leg:  {s.user_from_addr} → {s.miner_from_addr}')
+    console.print(f'  Dest leg:    {s.miner_to_addr} → {s.user_to_addr}')
     console.print(f'  Source tx:   {s.from_tx_hash or "[dim](none)[/dim]"}')
     console.print(f'  Dest tx:     {s.to_tx_hash or "[dim](none)[/dim]"}')
     console.print(f'  Initiated:   {s.initiated_at}')
@@ -434,13 +438,11 @@ def view_swap(swap_key_hex: str, watch: bool, as_json: bool):
         _render_swap_detail(s)
         return
 
-    terminal = {'PendingAttestation'}
+    # No live status is terminal — Active/Fulfilled/PendingAttestation are all mid-flight. The
+    # account closing is the only end, and it is handled below.
     while True:
         console.clear()
         _render_swap_detail(s)
-        if s.status in terminal:
-            console.print('[dim]Swap reached a terminal on-chain status.[/dim]')
-            return
         time.sleep(5)
         s = _load()
         if s is None:
