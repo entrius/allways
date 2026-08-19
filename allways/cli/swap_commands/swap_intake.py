@@ -11,6 +11,7 @@ the same reads.
 """
 
 from dataclasses import dataclass
+from decimal import Decimal
 from typing import Dict, List, Optional, Tuple
 
 from allways.chains import canonical_pair, get_chain_def
@@ -55,8 +56,10 @@ class MinerCandidate:
 
 
 def to_smallest_units(amount: float, chain: str) -> int:
-    """Display amount (e.g. 0.1 BTC) → smallest units (sat/lamport/rao)."""
-    return int(round(amount * 10 ** get_chain_def(chain).decimals))
+    """Display amount (e.g. 0.1 BTC) → smallest units (sat/lamport/wei). Decimal, not float: an
+    18-decimal chain needs more digits than a float carries, so 1.1 pins 1100000000000000128 wei —
+    over what the taker sends, and the leg never verifies. Truncating keeps the pin at or below."""
+    return int(Decimal(str(amount)) * 10 ** get_chain_def(chain).decimals)
 
 
 def rate_display_from_fixed(rate_fixed: int) -> str:
