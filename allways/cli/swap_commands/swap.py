@@ -11,6 +11,7 @@ Either way the tail is the same: send source funds + `swap post-tx`."""
 import json
 import sys
 import time
+from decimal import Decimal
 from typing import List, NamedTuple, Optional
 
 import click
@@ -26,7 +27,7 @@ from allways.cli.dendrite_lite import (
 )
 from allways.cli.help import StyledGroup
 from allways.cli.swap_commands.helpers import (
-    FINITE_FLOAT,
+    FINITE_DECIMAL,
     PENDING_SWAP_FILE,
     backing_label,
     console,
@@ -315,7 +316,7 @@ def _poll_routed_reservation(client, miner, user, timeout_secs: int):
 @swap_group.command('now', show_disclaimer=True)
 @click.option('--from', 'from_chain_opt', default=None, help='Source chain (e.g. btc, tao)')
 @click.option('--to', 'to_chain_opt', default=None, help='Destination chain (e.g. btc, tao)')
-@click.option('--amount', 'amount_opt', default=None, type=FINITE_FLOAT, help='Amount to send in source chain units')
+@click.option('--amount', 'amount_opt', default=None, type=FINITE_DECIMAL, help='Amount to send in source chain units')
 @click.option('--receive-address', 'receive_address_opt', default=None, help='Receive address on destination chain')
 @click.option('--from-address', 'from_address_opt', default=None, help='Source address on source chain')
 @click.option('--from-tx-hash', 'from_tx_hash_opt', default=None, help='Source tx hash (skip fund sending)')
@@ -352,7 +353,7 @@ def _poll_routed_reservation(client, miner, user, timeout_secs: int):
 def swap_now_command(
     from_chain_opt: Optional[str],
     to_chain_opt: Optional[str],
-    amount_opt: Optional[float],
+    amount_opt: Optional[Decimal],
     receive_address_opt: Optional[str],
     from_address_opt: Optional[str],
     from_tx_hash_opt: Optional[str],
@@ -382,7 +383,7 @@ def swap_now_command(
     if from_chain == to_chain or hub_leg(from_chain, to_chain) is None:
         fail('A swap must have a hub leg (SOL or TAO) and two distinct chains — spoke<->spoke has no market.')
     if amount_opt is None:
-        amount_opt = _prompt_missing(None, 'Amount (source units)', '--amount', cast=float)
+        amount_opt = _prompt_missing(None, 'Amount (source units)', '--amount', cast=Decimal)
     if amount_opt is None or amount_opt <= 0:
         fail('--amount (source-chain units) must be positive.')
     if not receive_address_opt:

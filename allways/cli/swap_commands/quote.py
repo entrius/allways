@@ -5,6 +5,7 @@ origination path uses (`swap_intake`), and shows every viable miner and what you
 protocol fee — without committing to a swap."""
 
 import sys
+from decimal import Decimal
 
 import click
 from rich.table import Table
@@ -12,7 +13,7 @@ from rich.text import Text
 
 from allways.chains import SUPPORTED_CHAINS, get_chain_def
 from allways.cli.swap_commands.helpers import (
-    FINITE_FLOAT,
+    FINITE_DECIMAL,
     backing_label,
     console,
     fail,
@@ -55,9 +56,9 @@ def _prompt_or_fail(value, prompt_text, opt, cast=str):
 @click.command('quote')
 @click.option('--from', 'from_chain', default=None, type=str, help='Source chain (e.g. sol, btc, tao)')
 @click.option('--to', 'to_chain', default=None, type=str, help='Destination chain (e.g. sol, btc, tao)')
-@click.option('--amount', default=None, type=FINITE_FLOAT, help='Amount to send in source chain units')
+@click.option('--amount', default=None, type=FINITE_DECIMAL, help='Amount to send in source chain units')
 @click.option('--json', 'as_json', is_flag=True, help='Emit machine-readable JSON instead of a table.')
-def quote_command(from_chain: str, to_chain: str, amount: float, as_json: bool):
+def quote_command(from_chain: str, to_chain: str, amount: Decimal, as_json: bool):
     """Preview rates and estimated receive amounts for a swap.
 
     \b
@@ -74,7 +75,7 @@ def quote_command(from_chain: str, to_chain: str, amount: float, as_json: bool):
     chains = ', '.join(SUPPORTED_CHAINS)
     from_chain = _prompt_or_fail(from_chain, f'Source chain ({chains})', '--from')
     to_chain = _prompt_or_fail(to_chain, f'Destination chain ({chains})', '--to')
-    amount = _prompt_or_fail(amount, 'Amount (source units)', '--amount', cast=float)
+    amount = _prompt_or_fail(amount, 'Amount (source units)', '--amount', cast=Decimal)
 
     from_chain = from_chain.lower()
     to_chain = to_chain.lower()

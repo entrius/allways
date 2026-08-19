@@ -6,6 +6,7 @@ the miner + validator. Concrete rates chosen so the arithmetic is hand-checkable
 
 import pytest
 
+from allways.cli.swap_commands.helpers import FINITE_DECIMAL
 from allways.cli.swap_commands.swap_intake import (
     MinerCandidate,
     compute_intake_amounts,
@@ -39,6 +40,8 @@ def test_to_smallest_units():
     # 18 dec: float would pin 1100000000000000128 (over — leg never verifies) and ...9999999744.
     assert to_smallest_units(1.1, 'eth') == 1_100_000_000_000_000_000
     assert to_smallest_units(2.3, 'eth') == 2_300_000_000_000_000_000
+    exact = FINITE_DECIMAL.convert('0.123456789123456789', None, None)
+    assert to_smallest_units(exact, 'eth') == 123_456_789_123_456_789
 
 
 def test_sol_to_btc_amounts():
