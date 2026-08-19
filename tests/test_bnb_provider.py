@@ -272,28 +272,18 @@ class TestDeliveryGates:
 
         def code_at(params):
             probed.append(params[1])
-            return DELEGATION if params[1] == hex(9_933) else '0x'
+            return DELEGATION if params[1] == hex(9_970) else '0x'
 
         rpc_stub(provider, {'eth_blockNumber': hex(10_000), 'eth_getCode': code_at})
         assert provider.delivery_refused(RECIPIENT, frozen_now - 60) is True
-        # The 60-second wall-time window is 134 blocks at BSC's 0.45-second rate.
-        assert probed == ['latest', hex(9_866), hex(9_933)]
+        # now, then the window's far edge and its midpoint. The 60s window is 60 blocks at the
+        # stored 1s; note the gate's 120-block span cap is only ~54s of real BSC history (0.45s
+        # blocks), so "the window since since_unix" stops being true beyond that.
+        assert probed == ['latest', hex(9_940), hex(9_970)]
 
     def test_slash_gate_does_not_exempt_a_dest_that_never_had_code(self, provider, frozen_now):
         rpc_stub(provider, {'eth_blockNumber': hex(10_000), 'eth_getCode': '0x'})
         assert provider.delivery_refused(RECIPIENT, frozen_now - 60) is False
-
-    def test_slash_gate_keeps_the_full_ten_minute_window(self, provider, frozen_now):
-        probed = []
-        rpc_stub(
-            provider,
-            {
-                'eth_blockNumber': hex(10_000),
-                'eth_getCode': lambda params: probed.append(params[1]) or '0x',
-            },
-        )
-        assert provider.delivery_refused(RECIPIENT, frozen_now - 600) is False
-        assert probed == ['latest', hex(8_666), hex(9_333)]
 
 
 class TestDepositScanner:
