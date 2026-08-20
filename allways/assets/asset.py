@@ -8,6 +8,12 @@ from allways.assets.chain import Chain
 from allways.chains import ChainDefinition
 
 
+class MissingTestnetDeployment(ValueError):
+    """A hosted asset has no pinned deployment on the configured test network (issuer-deployed
+    tokens often exist on mainnet only). Distinct so create_assets can disable the spoke on
+    testnet instead of failing the whole neuron's boot."""
+
+
 class ProviderUnreachableError(Exception):
     """Raised when a chain provider cannot reach its backend during verification."""
 

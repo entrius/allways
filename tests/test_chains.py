@@ -21,6 +21,8 @@ from allways.chains import (
     CHAIN_POL,
     CHAIN_POLUSDC,
     CHAIN_QNT,
+    CHAIN_SOL,
+    CHAIN_SOLUSDC,
     CHAIN_TAO,
     CHAIN_UNI,
     EXTENSION_BUCKET_SECONDS,
@@ -77,6 +79,9 @@ class TestGetChain:
     def test_polusdc(self):
         assert get_chain_def('polusdc') is CHAIN_POLUSDC
 
+    def test_solusdc(self):
+        assert get_chain_def('solusdc') is CHAIN_SOLUSDC
+
     def test_unsupported_raises(self):
         with pytest.raises(KeyError):
             get_chain_def('doge')
@@ -110,6 +115,11 @@ class TestGetChain:
         for host, found in prefixes.items():
             assert len(found) == 1, f'{host} assets disagree on env_prefix: {sorted(found)}'
         for host, ids in declared.items():
+            if host not in EVM_NETWORKS:
+                # Solana's cluster is genesis-hash-guarded, never picked by name: no row declares
+                # `networks`, and none may (it would render a dead CLI key beside `solana-network`).
+                assert ids == [], f'{host} is not name-selected; {ids} must not declare networks'
+                continue
             assert len(ids) == 1, f'{host} needs exactly one networks-declaring row, found {ids}'
         for prefix, ids in owners.items():
             assert len(ids) == 1, f'{prefix}_NETWORK is declared by more than one row: {ids}'
@@ -122,40 +132,40 @@ class TestGetChain:
             assert declared is issubclass(spec.cls, Erc20), spec.chain_id
 
     def test_only_self_hosted_assets_lack_a_host_chain(self):
-        for chain_id in ('btc', 'tao', 'sol'):
-            assert get_chain_def(chain_id).host_chain is None
-        for chain_id in ('eth', 'hype', 'bnb', 'avax', 'cro', 'arbusdc'):
-            assert get_chain_def(chain_id).host_chain in EVM_NETWORKS
-        # asset_locator is the token-only field: a native coin has no contract to pin.
-        assert CHAIN_ARBUSDC.asset_locator.startswith('0x')
-        assert all(
-            get_chain_def(c).asset_locator is None for c in ('btc', 'tao', 'sol', 'eth', 'hype', 'bnb', 'avax', 'cro')
-        )
-        for chain_id in ('eth', 'hype', 'arbusdc', 'baseusdc'):
-            assert get_chain_def(chain_id).host_chain in EVM_NETWORKS
-        # asset_locator is the token-only field: a native coin has no contract to pin.
-        assert CHAIN_ARBUSDC.asset_locator.startswith('0x')
-        assert CHAIN_BASEUSDC.asset_locator.startswith('0x')
-        for chain_id in ('eth', 'hype', 'arbusdc', 'ethusdc'):
-            assert get_chain_def(chain_id).host_chain in EVM_NETWORKS
-        # asset_locator is the token-only field: a native coin has no contract to pin.
-        assert CHAIN_ARBUSDC.asset_locator.startswith('0x') and CHAIN_ETHUSDC.asset_locator.startswith('0x')
-        assert all(get_chain_def(c).asset_locator is None for c in ('btc', 'tao', 'sol', 'eth', 'hype'))
-        # ethusdc rides CHAIN_ETH's network row — same host, same prefix, no networks of its own.
-        assert (CHAIN_ETHUSDC.host_chain, CHAIN_ETHUSDC.env_prefix) == (CHAIN_ETH.host_chain, CHAIN_ETH.env_prefix)
-        """btc/tao/sol ARE their own network; every EVM row names the network it rides. Only the
-        self-hosted list is enumerated — a new EVM asset needs no edit here."""
+        """btc/tao/sol ARE their own network; every hosted row names the network it rides — an
+        EVM_NETWORKS key, or 'solana' for an SPL token beside native SOL. Only the self-hosted list
+        is enumerated — a new hosted asset needs no edit here."""
         for chain_id, chain in SUPPORTED_CHAINS.items():
             if chain_id in ('btc', 'tao', 'sol'):
                 assert chain.host_chain is None, chain_id
             else:
-                assert chain.host_chain in EVM_NETWORKS, chain_id
+                assert chain.host_chain in EVM_NETWORKS or chain.host_chain == 'solana', chain_id
+        # asset_locator is the token-only field: a native coin has no contract/mint to pin.
+        assert CHAIN_ARBUSDC.asset_locator.startswith('0x')
+        assert all(
+            get_chain_def(c).asset_locator is None for c in ('btc', 'tao', 'sol', 'eth', 'hype', 'bnb', 'avax', 'cro')
+        )
         # Ethereum hosts several assets (eth, ethusdc, uni). Every rider takes CHAIN_ETH's network
         # row — same prefix, no networks of its own — so one ETH_NETWORK moves all of them.
         riders = [c for c in SUPPORTED_CHAINS.values() if c.host_chain == CHAIN_ETH.host_chain and c is not CHAIN_ETH]
         assert CHAIN_ETHUSDC in riders and CHAIN_UNI in riders
         for chain in riders:
             assert (chain.env_prefix, chain.networks) == (CHAIN_ETH.env_prefix, ()), chain.id
+
+    def test_spl_token_rows_ride_solana(self):
+        """An SPL token is hosted on 'solana', pins a base58 mint, shares SOL's env identity and
+        finality depth, and declares no `networks` (the cluster is genesis-hash-guarded, not named)."""
+        from solders.pubkey import Pubkey
+
+        from allways.assets.spl_token import SplToken
+
+        rows = [get_chain_def(spec.chain_id) for spec in ASSET_REGISTRY if issubclass(spec.cls, SplToken)]
+        assert CHAIN_SOLUSDC in rows
+        for chain in rows:
+            assert chain.host_chain == 'solana', chain.id
+            Pubkey.from_string(chain.asset_locator)  # a mint, not an 0x contract
+            assert chain.env_prefix == CHAIN_SOL.env_prefix and chain.networks == (), chain.id
+            assert chain.min_confirmations == CHAIN_SOL.min_confirmations, chain.id
 
 
 class TestCanonicalPair:
@@ -261,6 +271,11 @@ class TestComputeExtensionTargetSecs:
             'pol', 0, self.NOW, self.CEILING
         )
 
+    def test_solusdc_matches_the_chain_it_shares(self):
+        assert compute_extension_target_secs('solusdc', 0, self.NOW, self.CEILING) == compute_extension_target_secs(
+            'sol', 0, self.NOW, self.CEILING
+        )
+
     def test_unsupported_chain_raises(self):
         with pytest.raises(KeyError):
             compute_extension_target_secs('doge', 0, self.NOW, self.CEILING)
@@ -275,8 +290,11 @@ class TestReplayGrace:
         # Ethereum's monotonic slot timestamps once justified 0 here; the floor is hub-stamped,
         # so ETH (and ethusdc with it) need the same allowance as every other EVM row.
         for chain in SUPPORTED_CHAINS.values():
-            if chain.host_chain is not None:
+            if chain.host_chain in EVM_NETWORKS:
                 assert chain.replay_grace_secs == 60, chain.id
+        # An SPL token shares the hub's ledger AND clock: its leg's blockTime and the reservation
+        # floor are stamped by the same chain, so there is no hub-vs-spoke skew to absorb.
+        assert CHAIN_SOLUSDC.replay_grace_secs == 0
 
     def test_freshness_consumer_absorbs_the_eth_grace(self):
         # The validator reads grace off chain_def (solana_swap_loop._is_fresh) — a deposit

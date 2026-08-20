@@ -17,6 +17,7 @@ from typing import Dict, List, Tuple
 
 import click
 
+from allways.chains import uses_solana_wallet
 from allways.cli.help import StyledCommand
 from allways.cli.swap_commands.helpers import (
     FINITE_FLOAT,
@@ -140,6 +141,8 @@ def quotes_command(spread_bps, hub, backing, dry_run, yes, **spoke_opts):
             continue
         if not price or price <= 0:
             continue
+        if not addr and uses_solana_wallet(spoke):
+            addr = spoke_opts.get(_addr_kw(NUMERAIRE_CHAIN))  # same wallet as the SOL leg
         if not addr:
             fail(f'--{spoke}-address required with --{spoke}-price')
         chain_specs[spoke] = (price, addr)

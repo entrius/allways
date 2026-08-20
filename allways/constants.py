@@ -56,6 +56,9 @@ CANCEL_REASON_SOL_RESERVED = 3
 # An issuer-enabled transfer fee shaves the delivered log below the pinned amount, so every
 # honest delivery on the token would false-slash — a hub-wide, no-fault condition (V-M2/PAXG).
 CANCEL_REASON_ERC20_FEE_ENABLED = 4
+# The issuer froze the destination's SPL token account (USDC's mint carries a freeze authority):
+# undeliverable through no fault of the miner. Python-side first; mirror into constants.rs next release.
+CANCEL_REASON_SPL_FROZEN = 5
 CANCEL_REASON_OTHER = 255
 
 BTC_MIN_FEE_RATE = 5
@@ -126,6 +129,7 @@ LAUNCH_SPOKES = (
     'pol',
     'polusdc',
     'paxg',
+    'solusdc',
 )
 # Every launch pair as (hub, spoke): each hub pairs against every spoke except itself. sol↔tao
 # lands exactly once (under SOL, its anchor) because sol never appears in LAUNCH_SPOKES.

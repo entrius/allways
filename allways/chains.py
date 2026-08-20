@@ -37,12 +37,12 @@ class ChainDefinition:
     # Default 0 (at-or-after the floor; only a tx that predates it is a replay). Absorbs honest miner
     # clock skew; MUST stay well under reservation_ttl_secs — the replay window is exactly this wide (B2).
     replay_grace_secs: int = 0
-    # The network whose txs carry this asset (assets/evm.py EVM_NETWORKS key). Every EVM row
-    # sets it — native coin and token alike — so both resolve their chain the same way.
-    # None only for assets that ARE their own network (btc/tao/sol).
+    # The network whose txs carry this asset: an assets/evm.py EVM_NETWORKS key, or 'solana'.
+    # Every EVM row sets it — native coin and token alike — so both resolve their chain the same
+    # way. None only for assets that ARE their own network (btc/tao/sol).
     host_chain: str | None = None
-    # Canonical MAINNET contract of a hosted asset. Testnet deployments + env overrides
-    # resolve in the provider (assets/erc20.py) — each address lives exactly once.
+    # Canonical MAINNET contract (or SPL mint) of a hosted asset. Testnet deployments + env
+    # overrides resolve in the provider (assets/erc20.py, spl_token.py) — each address lives once.
     asset_locator: str | None = None
     # ABI signatures the issuer refuses delivery with: 'f()' stops the whole token, 'f(address)'
     # freezes one destination. Required on every token row; () claims no freeze surface at all.
@@ -95,6 +95,28 @@ CHAIN_SOL = ChainDefinition(
     # Rent-exempt minimum for a 0-data System account — the SOL analog of TAO's
     # existential deposit (a credit below this can't keep a fresh account alive).
     min_onchain_amount=890880,
+)
+
+CHAIN_SOLUSDC = ChainDefinition(
+    id='solusdc',
+    name='USDC (Solana)',
+    native_unit='µUSDC',
+    decimals=6,
+    # Solana's env identity, shared with native SOL: the cluster is picked by the RPC's genesis hash,
+    # never by name, so no `networks` — a declared tuple would spawn a dead `sol-network` CLI key.
+    env_prefix='SOL',
+    seconds_per_block=1,
+    # Two assets on one chain must not disagree about its finality depth (pinned == CHAIN_SOL by test).
+    min_confirmations=32,
+    # 5 USDC — the crown-eligibility floor, sized like every USDC row (see CHAIN_ARBUSDC); Solana's
+    # cheap fees are not the input, the crown band is.
+    min_onchain_amount=5_000_000,
+    # Hub and spoke share ONE clock here — the leg's blockTime and the reservation floor are stamped by
+    # the same ledger — so 0 is justified on skew grounds, unlike the cross-chain spokes' 60s.
+    replay_grace_secs=0,
+    host_chain='solana',
+    # Circle's USDC mint on mainnet-beta; devnet lives in assets/spl_token.py CLUSTER_MINTS.
+    asset_locator='EPjFWdd5AufqSSqeM2qN1xzybapC8G4wEGGkZwyTDt1v',
 )
 
 CHAIN_ETH = ChainDefinition(
@@ -510,6 +532,7 @@ SUPPORTED_CHAINS = {
     'pol': CHAIN_POL,
     'polusdc': CHAIN_POLUSDC,
     'paxg': CHAIN_PAXG,
+    'solusdc': CHAIN_SOLUSDC,
 }
 
 
@@ -529,6 +552,12 @@ def apply_testnet_network_defaults() -> dict[str, str]:
             os.environ[env_var] = chain.testnet_network
             applied[env_var] = chain.testnet_network
     return applied
+
+
+def uses_solana_wallet(chain_id: str) -> bool:
+    """True for every asset whose address is a Solana wallet pubkey — native SOL and any SPL token
+    hosted on it — so the CLI can default that leg to the signer instead of asking for it."""
+    return chain_id == 'sol' or get_chain_def(chain_id).host_chain == 'solana'
 
 
 def get_chain_def(chain_id: str) -> ChainDefinition:

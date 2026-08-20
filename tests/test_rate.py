@@ -462,6 +462,13 @@ class TestIsExecutableRate:
         assert is_executable_rate(150.0, 'arbusdc', 'sol', self.MIN, self.MAX) is True
         assert is_executable_rate(150.0, 'sol', 'arbusdc', self.MIN, self.MAX) is True
 
+    def test_solusdc_routes_at_its_five_dollar_floor(self):
+        """solusdc sizes its floor like every USDC row (crown band), not off Solana's cheap fees —
+        and the same-ledger pair must route both ways like any other spoke."""
+        assert get_chain_def('solusdc').min_onchain_amount == 5_000_000
+        assert is_executable_rate(150.0, 'solusdc', 'sol', self.MIN, self.MAX) is True
+        assert is_executable_rate(150.0, 'sol', 'solusdc', self.MIN, self.MAX) is True
+
     def test_ethusdc_routes_at_its_five_dollar_floor(self):
         """ethusdc's floor is a rate-sanity input, not a per-swap minimum (that is the
         contract's min_swap_amount): non-binding here, since 0.1 SOL needs ~15 USDC at 150/SOL."""
