@@ -2,7 +2,6 @@ import os
 from typing import List, Optional
 
 import bittensor as bt
-import requests
 from solders.instruction import AccountMeta, Instruction
 from solders.keypair import Keypair
 from solders.pubkey import Pubkey
@@ -17,7 +16,7 @@ from allways.assets.asset import (
 from allways.assets.sol import LOG_SOL, RESERVED_ACCOUNTS, SolanaChain
 from allways.chains import ChainDefinition
 from allways.constants import CANCEL_REASON_SOL_RESERVED, CANCEL_REASON_SPL_FROZEN
-from allways.solana.rpc import SolanaRpc, classify_cluster
+from allways.solana.rpc import SolanaRpc, TransientRpcError, classify_cluster
 
 # Legacy SPL Token — Circle's USDC mint lives here, not under Token-2022. Pinned rather than read
 # from the mint so a Token-2022 look-alike mint can never satisfy a USDC leg.
@@ -215,7 +214,10 @@ class SplToken(Asset):
             return None
         try:
             tx = self.rpc.get_transaction(tx_hash)
-        except (requests.ConnectionError, requests.Timeout) as e:
+        except TransientRpcError as e:
+            # SolanaRpc._call never lets requests errors escape — it re-raises them as TransientRpcError
+            # (incl. SolanaRpcUnreachable). Catching the wrong type here fell through to `return None`,
+            # i.e. an RPC outage read as "no such payment" — slash-eligible.
             raise ProviderUnreachableError(f'Solana RPC unreachable: {e}') from e
         except Exception as e:
             bt.logging.error(f'{LOG_SOL} getTransaction failed for {tx_hash[:16]}...: {e}')

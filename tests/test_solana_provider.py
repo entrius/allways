@@ -6,13 +6,12 @@ address validity, the ed25519 proof sign/verify roundtrip, balance, and the Syst
 """
 
 import pytest
-import requests
 from solders.keypair import Keypair
 
 from allways.assets.asset import ProviderUnreachableError
 from allways.assets.sol import RESERVED_ACCOUNTS, Sol
 from allways.chains import CHAIN_SOL
-from allways.solana.rpc import SolanaRpcError
+from allways.solana.rpc import SolanaRpcError, SolanaRpcUnreachable
 
 
 def make_tx(recipient, credit, sender='SENDER', slot=100, block_time=5000, err=None, extra_keys=None):
@@ -41,7 +40,7 @@ class FakeRpc:
 
     def get_transaction(self, sig, commitment='confirmed'):
         if self._raise_conn:
-            raise requests.ConnectionError('down')
+            raise SolanaRpcUnreachable('down', url='http://fake')
         return self._tx
 
     def get_slot(self, commitment='confirmed'):

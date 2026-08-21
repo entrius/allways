@@ -3,7 +3,6 @@ import time
 from typing import Any, List, Optional
 
 import bittensor as bt
-import requests
 from solders.keypair import Keypair
 from solders.pubkey import Pubkey
 from solders.signature import Signature
@@ -12,7 +11,7 @@ from allways.assets.asset import Asset, ProviderUnreachableError, SendResult, Tr
 from allways.assets.chain import Chain
 from allways.chains import CHAIN_SOL, ChainDefinition
 from allways.constants import CANCEL_REASON_SOL_RESERVED
-from allways.solana.rpc import SolanaRpc, SolanaRpcError, resolve_rpc_url
+from allways.solana.rpc import SolanaRpc, SolanaRpcError, TransientRpcError, resolve_rpc_url
 
 LOG_SOL = '[Solana]'
 
@@ -321,7 +320,10 @@ class Sol(Asset):
             return None
         try:
             tx = self.rpc.get_transaction(tx_hash)
-        except (requests.ConnectionError, requests.Timeout) as e:
+        except TransientRpcError as e:
+            # SolanaRpc._call never lets requests errors escape — it re-raises them as TransientRpcError
+            # (incl. SolanaRpcUnreachable). Catching the wrong type here fell through to `return None`,
+            # i.e. an RPC outage read as "no such payment" — slash-eligible.
             raise ProviderUnreachableError(f'Solana RPC unreachable: {e}') from e
         except Exception as e:
             bt.logging.error(f'{LOG_SOL} getTransaction failed for {tx_hash[:16]}...: {e}')

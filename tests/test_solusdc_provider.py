@@ -2,7 +2,6 @@
 method→response stub injected through the composed chain; keypairs and ATA derivation are real."""
 
 import pytest
-import requests
 from solders.keypair import Keypair
 from solders.pubkey import Pubkey
 
@@ -21,7 +20,7 @@ from allways.assets.spl_token import (
 )
 from allways.chains import CHAIN_SOL, CHAIN_SOLUSDC, get_chain_def
 from allways.constants import CANCEL_REASON_SOL_RESERVED, CANCEL_REASON_SPL_FROZEN, LAUNCH_SPOKES
-from allways.solana.rpc import SOLANA_GENESIS_HASHES
+from allways.solana.rpc import SOLANA_GENESIS_HASHES, SolanaRpcUnreachable
 
 MAINNET_MINT = 'EPjFWdd5AufqSSqeM2qN1xzybapC8G4wEGGkZwyTDt1v'
 DEVNET_MINT = '4zMMC9srt5Ri5X14GAgXhaHii3GnPAEERYPJgZJDncDU'
@@ -95,7 +94,7 @@ class FakeRpc:
 
     def get_transaction(self, sig, commitment='confirmed'):
         if self._raise:
-            raise requests.ConnectionError('down')
+            raise SolanaRpcUnreachable('down', url='http://fake')
         if self._txs is not None:
             return self._txs.get(sig)
         return self._tx
@@ -105,7 +104,7 @@ class FakeRpc:
 
     def get_parsed_account(self, pubkey, commitment='confirmed'):
         if self._raise:
-            raise requests.ConnectionError('down')
+            raise SolanaRpcUnreachable('down', url='http://fake')
         return self.accounts.get(str(pubkey))
 
     def get_balance(self, pubkey, commitment='confirmed'):
