@@ -68,13 +68,57 @@ def to_mainnet_address(address: str) -> str:
         return address
 
 
-def parse_esplora_urls(raw: str, auth_header: str = 'Authorization') -> list[tuple[str, Optional[dict]]]:
+# Blockstream Explorer API keys are OAuth2 client_credentials: tokens expire after 300 s and there is no
+# refresh token, so the client id/secret are re-POSTed here whenever the cached token nears expiry.
+BLOCKSTREAM_TOKEN_URL = 'https://login.blockstream.com/realms/blockstream-public/protocol/openid-connect/token'
+OAUTH_KEY_PREFIX = 'oauth:'
+OAUTH_REFRESH_MARGIN_S = 60
+
+
+class OAuthClientCredentials:
+    """Cached bearer token for one Esplora endpoint; ``headers()`` refreshes it when within the margin."""
+
+    def __init__(self, client_id: str, client_secret: str, token_url: str = BLOCKSTREAM_TOKEN_URL):
+        self.client_id = client_id
+        self.client_secret = client_secret
+        self.token_url = token_url
+        self._token: Optional[str] = None
+        self._expires_at = 0.0
+
+    def invalidate(self) -> None:
+        self._token = None
+        self._expires_at = 0.0
+
+    def headers(self, http: requests.Session, timeout: int = 10) -> dict:
+        """Return ``{'Authorization': 'Bearer …'}``; raises on token-endpoint failure."""
+        if not self._token or time.time() >= self._expires_at - OAUTH_REFRESH_MARGIN_S:
+            resp = http.post(
+                self.token_url,
+                data={
+                    'client_id': self.client_id,
+                    'client_secret': self.client_secret,
+                    'grant_type': 'client_credentials',
+                    'scope': 'openid',
+                },
+                timeout=timeout,
+            )
+            resp.raise_for_status()
+            body = resp.json()
+            self._token = body['access_token']
+            self._expires_at = time.time() + float(body.get('expires_in', 300))
+            bt.logging.debug(f'{LOG_ESPLORA} oauth token refreshed (expires_in={body.get("expires_in")})')
+        return {'Authorization': f'Bearer {self._token}'}
+
+
+EsploraAuth = Optional[dict | OAuthClientCredentials]
+
+
+def parse_esplora_urls(raw: str, auth_header: str = 'Authorization') -> list[tuple[str, EsploraAuth]]:
     """Parse BTC_ESPLORA_URLS into (base_url, headers) pairs, tried in order.
 
-    Comma-separated; each entry is ``url`` or ``url|api_key``. A keyed entry
-    sends the key via ``auth_header`` to that endpoint only — others stay
-    anonymous. The default ``Authorization`` header carries a ``Bearer`` prefix;
-    any other header (e.g. Maestro's ``api-key``) sends the raw key.
+    Comma-separated; each entry is ``url``, ``url|api_key`` or ``url|oauth:CLIENT_ID:CLIENT_SECRET``.
+    A static key is sent via ``auth_header`` (``Authorization`` adds a ``Bearer`` prefix); an ``oauth:``
+    entry exchanges the credentials for a short-lived bearer token (Blockstream Explorer API).
     """
     bases = []
     for entry in raw.split(','):
@@ -85,6 +129,11 @@ def parse_esplora_urls(raw: str, auth_header: str = 'Authorization') -> list[tup
         key = key.strip()
         if not key:
             bases.append((url, None))
+        elif key.startswith(OAUTH_KEY_PREFIX):
+            client_id, _, client_secret = key[len(OAUTH_KEY_PREFIX) :].partition(':')
+            if not client_id or not client_secret:
+                raise ValueError(f'BTC_ESPLORA_URLS oauth entry for {url} must be oauth:CLIENT_ID:CLIENT_SECRET')
+            bases.append((url, OAuthClientCredentials(client_id, client_secret)))
         elif auth_header.lower() == 'authorization':
             bases.append((url, {auth_header: f'Bearer {key}'}))
         else:
@@ -316,8 +365,8 @@ class Bitcoin(Asset, Chain):
         """Get balance for a Bitcoin address in satoshis via the Esplora API."""
         return self.api_get_balance(address)
 
-    def btc_api_bases(self) -> list[tuple[str, Optional[dict]]]:
-        """Esplora (base_url, headers) pairs tried in order.
+    def btc_api_bases(self) -> list[tuple[str, EsploraAuth]]:
+        """Esplora (base_url, auth) pairs tried in order.
 
         Defaults to public blockstream → mempool. Override with BTC_ESPLORA_URLS
         (comma-separated ``url`` or ``url|api_key``) to use paid/private endpoints.
@@ -358,13 +407,19 @@ class Bitcoin(Asset, Chain):
         """
         bases = self.btc_api_bases()
         last_err: Optional[Exception] = None
-        for i, (base, headers) in enumerate(bases):
+        for i, (base, auth) in enumerate(bases):
             pos = f'[{i + 1}/{len(bases)}]'
             tag = esplora_tag(base)
             nxt = esplora_tag(bases[i + 1][0]) if i + 1 < len(bases) else None
             tail = f'falling back to: {nxt}' if nxt else 'no providers left, giving up'
+            oauth = auth if isinstance(auth, OAuthClientCredentials) else None
             try:
-                resp = self.http.request(method, f'{base}{path}', timeout=timeout, headers=headers, **kwargs)
+                resp = self._request_with_auth(method, f'{base}{path}', timeout, auth, **kwargs)
+                # A rejected bearer may just be stale: mint a fresh token and retry this rung once.
+                if oauth and resp.status_code in (401, 403):
+                    bt.logging.info(f'Esplora {pos} {tag}{path} → {resp.status_code}; refreshing oauth token')
+                    oauth.invalidate()
+                    resp = self._request_with_auth(method, f'{base}{path}', timeout, auth, **kwargs)
             except Exception as e:
                 last_err = e
                 bt.logging.warning(f'Esplora {pos} {tag}{path} → request error: {e}; {tail}')
@@ -384,6 +439,10 @@ class Bitcoin(Asset, Chain):
                 bt.logging.debug(f'Esplora {pos} {tag}{path} → {resp.status_code}')
             return resp
         raise last_err or RuntimeError('all BTC APIs failed')
+
+    def _request_with_auth(self, method: str, url: str, timeout: int, auth: EsploraAuth, **kwargs) -> requests.Response:
+        headers = auth.headers(self.http) if isinstance(auth, OAuthClientCredentials) else auth
+        return self.http.request(method, url, timeout=timeout, headers=headers, **kwargs)
 
     def btc_api_get(self, path: str, timeout: int = 15) -> requests.Response:
         return self.btc_api_request('GET', path, timeout)
