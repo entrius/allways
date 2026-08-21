@@ -216,7 +216,7 @@ def test_vote_set_attestation_builds_the_round_and_the_pda(client):
         (client.keypair.pubkey(), True, True),
         (pdas.config_pda(PID), False, False),
         (miner, False, False),
-        (pdas.miner_state_pda(miner, PID), False, False),
+        (pdas.miner_state_pda(miner, PID), False, True),  # writable: under-floor bond drops the hub bit
         (pdas.reservation_pda(miner, 'tao', PID), False, False),  # F5: filled-reservation obligation floor
         (pdas.bond_attestation_pda(miner, 'tao', PID), False, True),
         (pdas.attestation_round_pda(miner, 'tao', PID), False, True),

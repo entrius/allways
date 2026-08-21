@@ -7,6 +7,7 @@ use crate::constants::{
 };
 use crate::error::ErrorCode;
 use crate::events::BondAttested;
+use crate::penalty::drop_backing_under_floor;
 use crate::state::{BondAttestation, Config, MinerState, Reservation, VoteRound};
 
 /// Validators write a miner's effective bond on one backing chain. Solana can't read the vault holding
@@ -28,7 +29,10 @@ pub struct VoteSetAttestation<'info> {
 
     /// Read for this hub's in-flight-swap reserve — a downward write is refused only if it would drop
     /// the purse below a LIVE obligation (F5). Every attestable miner is registered, so this always exists.
+    /// Mutable: a quorum write that lands the purse under the hub's activation floor drops the hub's
+    /// backing bit (`drop_backing_under_floor`), the vaulted twin of `apply_penalty`'s SOL rule.
     #[account(
+        mut,
         seeds = [MINER_SEED, miner.key().as_ref()],
         bump = miner_state.bump,
         constraint = miner_state.miner == miner.key(),
@@ -141,12 +145,20 @@ pub fn handler(
         reset_round(&mut ctx.accounts.vote_round);
         emit!(BondAttested {
             miner: miner_key,
-            chain,
+            chain: chain.clone(),
             effective_balance,
             locked,
             epoch,
             attested_at: now,
         });
+        // A LOCKED bond under the hub's floor drops that hub's bit, same as a SOL purse slashed under
+        // `min_collateral` — re-entry is a fresh `vote_activate` once the bond is topped back up. An
+        // unlocked bond is left to its own gates (`BondNotLocked` refuses entry; the scorer reads it as
+        // an empty purse): unlocking is the miner's own exit, not a deficiency.
+        if locked {
+            let floor = backing::activation_floor(&ctx.accounts.config, &chain)?;
+            drop_backing_under_floor(&mut ctx.accounts.miner_state, bit, &chain, effective_balance, floor, now);
+        }
     }
     Ok(())
 }

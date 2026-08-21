@@ -779,7 +779,10 @@ class AllwaysSolanaClient:
             AccountMeta(validator, True, True),
             AccountMeta(pdas.config_pda(self.program_id), False, False),
             AccountMeta(m, False, False),
-            AccountMeta(pdas.miner_state_pda(m, self.program_id), False, False),
+            # Writable: a quorum write that lands a LOCKED bond under the hub's floor drops that hub's
+            # backing bit (the vaulted twin of apply_penalty's SOL rule). Marking it writable is harmless
+            # against a pre-upgrade program, which only reads it.
+            AccountMeta(pdas.miner_state_pda(m, self.program_id), False, True),
             # F5: this hub's reservation, read-only — a filled reservation's obligation floors a downward
             # write (an open pool alone does not). Always derivable; may be uninitialized on-chain.
             AccountMeta(pdas.reservation_pda(m, chain, self.program_id), False, False),

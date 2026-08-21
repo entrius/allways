@@ -1867,20 +1867,58 @@ fn test_tao_backed_pool_entry_reads_the_tao_purse_not_the_local_vault() {
     light_tao_purse(&mut svm, &vals, &miner, TAO_MIN_COLLATERAL_RAO);
 
     // A slash lands: the attested bond drops under the TAO floor while the miner's SOL vault is
-    // untouched. The bid must die on the TAO purse, not pass on the lamports it still holds.
+    // untouched. The quorum write itself drops the TAO bit (the vaulted twin of `apply_penalty`'s
+    // SOL rule) — an under-floor purse is deactivated, not merely unreservable — while the SOL purse
+    // keeps the miner active. The bid then dies on the inactive backing, never on the lamports.
     attest(&mut svm, &vals, &m, TAO_MIN_COLLATERAL_RAO - 1, true, 2);
+    let ms = miner_state(&svm, &m);
+    assert_eq!(ms.active_backings & BACKING_BIT_TAO, 0, "under-floor bond drops the TAO bit");
+    assert_ne!(ms.active_backings & BACKING_BIT_SOL, 0, "the SOL purse is untouched");
+    assert!(ms.active, "still active on SOL");
+    assert_eq!(ms.deactivation_at, 0, "the local withdrawal cooldown is a SOL-purse rule");
+    assert_eq!(ms.collateral, COLLATERAL, "the local vault was never consulted");
     let err = send(&mut svm, open_backed_ix(&vals[0].pubkey(), &m, HUB_FROM, HUB_TO, TAO), &vals[0].pubkey(), &vals[0])
         .unwrap_err();
     assert!(
-        err.contains("InsufficientCollateral"),
+        err.contains("MinerNotActive"),
         "a bond below tao_min_collateral must not open a pool despite {COLLATERAL} lamports of SOL, got: {err}"
     );
-    assert_eq!(miner_state(&svm, &m).collateral, COLLATERAL, "the local vault was never consulted");
 
-    // Bond restored to the floor and the same bid goes through.
+    // Bond restored to the floor: the purse is sufficient again, but re-entry is a fresh
+    // `vote_activate` — a topped-up bond does not silently re-light the bit.
     attest(&mut svm, &vals, &m, TAO_MIN_COLLATERAL_RAO, true, 3);
+    assert_eq!(miner_state(&svm, &m).active_backings & BACKING_BIT_TAO, 0, "top-up alone does not re-activate");
+    let attest_key = Some(attest_pda(&m, TAO));
+    send(&mut svm, activate_ix(&vals[0].pubkey(), &m, TAO, attest_key), &vals[0].pubkey(), &vals[0]).expect("re0");
+    send(&mut svm, activate_ix(&vals[1].pubkey(), &m, TAO, attest_key), &vals[1].pubkey(), &vals[1]).expect("re1");
+    assert_ne!(miner_state(&svm, &m).active_backings & BACKING_BIT_TAO, 0, "re-activated at the floor");
     send(&mut svm, open_backed_ix(&vals[0].pubkey(), &m, HUB_FROM, HUB_TO, TAO), &vals[0].pubkey(), &vals[0])
         .expect("tao-backed open at the floor");
+}
+
+#[test]
+fn test_an_under_floor_bond_on_the_only_purse_deactivates_the_miner() {
+    // A TAO-only miner slashed under the floor has no purse left: the attestation quorum clears the
+    // last bit and the miner reads inactive — the state the scorer rebuilds from MinerDeactivated.
+    let (mut svm, _admin, vals, miner) = setup();
+    let m = miner.pubkey();
+    light_tao_purse(&mut svm, &vals, &miner, TAO_MIN_COLLATERAL_RAO);
+    send(&mut svm, self_deactivate_ix(&m, Some(SOL)), &m, &miner).expect("drop the SOL purse");
+    let ms = miner_state(&svm, &m);
+    assert_eq!(ms.active_backings, BACKING_BIT_TAO);
+    assert!(ms.active);
+
+    attest(&mut svm, &vals, &m, TAO_MIN_COLLATERAL_RAO - 1, true, 2);
+    let ms = miner_state(&svm, &m);
+    assert_eq!(ms.active_backings, 0, "the last purse under floor clears the mask");
+    assert!(!ms.active, "no purse left → inactive");
+
+    // At-floor and above-floor writes never touch the mask.
+    let (mut svm, _admin, vals, miner) = setup();
+    let m = miner.pubkey();
+    light_tao_purse(&mut svm, &vals, &miner, TAO_MIN_COLLATERAL_RAO);
+    attest(&mut svm, &vals, &m, TAO_MIN_COLLATERAL_RAO, true, 2);
+    assert_ne!(miner_state(&svm, &m).active_backings & BACKING_BIT_TAO, 0, "at the floor is not under it");
 }
 
 #[test]
