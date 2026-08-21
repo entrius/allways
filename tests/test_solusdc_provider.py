@@ -215,6 +215,11 @@ class TestCheckConnection:
         with pytest.raises(ConnectionError, match='does not exist'):
             p.check_connection(require_send=False)
 
+    def test_unreachable_mint_probe_degrades_not_raises(self, monkeypatch):
+        # Transient probe failure must not drop the spoke for the process lifetime (Erc20 posture).
+        p = provider_with(FakeRpc(raise_conn=True), monkeypatch=monkeypatch)
+        p.check_connection(require_send=False)
+
 
 class TestVerification:
     RECIP = str(USER.pubkey())

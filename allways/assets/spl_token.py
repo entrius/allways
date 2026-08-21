@@ -180,7 +180,11 @@ class SplToken(Asset):
         try:
             account = self.rpc.get_parsed_account(mint)
         except Exception as e:
-            raise ConnectionError(f'Cannot read {self.chain_def.id} mint {mint}: {e}') from e
+            # A probe we can't COMPLETE is transient (rate-limit, flaky endpoint) — degrade, as Erc20 does; a
+            # raise here drops the spoke for the process lifetime and it then votes TIMEOUT past max_extend_at.
+            # Unlike eth_getCode, a null account for a years-old mint IS a real fault, so only this path degrades.
+            bt.logging.warning(f'{self.chain_def.id} mint probe unreachable ({e}) — degraded')
+            return
         if account is None:
             raise ConnectionError(f'{self.chain_def.id} mint {mint} does not exist on {self.chain.rpc_url}')
         if account.get('owner') != str(TOKEN_PROGRAM_ID):
