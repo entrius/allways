@@ -286,7 +286,14 @@ class SolanaSwapLoop:
             sender=swap.miner_to_addr,
         )
         if d_status == 'down':
-            return SwapAction(SwapDecision.SKIP, reason=f'dest provider unreachable (src={s_status})')
+            # Same ceiling as the no-provider branch in decide(): a leg that never becomes judgeable (RPC
+            # down, meta missing its token-balance arrays) must not defer forever or the collateral freezes.
+            if now < int(swap.max_extend_at):
+                return SwapAction(SwapDecision.SKIP, reason=f'dest provider unreachable (src={s_status})')
+            return SwapAction(
+                SwapDecision.TIMEOUT,
+                reason=f'dest provider unreachable past max_extend_at (src={s_status}) — terminal, else collateral freezes',
+            )
         if d_status == 'pending':
             # Valid-but-unconfirmed payout near timeout → extend; if extension is exhausted/not yet due,
             # fall through to the same overdue rule (at the ceiling + overdue still slashes).
