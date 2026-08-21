@@ -6,7 +6,7 @@ import bittensor as bt
 from eth_account import Account
 from eth_utils import keccak, to_checksum_address
 
-from allways.assets.asset import ProviderUnreachableError, SendResult, TransactionInfo
+from allways.assets.asset import MissingTestnetDeployment, ProviderUnreachableError, SendResult, TransactionInfo
 from allways.assets.evm import EVM_NETWORKS, FALLBACK_PRIORITY_FEE_WEI, EvmAsset, EvmChain
 from allways.chains import ChainDefinition
 from allways.constants import (
@@ -60,12 +60,6 @@ TESTNET_TOKEN_CONTRACTS = {
     # Circle-verified native USDC on Polygon Amoy (developers.circle.com, 2026-08-12).
     'polusdc': {'amoy': '0x41E94Eb019C0762f9Bfcf9Fb1E58725BfB0e7582'},
 }
-
-
-class MissingTestnetDeployment(ValueError):
-    """The token has no pinned deployment on the configured test network (issuer-deployed
-    assets like QNT/PAXG often exist on mainnet only). Distinct so create_assets can disable
-    the spoke on testnet instead of failing the whole neuron's boot."""
 
 
 def _token_contract(chain_def: ChainDefinition, network: str) -> str:

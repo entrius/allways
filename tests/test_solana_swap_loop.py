@@ -406,6 +406,14 @@ def test_provider_unreachable_skips():
     assert loop.decide(make_swap(status='Fulfilled'), now=1500).decision == SwapDecision.SKIP
 
 
+def test_provider_unreachable_past_ceiling_times_out():
+    # An unjudgeable dest leg (RPC down, or meta with no token-balance arrays) defers only up to
+    # max_extend_at — same bound as a missing provider — else the collateral never frees.
+    loop, _ = loop_with(result='unreachable')
+    swap = make_swap(status='Fulfilled', timeout_at=1000, max_extend_at=1200)
+    assert loop.decide(swap, now=1500).decision == SwapDecision.TIMEOUT
+
+
 # ─── D3: deadline extensions for valid-but-unconfirmed legs ───
 
 

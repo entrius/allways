@@ -16,7 +16,7 @@ from typing import List, NamedTuple, Optional
 
 import click
 
-from allways.chains import SUPPORTED_CHAINS, get_chain_def
+from allways.chains import SUPPORTED_CHAINS, get_chain_def, uses_solana_wallet
 from allways.cli.dendrite_lite import (
     broadcast_synapse,
     discover_validators,
@@ -396,11 +396,12 @@ def swap_now_command(
     user = client.keypair.pubkey()
     router_hotkey = (router_opt or config.get('router') or '').strip()
     routed = bool(router_hotkey) and not no_router
-    if from_chain != NUMERAIRE_CHAIN and not from_address_opt:
+    # A Solana-wallet source (SOL, or an SPL token beside it) is sent from the signer itself.
+    if not uses_solana_wallet(from_chain) and not from_address_opt:
         from_address_opt = _prompt_missing(
             None, f'Source address (your {from_chain.upper()} address you send from)', '--from-address'
         )
-    user_from_addr = str(user) if from_chain == NUMERAIRE_CHAIN else (from_address_opt or '')
+    user_from_addr = str(user) if uses_solana_wallet(from_chain) else (from_address_opt or '')
     if not user_from_addr:
         fail(f'--from-address (your source-chain address) is required for a non-{NUMERAIRE_CHAIN.upper()} source.')
     # Canonical source form before anything commits it: the finalize hash + source-lock PDA are
@@ -745,10 +746,9 @@ def _auto_send_wizard(client, config, resv, miner_pk, from_chain, to_chain, from
     amount_disp = int(resv.from_amount) / 10 ** get_chain_def(from_chain).decimals
     to_addr = resv.miner_from_addr
     wallet_label = {
-        'sol': 'Solana keypair',
         'tao': f'Bittensor coldkey ({config.get("wallet", "?")})',
         'btc': 'Bitcoin WIF wallet',
-    }.get(from_chain, f'{from_chain.upper()} wallet')
+    }.get(from_chain, 'Solana keypair' if uses_solana_wallet(from_chain) else f'{from_chain.upper()} wallet')
     console.print(f'  [dim]Source: your configured {wallet_label}[/dim]  [cyan]{resv.from_addr}[/cyan]')
     if not skip_confirm and not click.confirm(
         f'  Send {amount_disp:g} {from_chain.upper()} to the miner now?',

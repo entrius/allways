@@ -3,7 +3,7 @@ from typing import Dict, NamedTuple, Optional, Set, Tuple, Type
 import bittensor as bt
 
 from allways.assets.arbusdc import ArbUsdc
-from allways.assets.asset import Asset, SendResult, TransactionInfo
+from allways.assets.asset import Asset, MissingTestnetDeployment, SendResult, TransactionInfo
 from allways.assets.aster import Aster
 from allways.assets.avax import Avax
 from allways.assets.baseusdc import BaseUsdc
@@ -11,7 +11,7 @@ from allways.assets.bnb import Bnb
 from allways.assets.btc import Bitcoin
 from allways.assets.chain import Chain
 from allways.assets.cro import Cro
-from allways.assets.erc20 import Erc20, MissingTestnetDeployment
+from allways.assets.erc20 import Erc20
 from allways.assets.eth import Ether
 from allways.assets.ethusdc import EthUsdc
 from allways.assets.evm_coin import EvmCoin
@@ -20,7 +20,9 @@ from allways.assets.paxg import Paxg
 from allways.assets.pol import Pol
 from allways.assets.polusdc import PolUsdc
 from allways.assets.qnt import Qnt
-from allways.assets.sol import Sol
+from allways.assets.sol import Sol, SolanaChain
+from allways.assets.solusdc import SolUsdc
+from allways.assets.spl_token import SplToken
 from allways.assets.tao import Tao
 from allways.assets.uni import Uni
 
@@ -49,6 +51,9 @@ __all__ = [
     'Qnt',
     'PolUsdc',
     'Paxg',
+    'SolanaChain',
+    'SplToken',
+    'SolUsdc',
     'create_assets',
 ]
 
@@ -80,6 +85,7 @@ ASSET_REGISTRY: Tuple[AssetSpec, ...] = (
     AssetSpec('pol', Pol, ()),
     AssetSpec('polusdc', PolUsdc, ()),
     AssetSpec('paxg', Paxg, ()),
+    AssetSpec('solusdc', SolUsdc, ('solana_rpc_url', 'solana_keypair')),
 )
 
 

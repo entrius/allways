@@ -180,6 +180,12 @@ class SolanaRpc:
             return None
         return base64.b64decode(val['data'][0])
 
+    def get_parsed_account(self, pubkey, commitment: str = 'confirmed') -> Optional[dict]:
+        """The account's ``value`` under jsonParsed encoding (owner, lamports, data.parsed for SPL
+        mints/token accounts), or None when the account does not exist."""
+        res = self._call('getAccountInfo', [str(pubkey), {'encoding': 'jsonParsed', 'commitment': commitment}])
+        return res.get('value')
+
     def get_account_lamports(self, pubkey, commitment: str = 'confirmed') -> Optional[int]:
         res = self._call('getAccountInfo', [str(pubkey), {'encoding': 'base64', 'commitment': commitment}])
         val = res.get('value')
