@@ -220,6 +220,29 @@ def direction_eligible(miner_state, from_chain: str, to_chain: str, now: int, ba
     return any(hub_free(miner_state, hub, now) for hub in hubs)
 
 
+def lane_eligible_hotkeys(
+    live_states: Dict[str, object],
+    rewardable_hotkeys: Set[str],
+    from_chain: str,
+    to_chain: str,
+    now: int,
+    backing: Optional[str] = None,
+) -> Set[str]:
+    """The crown-candidate set for one lane: on-metagraph hotkeys that also pass
+    ``direction_eligible`` right now. Ineligibility (strikes, or the lane's hub
+    mid-settle) removes a miner from candidacy rather than only zeroing its payout —
+    otherwise a struck/settling miner keeps *holding* the crown, the next-best
+    eligible rate earns nothing, and the lane's pool burns for the duration. Evaluated
+    at ``now`` over the whole window (the same at-scoring-time reading the payout gate
+    uses); a hotkey with no live ``MinerState`` is not a candidate, matching the
+    payout gate's absent-hotkey → not-eligible default."""
+    return {
+        hk
+        for hk in rewardable_hotkeys
+        if hk in live_states and direction_eligible(live_states[hk], from_chain, to_chain, now, backing=backing)
+    }
+
+
 def live_miner_states(solana_client, metagraph, attribution: Optional[Dict[str, str]] = None) -> Dict[str, object]:
     """``{hotkey: MinerState}`` for bound, on-metagraph miners — one chain read shared by
     the eligibility gate and the live-state reconcile. Each pubkey-keyed ``MinerState`` is
@@ -496,6 +519,10 @@ def calculate_miner_rewards(self: Validator, current_time: int) -> Tuple[np.ndar
             intervals = []
             intervals_by_dir[(from_chain, to_chain, backing)] = intervals
         min_swap_hub, max_swap_hub = swap_bounds.get(backing, (0, 0))
+        # Ineligible miners are not crown candidates on this lane (see lane_eligible_hotkeys).
+        lane_candidates = lane_eligible_hotkeys(
+            live_states, rewardable_hotkeys, from_chain, to_chain, current_time, backing=backing
+        )
         crown_time = replay_crown_time_window(
             store=self.state_store,
             event_index=self.event_index,
@@ -503,7 +530,7 @@ def calculate_miner_rewards(self: Validator, current_time: int) -> Tuple[np.ndar
             to_chain=to_chain,
             window_start=window_start,
             window_end=window_end,
-            rewardable_hotkeys=rewardable_hotkeys,
+            rewardable_hotkeys=lane_candidates,
             trace=trace,
             intervals_out=intervals,
             min_swap_hub=min_swap_hub,
@@ -606,7 +633,9 @@ def miner_score_tuples(score_rows: List[ScoreRow], ts: int) -> List[Tuple]:
     ]
 
 
-def snapshot_current_miner_scores(self: Validator, at_time: Optional[int] = None) -> List[Tuple]:
+def snapshot_current_miner_scores(
+    self: Validator, at_time: Optional[int] = None, live_states: Optional[Dict[str, object]] = None
+) -> List[Tuple]:
     """Mid-round live tip: the factors each crown holder would be paid on if
     the in-progress round [last_scored_time, now] flushed right now — the same
     replay + ``build_direction_score_rows`` math ``calculate_miner_rewards``
@@ -620,7 +649,8 @@ def snapshot_current_miner_scores(self: Validator, at_time: Optional[int] = None
     ts = int(time.time()) if at_time is None else at_time
     window_start, window_end = scoring_window_bounds(ts, self.last_scored_time)
     rewardable_hotkeys: Set[str] = set(self.metagraph.hotkeys)
-    live_states = live_miner_states(self.solana_client, self.metagraph)
+    if live_states is None:
+        live_states = live_miner_states(self.solana_client, self.metagraph)
     try:
         swap_bounds = bounds_from_config(self.solana_config_cache.config())
     except Exception as e:
@@ -631,6 +661,9 @@ def snapshot_current_miner_scores(self: Validator, at_time: Optional[int] = None
     for (from_chain, to_chain, backing), pool in pools.items():
         trace = DirectionTrace(pool=pool)
         min_swap_hub, max_swap_hub = swap_bounds.get(backing, (0, 0))
+        lane_candidates = lane_eligible_hotkeys(
+            live_states, rewardable_hotkeys, from_chain, to_chain, ts, backing=backing
+        )
         crown_time = replay_crown_time_window(
             store=self.state_store,
             event_index=self.event_index,
@@ -638,7 +671,7 @@ def snapshot_current_miner_scores(self: Validator, at_time: Optional[int] = None
             to_chain=to_chain,
             window_start=window_start,
             window_end=window_end,
-            rewardable_hotkeys=rewardable_hotkeys,
+            rewardable_hotkeys=lane_candidates,
             trace=trace,
             min_swap_hub=min_swap_hub,
             max_swap_hub=max_swap_hub,
@@ -1044,6 +1077,7 @@ def replay_crown_time_window(
 def snapshot_current_crown_holders(
     self: Validator,
     at_time: Optional[int] = None,
+    live_states: Optional[Dict[str, object]] = None,
 ) -> Dict[Tuple[str, str, str], List[Tuple[str, str, str, str, float, float, int]]]:
     """Cheap "who holds the crown right now" per lane. Used by the
     per-forward-step live-crown writer.
@@ -1057,6 +1091,11 @@ def snapshot_current_crown_holders(
     means "no qualifying holder right now" — instructs the storage layer
     to clear that lane's rows.
 
+    ``live_states`` (``live_miner_states``) gates candidacy per lane through
+    ``lane_eligible_hotkeys`` so the live table never names a holder the round
+    scorer would drop as ineligible. Pass the per-step snapshot in from the forward
+    loop (shared with the live score tip); None reads it here.
+
     Halt is not checked here — that RPC is expensive and halt is rare;
     instead ``_flush_halt_window`` clears the live table at the next
     scoring round when a halt is detected. Worst case the live table
@@ -1067,6 +1106,8 @@ def snapshot_current_crown_holders(
     # (blockTime) axis the event tables use. Tests pass an explicit instant.
     ts = int(time.time()) if at_time is None else at_time
     rewardable_hotkeys: Set[str] = set(self.metagraph.hotkeys)
+    if live_states is None:
+        live_states = live_miner_states(self.solana_client, self.metagraph)
     # Match the scoring path's executability filter so the live table never
     # credits an out-of-bounds-rate holder the ledger drops. Bounds from the
     # TTL cache (no per-step RPC); empty map on failure = permissive, as before.
@@ -1081,18 +1122,21 @@ def snapshot_current_crown_holders(
             min_swap_hub, max_swap_hub = swap_bounds.get(backing, (0, 0))
             bounds_set = min_swap_hub > 0 or max_swap_hub > 0
             purse_known = direction_purse_known(backing)
+            lane_candidates = lane_eligible_hotkeys(
+                live_states, rewardable_hotkeys, from_chain, to_chain, ts, backing=backing
+            )
             rates, activity, active_set, collaterals = reconstruct_window_start_state(
                 self.state_store,
                 self.event_index,
                 from_chain,
                 to_chain,
                 ts,
-                rewardable_hotkeys,
+                lane_candidates,
                 backing,
             )
             canon_from, _ = canonical_pair(from_chain, to_chain)
             lower_rate_wins = from_chain != canon_from
-            rewardable_by_state = rewardable_by_activity(activity, rewardable_hotkeys, lane_serving_hubs(backing))
+            rewardable_by_state = rewardable_by_activity(activity, lane_candidates, lane_serving_hubs(backing))
 
             # Same predicates the scoring replay uses, so the live table never
             # credits a holder the ledger drops. Built per lane so each
@@ -1103,7 +1147,7 @@ def snapshot_current_crown_holders(
 
             holders = crown_holders_at_instant(
                 rates,
-                rewardable_hotkeys,
+                lane_candidates,
                 rewardable_by_state=rewardable_by_state,
                 active=active_set,
                 lower_rate_wins=lower_rate_wins,
