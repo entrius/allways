@@ -27,6 +27,20 @@ def resolve_rpc_url(explicit: Optional[str] = None) -> str:
     return url
 
 
+def resolve_ws_url(rpc_url: str, explicit: Optional[str] = None) -> str:
+    """The WebSocket twin of an RPC endpoint: ``explicit`` (or ``SOLANA_WS_URL``) if set, else the RPC URL
+    with its scheme swapped (https→wss, http→ws). Host + query survive, so a keyed Helius HTTP URL derives
+    its matching keyed wss endpoint — the same rule the dashboard indexer uses."""
+    override = explicit or os.environ.get('SOLANA_WS_URL')
+    if override:
+        return override
+    if rpc_url.startswith('https://'):
+        return 'wss://' + rpc_url[len('https://') :]
+    if rpc_url.startswith('http://'):
+        return 'ws://' + rpc_url[len('http://') :]
+    return rpc_url
+
+
 # A Solana cluster is identified by its immutable genesis hash, not its RPC URL: a real paid
 # mainnet endpoint (Helius/QuickNode subdomain, bare IP, ?api-key= URL) rarely contains the
 # literal string "mainnet", so a substring check misses exactly the dangerous case. These three

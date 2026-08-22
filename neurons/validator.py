@@ -36,7 +36,8 @@ from allways.constants import (  # noqa: E402
 from allways.solana import keys  # noqa: E402
 from allways.solana.client import AllwaysSolanaClient  # noqa: E402
 from allways.solana.events import SolanaEventIngest  # noqa: E402
-from allways.solana.rpc import assert_cluster_safe, resolve_rpc_url  # noqa: E402
+from allways.solana.program_feed import ProgramEventFeed  # noqa: E402
+from allways.solana.rpc import assert_cluster_safe, resolve_rpc_url, resolve_ws_url  # noqa: E402
 from allways.validator.axon_handlers import (  # noqa: E402
     blacklist_miner_activate,
     blacklist_swap_confirm,
@@ -54,6 +55,7 @@ from allways.validator.event_index import SolanaEventIndex  # noqa: E402
 from allways.validator.floor_sweep import CollateralFloorSweep  # noqa: E402
 from allways.validator.forward import forward  # noqa: E402
 from allways.validator.relay.wiring import build_bond_relay  # noqa: E402
+from allways.validator.reserve_engine import CrankScheduler  # noqa: E402
 from allways.validator.seam_http import maybe_start_seam  # noqa: E402
 from allways.validator.solana_swap_loop import SolanaSwapLoop  # noqa: E402
 from allways.validator.state_store import ValidatorStateStore  # noqa: E402
@@ -189,6 +191,11 @@ class Validator(BaseValidatorNeuron):
         # handler, and running it unlocked would race the locked reads' recv (#456).
         self.axon_lock = threading.RLock()
         self.crank_lock = threading.Lock()  # forward step vs scheduled crank
+        # Routed pools are cranked off the program's pushed events (PoolDrawArmed/PoolResolved over the
+        # RPC's wss twin) the moment each stage lands; the forward step's crank stays the backstop.
+        self.program_feed = ProgramEventFeed(resolve_ws_url(solana_rpc_url), self.solana_client.program_id)
+        self.crank_scheduler = CrankScheduler(self, self.program_feed)
+        self.program_feed.start()
         self.axon_subtensor = bt.Subtensor(config=self.config)
         axon_assets = create_assets(subtensor=bt.Subtensor(config=self.config), solana_rpc_url=solana_rpc_url)
         self.axon_assets = {chain: provider for chain, provider in axon_assets.items() if chain in self.assets}
