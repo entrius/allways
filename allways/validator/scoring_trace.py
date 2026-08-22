@@ -57,6 +57,7 @@ def log_scoring_trace(
     recycled: float,
     weighting_traces: Optional[Dict[str, 'WeightingTrace']] = None,
     swap_bounds: Optional[Dict[str, Tuple[int, int]]] = None,
+    live_rates: Optional[Dict[Tuple[str, str, str, str], float]] = None,
 ) -> None:
     hotkeys = self.metagraph.hotkeys
     recycle_uid = RECYCLE_UID if RECYCLE_UID < len(rewards) else 0
@@ -113,6 +114,7 @@ def log_scoring_trace(
             collaterals,
             swap_bounds,
             covered=crown_holders,
+            live_rates=live_rates,
         )
     )
 
@@ -139,6 +141,7 @@ def non_earner_lines(
     collaterals: Optional[Dict[str, int]] = None,
     swap_bounds: Optional[Dict[str, Tuple[int, int]]] = None,
     covered: Optional[Set[str]] = None,
+    live_rates: Optional[Dict[Tuple[str, str, str, str], float]] = None,
 ) -> List[str]:
     collaterals = collaterals or {}
     covered = covered or set()
@@ -147,8 +150,10 @@ def non_earner_lines(
         if e['active']:
             ever_active.add(e['hotkey'])
 
+    # Live on-chain quotes (the round's reconcile read), collapsed across backings:
+    # the diagnosis anchors on the pair's hub leg, so one rate per pair is enough.
     rates_by_hotkey: Dict[str, Dict[Tuple[str, str], float]] = {}
-    for (hk, from_c, to_c), r in (getattr(self, 'last_known_rates', {}) or {}).items():
+    for (hk, from_c, to_c, _backing), r in (live_rates or {}).items():
         if r > 0:
             rates_by_hotkey.setdefault(hk, {})[(from_c, to_c)] = r
 
@@ -195,7 +200,7 @@ def diagnose_non_earner(
 
     outbid_parts: List[str] = []
     for (from_c, to_c), own in latest_rates.items():
-        # last_known_rates carries no backing, so diagnose against the pair's hub-leg
+        # latest_rates carries no backing, so diagnose against the pair's hub-leg
         # lane (its pricing anchor); the plain pair key keeps direct callers working.
         trace = direction_traces.get((from_c, to_c, hub_leg(from_c, to_c))) or direction_traces.get((from_c, to_c))
         if trace is None or trace.best_rate <= 0:

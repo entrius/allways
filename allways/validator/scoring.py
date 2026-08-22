@@ -478,8 +478,10 @@ def calculate_miner_rewards(self: Validator, current_time: int) -> Tuple[np.ndar
     # Rate-liveness backstop: a lost QuoteRemoved would otherwise freeze a lane's crown
     # credit forever (the prune keeps the last rate as the lane's anchor). Best-effort —
     # the reconcile is a safety net, so a failed quote read never sinks the round.
+    live_rates: Dict[Tuple[str, str, str, str], float] = {}
     try:
-        self.event_index.reconcile_live_quotes(live_quote_rates(self.solana_client, attribution), now=current_time)
+        live_rates = live_quote_rates(self.solana_client, attribution)
+        self.event_index.reconcile_live_quotes(live_rates, now=current_time)
     except Exception as e:
         bt.logging.warning(f'quote reconcile failed, skipping this round: {e}')
     # The global (strike) view feeds the trace log; rows gate per lane so a TAO settle zeroes
@@ -587,6 +589,7 @@ def calculate_miner_rewards(self: Validator, current_time: int) -> Tuple[np.ndar
         recycled=recycled,
         weighting_traces=weighting_traces,
         swap_bounds=swap_bounds,
+        live_rates=live_rates,
     )
 
     if storage_enabled:
