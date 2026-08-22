@@ -17,6 +17,7 @@ from allways.validator.relay.wiring import ensure_bond_relay
 from allways.validator.reserve_engine import finalize_won_seats
 from allways.validator.scoring import (
     due_for_scoring,
+    live_miner_states,
     score_and_reward_miners,
     snapshot_current_crown_holders,
     snapshot_current_miner_scores,
@@ -87,7 +88,11 @@ async def forward(self: Validator) -> None:
     # never propagates into the forward loop. Reads "now" on the unix-time axis,
     # matching the scoring window. No halt check here (that RPC is the expensive
     # one); halt-aware clearing happens once per round in `_flush_halt_window`.
-    crown_snapshot = snapshot_current_crown_holders(self)
+    # One MinerState read per step, shared by the crown snapshot and the score tip:
+    # eligibility now gates crown CANDIDACY (lane_eligible_hotkeys), so the live
+    # crown needs the same strike/settle view the round scorer applies.
+    live_states = live_miner_states(self.solana_client, self.metagraph)
+    crown_snapshot = snapshot_current_crown_holders(self, live_states=live_states)
     log_crown_winners(self.metagraph, self.block, crown_snapshot)
     dev_signal.emit('crown_snapshot', holders={f'{k[0]}-{k[1]}-{k[2]}': v for k, v in crown_snapshot.items()})
     if self.database_storage.is_enabled():
@@ -99,7 +104,9 @@ async def forward(self: Validator) -> None:
         # if the in-progress round flushed now. Same storage gate/cadence as
         # the crown snapshot; computed only when someone is reading (DB on).
         try:
-            self.database_storage.replace_current_miner_scores(snapshot_current_miner_scores(self))
+            self.database_storage.replace_current_miner_scores(
+                snapshot_current_miner_scores(self, live_states=live_states)
+            )
         except Exception as e:
             bt.logging.warning(f'current_miner_scores snapshot failed: {e}')
 

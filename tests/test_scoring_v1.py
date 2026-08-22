@@ -2655,9 +2655,10 @@ class TestScoreSnapshots:
         np.testing.assert_allclose(reward, expected, atol=1e-9)
         np.testing.assert_allclose(reward, rewards[0], atol=1e-6)
 
-    def test_ineligible_holder_persists_factors_with_zero_reward(self, tmp_path: Path):
-        """The gate zeroes the reward but the factors are still recorded — the
-        dashboard can show WHY the eligible=false round paid nothing."""
+    def test_ineligible_miner_is_not_a_crown_candidate(self, tmp_path: Path):
+        """An ineligible miner (strikes / hub mid-settle) is removed from crown
+        CANDIDACY, not merely zeroed at payout: a lane whose only poster is
+        ineligible has no holder, no score row, and the pool recycles."""
         hotkeys = pad_hotkeys_to_cover_recycle(['hk_a'])
         v = make_validator(tmp_path, hotkeys, all_eligible=False)
         v.database_storage.is_enabled.return_value = True
@@ -2669,13 +2670,44 @@ class TestScoreSnapshots:
         conn.commit()
         rewards, _ = calculate_miner_rewards(v, v.block)
         rows = v.database_storage.flush_scoring_window.call_args.kwargs['miner_score_rows']
-        assert len(rows) == 1
-        (_ts, _hk, _from_c, _to_c, _backing, eligible, pool, crown_share, _cap, reward) = rows[0]
-        assert eligible is False
-        np.testing.assert_allclose(crown_share, 1.0)  # crown_share still recorded
-        assert pool > 0.0  # the pool the round would have paid on is recorded too
-        assert reward == 0.0
+        assert rows == []
         assert rewards[0] == 0.0
+        # The live crown table agrees: nobody holds the lane.
+        assert snapshot_current_crown_holders(v, v.block)[('btc', 'sol', 'sol')] == []
+        v.state_store.close()
+
+    def test_ineligible_best_rate_falls_through_to_eligible_runner_up(self, tmp_path: Path):
+        """The struck miner posts the best rate; the crown — and the whole lane
+        payout — goes to the next-best ELIGIBLE rate instead of burning, and the
+        live crown snapshot names the same holder the round scorer pays."""
+        hotkeys = pad_hotkeys_to_cover_recycle(['hk_struck', 'hk_ok'])
+        v = make_validator(
+            tmp_path,
+            hotkeys,
+            miner_counters={
+                'hk_struck': (MIN_SUCCESSFUL_SWAPS, MAX_FAILED_SWAPS + 1),
+                'hk_ok': (MIN_SUCCESSFUL_SWAPS, 0),
+            },
+        )
+        v.database_storage.is_enabled.return_value = True
+        conn = v.state_store.require_connection()
+        # btc→sol reads the canonical BTC-per-SOL rate, lower is better: the struck miner undercuts.
+        conn.executemany(
+            'INSERT INTO rate_events (hotkey, from_chain, to_chain, rate, block) VALUES (?, ?, ?, ?, ?)',
+            [('hk_struck', 'btc', 'sol', 0.00015, 0), ('hk_ok', 'btc', 'sol', 0.00020, 0)],
+        )
+        conn.commit()
+        rewards, _ = calculate_miner_rewards(v, v.block)
+        rows = [r for r in v.database_storage.flush_scoring_window.call_args.kwargs['miner_score_rows']]
+        lane_rows = [r for r in rows if (r[2], r[3]) == ('btc', 'sol')]
+        assert [r[1] for r in lane_rows] == ['hk_ok']
+        (_ts, _hk, _f, _t, _b, eligible, pool, crown_share, _cap, reward) = lane_rows[0]
+        assert eligible is True
+        np.testing.assert_allclose(crown_share, 1.0)
+        assert reward > 0.0
+        assert rewards[1] > 0.0 and rewards[0] == 0.0
+        holders = [row[3] for row in snapshot_current_crown_holders(v, v.block)[('btc', 'sol', 'sol')]]
+        assert holders == ['hk_ok']
         v.state_store.close()
 
     def test_live_tip_equals_round_rows_for_same_window(self, tmp_path: Path):
