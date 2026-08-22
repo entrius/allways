@@ -15,5 +15,11 @@ services:
       # ./data/solana/id.json and fund it; ro so a missing file errors loudly at startup
       # instead of load_or_create silently minting a throwaway key.
       - ./data/solana:/root/.solana:ro
+    # Keep at most 4 x 3 MB of logs per container (3 rotated + the live file): a hard 12 MB cap.
+    logging:
+      driver: json-file
+      options:
+        max-size: "3m"
+        max-file: "4"
     labels:
       - "com.centurylinklabs.watchtower.enable=true"

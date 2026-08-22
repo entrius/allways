@@ -18,6 +18,12 @@ services:
     # (requires STORE_DB_RESULTS=true and DB_* vars in .env)
     # networks:
     #   - allways_network
+    # Keep at most 4 x 3 MB of logs per container (3 rotated + the live file): a hard 12 MB cap.
+    logging:
+      driver: json-file
+      options:
+        max-size: "3m"
+        max-file: "4"
     labels:
       - "com.centurylinklabs.watchtower.enable=true"
 
