@@ -7,9 +7,6 @@ if [ -z "$SUBTENSOR_NETWORK" ]; then echo "SUBTENSOR_NETWORK is not set" && exit
 if [ -z "$PORT" ]; then echo "PORT is not set" && exit 1; fi
 if [ -z "$LOG_LEVEL" ]; then echo "LOG_LEVEL is not set" && exit 1; fi
 
-# bittensor opens the rotating log file without creating its directory.
-mkdir -p /root/.allways/logs
-
 exec python neurons/validator.py \
   --netuid ${NETUID} \
   --wallet.name ${WALLET_NAME} \
@@ -17,5 +14,5 @@ exec python neurons/validator.py \
   --subtensor.network ${SUBTENSOR_NETWORK} \
   --axon.port ${PORT} \
   --logging.${LOG_LEVEL} \
-  --logging.record_log --logging.logging_dir /root/.allways/logs \
+  --logging.record_log --logging.logging_dir /root/.allways \
   "$@"
