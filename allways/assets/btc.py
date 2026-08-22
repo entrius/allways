@@ -160,6 +160,9 @@ class Bitcoin(Asset, Chain):
     """
 
     def __init__(self):
+        # Tip-gated verify cache: pending legs only, dropped whenever the tip moves (see api_verify_transaction).
+        self._verify_cache: dict[tuple[str, str, int], TransactionInfo] = {}
+        self._verify_cache_tip: Optional[int] = None
         # Local-node mode was removed; warn (don't fail) if a stale BTC_MODE=node lingers.
         legacy_mode = os.environ.get('BTC_MODE', '').lower()
         if legacy_mode and legacy_mode != 'lightweight':
@@ -288,7 +291,29 @@ class Bitcoin(Asset, Chain):
     def api_verify_transaction(
         self, tx_hash: str, expected_recipient: str, expected_amount: int
     ) -> Optional[TransactionInfo]:
-        """Verify via Esplora API; raises ProviderUnreachableError if unreachable."""
+        """Verify via Esplora API; raises ProviderUnreachableError if unreachable.
+
+        Tip-gated: a ``pending`` (seen, under min_confirmations) result is reused until the chain tip
+        moves, since mempool→mined and every extra confirmation need a new block. Absent (None) and
+        confirmed results are never cached — a payout can enter the mempool without a tip change, and a
+        confirm must always re-run the live reorg check — so every slash and confirm path fetches live."""
+        key = (tx_hash, expected_recipient, expected_amount)
+        tip = self.chain.cached_block_height()
+        if tip is not None and tip != self._verify_cache_tip:
+            self._verify_cache.clear()
+            self._verify_cache_tip = tip
+        cached = self._verify_cache.get(key) if tip is not None else None
+        if cached is not None:
+            bt.logging.debug(f'{LOG_ESPLORA} tx {tx_hash[:16]}... pending @tip {tip} (cached, no refetch)')
+            return cached
+        info = self._fetch_verify_transaction(tx_hash, expected_recipient, expected_amount)
+        if info is not None and not info.confirmed and tip is not None:
+            self._verify_cache[key] = info
+        return info
+
+    def _fetch_verify_transaction(
+        self, tx_hash: str, expected_recipient: str, expected_amount: int
+    ) -> Optional[TransactionInfo]:
         try:
             resp = self.btc_api_get(f'/tx/{tx_hash}', timeout=15)
             if resp.status_code == 404:
