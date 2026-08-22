@@ -239,11 +239,9 @@ def reserve_on_behalf(
 
 
 CRANK_SKEW_SECS = 2  # the chain clock can trail wall time; fire a touch after the window shuts
-CRANK_RETRY_SECS = 3
-CRANK_RETRIES = 4
 SLOT_SECS = 0.4  # nominal slot time; the draw waits for the armed seed slot to be produced
 DRAW_SKEW_SECS = 0.5
-DRAW_RETRY_SECS = 1
+DRAW_RETRY_SECS = 1  # one extra crank if the seed slot hadn't been produced by the nominal time
 # Staleness backstop for queued routed requests: pool window + finalize window + generous slack.
 # A queue whose reservation never materializes (miner never drawn, RPC blind spot) dies here.
 ROUTED_REQUEST_TTL_SECS = 900
@@ -262,120 +260,63 @@ def _timer(delay: float, fn, *args) -> threading.Timer:
     return timer
 
 
-# Per crank stage: the tracked pool state it keeps retrying in, and its (interval, max retries).
-_STAGE_WAITS_ON = {'arm': 'arm', 'draw': 'armed', 'finalize': 'resolved'}
-_STAGE_RETRY = {
-    'arm': (CRANK_RETRY_SECS, CRANK_RETRIES),
-    'draw': (DRAW_RETRY_SECS, CRANK_RETRIES * 3),
-    'finalize': (CRANK_RETRY_SECS, CRANK_RETRIES),
-}
-
-
 class CrankScheduler:
-    """Drives each routed pool from close to settled seat off the program's pushed events: close → arm the
-    draw; `PoolDrawArmed` → draw the moment its seed slot is produced; `PoolResolved` → finalize at once
-    (whoever resolved it). Only pools we reserved on are tracked. Without a connected feed every stage
-    degrades to a brief polling retry; the forward step's crank remains the backstop either way."""
+    """Cranks each routed pool we reserved on exactly when its next stage is due, off the program's pushed
+    events: close → arm the draw; `PoolDrawArmed` → draw once its seed slot is produced; `PoolResolved` →
+    finalize at once, whoever resolved it. Missed events (socket down) are covered by the forward step's
+    crank, which runs the same `crank()` every step."""
 
-    def __init__(self, validator, feed=None) -> None:
+    def __init__(self, validator, feed) -> None:
         self.validator = validator
-        self.feed = feed
         self._lock = threading.Lock()
-        self._pools: dict = {}  # miner → {'stage': arm|armed|resolved, 'deadline': unix}
-        if feed is not None:
-            feed.on('PoolDrawArmed', self._on_armed)
-            feed.on('PoolResolved', self._on_resolved)
-
-    @property
-    def live(self) -> bool:
-        return self.feed is not None and self.feed.connected
+        self._pools: dict = {}  # miner → tracking deadline (unix)
+        feed.on('PoolDrawArmed', self._on_armed)
+        feed.on('PoolResolved', self._on_resolved)
 
     def schedule(self, miner, closes_at: int) -> threading.Timer:
-        miner = str(miner)
         with self._lock:
-            self._pools[miner] = {'stage': 'arm', 'deadline': int(time.time()) + ROUTED_REQUEST_TTL_SECS}
-        return _timer(closes_at - time.time() + CRANK_SKEW_SECS, self._fire, miner, 'arm', 0)
+            self._pools[str(miner)] = int(time.time()) + ROUTED_REQUEST_TTL_SECS
+        return _timer(closes_at - time.time() + CRANK_SKEW_SECS, self._crank, 'arm')
 
-    # ── feed handlers (feed thread: record + hand off, no RPC here) ───────────
-
-    def _advance(self, miner: str, stage: str) -> bool:
-        """Move a tracked pool to `stage`; False (ignored) for pools we never reserved on or that expired."""
+    def _tracked(self, miner) -> bool:
         with self._lock:
-            entry = self._pools.get(miner)
-            if entry is None:
+            deadline = self._pools.get(str(miner))
+            if deadline is not None and deadline < time.time():
+                del self._pools[str(miner)]
                 return False
-            if entry['deadline'] < time.time():
-                del self._pools[miner]
-                return False
-            entry['stage'] = stage
-            return True
+            return deadline is not None
 
+    # Feed handlers run on the feed thread: record, then hand the RPC work to a timer thread.
     def _on_armed(self, _name: str, ev) -> None:
-        miner = str(ev.miner)
-        if self._advance(miner, 'armed'):
-            _timer(0, self._schedule_draw, miner, int(ev.seed_slot))
+        if self._tracked(ev.miner):
+            _timer(0, self._schedule_draw, int(ev.seed_slot))
 
     def _on_resolved(self, _name: str, ev) -> None:
-        miner = str(ev.miner)
-        if self._advance(miner, 'resolved'):
-            _timer(0, self._fire, miner, 'finalize', 0)
+        if self._tracked(ev.miner):
+            with self._lock:
+                self._pools.pop(str(ev.miner), None)
+            _timer(0, self._crank, 'finalize')
 
-    def _schedule_draw(self, miner: str, seed_slot: int) -> None:
+    def _schedule_draw(self, seed_slot: int) -> None:
         try:
             behind = seed_slot - self.validator.solana_client.rpc.get_slot()
         except Exception as e:
-            bt.logging.warning(f'pool {miner}: slot read failed ({e}); drawing on retry cadence')
+            bt.logging.warning(f'crank: slot read failed ({e}); drawing now')
             behind = 0
-        _timer(behind * SLOT_SECS + DRAW_SKEW_SECS, self._fire, miner, 'draw', 0)
+        _timer(behind * SLOT_SECS + DRAW_SKEW_SECS, self._crank, 'draw')
+        _timer(behind * SLOT_SECS + DRAW_SKEW_SECS + DRAW_RETRY_SECS, self._crank, 'draw-retry')
 
-    # ── the crank itself (timer threads) ──────────────────────────────────────
-
-    def _stage(self, miner: str) -> Optional[str]:
-        with self._lock:
-            entry = self._pools.get(miner)
-            return entry['stage'] if entry else None
-
-    def _settled(self, miner: str) -> bool:
-        """The seat is done with: finalized, or the queue was dropped (lost / lapsed), so nothing is pending."""
-        try:
-            return all(m != miner for m, _, _, _ in self.validator.state_store.distinct_routed_pools())
-        except Exception:
-            return False
-
-    def _handed_off(self, miner: str, stage: str) -> bool:
-        """Live feed: the chain's event already moved this pool past `stage`, so its next stage owns it."""
-        return self.live and self._stage(miner) != _STAGE_WAITS_ON[stage]
-
-    def _fire(self, miner: str, stage: str, attempt: int) -> None:
-        if attempt and self._handed_off(miner, stage):
-            return  # a retry queued before the event landed — nothing left for this stage to do
-        finalized: list = []
+    def _crank(self, stage: str) -> None:
         try:
             resolved, finalized = crank(self.validator, int(time.time()))
-            bt.logging.info(
-                f'crank[{stage}#{attempt}] {miner[:8]}: {len(resolved)} pool(s) resolved, '
-                f'{len(finalized)} seat(s) finalized'
-            )
+            bt.logging.info(f'crank[{stage}]: {len(resolved)} pool(s) resolved, {len(finalized)} seat(s) finalized')
         except Exception as e:
-            bt.logging.warning(f'crank[{stage}#{attempt}] {miner[:8]} failed: {e}')
-        if miner in finalized or self._settled(miner):
-            with self._lock:
-                self._pools.pop(miner, None)
-            return
-        # Polling fallback (no feed): retry on cadence until the seat settles.
-        if self._handed_off(miner, stage):
-            return
-        retry, cap = _STAGE_RETRY[stage]
-        if attempt < cap:
-            _timer(retry, self._fire, miner, stage, attempt + 1)
+            bt.logging.warning(f'crank[{stage}] failed: {e}')
 
 
-def schedule_crank(validator, closes_at: int, miner=None) -> threading.Timer:
-    """Crank this pool from its close to a settled seat (see CrankScheduler); the forward step backstops."""
-    scheduler = getattr(validator, 'crank_scheduler', None)
-    if scheduler is None:
-        scheduler = validator.crank_scheduler = CrankScheduler(validator)
-    return scheduler.schedule(miner, closes_at)
+def schedule_crank(validator, closes_at: int, miner) -> threading.Timer:
+    """Crank this pool at each stage as the chain reaches it (see CrankScheduler)."""
+    return validator.crank_scheduler.schedule(miner, closes_at)
 
 
 def draw_pool_winner(requests: list) -> dict:

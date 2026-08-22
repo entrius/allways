@@ -89,7 +89,12 @@ class FakeClient:
 
 def _validator(client):
     store = ValidatorStateStore(db_path=Path(tempfile.mkdtemp()) / 'state.db')
-    return SimpleNamespace(solana_client=client, axon_lock=threading.RLock(), state_store=store)
+    scheduler = SimpleNamespace(
+        scheduled=[], schedule=lambda miner, closes_at: scheduler.scheduled.append((miner, closes_at))
+    )
+    return SimpleNamespace(
+        solana_client=client, axon_lock=threading.RLock(), state_store=store, crank_scheduler=scheduler
+    )
 
 
 def _reserve(client, from_amount=1_000_000_000):
@@ -984,8 +989,7 @@ class _Loop:
 class _FakeFeed:
     """Stands in for ProgramEventFeed: records handlers, lets a test push decoded events."""
 
-    def __init__(self, connected=True):
-        self.connected = connected
+    def __init__(self):
         self.handlers = {}
 
     def on(self, name, handler):
@@ -1002,60 +1006,50 @@ def _wait(cond, secs=2.0):
     return cond()
 
 
-def test_schedule_crank_without_a_feed_retries_until_the_seat_settles(monkeypatch):
-    import allways.validator.reserve_engine as engine
-
-    monkeypatch.setattr(engine, 'CRANK_SKEW_SECS', 0)
-    monkeypatch.setitem(engine._STAGE_RETRY, 'arm', (0.05, 4))
-    calls = []
+def _crank_validator(calls):
     lock = threading.Lock()
+    return SimpleNamespace(
+        solana_swap_loop=_Loop(lock, calls),
+        crank_lock=lock,
+        solana_client=SimpleNamespace(rpc=SimpleNamespace(get_slot=lambda: 100)),
+    )
 
-    def fake_finalize(validator, now):
-        assert lock.locked()
-        calls.append('finalize')
-        return [str(MINER_PK)] if calls.count('finalize') == 2 else []
 
-    monkeypatch.setattr(engine, 'finalize_won_seats', fake_finalize)
-    validator = SimpleNamespace(solana_swap_loop=_Loop(lock, calls), crank_lock=lock)
-    engine.schedule_crank(validator, int(time.time()), MINER_PK)
-    assert _wait(lambda: calls.count('finalize') >= 2)
-    time.sleep(0.2)
-    assert calls == ['resolve', 'finalize'] * 2
-    assert validator.crank_scheduler._pools == {}
+def _crank_crank_validator(calls):
+    lock = threading.Lock()
+    return SimpleNamespace(
+        solana_swap_loop=_Loop(lock, calls),
+        crank_lock=lock,
+        solana_client=SimpleNamespace(rpc=SimpleNamespace(get_slot=lambda: 100)),
+    )
 
 
 def test_feed_events_drive_arm_draw_finalize(monkeypatch):
-    """With the feed live: one crank at close (arm), one at the seed slot (draw), one on PoolResolved
-    (finalize) — no blind retries in between because each event hands off to the next stage."""
+    """One crank at close (arm), one at the seed slot (+ one retry), one on PoolResolved (finalize)."""
     import allways.validator.reserve_engine as engine
 
     monkeypatch.setattr(engine, 'CRANK_SKEW_SECS', 0)
     monkeypatch.setattr(engine, 'SLOT_SECS', 0.01)
     monkeypatch.setattr(engine, 'DRAW_SKEW_SECS', 0)
-    monkeypatch.setitem(engine._STAGE_RETRY, 'arm', (0.2, 4))
-    monkeypatch.setitem(engine._STAGE_RETRY, 'draw', (0.2, 0))  # single-shot draw keeps the count exact
-    calls, finalized = [], []
-    lock = threading.Lock()
-    monkeypatch.setattr(engine, 'finalize_won_seats', lambda v, now: (calls.append('finalize'), list(finalized))[1])
+    monkeypatch.setattr(engine, 'DRAW_RETRY_SECS', 0.05)
+    calls = []
+    monkeypatch.setattr(engine, 'finalize_won_seats', lambda v, now: (calls.append('finalize'), [])[1])
     feed = _FakeFeed()
-    validator = SimpleNamespace(
-        solana_swap_loop=_Loop(lock, calls),
-        crank_lock=lock,
-        solana_client=SimpleNamespace(rpc=SimpleNamespace(get_slot=lambda: 100)),
-        state_store=SimpleNamespace(distinct_routed_pools=lambda: [(str(MINER_PK), 'sol', 'btc', 'sol')]),
-    )
+    validator = _crank_validator(calls)
     scheduler = engine.CrankScheduler(validator, feed)
     assert set(feed.handlers) == {'PoolDrawArmed', 'PoolResolved'}
 
     scheduler.schedule(MINER_PK, int(time.time()))
-    assert _wait(lambda: calls.count('resolve') >= 1)
-    feed.push('PoolDrawArmed', miner=MINER_PK, seed_slot=110, collateral_chain='sol')  # arm landed → stop arm retries
-    assert _wait(lambda: calls.count('resolve') >= 2)  # the draw, ~10 slots later
-    finalized.append(str(MINER_PK))
+    assert _wait(lambda: calls.count('resolve') == 1)
+    time.sleep(0.2)
+    assert calls.count('resolve') == 1, 'no blind retries after the arm'
+    feed.push('PoolDrawArmed', miner=MINER_PK, seed_slot=110, collateral_chain='sol')
+    assert _wait(lambda: calls.count('resolve') == 3)  # draw + its one retry, ~10 slots later
     feed.push('PoolResolved', miner=MINER_PK, winner=MINER_PK, requests=1, collateral_chain='sol')
-    assert _wait(lambda: scheduler._pools == {})
-    time.sleep(0.5)
-    assert calls.count('resolve') == 3, calls  # arm, draw, finalize — one crank per stage, no blind retries
+    assert _wait(lambda: calls.count('resolve') == 4)
+    assert scheduler._pools == {}
+    time.sleep(0.2)
+    assert calls.count('resolve') == 4, calls
 
 
 def test_feed_events_for_untracked_pools_are_ignored():
@@ -1063,25 +1057,20 @@ def test_feed_events_for_untracked_pools_are_ignored():
 
     feed = _FakeFeed()
     calls = []
-    validator = SimpleNamespace(crank_lock=threading.Lock(), solana_swap_loop=_Loop(threading.Lock(), calls))
-    engine.CrankScheduler(validator, feed)
+    engine.CrankScheduler(_crank_validator(calls), feed)
+    feed.push('PoolDrawArmed', miner=MINER_PK, seed_slot=110, collateral_chain='sol')
     feed.push('PoolResolved', miner=MINER_PK, winner=MINER_PK, requests=1, collateral_chain='sol')
     time.sleep(0.1)
     assert calls == []
 
 
-def test_reserve_schedules_a_crank_at_the_pool_close(monkeypatch):
-    import allways.validator.reserve_engine as engine
-
-    scheduled = []
-    monkeypatch.setattr(
-        engine, 'schedule_crank', lambda validator, closes_at, miner: scheduled.append((closes_at, miner))
-    )
+def test_reserve_schedules_a_crank_at_the_pool_close():
     client = FakeClient()
     closes = int(time.time()) + 30
     client.get_pool = lambda miner, backing='sol': SimpleNamespace(
         miner=MINER_PK, opened_at=0, requests=[], closes_at=closes
     )
-    result, _ = _reserve(client)
+    validator = _validator(client)
+    result = reserve_on_behalf(validator, HOTKEY, 'sol', 'btc', USER_PK, str(USER_PK), 'userBTCaddr', 1_000_000_000)
     assert result.ok
-    assert scheduled == [(closes, MINER_PK)]
+    assert validator.crank_scheduler.scheduled == [(MINER_PK, closes)]
