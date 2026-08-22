@@ -5,6 +5,9 @@ Blockstream issues OAuth2 client_credentials tokens that expire after 300 s with
 rung once on 401 before failing over. Static ``url|key`` entries are unchanged. Backend mocked — no network.
 """
 
+import threading
+import time
+
 import pytest
 
 import allways.assets.btc as btc_mod
@@ -142,3 +145,19 @@ def test_402_quota_exhausted_fails_over(monkeypatch):
     p = _provider(monkeypatch, 'https://bs/api|oauth:id:sec,https://mempool.space/api', s)
     assert p.btc_api_get('/blocks/tip/height').text == 'pub'
     assert s.token_posts == 1  # 402 is not an auth failure: no token refresh
+
+
+def test_concurrent_cold_start_mints_once():
+    class SlowSession(_Session):
+        def post(self, *a, **k):
+            time.sleep(0.05)  # widen the race window
+            return super().post(*a, **k)
+
+    s = SlowSession([_token('t1')] + [_token('dup')] * 20, [])
+    auth = OAuthClientCredentials('id', 'sec')
+    seen = []
+    ts = [threading.Thread(target=lambda: seen.append(auth.headers(s))) for _ in range(20)]
+    [t.start() for t in ts]
+    [t.join() for t in ts]
+    assert s.token_posts == 1
+    assert seen == [{'Authorization': 'Bearer t1'}] * 20

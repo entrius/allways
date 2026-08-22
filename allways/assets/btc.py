@@ -1,4 +1,5 @@
 import os
+import threading
 import time
 from typing import Any, Optional, Tuple
 from urllib.parse import urlparse
@@ -84,6 +85,7 @@ class OAuthClientCredentials:
         self.token_url = token_url
         self._token: Optional[str] = None
         self._expires_at = 0.0
+        self._lock = threading.Lock()
 
     def invalidate(self) -> None:
         self._token = None
@@ -91,7 +93,9 @@ class OAuthClientCredentials:
 
     def headers(self, http: requests.Session, timeout: int = 10) -> dict:
         """Return ``{'Authorization': 'Bearer …'}``; raises on token-endpoint failure."""
-        if not self._token or time.time() >= self._expires_at - OAUTH_REFRESH_MARGIN_S:
+        with self._lock:  # one mint per expiry, not one per racing thread
+            if self._token and time.time() < self._expires_at - OAUTH_REFRESH_MARGIN_S:
+                return {'Authorization': f'Bearer {self._token}'}
             resp = http.post(
                 self.token_url,
                 data={
@@ -107,7 +111,7 @@ class OAuthClientCredentials:
             self._token = body['access_token']
             self._expires_at = time.time() + float(body.get('expires_in', 300))
             bt.logging.debug(f'{LOG_ESPLORA} oauth token refreshed (expires_in={body.get("expires_in")})')
-        return {'Authorization': f'Bearer {self._token}'}
+            return {'Authorization': f'Bearer {self._token}'}
 
 
 EsploraAuth = Optional[dict | OAuthClientCredentials]
