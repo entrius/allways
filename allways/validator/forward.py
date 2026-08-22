@@ -46,8 +46,7 @@ async def forward(self: Validator) -> None:
     # Solana `timeout_at`/`created_at` are unix seconds, not substrate blocks.
     # run_once casts on-chain votes (network I/O), so run it off the event loop.
     now = int(time.time())
-    # Permissionless crank: turn closed reservation pools into winner Reservations, then sweep any
-    # routed seat we won — the same crank reserve_on_behalf schedules at each pool's close.
+    # Backstop for the crank reserve_on_behalf schedules at each pool close.
     resolved, finalized = await asyncio.to_thread(crank, self, now)
     if resolved:
         bt.logging.info(f'forward step #{self.step}: resolved {len(resolved)} reservation pool(s)')

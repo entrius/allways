@@ -238,33 +238,26 @@ def reserve_on_behalf(
     return ReserveResult(True, '', closes_at, sig)
 
 
-# The forward step cranks on its poll cadence (~12s): a pool that closes just after a step waits most
-# of a step to resolve, then another to finalize. The router knows closes_at the moment it enters the
-# pool, so it fires the same crank right when the window ends. One lock serializes it with the step.
 CRANK_SKEW_SECS = 1
 
 
 def crank(validator, now: int) -> tuple:
-    """Resolve closed pools, then finalize any seat this validator won — under the crank lock."""
+    """Resolve closed pools, then finalize seats we won. Serialized with the forward step."""
     with validator.crank_lock:
-        resolved = validator.solana_swap_loop.resolve_pools_once(now)
-        finalized = finalize_won_seats(validator, now)
-    return resolved, finalized
+        return validator.solana_swap_loop.resolve_pools_once(now), finalize_won_seats(validator, now)
 
 
 def schedule_crank(validator, closes_at: int) -> threading.Timer:
-    """Fire ``crank`` once, just after ``closes_at``. A failure here is harmless: the next forward
-    step runs the same crank."""
-    delay = max(0.0, closes_at - time.time()) + CRANK_SKEW_SECS
+    """Fire crank once right after the pool closes; the forward step remains the backstop."""
 
     def fire():
         try:
             resolved, finalized = crank(validator, int(time.time()))
-            bt.logging.info(f'scheduled crank: resolved {len(resolved)} pool(s), finalized {len(finalized)} seat(s)')
+            bt.logging.info(f'scheduled crank: {len(resolved)} pool(s) resolved, {len(finalized)} seat(s) finalized')
         except Exception as e:
-            bt.logging.warning(f'scheduled crank failed (forward step will retry): {e}')
+            bt.logging.warning(f'scheduled crank failed, forward step retries: {e}')
 
-    timer = threading.Timer(delay, fire)
+    timer = threading.Timer(max(0.0, closes_at - time.time()) + CRANK_SKEW_SECS, fire)
     timer.daemon = True
     timer.start()
     return timer
