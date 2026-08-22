@@ -5,6 +5,7 @@ from abc import ABC, abstractmethod
 from typing import Callable
 
 import bittensor as bt
+from bittensor.utils.btlogging import loggingmachine as bt_loggingmachine
 from websockets.exceptions import ConnectionClosedError
 
 from allways import __spec_version__ as spec_version
@@ -73,6 +74,10 @@ class BaseNeuron(ABC):
         self.config.merge(base_config)
         self.check_config(self.config)
 
+        # --logging.record_log keeps a rotating copy at the mounted ~/.allways/bittensor.log (and the neuron's
+        # state.npz under it) that outlives the container; bittensor hard-codes 25 MB x 10, so size it first.
+        bt_loggingmachine.DEFAULT_MAX_ROTATING_LOG_FILE_SIZE = int(os.getenv('LOG_FILE_MAX_MB', '10')) * 1024 * 1024
+        bt_loggingmachine.DEFAULT_LOG_BACKUP_COUNT = int(os.getenv('LOG_FILE_BACKUPS', '4'))
         bt.logging.set_config(config=self.config.logging)
 
         self.device = self.config.neuron.device

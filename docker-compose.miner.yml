@@ -15,5 +15,12 @@ services:
       # ./data/solana/id.json and fund it; ro so a missing file errors loudly at startup
       # instead of load_or_create silently minting a throwaway key.
       - ./data/solana:/root/.solana:ro
+    # `docker logs` buffer: 3 x 10 MB, oldest dropped. Dies with the container — the durable copy is
+    # ./data/allways/bittensor.log, rotated by the neuron (LOG_FILE_MAX_MB / LOG_FILE_BACKUPS).
+    logging:
+      driver: json-file
+      options:
+        max-size: "10m"
+        max-file: "3"
     labels:
       - "com.centurylinklabs.watchtower.enable=true"
