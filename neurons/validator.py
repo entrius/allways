@@ -188,6 +188,8 @@ class Validator(BaseValidatorNeuron):
         # blocks for seconds, so holding axon_lock across it would stall every other
         # handler, and running it unlocked would race the locked reads' recv (#456).
         self.axon_lock = threading.RLock()
+        # Serializes the pool crank between the forward step and reserve_on_behalf's scheduled fire.
+        self.crank_lock = threading.Lock()
         self.axon_subtensor = bt.Subtensor(config=self.config)
         axon_assets = create_assets(subtensor=bt.Subtensor(config=self.config), solana_rpc_url=solana_rpc_url)
         self.axon_assets = {chain: provider for chain, provider in axon_assets.items() if chain in self.assets}

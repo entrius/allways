@@ -966,3 +966,45 @@ def test_closed_pda_by_key_serves_delivery_hash_from_fulfillment_index(tmp_path)
     s = swap_status(validator, HOTKEY, key.hex())
     assert s.stage == 'completed' and s.detail == {'to_tx_hash': 'destTx'}
     store.close()
+
+
+# ── event-driven crank ───────────────────────────────────────────────────────
+
+
+def test_schedule_crank_fires_resolve_then_finalize_under_the_lock(monkeypatch):
+    import allways.validator.reserve_engine as engine
+
+    calls = []
+    lock = threading.Lock()
+
+    class Loop:
+        def resolve_pools_once(self, now):
+            assert lock.locked()
+            calls.append('resolve')
+            return ['miner']
+
+    def fake_finalize(validator, now):
+        assert lock.locked()
+        calls.append('finalize')
+        return []
+
+    monkeypatch.setattr(engine, 'finalize_won_seats', fake_finalize)
+    validator = SimpleNamespace(solana_swap_loop=Loop(), crank_lock=lock)
+    timer = engine.schedule_crank(validator, closes_at=int(time.time()))
+    timer.join(timeout=engine.CRANK_SKEW_SECS + 2)
+    assert calls == ['resolve', 'finalize']
+
+
+def test_reserve_schedules_a_crank_at_the_pool_close(monkeypatch):
+    import allways.validator.reserve_engine as engine
+
+    scheduled = []
+    monkeypatch.setattr(engine, 'schedule_crank', lambda validator, closes_at: scheduled.append(closes_at))
+    client = FakeClient()
+    closes = int(time.time()) + 30
+    client.get_pool = lambda miner, backing='sol': SimpleNamespace(
+        miner=MINER_PK, opened_at=0, requests=[], closes_at=closes
+    )
+    result, _ = _reserve(client)
+    assert result.ok
+    assert scheduled == [closes]

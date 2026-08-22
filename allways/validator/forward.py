@@ -14,7 +14,7 @@ from allways.validator.binding import build_attribution
 from allways.validator.floor_sweep import maybe_sweep_floor
 from allways.validator.relay.engine import maybe_relay
 from allways.validator.relay.wiring import ensure_bond_relay
-from allways.validator.reserve_engine import finalize_won_seats
+from allways.validator.reserve_engine import crank
 from allways.validator.scoring import (
     due_for_scoring,
     live_miner_states,
@@ -46,13 +46,11 @@ async def forward(self: Validator) -> None:
     # Solana `timeout_at`/`created_at` are unix seconds, not substrate blocks.
     # run_once casts on-chain votes (network I/O), so run it off the event loop.
     now = int(time.time())
-    # Permissionless crank: turn closed reservation pools into winner Reservations before processing swaps.
-    resolved = await asyncio.to_thread(self.solana_swap_loop.resolve_pools_once, now)
+    # Permissionless crank: turn closed reservation pools into winner Reservations, then sweep any
+    # routed seat we won — the same crank reserve_on_behalf schedules at each pool's close.
+    resolved, finalized = await asyncio.to_thread(crank, self, now)
     if resolved:
         bt.logging.info(f'forward step #{self.step}: resolved {len(resolved)} reservation pool(s)')
-    # Routed-reservation sweep right after the crank: won seats are freshest here, spending
-    # the least of the finalize window on queued on-behalf users.
-    finalized = await asyncio.to_thread(finalize_won_seats, self, now)
     if finalized:
         bt.logging.info(f'forward step #{self.step}: finalized {len(finalized)} routed seat(s)')
     decisions = await asyncio.to_thread(self.solana_swap_loop.run_once, now)
