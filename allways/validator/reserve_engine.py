@@ -238,7 +238,9 @@ def reserve_on_behalf(
     return ReserveResult(True, '', closes_at, sig)
 
 
-CRANK_SKEW_SECS = 1
+CRANK_SKEW_SECS = 2
+CRANK_RETRY_SECS = 3
+CRANK_RETRIES = 4
 
 
 def crank(validator, now: int) -> tuple:
@@ -248,19 +250,27 @@ def crank(validator, now: int) -> tuple:
 
 
 def schedule_crank(validator, closes_at: int) -> threading.Timer:
-    """Fire crank once right after the pool closes; the forward step remains the backstop."""
+    """Crank right after the pool closes, retrying briefly until a seat finalizes; the forward step backstops."""
 
-    def fire():
+    def fire(attempt: int = 0):
+        finalized = []
         try:
             resolved, finalized = crank(validator, int(time.time()))
-            bt.logging.info(f'scheduled crank: {len(resolved)} pool(s) resolved, {len(finalized)} seat(s) finalized')
+            bt.logging.info(
+                f'scheduled crank #{attempt}: {len(resolved)} pool(s) resolved, {len(finalized)} seat(s) finalized'
+            )
         except Exception as e:
-            bt.logging.warning(f'scheduled crank failed, forward step retries: {e}')
+            bt.logging.warning(f'scheduled crank #{attempt} failed: {e}')
+        if not finalized and attempt < CRANK_RETRIES:
+            start(CRANK_RETRY_SECS, attempt + 1)
 
-    timer = threading.Timer(max(0.0, closes_at - time.time()) + CRANK_SKEW_SECS, fire)
-    timer.daemon = True
-    timer.start()
-    return timer
+    def start(delay: float, attempt: int) -> threading.Timer:
+        timer = threading.Timer(delay, fire, [attempt])
+        timer.daemon = True
+        timer.start()
+        return timer
+
+    return start(max(0.0, closes_at - time.time()) + CRANK_SKEW_SECS, 0)
 
 
 # Staleness backstop for queued routed requests: pool window + finalize window + generous slack.

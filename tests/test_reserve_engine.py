@@ -971,9 +971,11 @@ def test_closed_pda_by_key_serves_delivery_hash_from_fulfillment_index(tmp_path)
 # ── event-driven crank ───────────────────────────────────────────────────────
 
 
-def test_schedule_crank_fires_resolve_then_finalize_under_the_lock(monkeypatch):
+def test_schedule_crank_retries_until_a_seat_finalizes(monkeypatch):
     import allways.validator.reserve_engine as engine
 
+    monkeypatch.setattr(engine, 'CRANK_SKEW_SECS', 0)
+    monkeypatch.setattr(engine, 'CRANK_RETRY_SECS', 0.05)
     calls = []
     lock = threading.Lock()
 
@@ -981,18 +983,21 @@ def test_schedule_crank_fires_resolve_then_finalize_under_the_lock(monkeypatch):
         def resolve_pools_once(self, now):
             assert lock.locked()
             calls.append('resolve')
-            return ['miner']
+            return []
 
     def fake_finalize(validator, now):
         assert lock.locked()
         calls.append('finalize')
-        return []
+        return ['seat'] if calls.count('finalize') == 2 else []
 
     monkeypatch.setattr(engine, 'finalize_won_seats', fake_finalize)
     validator = SimpleNamespace(solana_swap_loop=Loop(), crank_lock=lock)
-    timer = engine.schedule_crank(validator, closes_at=int(time.time()))
-    timer.join(timeout=engine.CRANK_SKEW_SECS + 2)
-    assert calls == ['resolve', 'finalize']
+    engine.schedule_crank(validator, closes_at=int(time.time()))
+    deadline = time.time() + 2
+    while calls.count('finalize') < 2 and time.time() < deadline:
+        time.sleep(0.02)
+    time.sleep(0.2)
+    assert calls == ['resolve', 'finalize'] * 2
 
 
 def test_reserve_schedules_a_crank_at_the_pool_close(monkeypatch):
