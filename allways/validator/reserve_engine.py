@@ -5,6 +5,7 @@ One source of truth for reserve / confirm / rate / status, shared by the axon sy
 invariants before it signs — the caller (offering or CLI) is never trusted.
 """
 
+import threading
 import time
 from dataclasses import dataclass, field
 from typing import Optional
@@ -232,12 +233,90 @@ def reserve_on_behalf(
     )
     pool = client.get_pool(miner_pk, backing)
     closes_at = int(getattr(pool, 'closes_at', 0) or 0) if pool else 0
+    if closes_at:
+        schedule_crank(validator, closes_at, miner_pk)
     return ReserveResult(True, '', closes_at, sig)
 
 
+CRANK_SKEW_SECS = 2  # the chain clock can trail wall time; fire a touch after the window shuts
+SLOT_SECS = 0.4  # nominal slot time; the draw waits for the armed seed slot to be produced
+DRAW_SKEW_SECS = 0.5
+DRAW_RETRY_SECS = 1  # one extra crank if the seed slot hadn't been produced by the nominal time
 # Staleness backstop for queued routed requests: pool window + finalize window + generous slack.
 # A queue whose reservation never materializes (miner never drawn, RPC blind spot) dies here.
 ROUTED_REQUEST_TTL_SECS = 900
+
+
+def crank(validator, now: int) -> tuple:
+    """Resolve closed pools, then finalize seats we won. Serialized with the forward step."""
+    with validator.crank_lock:
+        return validator.solana_swap_loop.resolve_pools_once(now), finalize_won_seats(validator, now)
+
+
+def _timer(delay: float, fn, *args) -> threading.Timer:
+    timer = threading.Timer(max(0.0, delay), fn, args)
+    timer.daemon = True
+    timer.start()
+    return timer
+
+
+class CrankScheduler:
+    """Cranks each routed pool we reserved on exactly when its next stage is due, off the program's pushed
+    events: close → arm the draw; `PoolDrawArmed` → draw once its seed slot is produced; `PoolResolved` →
+    finalize at once, whoever resolved it. Missed events (socket down) are covered by the forward step's
+    crank, which runs the same `crank()` every step."""
+
+    def __init__(self, validator, feed) -> None:
+        self.validator = validator
+        self._lock = threading.Lock()
+        self._pools: dict = {}  # miner → tracking deadline (unix)
+        feed.on('PoolDrawArmed', self._on_armed)
+        feed.on('PoolResolved', self._on_resolved)
+
+    def schedule(self, miner, closes_at: int) -> threading.Timer:
+        with self._lock:
+            self._pools[str(miner)] = int(time.time()) + ROUTED_REQUEST_TTL_SECS
+        return _timer(closes_at - time.time() + CRANK_SKEW_SECS, self._crank, 'arm')
+
+    def _tracked(self, miner) -> bool:
+        with self._lock:
+            deadline = self._pools.get(str(miner))
+            if deadline is not None and deadline < time.time():
+                del self._pools[str(miner)]
+                return False
+            return deadline is not None
+
+    # Feed handlers run on the feed thread: record, then hand the RPC work to a timer thread.
+    def _on_armed(self, _name: str, ev) -> None:
+        if self._tracked(ev.miner):
+            _timer(0, self._schedule_draw, int(ev.seed_slot))
+
+    def _on_resolved(self, _name: str, ev) -> None:
+        if self._tracked(ev.miner):
+            with self._lock:
+                self._pools.pop(str(ev.miner), None)
+            _timer(0, self._crank, 'finalize')
+
+    def _schedule_draw(self, seed_slot: int) -> None:
+        try:
+            behind = seed_slot - self.validator.solana_client.rpc.get_slot()
+        except Exception as e:
+            bt.logging.warning(f'crank: slot read failed ({e}); drawing now')
+            behind = 0
+        _timer(behind * SLOT_SECS + DRAW_SKEW_SECS, self._crank, 'draw')
+        _timer(behind * SLOT_SECS + DRAW_SKEW_SECS + DRAW_RETRY_SECS, self._crank, 'draw-retry')
+
+    def _crank(self, stage: str) -> None:
+        try:
+            resolved, finalized = crank(self.validator, int(time.time()))
+            bt.logging.info(f'crank[{stage}]: {len(resolved)} pool(s) resolved, {len(finalized)} seat(s) finalized')
+        except Exception as e:
+            bt.logging.warning(f'crank[{stage}] failed: {e}')
+
+
+def schedule_crank(validator, closes_at: int, miner) -> threading.Timer:
+    """Crank this pool at each stage as the chain reaches it (see CrankScheduler)."""
+    return validator.crank_scheduler.schedule(miner, closes_at)
 
 
 def draw_pool_winner(requests: list) -> dict:
