@@ -31,8 +31,11 @@ def _tx(confirmed=False, height=None):
     status = {'confirmed': confirmed}
     if confirmed:
         status.update(block_height=height, block_hash='h' * 64, block_time=1_700_000_000)
-    return {'status': status, 'vin': [{'prevout': {'scriptpubkey_address': 'bc1qsender'}}],
-            'vout': [{'scriptpubkey_address': RECIP, 'value': 5000}]}
+    return {
+        'status': status,
+        'vin': [{'prevout': {'scriptpubkey_address': 'bc1qsender'}}],
+        'vout': [{'scriptpubkey_address': RECIP, 'value': 5000}],
+    }
 
 
 class _Session:
