@@ -2508,6 +2508,56 @@ class TestNonEarnerDiagnosis:
         assert reason.startswith('competitive_but_unfilled'), reason
 
 
+class TestNonEarnerLinesUseLiveRates:
+    """non_earner_lines must source rates from the round's live on-chain quotes.
+    It used to read a dead ``last_known_rates`` attribute (writer deleted in the
+    B3.6 substrate teardown), so every non-earner — including a struck-out miner
+    with a live quote — was mislabelled ``no_rate_posted``."""
+
+    def _stub(self, hotkeys):
+        from unittest.mock import MagicMock
+
+        ei = MagicMock()
+        ei.get_active_miners_at.return_value = list(hotkeys)
+        ei.get_active_events_in_range.return_value = []
+        return SimpleNamespace(metagraph=SimpleNamespace(hotkeys=list(hotkeys)), event_index=ei)
+
+    def test_struck_out_miner_with_live_quote_reads_ineligible(self):
+        from allways.validator.scoring import DirectionTrace
+        from allways.validator.scoring_trace import non_earner_lines
+
+        v = self._stub(['hk_owner', 'hk_struck'])
+        lines = non_earner_lines(
+            v,
+            0,
+            100,
+            rewards=np.zeros(2),
+            eligibility={'hk_struck': False},
+            direction_traces={('sol', 'btc', 'sol'): DirectionTrace(pool=0.5)},
+            recycle_uid=0,
+            live_rates={('hk_struck', 'sol', 'btc', 'sol'): 0.0011357},
+        )
+        assert len(lines) == 1
+        assert 'uid=1' in lines[0] and 'reason="ineligible"' in lines[0], lines[0]
+
+    def test_no_live_quote_still_reads_no_rate_posted(self):
+        from allways.validator.scoring import DirectionTrace
+        from allways.validator.scoring_trace import non_earner_lines
+
+        v = self._stub(['hk_owner', 'hk_quiet'])
+        lines = non_earner_lines(
+            v,
+            0,
+            100,
+            rewards=np.zeros(2),
+            eligibility={'hk_quiet': True},
+            direction_traces={('sol', 'btc', 'sol'): DirectionTrace(pool=0.5)},
+            recycle_uid=0,
+            live_rates={},
+        )
+        assert len(lines) == 1 and 'reason="no_rate_posted"' in lines[0], lines
+
+
 class TestScoringCadenceAndWindow:
     """Block-based scoring gate + cursor-anchored, gap-free window tiling —
     guards the step-vs-block fix (a multi-block forward pass made the old
