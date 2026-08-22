@@ -134,3 +134,11 @@ def test_static_key_401_does_not_retry_rung(monkeypatch):
     assert p.btc_api_get('/blocks/tip/height').text == 'pub'
     assert s.token_posts == 0
     assert len(s.requests) == 2
+
+
+def test_402_quota_exhausted_fails_over(monkeypatch):
+    # Blockstream answers 402 when credits run out or the plan lacks the network (e.g. testnet4)
+    s = _Session([_token()], [_Resp(status_code=402, text='Payment Required'), _Resp(text='pub')])
+    p = _provider(monkeypatch, 'https://bs/api|oauth:id:sec,https://mempool.space/api', s)
+    assert p.btc_api_get('/blocks/tip/height').text == 'pub'
+    assert s.token_posts == 1  # 402 is not an auth failure: no token refresh

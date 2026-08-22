@@ -387,12 +387,15 @@ class Bitcoin(Asset, Chain):
     def failover_reason(self, resp: requests.Response) -> Optional[str]:
         """Reason to fall through to the next provider, or None to use this response.
 
-        Retries past rate limits (429), bad/expired keys (401/403), and server
-        errors (5xx). 404 (not found) is authoritative; other 4xx are returned.
+        Retries past rate limits (429), bad/expired keys (401/403), exhausted
+        quota (402), and server errors (5xx). 404 is authoritative; other 4xx
+        are returned.
         """
         code = resp.status_code
         if code in (401, 403):
             return f'auth failed ({code})'
+        if code == 402:
+            return f'quota exhausted ({code})'
         if code == 429:
             return f'rate-limited ({code})'
         if code >= 500:
