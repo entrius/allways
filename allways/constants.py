@@ -1,3 +1,5 @@
+import re
+
 from allways.classes import MinerActivity
 
 # ─── Network ───────────────────────────────────────────────
@@ -92,6 +94,11 @@ HUB_CHAINS = ('sol', 'tao')
 NUMERAIRE_CHAIN = 'sol'
 
 
+def family(chain: str) -> str:
+    """The backing family a chain settles in (twin of ``backing.rs::family``): an sn<N> alpha settles in TAO."""
+    return 'tao' if re.fullmatch(r'sn\d+', chain) else chain
+
+
 def is_hub(chain: str) -> bool:
     """True iff ``chain`` can anchor a pair (and back quotes with its own collateral purse)."""
     return chain in HUB_CHAINS
@@ -130,6 +137,11 @@ LAUNCH_SPOKES = (
     'polusdc',
     'paxg',
     'solusdc',
+)
+# Alpha tokens paired against each hub; add a subnet here to launch its pairs.
+LAUNCH_ALPHAS = (
+    'sn7',
+    'sn74',
 )
 # Every launch pair as (hub, spoke): each hub pairs against every spoke except itself. sol↔tao
 # lands exactly once (under SOL, its anchor) because sol never appears in LAUNCH_SPOKES.
