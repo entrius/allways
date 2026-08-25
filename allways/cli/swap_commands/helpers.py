@@ -18,7 +18,7 @@ from rich.text import Text
 from allways.chains import SUPPORTED_CHAINS, ChainDefinition
 from allways.classes import SwapStatus
 from allways.cli.swap_commands.swap_intake import backing_purse, floors_from_config
-from allways.constants import NETUID_FINNEY, TAO_TO_RAO, declarable_backings
+from allways.constants import NETUID_FINNEY, TAO_TO_RAO, declarable_backings, family
 from allways.solana import pdas
 from allways.solana.client import SolanaClientError
 from allways.solana.layouts import hub_busy_until, hub_swap_on, lock_max
@@ -892,3 +892,35 @@ def _underfunded(state: PurseState) -> str:
         )
     fix = 'alw collateral deposit' if state.backing == pdas.BACKING_CHAIN_SOL else 'alw vault post-collateral'
     return f'Your {state.backing.upper()} purse holds {state.purse} < the {state.floor} floor (`{fix}`).'
+
+
+def gate_provider(chain: str, client):
+    """Read-only provider for the CLI's screens; None when unbuildable (screens fail open, the validator re-gates)."""
+    from allways.assets import ASSET_REGISTRY
+
+    spec = next((s for s in ASSET_REGISTRY if s.chain_id == chain), None)
+    if spec is None:
+        return None
+    avail = {'solana_rpc_url': client.rpc.url, 'solana_keypair': client.keypair}
+    try:
+        if 'subtensor' in spec.kwarg_names:
+            avail['subtensor'] = get_cli_context(need_wallet=False)[2]
+        return spec.cls(**{k: avail[k] for k in spec.kwarg_names if k in avail})
+    except Exception:  # noqa: BLE001 - unbuildable provider (missing env) → screens fail open
+        return None
+
+
+def declared_leg_providers(client, backing, from_chain, to_chain) -> dict:
+    """The provider pricing a DECLARED alpha leg, keyed by chain — empty for an exact leg (builds nothing)."""
+    if not backing or backing in (from_chain, to_chain):
+        return {}
+    leg = from_chain if family(from_chain) == backing else to_chain
+    return {leg: gate_provider(leg, client)}
+
+
+def candidate_providers(client, candidates, from_chain, to_chain) -> dict:
+    """Declared-leg providers shared by every selector, built once per backing on offer."""
+    providers: dict = {}
+    for backing in dict.fromkeys(c.backing for c in candidates):
+        providers.update(declared_leg_providers(client, backing, from_chain, to_chain))
+    return providers

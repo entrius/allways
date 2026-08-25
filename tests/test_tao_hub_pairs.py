@@ -23,25 +23,30 @@ from allways.cli.swap_commands.swap_intake import (
     candidate_miners,
     compute_intake_amounts,
     hub_bounds,
+    leg_value,
     max_intake_from_amount,
     required_collateral,
     select_best_miner,
+    unviable_reason,
     viable_intakes,
 )
 from allways.constants import (
     DIRECTION_POOLS,
     HUB_CHAINS,
+    LAUNCH_ALPHAS,
     LAUNCH_PAIRS,
     MINER_POOL_SHARE,
     RATE_PRECISION,
+    declarable_backings,
     hub_leg,
     is_hub,
 )
 from allways.utils.rate import is_executable_rate, min_executable_hub_leg
-from allways.validator.reserve_engine import reserve_on_behalf
+from allways.validator.reserve_engine import _best_offer, reserve_on_behalf
 from allways.validator.state_store import ValidatorStateStore
 
 TAO = 1_000_000_000  # 1 TAO in rao (9 dec)
+SOL = 1_000_000_000  # 1 SOL in lamports (9 dec)
 ETH = 10**18  # 1 ETH in wei (18 dec)
 RATE = '0.05'  # canonical 'ETH per 1 TAO' (~$200 TAO vs ~$4000 ETH)
 TAO_MIN, TAO_MAX = TAO // 10, TAO  # deploy-config shape: 0.1 τ / 1 τ, in rao
@@ -58,6 +63,13 @@ class TestHubSet:
         # hub↔hub: HUB_CHAINS order wins — sol↔tao stays SOL-anchored (grandfathered).
         assert hub_leg('tao', 'sol') == 'sol'
         assert hub_leg('btc', 'eth') is None
+        assert hub_leg('sn7', 'avax') == 'sn7'
+        assert hub_leg('sn7', 'sn74') == 'sn7'
+
+    def test_declarable_backings_follow_leg_families(self):
+        assert declarable_backings('sn7', 'avax') == ['tao']
+        assert declarable_backings('sol', 'sn7') == ['sol', 'tao']
+        assert declarable_backings('sn7', 'sn74') == ['tao']
 
     def test_hub_leg_is_the_canonical_source(self):
         for a, b in (('tao', 'eth'), ('eth', 'tao'), ('sol', 'tao'), ('btc', 'sol')):
@@ -69,6 +81,8 @@ class TestHubSet:
         assert ('tao', 'eth') in LAUNCH_PAIRS and ('tao', 'btc') in LAUNCH_PAIRS
         assert len(LAUNCH_PAIRS) == len(set(LAUNCH_PAIRS))
         assert all(hub in HUB_CHAINS and spoke != hub for hub, spoke in LAUNCH_PAIRS)
+        assert all(pair == canonical_pair(*pair) for pair in LAUNCH_PAIRS)
+        assert all((hub, alpha) in LAUNCH_PAIRS for hub in HUB_CHAINS for alpha in LAUNCH_ALPHAS)
 
     def test_direction_pools_span_both_families_and_conserve(self):
         assert len(DIRECTION_POOLS) == 2 * len(LAUNCH_PAIRS)
@@ -134,8 +148,47 @@ class TestTaoHubIntake:
         assert a.collateral_amount == TAO
 
     def test_spoke_spoke_pair_rejected(self):
-        with pytest.raises(ValueError, match='hub leg'):
+        with pytest.raises(ValueError, match='anchor leg'):
             compute_intake_amounts('btc', 'eth', 100, '20', backing='btc')
+
+    def test_leg_value_binds_an_exact_leg_without_a_provider(self):
+        # Exact first, either side — and sn7<->tao keeps the exact TAO leg, never a spot read.
+        assert leg_value('tao', 'tao', TAO, 'eth', ETH // 20) == TAO
+        assert leg_value('tao', 'eth', ETH // 20, 'tao', TAO) == TAO
+        assert leg_value('tao', 'sn7', 5 * TAO, 'tao', TAO) == TAO
+        assert leg_value('sol', 'sol', SOL, 'sn7', 5 * TAO) == SOL
+
+    def test_leg_value_prices_a_declared_alpha_leg_at_spot(self):
+        sn7 = SimpleNamespace(value_rao=lambda amount: amount * 3)
+        assert leg_value('tao', 'sol', SOL, 'sn7', 5 * TAO, {'sn7': sn7}) == 15 * TAO
+        with pytest.raises(ValueError, match='provider'):
+            leg_value('tao', 'sol', SOL, 'sn7', 5 * TAO)
+        with pytest.raises(ValueError, match='no leg'):
+            leg_value('tao', 'sol', SOL, 'avax', 1, {'sn7': sn7})
+
+    def test_sol_to_sn7_is_sized_by_its_backing(self):
+        sn7 = SimpleNamespace(value_rao=lambda amount: 7 * TAO)
+        declared = compute_intake_amounts('sol', 'sn7', SOL, RATE, backing='tao', providers={'sn7': sn7})
+        assert declared.collateral_amount == 7 * TAO
+        assert compute_intake_amounts('sol', 'sn7', SOL, RATE, backing='sol').collateral_amount == SOL
+
+    def test_selectors_route_a_declared_leg_only_with_its_provider(self):
+        sn7 = SimpleNamespace(value_rao=lambda amount: 7 * TAO)
+        offer = MinerCandidate(object(), RATE, required_collateral(7 * TAO), backing='tao')
+        bounds = {'tao': (TAO_MIN, 10 * TAO)}
+        best = select_best_miner([offer], 'sol', 'sn7', SOL, 0, 0, bounds, {'sn7': sn7})
+        assert best is not None and best[1].collateral_amount == 7 * TAO
+        assert select_best_miner([offer], 'sol', 'sn7', SOL, 0, 0, bounds) is None
+        assert 'provider' in unviable_reason([offer], 'sol', 'sn7', SOL, 0, 0, bounds)
+
+    def test_exact_leg_selection_never_reads_a_price(self):
+        def boom(amount):
+            raise AssertionError('exact leg priced at spot')
+
+        offer = MinerCandidate(object(), RATE, required_collateral(TAO), backing='tao')
+        assert select_best_miner(
+            [offer], 'tao', 'eth', TAO, TAO_MIN, TAO_MAX, None, {'tao': SimpleNamespace(value_rao=boom)}
+        )
 
     def test_viability_gates_on_rao_bounds(self):
         bounds = {'sol': (0, 0), 'tao': (TAO_MIN, TAO_MAX)}
@@ -254,6 +307,16 @@ class TestTaoEthAcceptance:
         cand, amts = best
         assert amts.to_amount == ETH // 20  # priced off the canonical 'ETH per 1 TAO' quote
         assert amts.collateral_amount == TAO  # the contract's backing-leg notional, in rao
+
+    def test_routed_offer_prices_a_declared_alpha_leg_through_the_validator_providers(self):
+        client = TaoHubClient()
+        client.quote.from_chain, client.quote.to_chain = 'sol', 'sn7'
+        sn7 = SimpleNamespace(value_rao=lambda amount: TAO // 2)  # inside the fixture's TAO bounds
+        bounds = bounds_from_config(client.get_config())
+        offer, _ = _best_offer(client, MINER_PK, client.miner_state, 'sol', 'sn7', SOL, bounds, {'sn7': sn7})
+        assert offer == (client.quote, 'tao')
+        offer, why = _best_offer(client, MINER_PK, client.miner_state, 'sol', 'sn7', SOL, bounds)
+        assert offer is None and 'provider' in why
 
     def test_routed_reservation_bids_the_tao_backing(self):
         client = TaoHubClient()

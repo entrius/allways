@@ -55,7 +55,7 @@ def resolve_miner_pubkey(validator, miner_hotkey: str) -> Optional[Pubkey]:
     return hk_binding.miner
 
 
-def _best_offer(client, miner_pk, miner_state, from_chain: str, to_chain: str, from_amount: int, bounds):
+def _best_offer(client, miner_pk, miner_state, from_chain, to_chain, from_amount, bounds, providers=None):
     """The offer of this miner's that gives the user the most — one market per pair, mixed by rate
     (D2), NOT a preference for either purse. Reuses the taker's selector, so a routed user and a
     self-represented one pick the same offer, including its exact-tie preference for "sol".
@@ -75,9 +75,10 @@ def _best_offer(client, miner_pk, miner_state, from_chain: str, to_chain: str, f
     if not candidates:
         return None, f'miner has no quote for {from_chain}->{to_chain}'
     hub_min, hub_max = hub_bounds(bounds, from_chain, to_chain)
-    best = select_best_miner(candidates, from_chain, to_chain, from_amount, hub_min, hub_max, bounds)
+    best = select_best_miner(candidates, from_chain, to_chain, from_amount, hub_min, hub_max, bounds, providers)
     if best is None:
-        return None, unviable_reason(candidates, from_chain, to_chain, from_amount, hub_min, hub_max, bounds)
+        why = unviable_reason(candidates, from_chain, to_chain, from_amount, hub_min, hub_max, bounds, providers)
+        return None, why
     return (offers[best[0].backing], best[0].backing), ''
 
 
@@ -113,7 +114,8 @@ def reserve_on_behalf(
 
     # Canonical source form at intake: the finalize hash + source-lock PDA are byte-keyed on this
     # string (V-C2), so a case variant of a live source would mint a second lock over one deposit.
-    src_asset = (getattr(validator, 'axon_assets', None) or {}).get(from_chain)
+    providers = getattr(validator, 'axon_assets', None) or {}
+    src_asset = providers.get(from_chain)
     if src_asset is not None:
         user_from_addr = src_asset.chain.normalize_address(user_from_addr)
 
@@ -149,7 +151,7 @@ def reserve_on_behalf(
         rate_fixed = pool.rate  # pinned at open — joiners must quote against it
         quote = client.get_quote(miner_pk, from_chain, to_chain, backing)
     else:
-        offer, why = _best_offer(client, miner_pk, miner_state, from_chain, to_chain, from_amount, bounds)
+        offer, why = _best_offer(client, miner_pk, miner_state, from_chain, to_chain, from_amount, bounds, providers)
         if offer is None:
             return ReserveResult(False, why)
         quote, backing = offer
@@ -160,8 +162,10 @@ def reserve_on_behalf(
             return ReserveResult(False, 'miner is busy with another swap on that hub; try again shortly')
 
     try:
-        amts = compute_intake_amounts(from_chain, to_chain, from_amount, rate_display_from_fixed(rate_fixed), backing)
-    except ValueError as e:
+        amts = compute_intake_amounts(
+            from_chain, to_chain, from_amount, rate_display_from_fixed(rate_fixed), backing, providers
+        )
+    except (ValueError, ProviderUnreachableError) as e:
         return ReserveResult(False, str(e))
     if amts.to_amount <= 0:
         return ReserveResult(False, 'non-positive dest amount for that source amount')
@@ -177,7 +181,6 @@ def reserve_on_behalf(
     # Deliverability gates — BEFORE any funds move: a dest that can't take delivery (malformed
     # address, or one that provably refuses transfers) must bounce here, not strand a paid swap
     # later. Format first: it's offline and a malformed address can never be delivered to.
-    providers = getattr(validator, 'axon_assets', {})
     provider = providers.get(to_chain)
     miner_quote = quote or client.get_quote(miner_pk, from_chain, to_chain, backing)
     verified = getattr(validator, 'assets', None)
@@ -409,7 +412,7 @@ def finalize_won_seats(validator, now: int) -> list:
             # The reservation lives at the queue's backing-seeded address, so the stored chain can
             # only agree; the fill is sized against THAT leg or the purse gate reads the wrong side.
             fill = compute_intake_amounts(
-                from_chain, to_chain, req['from_amount'], rate_display_from_fixed(resv.rate), backing
+                from_chain, to_chain, req['from_amount'], rate_display_from_fixed(resv.rate), backing, providers
             )
             client.finalize_reservation(
                 Pubkey.from_string(miner),
@@ -665,9 +668,12 @@ def rate_quote(validator, from_chain: str, to_chain: str, from_amount: int) -> R
     bounds = bounds_from_config(cfg)
     min_swap, max_swap = hub_bounds(bounds, from_chain, to_chain)
     cands = candidate_miners(client, from_chain, to_chain)
-    best = select_best_miner(cands, from_chain, to_chain, from_amount, min_swap, max_swap, bounds)
+    providers = getattr(validator, 'axon_assets', None) or {}
+    best = select_best_miner(cands, from_chain, to_chain, from_amount, min_swap, max_swap, bounds, providers)
     bq = _best_quote_result(validator, best) if best else None
-    reason = '' if bq else unviable_reason(cands, from_chain, to_chain, from_amount, min_swap, max_swap, bounds)
+    reason = (
+        '' if bq else unviable_reason(cands, from_chain, to_chain, from_amount, min_swap, max_swap, bounds, providers)
+    )
     depth: dict = {}
     for cand in cands:
         cap = max_intake_from_amount(cand, from_chain, to_chain, min_swap, max_swap, bounds)

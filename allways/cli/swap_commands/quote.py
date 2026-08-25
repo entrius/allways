@@ -15,6 +15,7 @@ from allways.chains import SUPPORTED_CHAINS, get_chain_def
 from allways.cli.swap_commands.helpers import (
     FINITE_DECIMAL,
     backing_label,
+    candidate_providers,
     console,
     fail,
     get_solana_cli_context,
@@ -27,15 +28,14 @@ from allways.cli.swap_commands.swap_intake import (
     MinerCandidate,
     backing_purse,
     bounds_from_config,
-    compute_intake_amounts,
     hub_bounds,
     rate_display_from_fixed,
     select_best_miner,
-    swap_viable,
     to_smallest_units,
+    viable_intakes,
 )
 from allways.constants import FEE_DIVISOR, hub_leg
-from allways.utils.rate import apply_fee_deduction, directional_rate, is_executable_rate
+from allways.utils.rate import apply_fee_deduction, directional_rate
 
 # The failure guarantee each backing carries. It differs in TIMING, not in whether you are made
 # whole — say that plainly rather than making a taker infer it from the asset name.
@@ -117,28 +117,15 @@ def quote_command(from_chain: str, to_chain: str, amount: Decimal, as_json: bool
                     )
                 )
 
-    # Build the viable set with the same guards the contract enforces, and identify the best offer.
-    viable = []  # (candidate, receive_units)
-    for c in candidates:
-        try:
-            rate = float(c.rate_display)
-        except (TypeError, ValueError):
-            continue
-        if not is_executable_rate(rate, from_chain, to_chain, min_swap, max_swap):
-            continue
-        try:
-            amts = compute_intake_amounts(from_chain, to_chain, from_amount, c.rate_display, c.backing)
-        except ValueError:
-            continue
-        if amts.to_amount <= 0:
-            continue
-        lo, hi = bounds.get(c.backing, (min_swap, max_swap))
-        ok, _reason = swap_viable(amts.collateral_amount, c.collateral, lo, hi, c.backing)
-        if not ok:
-            continue
-        viable.append((c, apply_fee_deduction(amts.to_amount, FEE_DIVISOR)))
-
-    best = select_best_miner(candidates, from_chain, to_chain, from_amount, min_swap, max_swap, bounds)
+    # The same gates the contract enforces, priced with the same providers the origination path uses.
+    providers = candidate_providers(client, candidates, from_chain, to_chain)
+    viable = [
+        (c, apply_fee_deduction(amts.to_amount, FEE_DIVISOR))
+        for c, amts in viable_intakes(
+            candidates, from_chain, to_chain, from_amount, min_swap, max_swap, bounds, providers
+        )
+    ]
+    best = select_best_miner(candidates, from_chain, to_chain, from_amount, min_swap, max_swap, bounds, providers)
     best_miner = str(best[0].miner) if best else None
 
     if as_json:

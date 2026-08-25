@@ -1,5 +1,5 @@
 from hashlib import blake2b
-from typing import Any, Dict, Optional, Tuple
+from typing import Any, Callable, Dict, Optional, Tuple
 
 import bittensor as bt
 from bittensor import Keypair
@@ -10,6 +10,14 @@ from allways.assets.chain import Chain
 from allways.chains import CHAIN_TAO, ChainDefinition
 
 LOG_SUB = '[Subtensor]'
+
+# (extrinsic_hash, dest, amount, sender) of one asset's transfer call, decoded from an extrinsic.
+Transfer = Tuple[str, str, int, str]
+Decoder = Callable[[Any, bool], Optional[Transfer]]
+# (sender, amount) that provably moved for a decoded transfer at (block, extrinsic_idx), else None.
+Settler = Callable[[int, int, Transfer], Optional[Tuple[str, int]]]
+# dedup_scope -> (to, amount, extrinsic_hash, seen_block); one dict per asset (see send_amount).
+Broadcasts = Dict[str, Tuple[str, int, str, int]]
 
 
 class Tao(Asset, Chain):
@@ -33,11 +41,11 @@ class Tao(Asset, Chain):
         self.events_cache: Dict[str, list] = {}
         # Deposit-scanner head cursors, keyed per (from, to, amount) triple — see find_recent_outgoing.
         self.scan_cursors: Dict[Tuple[str, str, int], int] = {}
-        # Own-broadcast dedup: dedup_scope -> (to, amount, extrinsic_hash, seen_block). subtensor.transfer
-        # can report failure — or raise mid-submit — on a transfer that actually included; without this the
-        # next poll re-sends and double-pays. hash '' = submit raised before the hash was learned (resolved
-        # by triple scan); seen_block 0 = head unreadable at record time (backfilled on the next poll).
-        self.broadcasted_txids: Dict[str, Tuple[str, int, str, int]] = {}
+        # Own-broadcast dedup: subtensor.transfer can report failure — or raise mid-submit — on a transfer
+        # that actually included; without this the next poll re-sends and double-pays. hash '' = submit
+        # raised before the hash was learned (resolved by triple scan); seen_block 0 = head unreadable at
+        # record time (backfilled on the next poll).
+        self.broadcasted_txids: Broadcasts = {}
 
     @property
     def chain_def(self) -> ChainDefinition:
@@ -218,7 +226,7 @@ class Tao(Asset, Chain):
         return events
 
     @staticmethod
-    def _event_extrinsic_idx(record: Any) -> Optional[int]:
+    def event_extrinsic_idx(record: Any) -> Optional[int]:
         """Index of the extrinsic that emitted this event record, or None if not extrinsic-applied."""
         if not isinstance(record, dict):
             return None
@@ -277,8 +285,8 @@ class Tao(Asset, Chain):
         else:
             raise unreadable(f'{type(attributes).__name__}')
 
-        sender = cls._as_ss58(sender)
-        dest = cls._as_ss58(dest)
+        sender = cls.as_ss58(sender)
+        dest = cls.as_ss58(dest)
         if not sender or not dest:
             raise unreadable('unresolved from/to')
         try:
@@ -287,7 +295,7 @@ class Tao(Asset, Chain):
             raise unreadable('non-numeric amount') from e
 
     @staticmethod
-    def _as_ss58(value: Any) -> str:
+    def as_ss58(value: Any) -> str:
         """Normalise an AccountId event field (ss58 str, {'Id': ...}, or raw bytes) to ss58."""
         if isinstance(value, dict):
             value = value.get('Id', value.get('value'))
@@ -322,7 +330,7 @@ class Tao(Asset, Chain):
         sender = ''
         indexed = 0
         for record in events:
-            idx = self._event_extrinsic_idx(record)
+            idx = self.event_extrinsic_idx(record)
             if idx is None:
                 continue
             indexed += 1
@@ -363,6 +371,15 @@ class Tao(Asset, Chain):
             bt.logging.debug(f'{LOG_SUB} block_time fetch failed for block {block_num}: {e}')
             return None
 
+    def settled_transfer(self, block_num: int, ext_idx: int, transfer: Transfer) -> Optional[Tuple[str, int]]:
+        """Balances.Transfer settlement of a decoded transfer call: (sender, credited_rao) or None."""
+        return self.settled_credit(block_num, ext_idx, transfer[1])
+
+    @staticmethod
+    def extrinsic_position(ext: Any, position: int, is_raw: bool) -> int:
+        """Index of ``ext`` within the full block: raw blocks are pre-filtered, so they carry it explicitly."""
+        return ext.get('extrinsic_idx', position) if is_raw else position
+
     def fetch_matching_tx(
         self,
         tx_hash: str,
@@ -371,15 +388,29 @@ class Tao(Asset, Chain):
         block_hint: int = 0,
         max_scan_blocks: int = 150,
     ) -> Optional[TransactionInfo]:
-        """Scan for a TAO transfer matching recipient + amount.
+        """Scan for a TAO transfer matching recipient + amount. Raises ProviderUnreachableError if unreachable."""
+        return self.scan_for_tx(
+            tx_hash,
+            expected_recipient,
+            expected_amount,
+            block_hint,
+            max_scan_blocks,
+            self.decode_transfer,
+            self.settled_transfer,
+        )
 
-        If block_hint > 0, checks the hinted block ±3. Otherwise scans
-        ``max_scan_blocks`` back from current (newest first). The ±3 window
-        covers small clock/finality skews between the caller's hint and the
-        block the transfer actually landed in.
-
-        Raises ProviderUnreachableError if subtensor is unreachable.
-        """
+    def scan_for_tx(
+        self,
+        tx_hash: str,
+        expected_recipient: str,
+        expected_amount: int,
+        block_hint: int,
+        max_scan_blocks: int,
+        decode: Decoder,
+        settle: Settler,
+    ) -> Optional[TransactionInfo]:
+        """Locate ``tx_hash`` (hinted block ±3, else ``max_scan_blocks`` back) as a settled transfer paying
+        ``expected_recipient`` >= ``expected_amount``, via the asset's ``decode`` and ``settle``."""
         try:
             current_block = self.subtensor.get_current_block()
         except Exception as e:
@@ -422,20 +453,18 @@ class Tao(Asset, Chain):
                 is_raw = block.get('_raw', False)
 
                 for position, ext in enumerate(block['extrinsics']):
-                    match = self.match_transfer(ext, tx_hash, is_raw)
-                    if match is None:
+                    transfer = decode(ext, is_raw)
+                    if transfer is None or transfer[0] != tx_hash:
                         continue
 
                     tx_hash_seen = True
-                    dest, amount, _ = match
+                    _, dest, amount, _ = transfer
                     confs = current_block - block_num
                     if dest != expected_recipient or amount < expected_amount:
                         continue
 
-                    # The call only states intent. Require the Balances.Transfer event before
-                    # treating this as a deposit, and take the amount/sender from the event.
-                    ext_idx = ext.get('extrinsic_idx', position) if is_raw else position
-                    settled = self.settled_credit(block_num, ext_idx, expected_recipient)
+                    # The call only states intent: settlement decides, and supplies the amount/sender.
+                    settled = settle(block_num, self.extrinsic_position(ext, position, is_raw), transfer)
                     if settled is None:
                         bt.logging.warning(
                             f'{LOG_SUB} tx {tx_hash[:16]}... is in block {block_num} but moved no funds '
@@ -489,30 +518,26 @@ class Tao(Asset, Chain):
             raise ProviderUnreachableError(f'TAO block scan failed: {e}') from e
 
     @staticmethod
-    def match_transfer(ext, tx_hash: str, is_raw: bool) -> Optional[Tuple[str, int, str]]:
-        """Try to match an extrinsic against a tx hash. Returns (dest, amount, sender) or None."""
-        decoded = Tao.decode_transfer(ext, is_raw)
-        if decoded is None or decoded[0] != tx_hash:
-            return None
-        _, dest, amount, sender = decoded
-        return dest, amount, sender
+    def extrinsic_hash(ext: Any) -> str:
+        """Hex hash of a decoded extrinsic (GenericExtrinsic or its value dict), '' when absent."""
+        ext_hash = getattr(ext, 'extrinsic_hash', None) or (
+            ext.get('extrinsic_hash', '') if isinstance(ext, dict) else ''
+        )
+        if isinstance(ext_hash, bytes):
+            ext_hash = '0x' + ext_hash.hex()
+        return ext_hash or ''
 
     @staticmethod
-    def decode_transfer(ext, is_raw: bool) -> Optional[Tuple[str, str, int, str]]:
-        """Decode a transfer extrinsic into (tx_hash, dest, amount, sender), or None if it
-        isn't a transfer. The single decode shared by the by-hash verifier (match_transfer)
-        and the by-content deposit scanner (find_recent_outgoing)."""
+    def decode_transfer(ext, is_raw: bool) -> Optional[Transfer]:
+        """Decode a Balances transfer extrinsic into (tx_hash, dest, amount, sender), or None if it
+        isn't one. The single decode shared by the by-hash verifier and the by-content scanner."""
         if is_raw:
             ext_hash = ext.get('extrinsic_hash', '')
             if not ext_hash:
                 return None
             return ext_hash, ext.get('dest', ''), ext.get('amount', 0), ext.get('sender', '')
 
-        ext_hash = getattr(ext, 'extrinsic_hash', None) or (
-            ext.get('extrinsic_hash', '') if isinstance(ext, dict) else ''
-        )
-        if isinstance(ext_hash, bytes):
-            ext_hash = '0x' + ext_hash.hex()
+        ext_hash = Tao.extrinsic_hash(ext)
         if not ext_hash:
             return None
 
@@ -551,41 +576,54 @@ class Tao(Asset, Chain):
     _MAX_SCAN_CURSORS = 64
 
     def find_recent_outgoing(self, from_addr: str, to_addr: str, amount: int) -> Optional[str]:
-        """Extrinsic hash of a recent transfer ``from_addr`` → ``to_addr`` of >= ``amount`` rao,
-        else None. The TAO sibling of the BTC/SOL deposit scanners: a hash-finder only — the
-        seam's confirm re-verifies everything by hash, so a miss here just means the manual
-        rescue paths. An unretrievable block is skipped and not revisited (the cursor moves on)."""
-        head = self.chain.get_current_block_height()
+        """Extrinsic hash of a recent transfer ``from_addr`` → ``to_addr`` of >= ``amount`` rao, else None."""
+        return self.find_outgoing(
+            self.scan_cursors, from_addr, to_addr, amount, self.decode_transfer, self.settled_transfer
+        )
+
+    def find_outgoing(
+        self,
+        cursors: Dict[Tuple[str, str, int], int],
+        from_addr: str,
+        to_addr: str,
+        amount: int,
+        decode: Decoder,
+        settle: Settler,
+    ) -> Optional[str]:
+        """Extrinsic hash of a settled ``from_addr`` → ``to_addr`` transfer of >= ``amount`` in the blocks
+        minted since this triple's cursor, else None. The subtensor sibling of the BTC/SOL deposit scanners:
+        a hash-finder only — the seam's confirm re-verifies everything by hash, so a miss here just means
+        the manual rescue paths. An unretrievable block is skipped and not revisited (the cursor moves on)."""
+        head = self.get_current_block_height()
         if head is None:
             return None
         key = (from_addr, to_addr, int(amount))
         floor = max(head - self.SCAN_LOOKBACK_BLOCKS, 0)
-        last = self.scan_cursors.get(key, floor)
+        last = cursors.get(key, floor)
         for block_num in range(max(last, floor) + 1, head + 1):
             block = self.get_block(block_num)
             if not block or 'extrinsics' not in block:
                 continue
             is_raw = block.get('_raw', False)
             for position, ext in enumerate(block['extrinsics']):
-                decoded = self.decode_transfer(ext, is_raw)
-                if decoded is None:
+                transfer = decode(ext, is_raw)
+                if transfer is None:
                     continue
-                ext_hash, dest, amt, sender = decoded
+                ext_hash, dest, amt, sender = transfer
                 if dest != to_addr or sender != from_addr or int(amt) < int(amount):
                     continue
                 # Call-level match is only a candidate; confirm the funds actually moved.
-                ext_idx = ext.get('extrinsic_idx', position) if is_raw else position
                 try:
-                    settled = self.settled_credit(block_num, ext_idx, to_addr)
+                    settled = settle(block_num, self.extrinsic_position(ext, position, is_raw), transfer)
                 except ProviderUnreachableError:
                     continue
                 if settled is None or settled[1] < int(amount):
                     continue
-                self.scan_cursors.pop(key, None)
+                cursors.pop(key, None)
                 return ext_hash
-        self.scan_cursors[key] = head
-        if len(self.scan_cursors) > self._MAX_SCAN_CURSORS:
-            self.scan_cursors.pop(next(iter(self.scan_cursors)))
+        cursors[key] = head
+        if len(cursors) > self._MAX_SCAN_CURSORS:
+            cursors.pop(next(iter(cursors)))
         return None
 
     def get_current_block_height(self) -> Optional[int]:
@@ -637,19 +675,32 @@ class Tao(Asset, Chain):
     def _own_transfer_landed(
         self, tx_hash: str, from_addr: str, to_addr: str, amount: int, seen_head: Optional[int] = None
     ) -> Optional[SendResult]:
+        return self.own_send_landed(
+            tx_hash, from_addr, to_addr, amount, seen_head, self.decode_transfer, self.settled_transfer
+        )
+
+    def own_send_landed(
+        self,
+        tx_hash: str,
+        from_addr: str,
+        to_addr: str,
+        amount: int,
+        seen_head: Optional[int],
+        decode: Decoder,
+        settle: Settler,
+    ) -> Optional[SendResult]:
         """``(tx_hash, block_num)`` if THIS exact recorded extrinsic is on-chain AND its funds provably
         moved, else None. Matches on the extrinsic hash (not first-match), so it can never reuse a
-        different swap's transfer. Inclusion is NOT settlement: an included-but-failed transfer (e.g.
-        insufficient balance) still occupies a block and decodes to the intended dest/amount, so the
-        match is gated on ``settled_credit`` (the Balances.Transfer event) exactly as the deposit
-        scanner is — otherwise a genuinely-failed send is mistaken for paid, never retried, and rides to
-        a slash. Reliable because ``send`` uses wait_for_inclusion: after it returns the extrinsic is
-        included-or-not, never still-pending. RAISES (ProviderUnreachableError) when the head, any
-        in-window block, or settlement can't be read: an unreadable chain can hide a landed transfer,
-        so "couldn't check" waits rather than clearing a re-send into a double pay. ``seen_head``
-        anchors the scan window on the block the send was recorded at, so an RPC outage spanning polls
-        can't slide the landed transfer out of the lookback and read as "never landed"."""
-        head = self.chain.get_current_block_height()
+        different swap's transfer. Inclusion is NOT settlement: an included-but-failed transfer still
+        occupies a block and decodes to the intended dest/amount, so the match is gated on ``settle``
+        exactly as the deposit scanner is — otherwise a genuinely-failed send is mistaken for paid, never
+        retried, and rides to a slash. Reliable because sends use wait_for_inclusion: after they return
+        the extrinsic is included-or-not, never still-pending. RAISES (ProviderUnreachableError) when the
+        head, any in-window block, or settlement can't be read: an unreadable chain can hide a landed
+        transfer, so "couldn't check" waits rather than clearing a re-send into a double pay.
+        ``seen_head`` anchors the scan window on the block the send was recorded at, so an RPC outage
+        spanning polls can't slide the landed transfer out of the lookback and read as "never landed"."""
+        head = self.get_current_block_height()
         if head is None:
             raise ProviderUnreachableError('TAO head unavailable — cannot resolve the prior send')
         anchor = min(int(seen_head), head) if seen_head else head
@@ -661,15 +712,14 @@ class Tao(Asset, Chain):
                 raise ProviderUnreachableError(f'TAO block {block_num} unreadable — cannot rule out the prior send')
             is_raw = block.get('_raw', False)
             for position, ext in enumerate(block['extrinsics']):
-                decoded = self.decode_transfer(ext, is_raw)
-                if decoded is None:
+                transfer = decode(ext, is_raw)
+                if transfer is None:
                     continue
-                ext_hash, dest, amt, sender = decoded
+                ext_hash, dest, amt, sender = transfer
                 if ext_hash != tx_hash or dest != to_addr or sender != from_addr or int(amt) < int(amount):
                     continue
                 # Exact-hash call match is only a candidate; confirm the funds actually moved.
-                ext_idx = ext.get('extrinsic_idx', position) if is_raw else position
-                settled = self.settled_credit(block_num, ext_idx, to_addr)
+                settled = settle(block_num, self.extrinsic_position(ext, position, is_raw), transfer)
                 if settled is None or settled[1] < int(amount):
                     return None  # included but the transfer failed → moved nothing → safe to re-send
                 return (tx_hash, block_num)
@@ -678,14 +728,28 @@ class Tao(Asset, Chain):
     def _lost_hash_prior_landed(
         self, from_addr: str, to_addr: str, amount: int, seen_head: int
     ) -> Optional[SendResult]:
-        """Resolve a prior send whose extrinsic hash was never learned: ``subtensor.transfer`` raised
-        mid-submit (e.g. a websocket drop during wait_for_inclusion), so the extrinsic may have reached
-        the chain even though the call reported nothing. ``(hash, block)`` if a settled
-        ``from → to >= amount`` transfer is found since just before the attempt; None only once the
-        inclusion window since the attempt has fully elapsed AND every block in it scanned clean, so the
-        lost extrinsic provably never landed. RAISES (ProviderUnreachableError) while the window is
-        still open or any block is unreadable — the caller must wait, not re-send."""
-        head = self.chain.get_current_block_height()
+        return self.lost_send_landed(
+            from_addr, to_addr, amount, seen_head, self.decode_transfer, self.settled_transfer, self.broadcasted_txids
+        )
+
+    def lost_send_landed(
+        self,
+        from_addr: str,
+        to_addr: str,
+        amount: int,
+        seen_head: int,
+        decode: Decoder,
+        settle: Settler,
+        broadcasted: Broadcasts,
+    ) -> Optional[SendResult]:
+        """Resolve a prior send whose extrinsic hash was never learned: the submit raised mid-flight
+        (e.g. a websocket drop during wait_for_inclusion), so the extrinsic may have reached the chain
+        even though the call reported nothing. ``(hash, block)`` if a settled ``from → to >= amount``
+        transfer is found since just before the attempt; None only once the inclusion window since the
+        attempt has fully elapsed AND every block in it scanned clean, so the lost extrinsic provably
+        never landed. RAISES (ProviderUnreachableError) while the window is still open or any block is
+        unreadable — the caller must wait, not re-send."""
+        head = self.get_current_block_height()
         if head is None:
             raise ProviderUnreachableError('TAO head unavailable — cannot resolve the prior send')
         floor = max(min(int(seen_head), head) - self.SCAN_LOOKBACK_BLOCKS, 0)
@@ -695,23 +759,62 @@ class Tao(Asset, Chain):
                 raise ProviderUnreachableError(f'TAO block {block_num} unreadable — cannot rule out the prior send')
             is_raw = block.get('_raw', False)
             for position, ext in enumerate(block['extrinsics']):
-                decoded = self.decode_transfer(ext, is_raw)
-                if decoded is None:
+                transfer = decode(ext, is_raw)
+                if transfer is None:
                     continue
-                ext_hash, dest, amt, sender = decoded
+                ext_hash, dest, amt, sender = transfer
                 if dest != to_addr or sender != from_addr or int(amt) < int(amount):
                     continue
                 # A hash already recorded under any scope belongs to a DIFFERENT obligation this
                 # process sent — the lost extrinsic's hash was, by definition, never recorded.
-                if any(rec[2] == ext_hash for rec in self.broadcasted_txids.values()):
+                if any(rec[2] == ext_hash for rec in broadcasted.values()):
                     continue
-                ext_idx = ext.get('extrinsic_idx', position) if is_raw else position
-                settled = self.settled_credit(block_num, ext_idx, to_addr)
+                settled = settle(block_num, self.extrinsic_position(ext, position, is_raw), transfer)
                 if settled is not None and settled[1] >= int(amount):
                     return (ext_hash, block_num)
         if head - int(seen_head) > self.LOST_SEND_DEAD_BLOCKS:
             return None  # mortal era elapsed and scanned clean: the lost extrinsic can never land
         raise ProviderUnreachableError('prior TAO send (hash lost mid-submit) not yet resolvable — waiting a pass')
+
+    def prior_send_landed(
+        self,
+        broadcasted: Broadcasts,
+        scope: str,
+        from_addr: str,
+        to_addr: str,
+        amount: int,
+        decode: Decoder,
+        settle: Settler,
+    ) -> Optional[SendResult]:
+        """``(hash, block)`` if the send recorded under ``scope`` settled; None if none is recorded or it provably
+        did not land; raises while that is unknown."""
+        prior = broadcasted.get(scope)
+        if prior is None or prior[0] != to_addr or prior[1] != int(amount):
+            return None
+        amount = int(amount)
+        tx_hash, seen = prior[2], int(prior[3])
+        if seen <= 0:
+            # Head was unreadable at record time: backfill with the current head so the
+            # resolution window counts from now — unknown age must read recent, never stale.
+            seen = self.get_current_block_height()
+            if seen is None:
+                raise ProviderUnreachableError('TAO head unavailable — cannot resolve the prior send')
+            broadcasted[scope] = (to_addr, amount, tx_hash, seen)
+        if tx_hash:
+            landed = self.own_send_landed(tx_hash, from_addr, to_addr, amount, seen, decode, settle)
+        else:
+            landed = self.lost_send_landed(from_addr, to_addr, amount, seen, decode, settle, broadcasted)
+        if landed is not None:
+            broadcasted[scope] = (to_addr, amount, landed[0], int(landed[1] or seen))
+        return landed
+
+    def record_send_attempt(self, broadcasted: Broadcasts, scope: str, to_addr: str, amount: int) -> int:
+        """Record the attempt BEFORE the send (an extrinsic can land even when the call raises); returns the head seen, 0 if unreadable."""
+        attempt_head = self.get_current_block_height() or 0
+        broadcasted[scope] = (to_addr, int(amount), '', attempt_head)
+        if len(broadcasted) > 256:
+            broadcasted.pop(next(iter(broadcasted)))
+        return attempt_head
 
     def send_amount(
         self, to_address: str, amount: int, from_address: Optional[str] = None, dedup_key: Optional[str] = None
@@ -733,39 +836,25 @@ class Tao(Asset, Chain):
         # would otherwise double-pay.
         from_ss58 = self.wallet.coldkeypub.ss58_address
         scope = dedup_key or ''
-        prior = self.broadcasted_txids.get(scope)
-        if prior is not None and prior[0] == to_address and prior[1] == int(amount):
-            try:
-                seen = int(prior[3]) if len(prior) > 3 else 0
-                if seen <= 0:
-                    # Head was unreadable at record time: backfill with the current head so the
-                    # resolution window counts from now — unknown age must read recent, never stale.
-                    head_now = self.chain.get_current_block_height()
-                    if head_now is None:
-                        raise ProviderUnreachableError('TAO head unavailable — cannot resolve the prior send')
-                    seen = head_now
-                    self.broadcasted_txids[scope] = (prior[0], prior[1], prior[2], seen)
-                if prior[2]:
-                    landed = self._own_transfer_landed(prior[2], from_ss58, to_address, amount, seen)
-                else:
-                    landed = self._lost_hash_prior_landed(from_ss58, to_address, amount, seen)
-            except Exception as e:
-                bt.logging.error(f'TAO prior send unresolved ({e}) — not re-sending, would risk a double pay')
-                return None
-            if landed is not None:
-                self.broadcasted_txids[scope] = (to_address, int(amount), landed[0], int(landed[1] or seen))
-                bt.logging.info(f'TAO reusing prior tx {landed[0]} to {to_address} ({amount} rao)')
-                return landed
-            # landed is None → the prior send provably moved nothing; fall through to a fresh send.
+        try:
+            landed = self.prior_send_landed(
+                self.broadcasted_txids,
+                scope,
+                from_ss58,
+                to_address,
+                amount,
+                self.decode_transfer,
+                self.settled_transfer,
+            )
+        except Exception as e:
+            bt.logging.error(f'TAO prior send unresolved ({e}) — not re-sending, would risk a double pay')
+            return None
+        if landed is not None:
+            bt.logging.info(f'TAO reusing prior tx {landed[0]} to {to_address} ({amount} rao)')
+            return landed
+        # landed is None → nothing recorded, or the prior send provably moved nothing: fresh send.
 
-        # Record the attempt BEFORE the send: the extrinsic hash only exists after subtensor.transfer
-        # returns, but the extrinsic can reach the chain even when the call raises (websocket drop
-        # during wait_for_inclusion). A pre-send marker means a raise leaves the next poll resolving
-        # the attempt by scan instead of blindly re-sending.
-        attempt_head = self.chain.get_current_block_height()
-        self.broadcasted_txids[scope] = (to_address, int(amount), '', attempt_head or 0)
-        if len(self.broadcasted_txids) > 256:
-            self.broadcasted_txids.pop(next(iter(self.broadcasted_txids)))
+        attempt_head = self.record_send_attempt(self.broadcasted_txids, scope, to_address, amount)
         try:
             response = self.subtensor.transfer(
                 wallet=self.wallet,

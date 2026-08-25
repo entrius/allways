@@ -5,7 +5,7 @@ from dataclasses import dataclass
 from allways.constants import (
     EXTENSION_BUCKET_SECONDS,
     EXTENSION_PADDING_SECONDS,
-    HUB_CHAINS,
+    hub_leg,
 )
 
 
@@ -51,6 +51,11 @@ class ChainDefinition:
     # on a given amount (PAXG's getFeeFor). Set only on tokens with an admin-settable fee; a live
     # non-zero fee shaves every delivery below the pinned amount, so it's a no-fault cancel (V-M2).
     fee_check: str | None = None
+    # The subnet an alpha token belongs to. None for every non-alpha asset.
+    netuid: int | None = None
+    # The backing family this asset settles penalties in ('tao' for an sn<N> alpha). The program
+    # derives the same fact from the id prefix, so only 'tao' rows may carry an sn<digits> id.
+    backing_family: str | None = None
 
 
 # ─── Supported Chains ────────────────────────────────────
@@ -514,6 +519,35 @@ CHAIN_PAXG = ChainDefinition(
     fee_check='getFeeFor(uint256)',
 )
 
+CHAIN_SN7 = ChainDefinition(
+    id='sn7',
+    name='Subnet 7 Alpha',
+    native_unit='rao',
+    decimals=9,
+    # Bittensor's prefix, shared with CHAIN_TAO: one TAO_* config serves every subtensor asset.
+    env_prefix='TAO',
+    # CHAIN_TAO's clock and reorg depth, deliberately identical — three assets on one chain must
+    # not disagree about either.
+    seconds_per_block=12,
+    min_confirmations=6,
+    # 1.0 alpha: a rate-sanity floor that can only over-restrict, never slash.
+    min_onchain_amount=1_000_000_000,
+    netuid=7,
+    backing_family='tao',
+)
+CHAIN_SN74 = ChainDefinition(
+    id='sn74',
+    name='Subnet 74 Alpha',
+    native_unit='rao',
+    decimals=9,
+    env_prefix='TAO',
+    seconds_per_block=12,
+    min_confirmations=6,
+    min_onchain_amount=1_000_000_000,
+    netuid=74,
+    backing_family='tao',
+)
+
 SUPPORTED_CHAINS = {
     'btc': CHAIN_BTC,
     'tao': CHAIN_TAO,
@@ -533,6 +567,8 @@ SUPPORTED_CHAINS = {
     'polusdc': CHAIN_POLUSDC,
     'paxg': CHAIN_PAXG,
     'solusdc': CHAIN_SOLUSDC,
+    'sn7': CHAIN_SN7,
+    'sn74': CHAIN_SN74,
 }
 
 
@@ -573,16 +609,14 @@ def canonical_pair(chain_a: str, chain_b: str) -> tuple:
     Determines the rate unit: rate is always 'dest per 1 source' in this ordering.
 
     Ordering rules (priority):
-    1. The pair's hub leg is always the canonical SOURCE, so every launch pair reads uniformly as
-       'dest per 1 hub' (e.g. TAO per SOL, ETH per TAO). ``HUB_CHAINS`` order breaks a hub↔hub
-       pair: sol↔tao stays SOL-anchored (grandfathered — stored quotes keep their convention).
+    1. The pair's ``hub_leg`` is the canonical SOURCE, so every pair reads 'dest per 1 anchor':
+       the literal hub (TAO per SOL, ETH per TAO; ``HUB_CHAINS`` order keeps sol↔tao SOL-anchored),
+       else the family-bearing leg (AVAX per SN7).
     2. Else alphabetical — deterministic fallback for spoke↔spoke (never a valid swap pair).
     """
-    for hub in HUB_CHAINS:
-        if chain_a == hub:
-            return (chain_a, chain_b)
-        if chain_b == hub:
-            return (chain_b, chain_a)
+    anchor = hub_leg(chain_a, chain_b)
+    if anchor:
+        return (anchor, chain_b if anchor == chain_a else chain_a)
     return (chain_a, chain_b) if chain_a < chain_b else (chain_b, chain_a)
 
 

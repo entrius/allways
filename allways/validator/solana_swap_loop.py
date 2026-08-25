@@ -19,6 +19,7 @@ from solders.pubkey import Pubkey
 from allways import dev_signal
 from allways.assets.asset import ProviderUnreachableError
 from allways.chains import compute_extension_target_secs, get_chain_def
+from allways.cli.swap_commands.swap_intake import leg_value
 from allways.constants import CANCEL_REASON_OTHER, EXTENSION_PADDING_SECONDS
 from allways.solana import pdas
 from allways.solana.client import benign_marker, swap_from_solana, swap_key_from_tx_hash
@@ -383,6 +384,21 @@ class SolanaSwapLoop:
             return SwapAction(
                 SwapDecision.REJECT, reason='dest == miner delivery address (poisoned) — refusing to attest'
             )
+        # A declared alpha leg is bound off-chain (spec §5): the router's collateral_amount must cover it
+        # at spot, or the user's refund shrinks. An exact leg reads nothing — the program bound it.
+        try:
+            cover = leg_value(
+                str(swap.collateral_chain),
+                swap.from_chain,
+                int(swap.from_amount),
+                swap.to_chain,
+                int(swap.to_amount),
+                self.providers,
+            )
+        except (ProviderUnreachableError, ValueError) as e:
+            return SwapAction(SwapDecision.SKIP, reason=f'alpha leg unpriceable: {e}')
+        if int(swap.collateral_amount) < cover:
+            return SwapAction(SwapDecision.REJECT, reason='collateral does not cover the alpha leg at spot')
         # Source deposit must exist, confirm, be sent BY the reserved user, AND be fresh vs the
         # Reservation before we'd attest — sender pin matches the relay's confirm_deposit check.
         s_status, info = self._fetch_leg(

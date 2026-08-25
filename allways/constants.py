@@ -1,3 +1,5 @@
+import re
+
 from allways.classes import MinerActivity
 
 # ─── Network ───────────────────────────────────────────────
@@ -59,6 +61,9 @@ CANCEL_REASON_ERC20_FEE_ENABLED = 4
 # The issuer froze the destination's SPL token account (USDC's mint carries a freeze authority):
 # undeliverable through no fault of the miner. Python-side first; mirror into constants.rs next release.
 CANCEL_REASON_SPL_FROZEN = 5
+# The subnet owner/root disabled alpha transfers (TransferToggle / SubtokenEnabled): strands every
+# miner on that subnet at once — no-fault. Mirrored in constants.rs.
+CANCEL_REASON_ALPHA_TRANSFER_DISABLED = 6
 CANCEL_REASON_OTHER = 255
 
 BTC_MIN_FEE_RATE = 5
@@ -85,30 +90,37 @@ MAX_SCORING_BACKFILL_SECS = 2 * SCORING_WINDOW_SECS  # ~2 hours — backfill cap
 REWARD_MINER_STATES: frozenset[MinerActivity] = frozenset({MinerActivity.AVAILABLE})
 # Hub (collateral-capable) chains, PRIORITY-ORDERED: the earlier hub anchors a hub↔hub pair, so
 # sol↔tao stays SOL-anchored (grandfathered — existing quotes keep their stored convention).
-# A pair is valid iff one leg is a hub; that leg is its pricing + bounds anchor ('dest per 1 hub').
+# A pair is valid iff one leg is a hub or an alpha; hub_leg() names that anchor ('dest per 1 anchor').
 HUB_CHAINS = ('sol', 'tao')
 # The SOL constant — the Solana ledger's own asset (reservation fee, local collateral purse,
 # the `alw miner quotes` default hub). "Is this the pair's hub" reads go through hub_leg() instead.
 NUMERAIRE_CHAIN = 'sol'
 
 
+def family(chain: str) -> str:
+    """The backing family a chain settles in (twin of ``backing.rs::family``): an sn<N> alpha settles in TAO."""
+    return 'tao' if re.fullmatch(r'sn[0-9]+', chain) else chain
+
+
 def is_hub(chain: str) -> bool:
-    """True iff ``chain`` can anchor a pair (and back quotes with its own collateral purse)."""
+    """True iff ``chain`` backs quotes with its own collateral purse (a literal hub, not an alpha)."""
     return chain in HUB_CHAINS
 
 
 def hub_leg(from_chain: str, to_chain: str) -> str | None:
-    """The pair's hub anchor — its pricing/bounds leg. None for a spoke↔spoke pair (invalid)."""
+    """The pair's anchor — its pricing leg and scoring family: the literal hub if one is a leg, else the
+    alphabetically first family-bearing leg (an alpha is its own scoring family). None = invalid pair."""
     for hub in HUB_CHAINS:
         if hub in (from_chain, to_chain):
             return hub
-    return None
+    family_legs = sorted(chain for chain in (from_chain, to_chain) if family(chain) != chain)
+    return family_legs[0] if family_legs else None
 
 
 def declarable_backings(from_chain: str, to_chain: str) -> list[str]:
     """The pair's hub-capable legs = the backings a quote may declare = its scoring lanes (F4):
-    two on the hub↔hub pair (sol↔tao), one on a spoke pair, none on a spoke↔spoke pair (invalid)."""
-    return [hub for hub in HUB_CHAINS if hub in (from_chain, to_chain)]
+    the hubs among the legs' families — two on sol↔tao, one on a spoke or alpha pair, none if invalid."""
+    return [hub for hub in HUB_CHAINS if hub in {family(from_chain), family(to_chain)}]
 
 
 # Chains paired against each hub; add a chain here to launch its pairs.
@@ -131,11 +143,17 @@ LAUNCH_SPOKES = (
     'paxg',
     'solusdc',
 )
-# Every launch pair as (hub, spoke): each hub pairs against every spoke except itself. sol↔tao
-# lands exactly once (under SOL, its anchor) because sol never appears in LAUNCH_SPOKES.
+# Alpha tokens paired against each hub; add a subnet here to launch its pairs.
+LAUNCH_ALPHAS = (
+    'sn7',
+    'sn74',
+)
+# Every launch pair in canonical order: each hub against every spoke and alpha (sol↔tao lands once,
+# under SOL, because sol never appears in LAUNCH_SPOKES). Alpha↔spoke pairs are gated on the
+# emissions redesign and deliberately absent.
 LAUNCH_PAIRS: tuple[tuple[str, str], ...] = tuple(
     (hub, spoke) for hub in HUB_CHAINS for spoke in LAUNCH_SPOKES if spoke != hub
-)
+) + tuple((hub, alpha) for hub in HUB_CHAINS for alpha in LAUNCH_ALPHAS)
 # Fixed burn: pools sum to MINER_POOL_SHARE instead of 1.0, so at least
 # BURN_RATE of every round recycles to RECYCLE_UID before any shortfall.
 BURN_RATE = 0.90
