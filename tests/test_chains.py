@@ -21,6 +21,8 @@ from allways.chains import (
     CHAIN_POL,
     CHAIN_POLUSDC,
     CHAIN_QNT,
+    CHAIN_SN7,
+    CHAIN_SN74,
     CHAIN_SOL,
     CHAIN_SOLUSDC,
     CHAIN_TAO,
@@ -31,6 +33,7 @@ from allways.chains import (
     compute_extension_target_secs,
     get_chain_def,
 )
+from allways.constants import family
 
 
 class TestGetChain:
@@ -94,6 +97,19 @@ class TestGetChain:
             assert re.fullmatch(r'[a-z0-9]{1,10}', chain_id), chain_id
             assert chain.id == chain_id
 
+    def test_subnet_prefix_matches_tao_backing_family(self):
+        for chain in SUPPORTED_CHAINS.values():
+            assert bool(re.fullmatch(r'sn\d+', chain.id)) is (chain.backing_family == 'tao'), chain.id
+            assert family(chain.id) == (chain.backing_family or chain.id), chain.id
+
+    def test_subnet_assets_share_tao_clock(self):
+        for chain in (CHAIN_SN7, CHAIN_SN74):
+            assert (chain.seconds_per_block, chain.min_confirmations, chain.decimals) == (
+                CHAIN_TAO.seconds_per_block,
+                CHAIN_TAO.min_confirmations,
+                CHAIN_TAO.decimals,
+            )
+
     def test_assets_on_one_network_share_its_env_identity(self):
         """A network is configured once, by EXACTLY ONE of its rows. Rows sharing a host_chain
         MUST share env_prefix, and exactly one of them declares ``networks`` — no more, because
@@ -136,7 +152,7 @@ class TestGetChain:
         EVM_NETWORKS key, or 'solana' for an SPL token beside native SOL. Only the self-hosted list
         is enumerated — a new hosted asset needs no edit here."""
         for chain_id, chain in SUPPORTED_CHAINS.items():
-            if chain_id in ('btc', 'tao', 'sol'):
+            if chain_id in ('btc', 'tao', 'sol') or chain.backing_family:
                 assert chain.host_chain is None, chain_id
             else:
                 assert chain.host_chain in EVM_NETWORKS or chain.host_chain == 'solana', chain_id
@@ -191,6 +207,12 @@ class TestCanonicalPair:
         assert canonical_pair('tao', 'sol') == ('sol', 'tao')
         assert canonical_pair('sol', 'eth') == ('sol', 'eth')
         assert canonical_pair('eth', 'sol') == ('sol', 'eth')
+
+    def test_family_leg_anchors_without_overriding_literal_hubs(self):
+        assert canonical_pair('sn7', 'sol') == ('sol', 'sn7')
+        assert canonical_pair('sn7', 'tao') == ('tao', 'sn7')
+        assert canonical_pair('avax', 'sn7') == ('sn7', 'avax')
+        assert canonical_pair('sn74', 'sn7') == ('sn7', 'sn74')
 
 
 class TestComputeExtensionTargetSecs:

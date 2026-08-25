@@ -105,17 +105,19 @@ def is_hub(chain: str) -> bool:
 
 
 def hub_leg(from_chain: str, to_chain: str) -> str | None:
-    """The pair's hub anchor — its pricing/bounds leg. None for a spoke↔spoke pair (invalid)."""
+    """The pair's anchor — its pricing leg and scoring family: the literal hub if one is a leg, else the
+    alphabetically first family-bearing leg (an alpha is its own scoring family). None = invalid pair."""
     for hub in HUB_CHAINS:
         if hub in (from_chain, to_chain):
             return hub
-    return None
+    family_legs = sorted(chain for chain in (from_chain, to_chain) if family(chain) != chain)
+    return family_legs[0] if family_legs else None
 
 
 def declarable_backings(from_chain: str, to_chain: str) -> list[str]:
     """The pair's hub-capable legs = the backings a quote may declare = its scoring lanes (F4):
-    two on the hub↔hub pair (sol↔tao), one on a spoke pair, none on a spoke↔spoke pair (invalid)."""
-    return [hub for hub in HUB_CHAINS if hub in (from_chain, to_chain)]
+    the hubs among the legs' families — two on sol↔tao, one on a spoke or alpha pair, none if invalid."""
+    return [hub for hub in HUB_CHAINS if hub in {family(from_chain), family(to_chain)}]
 
 
 # Chains paired against each hub; add a chain here to launch its pairs.
@@ -143,11 +145,12 @@ LAUNCH_ALPHAS = (
     'sn7',
     'sn74',
 )
-# Every launch pair as (hub, spoke): each hub pairs against every spoke except itself. sol↔tao
-# lands exactly once (under SOL, its anchor) because sol never appears in LAUNCH_SPOKES.
+# Every launch pair in canonical order: each hub against every spoke and alpha (sol↔tao lands once,
+# under SOL, because sol never appears in LAUNCH_SPOKES). Alpha↔spoke pairs are gated on the
+# emissions redesign and deliberately absent.
 LAUNCH_PAIRS: tuple[tuple[str, str], ...] = tuple(
     (hub, spoke) for hub in HUB_CHAINS for spoke in LAUNCH_SPOKES if spoke != hub
-)
+) + tuple((hub, alpha) for hub in HUB_CHAINS for alpha in LAUNCH_ALPHAS)
 # Fixed burn: pools sum to MINER_POOL_SHARE instead of 1.0, so at least
 # BURN_RATE of every round recycles to RECYCLE_UID before any shortfall.
 BURN_RATE = 0.90

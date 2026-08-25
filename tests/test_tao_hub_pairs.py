@@ -31,9 +31,11 @@ from allways.cli.swap_commands.swap_intake import (
 from allways.constants import (
     DIRECTION_POOLS,
     HUB_CHAINS,
+    LAUNCH_ALPHAS,
     LAUNCH_PAIRS,
     MINER_POOL_SHARE,
     RATE_PRECISION,
+    declarable_backings,
     hub_leg,
     is_hub,
 )
@@ -58,6 +60,13 @@ class TestHubSet:
         # hub↔hub: HUB_CHAINS order wins — sol↔tao stays SOL-anchored (grandfathered).
         assert hub_leg('tao', 'sol') == 'sol'
         assert hub_leg('btc', 'eth') is None
+        assert hub_leg('sn7', 'avax') == 'sn7'
+        assert hub_leg('sn7', 'sn74') == 'sn7'
+
+    def test_declarable_backings_follow_leg_families(self):
+        assert declarable_backings('sn7', 'avax') == ['tao']
+        assert declarable_backings('sol', 'sn7') == ['sol', 'tao']
+        assert declarable_backings('sn7', 'sn74') == ['tao']
 
     def test_hub_leg_is_the_canonical_source(self):
         for a, b in (('tao', 'eth'), ('eth', 'tao'), ('sol', 'tao'), ('btc', 'sol')):
@@ -69,6 +78,8 @@ class TestHubSet:
         assert ('tao', 'eth') in LAUNCH_PAIRS and ('tao', 'btc') in LAUNCH_PAIRS
         assert len(LAUNCH_PAIRS) == len(set(LAUNCH_PAIRS))
         assert all(hub in HUB_CHAINS and spoke != hub for hub, spoke in LAUNCH_PAIRS)
+        assert all(pair == canonical_pair(*pair) for pair in LAUNCH_PAIRS)
+        assert all((hub, alpha) in LAUNCH_PAIRS for hub in HUB_CHAINS for alpha in LAUNCH_ALPHAS)
 
     def test_direction_pools_span_both_families_and_conserve(self):
         assert len(DIRECTION_POOLS) == 2 * len(LAUNCH_PAIRS)

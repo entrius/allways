@@ -5,7 +5,7 @@ from dataclasses import dataclass
 from allways.constants import (
     EXTENSION_BUCKET_SECONDS,
     EXTENSION_PADDING_SECONDS,
-    HUB_CHAINS,
+    hub_leg,
 )
 
 
@@ -609,16 +609,14 @@ def canonical_pair(chain_a: str, chain_b: str) -> tuple:
     Determines the rate unit: rate is always 'dest per 1 source' in this ordering.
 
     Ordering rules (priority):
-    1. The pair's hub leg is always the canonical SOURCE, so every launch pair reads uniformly as
-       'dest per 1 hub' (e.g. TAO per SOL, ETH per TAO). ``HUB_CHAINS`` order breaks a hub↔hub
-       pair: sol↔tao stays SOL-anchored (grandfathered — stored quotes keep their convention).
+    1. The pair's ``hub_leg`` is the canonical SOURCE, so every pair reads 'dest per 1 anchor':
+       the literal hub (TAO per SOL, ETH per TAO; ``HUB_CHAINS`` order keeps sol↔tao SOL-anchored),
+       else the family-bearing leg (AVAX per SN7).
     2. Else alphabetical — deterministic fallback for spoke↔spoke (never a valid swap pair).
     """
-    for hub in HUB_CHAINS:
-        if chain_a == hub:
-            return (chain_a, chain_b)
-        if chain_b == hub:
-            return (chain_b, chain_a)
+    anchor = hub_leg(chain_a, chain_b)
+    if anchor:
+        return (anchor, chain_b if anchor == chain_a else chain_a)
     return (chain_a, chain_b) if chain_a < chain_b else (chain_b, chain_a)
 
 
