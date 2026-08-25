@@ -16,6 +16,7 @@ from typing import List, NamedTuple, Optional
 
 import click
 
+from allways.assets.asset import ProviderUnreachableError
 from allways.chains import SUPPORTED_CHAINS, get_chain_def, uses_solana_wallet
 from allways.cli.dendrite_lite import (
     broadcast_synapse,
@@ -44,6 +45,7 @@ from allways.cli.swap_commands.swap_intake import (
     candidate_miners,
     compute_intake_amounts,
     hub_bounds,
+    leg_value,
     rate_display_from_fixed,
     select_best_miner,
     swap_viable,
@@ -52,7 +54,7 @@ from allways.cli.swap_commands.swap_intake import (
     viable_intakes,
 )
 from allways.cli.validator_rejections import render_and_aggregate
-from allways.constants import FEE_DIVISOR, NETUID_FINNEY, NUMERAIRE_CHAIN, hub_leg
+from allways.constants import FEE_DIVISOR, NETUID_FINNEY, NUMERAIRE_CHAIN, family, hub_leg
 from allways.solana import pdas
 from allways.solana.client import benign_marker, contract_reject_reason
 from allways.solana.rpc import TransientRpcError
@@ -576,6 +578,7 @@ def swap_now_command(
         f'[green]  Seat filled[/green] — receiving ~[cyan]{recv:.8g} {to_chain.upper()}[/cyan], '
         f'[cyan]{backing_label(resv_backing)}[/cyan].'
     )
+    _refuse_uncovered(client, config, resv, from_chain, to_chain)
     # Never instruct a send the reservation can't outlive: a deposit that lands after reserved_until
     # yields no claim, and the funds are stranded (straight to the miner — no escrow, no Swap, no
     # timeout, no refund). Confirmations accrue *after* the claim, so they don't belong in this margin.
@@ -641,9 +644,39 @@ def _gate_provider(chain: str, client, config):
         return None
     avail = {'solana_rpc_url': client.rpc.url, 'solana_keypair': client.keypair}
     try:
+        if 'subtensor' in spec.kwarg_names:
+            avail['subtensor'] = get_cli_context(need_wallet=False)[2]
         return spec.cls(**{k: avail[k] for k in spec.kwarg_names if k in avail})
     except Exception:  # noqa: BLE001 - unbuildable provider (missing env) → screens fail open
         return None
+
+
+def _declared_leg_providers(client, config, backing, from_chain, to_chain) -> dict:
+    """The provider that prices a DECLARED alpha leg, keyed by chain — empty when the backing's leg is
+    exact, so today's pairs build nothing and read nothing."""
+    if not backing or backing in (from_chain, to_chain):
+        return {}
+    leg = from_chain if family(from_chain) == backing else to_chain
+    return {leg: _gate_provider(leg, client, config)}
+
+
+def _refuse_uncovered(client, config, resv, from_chain, to_chain) -> None:
+    """A declared alpha leg is bound off-chain (spec §5): never send into a seat whose collateral does
+    not cover it at spot — that collateral is the refund. An exact leg was bound by the program."""
+    backing = str(getattr(resv, 'collateral_chain', '') or '')
+    providers = _declared_leg_providers(client, config, backing, from_chain, to_chain)
+    if not providers:
+        return
+    (leg,) = providers
+    try:
+        cover = leg_value(backing, from_chain, int(resv.from_amount), to_chain, int(resv.to_amount), providers)
+    except (ValueError, ProviderUnreachableError) as e:
+        fail(f'  Cannot price your {leg.upper()} leg ({e}). Do NOT send funds; re-run when the price is readable.')
+    if int(resv.collateral_amount) < cover:
+        fail(
+            f'  The seat pins {int(resv.collateral_amount)} rao of collateral, under your {leg.upper()} leg at '
+            f'spot ({cover} rao). Do NOT send funds; re-run for a fresh reservation.'
+        )
 
 
 def _screen_deliverability(client, config, cand, from_chain, to_chain, receive_addr, user_from_addr, from_amount):
@@ -941,7 +974,13 @@ def _reserve_self_represented(
             )
 
     # Phase 3 — FINALIZE against the PINNED rate (not the live quote, which can drift after the bid).
-    fill = compute_intake_amounts(from_chain, to_chain, from_amount, rate_display_from_fixed(drawn.rate), backing)
+    providers = _declared_leg_providers(client, None, backing, from_chain, to_chain)
+    try:
+        fill = compute_intake_amounts(
+            from_chain, to_chain, from_amount, rate_display_from_fixed(drawn.rate), backing, providers
+        )
+    except (ValueError, ProviderUnreachableError) as e:
+        fail(f'  Cannot price the swap ({e}). Do NOT send funds; re-run shortly.')
     try:
         client.finalize_reservation(
             miner,
