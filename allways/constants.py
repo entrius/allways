@@ -138,7 +138,7 @@ LAUNCH_PAIRS: tuple[tuple[str, str], ...] = tuple(
 )
 # Fixed burn: pools sum to MINER_POOL_SHARE instead of 1.0, so at least
 # BURN_RATE of every round recycles to RECYCLE_UID before any shortfall.
-BURN_RATE = 0.25
+BURN_RATE = 0.0
 MINER_POOL_SHARE = 1.0 - BURN_RATE
 # Direction registry and the equal-split fallback: one entry per hub↔spoke direction
 # (both ways). The per-round pool values are volume-weighted at pair level
