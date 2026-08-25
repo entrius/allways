@@ -23,6 +23,7 @@ from allways.cli.swap_commands.swap_intake import (
     candidate_miners,
     compute_intake_amounts,
     hub_bounds,
+    leg_value,
     max_intake_from_amount,
     required_collateral,
     select_best_miner,
@@ -44,6 +45,7 @@ from allways.validator.reserve_engine import reserve_on_behalf
 from allways.validator.state_store import ValidatorStateStore
 
 TAO = 1_000_000_000  # 1 TAO in rao (9 dec)
+SOL = 1_000_000_000  # 1 SOL in lamports (9 dec)
 ETH = 10**18  # 1 ETH in wei (18 dec)
 RATE = '0.05'  # canonical 'ETH per 1 TAO' (~$200 TAO vs ~$4000 ETH)
 TAO_MIN, TAO_MAX = TAO // 10, TAO  # deploy-config shape: 0.1 τ / 1 τ, in rao
@@ -147,6 +149,27 @@ class TestTaoHubIntake:
     def test_spoke_spoke_pair_rejected(self):
         with pytest.raises(ValueError, match='hub leg'):
             compute_intake_amounts('btc', 'eth', 100, '20', backing='btc')
+
+    def test_leg_value_binds_an_exact_leg_without_a_provider(self):
+        # Exact first, either side — and sn7<->tao keeps the exact TAO leg, never a spot read.
+        assert leg_value('tao', 'tao', TAO, 'eth', ETH // 20) == TAO
+        assert leg_value('tao', 'eth', ETH // 20, 'tao', TAO) == TAO
+        assert leg_value('tao', 'sn7', 5 * TAO, 'tao', TAO) == TAO
+        assert leg_value('sol', 'sol', SOL, 'sn7', 5 * TAO) == SOL
+
+    def test_leg_value_prices_a_declared_alpha_leg_at_spot(self):
+        sn7 = SimpleNamespace(value_rao=lambda amount: amount * 3)
+        assert leg_value('tao', 'sol', SOL, 'sn7', 5 * TAO, {'sn7': sn7}) == 15 * TAO
+        with pytest.raises(ValueError, match='provider'):
+            leg_value('tao', 'sol', SOL, 'sn7', 5 * TAO)
+        with pytest.raises(ValueError, match='no leg'):
+            leg_value('tao', 'sol', SOL, 'avax', 1, {'sn7': sn7})
+
+    def test_sol_to_sn7_is_sized_by_its_backing(self):
+        sn7 = SimpleNamespace(value_rao=lambda amount: 7 * TAO)
+        declared = compute_intake_amounts('sol', 'sn7', SOL, RATE, backing='tao', providers={'sn7': sn7})
+        assert declared.collateral_amount == 7 * TAO
+        assert compute_intake_amounts('sol', 'sn7', SOL, RATE, backing='sol').collateral_amount == SOL
 
     def test_viability_gates_on_rao_bounds(self):
         bounds = {'sol': (0, 0), 'tao': (TAO_MIN, TAO_MAX)}
