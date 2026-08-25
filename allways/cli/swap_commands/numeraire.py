@@ -33,7 +33,7 @@ from allways.cli.swap_commands.helpers import (
     safe_read,
 )
 from allways.cli.swap_commands.pair import write_rate_posted_flag
-from allways.constants import HUB_CHAINS, LAUNCH_SPOKES, NUMERAIRE_CHAIN, RATE_PRECISION
+from allways.constants import HUB_CHAINS, LAUNCH_ALPHAS, LAUNCH_SPOKES, NUMERAIRE_CHAIN, RATE_PRECISION, family
 from allways.solana.client import SolanaClientError
 from allways.utils.rate import quantize_rate_display, quantize_rate_fixed
 
@@ -74,18 +74,19 @@ def _addr_kw(chain: str) -> str:
 
 
 def quote_options(f):
-    """Attach the SOL-address flag plus a ``--<spoke>-price`` / ``--<spoke>-address`` pair for every
-    launch spoke. Registry-derived from ``LAUNCH_SPOKES`` — add a spoke there and its flags appear
-    here automatically, with no hand-typed per-chain options. Every flag stays explicit, so posting
-    quotes is fully scriptable (``--yes`` skips the confirm). Under ``--hub tao`` the prices read
-    'X per 1 TAO' and ``--tao-address`` is the hub leg."""
-    for spoke in reversed(LAUNCH_SPOKES):  # reversed: decorators stack bottom-up, so this restores registry order
-        f = click.option(f'--{spoke}-address', default=None, help=f'Your {spoke.upper()} address.')(f)
+    """Attach the SOL-address flag plus a ``--<chain>-price`` for every launch spoke and alpha, and a
+    ``--<spoke>-address`` for every spoke (an alpha is delivered to the TAO address). Registry-derived
+    from ``LAUNCH_SPOKES`` / ``LAUNCH_ALPHAS`` — add a chain there and its flags appear here
+    automatically. Every flag stays explicit, so posting quotes is fully scriptable (``--yes`` skips
+    the confirm). Under ``--hub tao`` the prices read 'X per 1 TAO' and ``--tao-address`` is the hub leg."""
+    for chain in reversed(LAUNCH_SPOKES + LAUNCH_ALPHAS):  # reversed: decorators stack bottom-up
+        if chain in LAUNCH_SPOKES:
+            f = click.option(f'--{chain}-address', default=None, help=f'Your {chain.upper()} address.')(f)
         f = click.option(
-            f'--{spoke}-price',
+            f'--{chain}-price',
             type=FINITE_FLOAT,
             default=None,
-            help=f'{spoke.upper()} per 1 hub unit (0/omit to skip {spoke.upper()}).',
+            help=f'{chain.upper()} per 1 hub unit (0/omit to skip {chain.upper()}).',
         )(f)
     return click.option(
         f'--{NUMERAIRE_CHAIN}-address',
@@ -98,6 +99,7 @@ def quote_options(f):
 def _example() -> str:
     """A concrete, copy-pasteable usage line built from the current registry (not hand-typed)."""
     flags = ' '.join(f'--{s}-price <{s}-per-hub> --{s}-address <{s}>' for s in LAUNCH_SPOKES)
+    flags += ' ' + ' '.join(f'--{a}-price <{a}-per-hub>' for a in LAUNCH_ALPHAS)
     return f'alw miner quotes --{NUMERAIRE_CHAIN}-address <{NUMERAIRE_CHAIN}> {flags} --spread 50'
 
 
@@ -132,20 +134,21 @@ def quotes_command(spread_bps, hub, backing, dry_run, yes, **spoke_opts):
     """
     hub_address = spoke_opts.get(_addr_kw(hub))
     chain_specs: Dict[str, Tuple[float, str]] = {}
-    for spoke in LAUNCH_SPOKES:
-        price = spoke_opts.get(f'{spoke}_price')
-        addr = spoke_opts.get(f'{spoke}_address')
-        if spoke == hub:
+    for chain in LAUNCH_SPOKES + LAUNCH_ALPHAS:
+        price = spoke_opts.get(f'{chain}_price')
+        addr_chain = family(chain) if chain in LAUNCH_ALPHAS else chain  # an alpha lands on the TAO coldkey
+        addr = spoke_opts.get(_addr_kw(addr_chain))
+        if chain == hub:
             if price:
-                fail(f'--{spoke}-price conflicts with --hub {hub} — {spoke.upper()} is the hub leg, not a spoke.')
+                fail(f'--{chain}-price conflicts with --hub {hub} — {chain.upper()} is the hub leg, not a chain.')
             continue
         if not price or price <= 0:
             continue
-        if not addr and uses_solana_wallet(spoke):
+        if not addr and uses_solana_wallet(chain):
             addr = spoke_opts.get(_addr_kw(NUMERAIRE_CHAIN))  # same wallet as the SOL leg
         if not addr:
-            fail(f'--{spoke}-address required with --{spoke}-price')
-        chain_specs[spoke] = (price, addr)
+            fail(f'--{addr_chain}-address required with --{chain}-price')
+        chain_specs[chain] = (price, addr)
     if not chain_specs:
         fail('Nothing to post — give at least one --<chain>-price/--<chain>-address.')
     if not hub_address:
