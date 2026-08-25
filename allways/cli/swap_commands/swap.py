@@ -646,8 +646,7 @@ def _deadline_lines(reserved_until: int, want_send: bool, now: Optional[int] = N
 
 
 def _refuse_uncovered(client, config, resv, from_chain, to_chain) -> None:
-    """A declared alpha leg is bound off-chain (spec §5): never send into a seat whose collateral does
-    not cover it at spot — that collateral is the refund. An exact leg was bound by the program."""
+    """Never send into a seat whose collateral does not cover a declared alpha leg at spot — that collateral is the refund."""
     backing = str(getattr(resv, 'collateral_chain', '') or '')
     providers = declared_leg_providers(client, config, backing, from_chain, to_chain)
     if not providers:

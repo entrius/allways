@@ -59,9 +59,8 @@ def _best_offer(client, miner_pk, miner_state, from_chain, to_chain, from_amount
     """The offer of this miner's that gives the user the most — one market per pair, mixed by rate
     (D2), NOT a preference for either purse. Reuses the taker's selector, so a routed user and a
     self-represented one pick the same offer, including its exact-tie preference for "sol".
-    ``providers`` prices a declared alpha leg. Returns ``((quote, backing), '')`` or ``(None, reason)``
-    — the reason is the taker-facing one from the same gate set, so a routed rejection reads like a
-    self-represented one."""
+    Returns ``((quote, backing), '')`` or ``(None, reason)`` — the reason is the taker-facing one
+    from the same gate set, so a routed rejection reads like a self-represented one."""
     offers = {}
     candidates = []
     for q in client.get_quotes_for_direction(miner_pk, from_chain, to_chain) or []:

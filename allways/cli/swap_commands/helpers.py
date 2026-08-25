@@ -895,9 +895,7 @@ def _underfunded(state: PurseState) -> str:
 
 
 def gate_provider(chain: str, client, config):
-    """Read-only provider for deliverability screens (no send creds, no startup check).
-    None when it can't be built — the screens fail open; routed flows are re-gated by the
-    validator either way."""
+    """Read-only provider for the CLI's screens; None when unbuildable (screens fail open, the validator re-gates)."""
     from allways.assets import ASSET_REGISTRY
 
     spec = next((s for s in ASSET_REGISTRY if s.chain_id == chain), None)
@@ -913,8 +911,7 @@ def gate_provider(chain: str, client, config):
 
 
 def declared_leg_providers(client, config, backing, from_chain, to_chain) -> dict:
-    """The provider that prices a DECLARED alpha leg, keyed by chain — empty when the backing's leg is
-    exact, so today's pairs build nothing and read nothing."""
+    """The provider pricing a DECLARED alpha leg, keyed by chain — empty for an exact leg (builds nothing)."""
     if not backing or backing in (from_chain, to_chain):
         return {}
     leg = from_chain if family(from_chain) == backing else to_chain
@@ -922,8 +919,7 @@ def declared_leg_providers(client, config, backing, from_chain, to_chain) -> dic
 
 
 def candidate_providers(client, config, candidates, from_chain, to_chain) -> dict:
-    """The declared-leg providers every selector shares, built once per distinct backing on offer —
-    an exact-leg market (sol<->btc) builds nothing."""
+    """Declared-leg providers shared by every selector, built once per backing on offer."""
     providers: dict = {}
     for backing in dict.fromkeys(c.backing for c in candidates):
         providers.update(declared_leg_providers(client, config, backing, from_chain, to_chain))

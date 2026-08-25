@@ -28,32 +28,20 @@ from allways.validator.reserve_engine import (
 
 SEAM_HOST = os.environ.get('ALLWAYS_SEAM_HOST', '127.0.0.1')
 
-# The offering polls /status and /deposit-scan per active swap on a tight loop, and its
-# list view reconciles every live row per poll — so identical reads arrive from many tabs and
-# many rows at once, each costing uncached getAccountInfo. Sustained hard enough that earns the
-# validator an RPC 429, and a validator that cannot read the chain cannot verify a swap: the
-# miner holding the reservation is the one who eats the timeout. A chatty consumer must not be
-# able to price the validator out of its own RPC budget.
-#
-# Sized to the consumer's fastest poll, not longer: past that the TTL — not the caller's
-# cadence — sets how fast a stage transition surfaces, buying no extra dedup (a burst of tabs
-# and reconciled rows lands within ~1s) at the cost of latency on every transition. Cadence is
-# the lever for fewer reads; this one only collapses simultaneous ones.
+# Dedupes the identical reads the offering fires at once (many tabs, and its list view
+# reconciles every live row per poll) — uncached, that earned the validator an RPC 429.
+# Held at the consumer's fastest poll: longer would delay stage transitions without deduping more.
 SEAM_READ_TTL_SECS = 3.0
 
 
 def _ttl_bucket() -> int:
-    """Cache key component that rolls every TTL — a new bucket is a miss, old ones age out of
-    the LRU. Far shorter than any transition the offering reacts to (reservations live minutes,
-    dest legs need tens of seconds of confirmations), so a read this stale changes no decision."""
+    """Key component that rolls every TTL: a new bucket misses, old ones age out of the LRU."""
     return int(time.monotonic() / SEAM_READ_TTL_SECS)
 
 
 def _make_handler(validator, secret: str):
-    # Memos are per server, closing over this validator rather than keying on it: the validator
-    # is not required to be hashable, and no module-level table pins it alive. lru_cache does not
-    # store exceptions, so a transient RPC fault is retried rather than pinned for the bucket;
-    # maxsize caps the table so a long-lived seam can't grow an entry per swap ever polled.
+    # Closed over, not keyed on: the validator need not be hashable. lru_cache skips storing
+    # exceptions, so a transient RPC fault retries instead of pinning for the bucket.
     @lru_cache(maxsize=512)
     def cached_status(miner_hotkey: str, swap_key: str, _bucket: int):
         return swap_status(validator, miner_hotkey, swap_key)

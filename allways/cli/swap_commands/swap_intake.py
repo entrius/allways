@@ -170,8 +170,7 @@ def _bounds_for(
 
 
 def leg_value(backing: str, from_chain: str, from_amount: int, to_chain: str, to_amount: int, providers=None) -> int:
-    """The backing's leg in the backing's units — twin of ``backing.rs::collateral_leg_bind``. Exact
-    when a leg IS the backing; a leg of the backing's family (an alpha) is DECLARED and priced at spot."""
+    """The backing leg in backing units (twin of ``backing.rs::collateral_leg_bind``): exact, or a declared alpha leg priced at spot."""
     if backing == from_chain:
         return from_amount
     if backing == to_chain:
@@ -266,8 +265,7 @@ def viable_intakes(
 
     ``min_swap``/``max_swap`` are the pair's HUB-leg bounds (``hub_bounds``): ``is_executable_rate``
     is the crown/squat heuristic about a rate nobody can route, defined on the hub leg. The purse +
-    size gate below is the per-backing one. ``providers`` prices a declared alpha leg; an offer whose
-    leg cannot be priced is unviable, never a crash."""
+    size gate below is the per-backing one. ``providers`` prices a declared alpha leg (unpriceable = unviable)."""
     out: List[Tuple[MinerCandidate, IntakeAmounts]] = []
     for c in candidates:
         try:

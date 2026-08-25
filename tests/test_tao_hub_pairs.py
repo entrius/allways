@@ -42,7 +42,7 @@ from allways.constants import (
     is_hub,
 )
 from allways.utils.rate import is_executable_rate, min_executable_hub_leg
-from allways.validator.reserve_engine import reserve_on_behalf
+from allways.validator.reserve_engine import _best_offer, reserve_on_behalf
 from allways.validator.state_store import ValidatorStateStore
 
 TAO = 1_000_000_000  # 1 TAO in rao (9 dec)
@@ -307,6 +307,16 @@ class TestTaoEthAcceptance:
         cand, amts = best
         assert amts.to_amount == ETH // 20  # priced off the canonical 'ETH per 1 TAO' quote
         assert amts.collateral_amount == TAO  # the contract's backing-leg notional, in rao
+
+    def test_routed_offer_prices_a_declared_alpha_leg_through_the_validator_providers(self):
+        client = TaoHubClient()
+        client.quote.from_chain, client.quote.to_chain = 'sol', 'sn7'
+        sn7 = SimpleNamespace(value_rao=lambda amount: TAO // 2)  # inside the fixture's TAO bounds
+        bounds = bounds_from_config(client.get_config())
+        offer, _ = _best_offer(client, MINER_PK, client.miner_state, 'sol', 'sn7', SOL, bounds, {'sn7': sn7})
+        assert offer == (client.quote, 'tao')
+        offer, why = _best_offer(client, MINER_PK, client.miner_state, 'sol', 'sn7', SOL, bounds)
+        assert offer is None and 'provider' in why
 
     def test_routed_reservation_bids_the_tao_backing(self):
         client = TaoHubClient()
