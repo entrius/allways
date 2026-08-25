@@ -80,9 +80,10 @@ class TestHubSet:
         assert ('tao', 'sol') not in LAUNCH_PAIRS
         assert ('tao', 'eth') in LAUNCH_PAIRS and ('tao', 'btc') in LAUNCH_PAIRS
         assert len(LAUNCH_PAIRS) == len(set(LAUNCH_PAIRS))
-        assert all(hub in HUB_CHAINS and spoke != hub for hub, spoke in LAUNCH_PAIRS)
+        assert all(anchor == hub_leg(anchor, other) and other != anchor for anchor, other in LAUNCH_PAIRS)
         assert all(pair == canonical_pair(*pair) for pair in LAUNCH_PAIRS)
         assert all((hub, alpha) in LAUNCH_PAIRS for hub in HUB_CHAINS for alpha in LAUNCH_ALPHAS)
+        assert ('sn7', 'avax') in LAUNCH_PAIRS and ('sn7', 'sn74') in LAUNCH_PAIRS
 
     def test_direction_pools_span_both_families_and_conserve(self):
         assert len(DIRECTION_POOLS) == 2 * len(LAUNCH_PAIRS)
