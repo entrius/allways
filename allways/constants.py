@@ -61,6 +61,9 @@ CANCEL_REASON_ERC20_FEE_ENABLED = 4
 # The issuer froze the destination's SPL token account (USDC's mint carries a freeze authority):
 # undeliverable through no fault of the miner. Python-side first; mirror into constants.rs next release.
 CANCEL_REASON_SPL_FROZEN = 5
+# The subnet owner/root disabled alpha transfers (TransferToggle / SubtokenEnabled): strands every
+# miner on that subnet at once — no-fault. Python-side first; mirror into constants.rs next release.
+CANCEL_REASON_ALPHA_TRANSFER_DISABLED = 6
 CANCEL_REASON_OTHER = 255
 
 BTC_MIN_FEE_RATE = 5
