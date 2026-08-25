@@ -55,12 +55,13 @@ def resolve_miner_pubkey(validator, miner_hotkey: str) -> Optional[Pubkey]:
     return hk_binding.miner
 
 
-def _best_offer(client, miner_pk, miner_state, from_chain: str, to_chain: str, from_amount: int, bounds):
+def _best_offer(client, miner_pk, miner_state, from_chain, to_chain, from_amount, bounds, providers=None):
     """The offer of this miner's that gives the user the most — one market per pair, mixed by rate
     (D2), NOT a preference for either purse. Reuses the taker's selector, so a routed user and a
     self-represented one pick the same offer, including its exact-tie preference for "sol".
-    Returns ``((quote, backing), '')`` or ``(None, reason)`` — the reason is the taker-facing one
-    from the same gate set, so a routed rejection reads like a self-represented one."""
+    ``providers`` prices a declared alpha leg. Returns ``((quote, backing), '')`` or ``(None, reason)``
+    — the reason is the taker-facing one from the same gate set, so a routed rejection reads like a
+    self-represented one."""
     offers = {}
     candidates = []
     for q in client.get_quotes_for_direction(miner_pk, from_chain, to_chain) or []:
@@ -75,9 +76,10 @@ def _best_offer(client, miner_pk, miner_state, from_chain: str, to_chain: str, f
     if not candidates:
         return None, f'miner has no quote for {from_chain}->{to_chain}'
     hub_min, hub_max = hub_bounds(bounds, from_chain, to_chain)
-    best = select_best_miner(candidates, from_chain, to_chain, from_amount, hub_min, hub_max, bounds)
+    best = select_best_miner(candidates, from_chain, to_chain, from_amount, hub_min, hub_max, bounds, providers)
     if best is None:
-        return None, unviable_reason(candidates, from_chain, to_chain, from_amount, hub_min, hub_max, bounds)
+        why = unviable_reason(candidates, from_chain, to_chain, from_amount, hub_min, hub_max, bounds, providers)
+        return None, why
     return (offers[best[0].backing], best[0].backing), ''
 
 
@@ -150,7 +152,7 @@ def reserve_on_behalf(
         rate_fixed = pool.rate  # pinned at open — joiners must quote against it
         quote = client.get_quote(miner_pk, from_chain, to_chain, backing)
     else:
-        offer, why = _best_offer(client, miner_pk, miner_state, from_chain, to_chain, from_amount, bounds)
+        offer, why = _best_offer(client, miner_pk, miner_state, from_chain, to_chain, from_amount, bounds, providers)
         if offer is None:
             return ReserveResult(False, why)
         quote, backing = offer
@@ -667,9 +669,12 @@ def rate_quote(validator, from_chain: str, to_chain: str, from_amount: int) -> R
     bounds = bounds_from_config(cfg)
     min_swap, max_swap = hub_bounds(bounds, from_chain, to_chain)
     cands = candidate_miners(client, from_chain, to_chain)
-    best = select_best_miner(cands, from_chain, to_chain, from_amount, min_swap, max_swap, bounds)
+    providers = getattr(validator, 'axon_assets', None) or {}
+    best = select_best_miner(cands, from_chain, to_chain, from_amount, min_swap, max_swap, bounds, providers)
     bq = _best_quote_result(validator, best) if best else None
-    reason = '' if bq else unviable_reason(cands, from_chain, to_chain, from_amount, min_swap, max_swap, bounds)
+    reason = (
+        '' if bq else unviable_reason(cands, from_chain, to_chain, from_amount, min_swap, max_swap, bounds, providers)
+    )
     depth: dict = {}
     for cand in cands:
         cap = max_intake_from_amount(cand, from_chain, to_chain, min_swap, max_swap, bounds)

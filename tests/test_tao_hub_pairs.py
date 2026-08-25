@@ -27,6 +27,7 @@ from allways.cli.swap_commands.swap_intake import (
     max_intake_from_amount,
     required_collateral,
     select_best_miner,
+    unviable_reason,
     viable_intakes,
 )
 from allways.constants import (
@@ -170,6 +171,24 @@ class TestTaoHubIntake:
         declared = compute_intake_amounts('sol', 'sn7', SOL, RATE, backing='tao', providers={'sn7': sn7})
         assert declared.collateral_amount == 7 * TAO
         assert compute_intake_amounts('sol', 'sn7', SOL, RATE, backing='sol').collateral_amount == SOL
+
+    def test_selectors_route_a_declared_leg_only_with_its_provider(self):
+        sn7 = SimpleNamespace(value_rao=lambda amount: 7 * TAO)
+        offer = MinerCandidate(object(), RATE, required_collateral(7 * TAO), backing='tao')
+        bounds = {'tao': (TAO_MIN, 10 * TAO)}
+        best = select_best_miner([offer], 'sol', 'sn7', SOL, 0, 0, bounds, {'sn7': sn7})
+        assert best is not None and best[1].collateral_amount == 7 * TAO
+        assert select_best_miner([offer], 'sol', 'sn7', SOL, 0, 0, bounds) is None
+        assert 'provider' in unviable_reason([offer], 'sol', 'sn7', SOL, 0, 0, bounds)
+
+    def test_exact_leg_selection_never_reads_a_price(self):
+        def boom(amount):
+            raise AssertionError('exact leg priced at spot')
+
+        offer = MinerCandidate(object(), RATE, required_collateral(TAO), backing='tao')
+        assert select_best_miner(
+            [offer], 'tao', 'eth', TAO, TAO_MIN, TAO_MAX, None, {'tao': SimpleNamespace(value_rao=boom)}
+        )
 
     def test_viability_gates_on_rao_bounds(self):
         bounds = {'sol': (0, 0), 'tao': (TAO_MIN, TAO_MAX)}

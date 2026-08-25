@@ -31,8 +31,11 @@ from allways.cli.swap_commands.helpers import (
     FINITE_DECIMAL,
     PENDING_SWAP_FILE,
     backing_label,
+    candidate_providers,
     console,
+    declared_leg_providers,
     fail,
+    gate_provider,
     get_cli_context,
     get_solana_cli_context,
     hotkey_bytes_to_ss58,
@@ -48,13 +51,12 @@ from allways.cli.swap_commands.swap_intake import (
     leg_value,
     rate_display_from_fixed,
     select_best_miner,
-    swap_viable,
     to_smallest_units,
     unviable_reason,
     viable_intakes,
 )
 from allways.cli.validator_rejections import render_and_aggregate
-from allways.constants import FEE_DIVISOR, NETUID_FINNEY, NUMERAIRE_CHAIN, family, hub_leg
+from allways.constants import FEE_DIVISOR, NETUID_FINNEY, NUMERAIRE_CHAIN, hub_leg
 from allways.solana import pdas
 from allways.solana.client import benign_marker, contract_reject_reason
 from allways.solana.rpc import TransientRpcError
@@ -200,7 +202,9 @@ def _net_receive(to_amount: int, to_chain: str) -> float:
     return apply_fee_deduction(to_amount, FEE_DIVISOR) / 10 ** get_chain_def(to_chain).decimals
 
 
-def _named_intake(miner_opt, candidates, viable, from_chain, to_chain, from_amount, min_swap, max_swap, bounds=None):
+def _named_intake(
+    miner_opt, candidates, viable, from_chain, to_chain, from_amount, min_swap, max_swap, bounds, providers
+):
     """Resolve an explicit --miner pubkey against the same gates auto-select uses. Hard-fails with
     the specific reason — never silently falls back to another miner."""
     chosen = next((p for p in viable if str(p[0].miner) == miner_opt), None)
@@ -209,10 +213,8 @@ def _named_intake(miner_opt, candidates, viable, from_chain, to_chain, from_amou
     cand = next((c for c in candidates if str(c.miner) == miner_opt), None)
     if cand is None:
         fail(f'Miner {miner_opt[:8]}… is not active or not quoting {from_chain}->{to_chain}.')
-    amts = compute_intake_amounts(from_chain, to_chain, from_amount, cand.rate_display, cand.backing)
-    lo, hi = (bounds or {}).get(cand.backing, (min_swap, max_swap))
-    _, reason = swap_viable(amts.collateral_amount, cand.collateral, lo, hi, cand.backing)
-    fail(f'Miner {miner_opt[:8]}… cannot take this swap: {reason or "rate not executable"}.')
+    reason = unviable_reason([cand], from_chain, to_chain, from_amount, min_swap, max_swap, bounds, providers)
+    fail(f'Miner {miner_opt[:8]}… cannot take this swap: {reason}.')
 
 
 def _pick_intake(viable, from_chain, to_chain):
@@ -408,7 +410,7 @@ def swap_now_command(
         fail(f'--from-address (your source-chain address) is required for a non-{NUMERAIRE_CHAIN.upper()} source.')
     # Canonical source form before anything commits it: the finalize hash + source-lock PDA are
     # byte-keyed on this string (V-C2), so a cased variant would mint a divergent lock on-chain.
-    _src_gate = _gate_provider(from_chain, client, config)
+    _src_gate = gate_provider(from_chain, client, config)
     if _src_gate is not None:
         user_from_addr = _src_gate.chain.normalize_address(user_from_addr)
 
@@ -422,17 +424,20 @@ def swap_now_command(
     candidates = candidate_miners(client, from_chain, to_chain)
     if not candidates:
         fail(f'No miners quoting {from_chain}->{to_chain} right now.')
+    providers = candidate_providers(client, config, candidates, from_chain, to_chain)
     if miner_opt:
-        viable = viable_intakes(candidates, from_chain, to_chain, from_amount, min_swap, max_swap, bounds)
+        viable = viable_intakes(candidates, from_chain, to_chain, from_amount, min_swap, max_swap, bounds, providers)
         if not viable:
-            reason = unviable_reason(candidates, from_chain, to_chain, from_amount, min_swap, max_swap, bounds)
+            reason = unviable_reason(
+                candidates, from_chain, to_chain, from_amount, min_swap, max_swap, bounds, providers
+            )
             fail(f'No miner can take this swap: {reason}.')
         best_to = max(p[1].to_amount for p in viable)
         if miner_opt == _MINER_PICK:
             cand, amts = _pick_intake(viable, from_chain, to_chain)
         else:
             cand, amts = _named_intake(
-                miner_opt, candidates, viable, from_chain, to_chain, from_amount, min_swap, max_swap, bounds
+                miner_opt, candidates, viable, from_chain, to_chain, from_amount, min_swap, max_swap, bounds, providers
             )
         if amts.to_amount < best_to * (1 - MINER_RATE_WARN_FRACTION):
             pct = (1 - amts.to_amount / best_to) * 100
@@ -441,9 +446,11 @@ def swap_now_command(
                 f'(~{_net_receive(best_to, to_chain):.8g} {to_chain.upper()}).'
             )
     else:
-        best = select_best_miner(candidates, from_chain, to_chain, from_amount, min_swap, max_swap, bounds)
+        best = select_best_miner(candidates, from_chain, to_chain, from_amount, min_swap, max_swap, bounds, providers)
         if best is None:
-            reason = unviable_reason(candidates, from_chain, to_chain, from_amount, min_swap, max_swap, bounds)
+            reason = unviable_reason(
+                candidates, from_chain, to_chain, from_amount, min_swap, max_swap, bounds, providers
+            )
             fail(f'No miner can take this swap: {reason}.')
         cand, amts = best
 
@@ -466,7 +473,12 @@ def swap_now_command(
     # quote (which can drift after the pool opened and would show a receive the fill won't honor).
     pinned = contention.is_open and (contention.from_chain, contention.to_chain) == (from_chain, to_chain)
     if pinned and contention.rate > 0:
-        amts = compute_intake_amounts(from_chain, to_chain, from_amount, rate_display_from_fixed(contention.rate))
+        try:
+            amts = compute_intake_amounts(
+                from_chain, to_chain, from_amount, rate_display_from_fixed(contention.rate), cand.backing, providers
+            )
+        except (ValueError, ProviderUnreachableError) as e:
+            fail(f'  Cannot price the pinned pool rate ({e}). Re-run shortly.')
     # Quote the NET dest leg — the miner delivers `to_amount` less the protocol fee, same as
     # `alw swap quote`. The gross `to_amount` is what gets pinned on-chain, not what you receive.
     recv = _net_receive(amts.to_amount, to_chain)
@@ -633,38 +645,11 @@ def _deadline_lines(reserved_until: int, want_send: bool, now: Optional[int] = N
     return lines
 
 
-def _gate_provider(chain: str, client, config):
-    """Read-only provider for deliverability screens (no send creds, no startup check).
-    None when it can't be built — the screens fail open; routed flows are re-gated by the
-    validator either way."""
-    from allways.assets import ASSET_REGISTRY
-
-    spec = next((s for s in ASSET_REGISTRY if s.chain_id == chain), None)
-    if spec is None:
-        return None
-    avail = {'solana_rpc_url': client.rpc.url, 'solana_keypair': client.keypair}
-    try:
-        if 'subtensor' in spec.kwarg_names:
-            avail['subtensor'] = get_cli_context(need_wallet=False)[2]
-        return spec.cls(**{k: avail[k] for k in spec.kwarg_names if k in avail})
-    except Exception:  # noqa: BLE001 - unbuildable provider (missing env) → screens fail open
-        return None
-
-
-def _declared_leg_providers(client, config, backing, from_chain, to_chain) -> dict:
-    """The provider that prices a DECLARED alpha leg, keyed by chain — empty when the backing's leg is
-    exact, so today's pairs build nothing and read nothing."""
-    if not backing or backing in (from_chain, to_chain):
-        return {}
-    leg = from_chain if family(from_chain) == backing else to_chain
-    return {leg: _gate_provider(leg, client, config)}
-
-
 def _refuse_uncovered(client, config, resv, from_chain, to_chain) -> None:
     """A declared alpha leg is bound off-chain (spec §5): never send into a seat whose collateral does
     not cover it at spot — that collateral is the refund. An exact leg was bound by the program."""
     backing = str(getattr(resv, 'collateral_chain', '') or '')
-    providers = _declared_leg_providers(client, config, backing, from_chain, to_chain)
+    providers = declared_leg_providers(client, config, backing, from_chain, to_chain)
     if not providers:
         return
     (leg,) = providers
@@ -688,14 +673,14 @@ def _screen_deliverability(client, config, cand, from_chain, to_chain, receive_a
     miner's receive address must accept the source funds (T18). The source-address probe is a
     courtesy warning only — a frozen source just means the deposit fails and the reservation
     lapses unclaimed. A leg whose provider can't be built read-only fails open, as before."""
-    dest_provider = _gate_provider(to_chain, client, config)
+    dest_provider = gate_provider(to_chain, client, config)
     quote = client.get_quote(cand.miner, from_chain, to_chain, cand.backing)
     if dest_provider is not None:
         # Validity only — deliverability is NOT predicted at reserve time (not a boundary; the sound
         # check is the delivery-time reverted-tx proof). A malformed address can never be delivered to.
         if not dest_provider.chain.is_valid_address(receive_addr):
             fail(f'  {receive_addr!r} is not a valid {to_chain.upper()} address. No funds moved.')
-    src_provider = _gate_provider(from_chain, client, config)
+    src_provider = gate_provider(from_chain, client, config)
     if src_provider is None:
         return
     miner_addr = getattr(quote, 'miner_from_addr', '') if quote else ''
@@ -974,7 +959,7 @@ def _reserve_self_represented(
             )
 
     # Phase 3 — FINALIZE against the PINNED rate (not the live quote, which can drift after the bid).
-    providers = _declared_leg_providers(client, None, backing, from_chain, to_chain)
+    providers = declared_leg_providers(client, None, backing, from_chain, to_chain)
     try:
         fill = compute_intake_amounts(
             from_chain, to_chain, from_amount, rate_display_from_fixed(drawn.rate), backing, providers

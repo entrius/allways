@@ -134,7 +134,7 @@ def _run_swap_now(reserved_until, from_chain='btc'):
 
     with (
         patch('allways.cli.swap_commands.swap.get_solana_cli_context', return_value=(None, client)),
-        patch('allways.cli.swap_commands.swap._gate_provider', return_value=None),
+        patch('allways.cli.swap_commands.swap.gate_provider', return_value=None),
         patch('allways.cli.swap_commands.swap.candidate_miners', return_value=[cand]),
         patch('allways.cli.swap_commands.swap.select_best_miner', return_value=(cand, amts)),
         patch('allways.cli.swap_commands.swap._poll_drawn', return_value=drawn),
@@ -321,7 +321,7 @@ def _run_resume(existing, poll_resv):
     ]
     with (
         patch('allways.cli.swap_commands.swap.get_solana_cli_context', return_value=(None, client)),
-        patch('allways.cli.swap_commands.swap._gate_provider', return_value=None),
+        patch('allways.cli.swap_commands.swap.gate_provider', return_value=None),
         patch('allways.cli.swap_commands.swap.candidate_miners', return_value=[cand]),
         patch('allways.cli.swap_commands.swap.select_best_miner', return_value=(cand, amts)),
         patch(
@@ -496,7 +496,7 @@ def _screen(gate, from_chain, to_chain, client=None):
     from allways.cli.swap_commands.swap import _screen_deliverability
 
     cand = types.SimpleNamespace(miner='miner-pk', rate_display='150', backing='sol')
-    with patch('allways.cli.swap_commands.swap._gate_provider', return_value=gate):
+    with patch('allways.cli.swap_commands.swap.gate_provider', return_value=gate):
         _screen_deliverability(client or MagicMock(), {}, cand, from_chain, to_chain, 'recvaddr', 'useraddr', 10**6)
     return gate
 
@@ -569,7 +569,7 @@ def test_screen_rejection_aborts_swap_now_before_any_bid():
     argv = ['--from', 'sol', '--to', 'btc', '--amount', '0.001', '--receive-address', 'userBTCaddr', '--yes']
     with (
         patch('allways.cli.swap_commands.swap.get_solana_cli_context', return_value=(None, client)),
-        patch('allways.cli.swap_commands.swap._gate_provider', return_value=_Gate(reject={'minerSOLaddr'})),
+        patch('allways.cli.swap_commands.swap.gate_provider', return_value=_Gate(reject={'minerSOLaddr'})),
         patch('allways.cli.swap_commands.swap.candidate_miners', return_value=[cand]),
         patch('allways.cli.swap_commands.swap.select_best_miner', return_value=(cand, amts)),
         patch('allways.cli.swap_commands.swap._save_pending'),

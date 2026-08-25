@@ -14,6 +14,7 @@ from dataclasses import dataclass
 from decimal import Decimal
 from typing import Dict, List, Optional, Tuple
 
+from allways.assets.asset import ProviderUnreachableError
 from allways.chains import canonical_pair, get_chain_def
 from allways.constants import (
     COLLATERAL_REQUIREMENT_BPS,
@@ -258,13 +259,15 @@ def viable_intakes(
     min_swap: int,
     max_swap: int,
     bounds_by_backing: Optional[BoundsByBacking] = None,
+    providers=None,
 ) -> List[Tuple[MinerCandidate, IntakeAmounts]]:
     """Every candidate passing the executable-rate + viability gates, with derived amounts.
     Stable input order. The single gating path shared by auto-select and --miner.
 
     ``min_swap``/``max_swap`` are the pair's HUB-leg bounds (``hub_bounds``): ``is_executable_rate``
     is the crown/squat heuristic about a rate nobody can route, defined on the hub leg. The purse +
-    size gate below is the per-backing one."""
+    size gate below is the per-backing one. ``providers`` prices a declared alpha leg; an offer whose
+    leg cannot be priced is unviable, never a crash."""
     out: List[Tuple[MinerCandidate, IntakeAmounts]] = []
     for c in candidates:
         try:
@@ -274,9 +277,9 @@ def viable_intakes(
         if not is_executable_rate(rate, from_chain, to_chain, min_swap, max_swap):
             continue
         try:
-            amts = compute_intake_amounts(from_chain, to_chain, from_amount, c.rate_display, c.backing)
-        except ValueError:
-            continue  # backing not in this pair's legs — the contract would refuse it too
+            amts = compute_intake_amounts(from_chain, to_chain, from_amount, c.rate_display, c.backing, providers)
+        except (ValueError, ProviderUnreachableError):
+            continue  # unpriceable leg, or a backing outside this pair — the contract would refuse it too
         if amts.to_amount <= 0:
             continue
         lo, hi = _bounds_for(c.backing, bounds_by_backing, min_swap, max_swap)
@@ -343,6 +346,7 @@ def unviable_reason(
     min_swap: int,
     max_swap: int,
     bounds_by_backing: Optional[BoundsByBacking] = None,
+    providers=None,
 ) -> str:
     """Why nothing was quotable — the gates of ``viable_intakes``, spelled out for the taker.
 
@@ -359,8 +363,8 @@ def unviable_reason(
             reasons.append('rate not executable')
             continue
         try:
-            amts = compute_intake_amounts(from_chain, to_chain, from_amount, c.rate_display, c.backing)
-        except ValueError as e:
+            amts = compute_intake_amounts(from_chain, to_chain, from_amount, c.rate_display, c.backing, providers)
+        except (ValueError, ProviderUnreachableError) as e:
             reasons.append(str(e))
             continue
         if amts.to_amount <= 0:
@@ -385,6 +389,7 @@ def select_best_miner(
     min_swap: int,
     max_swap: int,
     bounds_by_backing: Optional[BoundsByBacking] = None,
+    providers=None,
 ) -> Optional[Tuple[MinerCandidate, IntakeAmounts]]:
     """Among executable + viable miners, pick the one giving the user the most dest (``to_amount``).
 
@@ -392,5 +397,7 @@ def select_best_miner(
     tie only, toward "sol": at identical value the instant-SOL-refund guarantee is strictly better
     for the taker than a TAO reimbursement that lands shortly after the timeout. Remaining ties fall
     back to first-seen (stable input order)."""
-    viable = viable_intakes(candidates, from_chain, to_chain, from_amount, min_swap, max_swap, bounds_by_backing)
+    viable = viable_intakes(
+        candidates, from_chain, to_chain, from_amount, min_swap, max_swap, bounds_by_backing, providers
+    )
     return max(viable, key=lambda p: (p[1].to_amount, p[0].backing == NUMERAIRE_CHAIN), default=None)
