@@ -409,10 +409,8 @@ class Tao(Asset, Chain):
         decode: Decoder,
         settle: Settler,
     ) -> Optional[TransactionInfo]:
-        """Locate ``tx_hash`` in the hinted block ±3 (or ``max_scan_blocks`` back, newest first) and return it
-        as a settled transfer to ``expected_recipient`` of >= ``expected_amount``, else None. ``decode`` reads
-        the asset's transfer call off an extrinsic; ``settle`` proves its funds moved and yields what did.
-        The ±3 window covers small clock/finality skews between the caller's hint and the landing block."""
+        """Locate ``tx_hash`` (hinted block ±3, else ``max_scan_blocks`` back) as a settled transfer paying
+        ``expected_recipient`` >= ``expected_amount``, via the asset's ``decode`` and ``settle``."""
         try:
             current_block = self.subtensor.get_current_block()
         except Exception as e:
@@ -788,10 +786,8 @@ class Tao(Asset, Chain):
         decode: Decoder,
         settle: Settler,
     ) -> Optional[SendResult]:
-        """``(hash, block)`` of the send already recorded under ``scope`` for this obligation if it settled
-        on-chain; None when nothing matching is recorded or the record provably moved nothing (safe to
-        send). RAISES while the answer is unknown — the caller must not send. Anchors the record on the
-        landing block for later reuse."""
+        """``(hash, block)`` if the send recorded under ``scope`` settled; None if none is recorded or it provably
+        did not land; raises while that is unknown."""
         prior = broadcasted.get(scope)
         if prior is None or prior[0] != to_addr or prior[1] != int(amount):
             return None
@@ -813,9 +809,7 @@ class Tao(Asset, Chain):
         return landed
 
     def record_send_attempt(self, broadcasted: Broadcasts, scope: str, to_addr: str, amount: int) -> int:
-        """Mark the attempt BEFORE the send and return the head it was seen at (0 when unreadable): the
-        extrinsic can reach the chain even when the call raises, and only a marker makes the next poll
-        resolve it by scan instead of blindly re-sending."""
+        """Record the attempt BEFORE the send (an extrinsic can land even when the call raises); returns the head seen, 0 if unreadable."""
         attempt_head = self.get_current_block_height() or 0
         broadcasted[scope] = (to_addr, int(amount), '', attempt_head)
         if len(broadcasted) > 256:

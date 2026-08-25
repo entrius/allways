@@ -1,5 +1,4 @@
-"""Alpha legs settle on a top-level transfer_stake whose extrinsic succeeded AND emitted StakeTransferred,
-with the alpha amount read from the CALL (the event carries the TAO-equivalent). Backends are stubbed."""
+"""Alpha settlement: a top-level transfer_stake that succeeded AND emitted StakeTransferred, amount from the CALL."""
 
 from types import SimpleNamespace
 
