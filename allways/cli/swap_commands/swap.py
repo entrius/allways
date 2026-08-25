@@ -410,7 +410,7 @@ def swap_now_command(
         fail(f'--from-address (your source-chain address) is required for a non-{NUMERAIRE_CHAIN.upper()} source.')
     # Canonical source form before anything commits it: the finalize hash + source-lock PDA are
     # byte-keyed on this string (V-C2), so a cased variant would mint a divergent lock on-chain.
-    _src_gate = gate_provider(from_chain, client, config)
+    _src_gate = gate_provider(from_chain, client)
     if _src_gate is not None:
         user_from_addr = _src_gate.chain.normalize_address(user_from_addr)
 
@@ -424,7 +424,7 @@ def swap_now_command(
     candidates = candidate_miners(client, from_chain, to_chain)
     if not candidates:
         fail(f'No miners quoting {from_chain}->{to_chain} right now.')
-    providers = candidate_providers(client, config, candidates, from_chain, to_chain)
+    providers = candidate_providers(client, candidates, from_chain, to_chain)
     if miner_opt:
         viable = viable_intakes(candidates, from_chain, to_chain, from_amount, min_swap, max_swap, bounds, providers)
         if not viable:
@@ -590,7 +590,7 @@ def swap_now_command(
         f'[green]  Seat filled[/green] — receiving ~[cyan]{recv:.8g} {to_chain.upper()}[/cyan], '
         f'[cyan]{backing_label(resv_backing)}[/cyan].'
     )
-    _refuse_uncovered(client, config, resv, from_chain, to_chain)
+    _refuse_uncovered(client, resv, from_chain, to_chain)
     # Never instruct a send the reservation can't outlive: a deposit that lands after reserved_until
     # yields no claim, and the funds are stranded (straight to the miner — no escrow, no Swap, no
     # timeout, no refund). Confirmations accrue *after* the claim, so they don't belong in this margin.
@@ -645,10 +645,10 @@ def _deadline_lines(reserved_until: int, want_send: bool, now: Optional[int] = N
     return lines
 
 
-def _refuse_uncovered(client, config, resv, from_chain, to_chain) -> None:
+def _refuse_uncovered(client, resv, from_chain, to_chain) -> None:
     """Never send into a seat whose collateral does not cover a declared alpha leg at spot — that collateral is the refund."""
     backing = str(getattr(resv, 'collateral_chain', '') or '')
-    providers = declared_leg_providers(client, config, backing, from_chain, to_chain)
+    providers = declared_leg_providers(client, backing, from_chain, to_chain)
     if not providers:
         return
     (leg,) = providers
@@ -672,14 +672,14 @@ def _screen_deliverability(client, config, cand, from_chain, to_chain, receive_a
     miner's receive address must accept the source funds (T18). The source-address probe is a
     courtesy warning only — a frozen source just means the deposit fails and the reservation
     lapses unclaimed. A leg whose provider can't be built read-only fails open, as before."""
-    dest_provider = gate_provider(to_chain, client, config)
+    dest_provider = gate_provider(to_chain, client)
     quote = client.get_quote(cand.miner, from_chain, to_chain, cand.backing)
     if dest_provider is not None:
         # Validity only — deliverability is NOT predicted at reserve time (not a boundary; the sound
         # check is the delivery-time reverted-tx proof). A malformed address can never be delivered to.
         if not dest_provider.chain.is_valid_address(receive_addr):
             fail(f'  {receive_addr!r} is not a valid {to_chain.upper()} address. No funds moved.')
-    src_provider = gate_provider(from_chain, client, config)
+    src_provider = gate_provider(from_chain, client)
     if src_provider is None:
         return
     miner_addr = getattr(quote, 'miner_from_addr', '') if quote else ''
@@ -958,7 +958,7 @@ def _reserve_self_represented(
             )
 
     # Phase 3 — FINALIZE against the PINNED rate (not the live quote, which can drift after the bid).
-    providers = declared_leg_providers(client, None, backing, from_chain, to_chain)
+    providers = declared_leg_providers(client, backing, from_chain, to_chain)
     try:
         fill = compute_intake_amounts(
             from_chain, to_chain, from_amount, rate_display_from_fixed(drawn.rate), backing, providers

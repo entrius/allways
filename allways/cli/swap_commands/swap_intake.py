@@ -4,8 +4,8 @@ Mirrors the contract: ``collateral_amount`` is the leg denominated in the quote'
 bounded, collateral-backed notional) — ``backing.rs::collateral_leg_bind``, so a "sol"-backed
 quote is sized against its SOL leg and a "tao"-backed one against its TAO leg, in rao. Uses the
 shared ``calculate_to_amount`` so the CLI's pinned amounts agree with the miner + validator
-byte-for-byte. Every launch pair has a hub leg (sol↔spoke / tao↔spoke); a spoke↔spoke pair is
-rejected here. The one network-touching helper (``candidate_miners``) takes the Solana client as a
+byte-for-byte. Every launch pair has an anchor leg (``hub_leg``: a hub or an alpha); a spoke↔spoke pair
+is rejected here. The one network-touching helper (``candidate_miners``) takes the Solana client as a
 parameter, so the CLI taker path and the validator reserve engine build the same candidate set from
 the same reads.
 """
@@ -153,7 +153,7 @@ def bounds_from_config(cfg) -> BoundsByBacking:
 def hub_bounds(bounds: BoundsByBacking, from_chain: str, to_chain: str) -> Tuple[int, int]:
     """The pair's HUB-leg swap bounds, in the hub's own smallest unit — what the rate-executability
     gates (``is_executable_rate`` / selection scalars) anchor on. (0, 0) = unset/permissive for a
-    pair with no hub leg. Distinct from the per-BACKING size gate: sol↔tao is SOL-anchored here even
+    pair whose anchor is not a hub (an alpha anchor has no hub bounds — see the PR3 gate). Distinct from the per-BACKING size gate: sol↔tao is SOL-anchored here even
     when a tao-backed quote's size is gated on the TAO bounds."""
     hub = hub_leg(from_chain, to_chain)
     return bounds.get(hub, (0, 0)) if hub else (0, 0)
@@ -195,12 +195,12 @@ def compute_intake_amounts(
 ) -> IntakeAmounts:
     """Derive (collateral_amount, from_amount, to_amount) for a swap of ``from_amount`` (source smallest-units).
 
-    ``rate_display`` is the miner's canonical 'dest per 1 hub' rate. Requires one leg to be a hub.
+    ``rate_display`` is the miner's canonical 'dest per 1 anchor' rate. Requires an anchor leg (``hub_leg``).
     ``collateral_amount`` is the ``backing``'s leg, in that asset's own units — the figure
     ``finalize_reservation`` bounds and collateralizes. ``providers`` prices a declared alpha leg.
     """
     if hub_leg(from_chain, to_chain) is None:
-        raise ValueError(f'{from_chain}->{to_chain}: a hub leg (sol or tao) is required (every pair is hub<->spoke)')
+        raise ValueError(f'{from_chain}->{to_chain}: no anchor leg (a hub or an alpha) — not a valid pair')
     canon_from, canon_to = canonical_pair(from_chain, to_chain)
     is_reverse = from_chain != canon_from
     to_amount = calculate_to_amount(

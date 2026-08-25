@@ -118,7 +118,7 @@ def quote_command(from_chain: str, to_chain: str, amount: Decimal, as_json: bool
                 )
 
     # The same gates the contract enforces, priced with the same providers the origination path uses.
-    providers = candidate_providers(client, {}, candidates, from_chain, to_chain)
+    providers = candidate_providers(client, candidates, from_chain, to_chain)
     viable = [
         (c, apply_fee_deduction(amts.to_amount, FEE_DIVISOR))
         for c, amts in viable_intakes(

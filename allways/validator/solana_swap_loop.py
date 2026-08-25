@@ -395,8 +395,8 @@ class SolanaSwapLoop:
                 int(swap.to_amount),
                 self.providers,
             )
-        except (ProviderUnreachableError, ValueError):
-            return SwapAction(SwapDecision.SKIP, reason='alpha price unreachable')
+        except (ProviderUnreachableError, ValueError) as e:
+            return SwapAction(SwapDecision.SKIP, reason=f'alpha leg unpriceable: {e}')
         if int(swap.collateral_amount) < cover:
             return SwapAction(SwapDecision.REJECT, reason='collateral does not cover the alpha leg at spot')
         # Source deposit must exist, confirm, be sent BY the reserved user, AND be fresh vs the

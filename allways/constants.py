@@ -62,7 +62,7 @@ CANCEL_REASON_ERC20_FEE_ENABLED = 4
 # undeliverable through no fault of the miner. Python-side first; mirror into constants.rs next release.
 CANCEL_REASON_SPL_FROZEN = 5
 # The subnet owner/root disabled alpha transfers (TransferToggle / SubtokenEnabled): strands every
-# miner on that subnet at once — no-fault. Python-side first; mirror into constants.rs next release.
+# miner on that subnet at once — no-fault. Mirrored in constants.rs.
 CANCEL_REASON_ALPHA_TRANSFER_DISABLED = 6
 CANCEL_REASON_OTHER = 255
 
@@ -90,7 +90,7 @@ MAX_SCORING_BACKFILL_SECS = 2 * SCORING_WINDOW_SECS  # ~2 hours — backfill cap
 REWARD_MINER_STATES: frozenset[MinerActivity] = frozenset({MinerActivity.AVAILABLE})
 # Hub (collateral-capable) chains, PRIORITY-ORDERED: the earlier hub anchors a hub↔hub pair, so
 # sol↔tao stays SOL-anchored (grandfathered — existing quotes keep their stored convention).
-# A pair is valid iff one leg is a hub; that leg is its pricing + bounds anchor ('dest per 1 hub').
+# A pair is valid iff one leg is a hub or an alpha; hub_leg() names that anchor ('dest per 1 anchor').
 HUB_CHAINS = ('sol', 'tao')
 # The SOL constant — the Solana ledger's own asset (reservation fee, local collateral purse,
 # the `alw miner quotes` default hub). "Is this the pair's hub" reads go through hub_leg() instead.
@@ -99,11 +99,11 @@ NUMERAIRE_CHAIN = 'sol'
 
 def family(chain: str) -> str:
     """The backing family a chain settles in (twin of ``backing.rs::family``): an sn<N> alpha settles in TAO."""
-    return 'tao' if re.fullmatch(r'sn\d+', chain) else chain
+    return 'tao' if re.fullmatch(r'sn[0-9]+', chain) else chain
 
 
 def is_hub(chain: str) -> bool:
-    """True iff ``chain`` can anchor a pair (and back quotes with its own collateral purse)."""
+    """True iff ``chain`` backs quotes with its own collateral purse (a literal hub, not an alpha)."""
     return chain in HUB_CHAINS
 
 

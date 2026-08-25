@@ -148,7 +148,7 @@ class TestTaoHubIntake:
         assert a.collateral_amount == TAO
 
     def test_spoke_spoke_pair_rejected(self):
-        with pytest.raises(ValueError, match='hub leg'):
+        with pytest.raises(ValueError, match='anchor leg'):
             compute_intake_amounts('btc', 'eth', 100, '20', backing='btc')
 
     def test_leg_value_binds_an_exact_leg_without_a_provider(self):

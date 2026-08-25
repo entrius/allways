@@ -231,8 +231,10 @@ class Alpha(Asset):
         tx_hash = getattr(receipt, 'extrinsic_hash', None) or Tao.extrinsic_hash(getattr(response, 'extrinsic', None))
         if tx_hash:
             self.broadcasted_txids[scope] = (to_address, int(amount), tx_hash, attempt_head)
-        if not response.success:
-            bt.logging.error(f'{LOG_ALPHA} transfer_stake failed: {response.message} — recorded, resolved next poll')
+        if not response.success or not tx_hash:
+            bt.logging.error(
+                f'{LOG_ALPHA} transfer_stake unresolved: {response.message} — recorded, resolved next poll'
+            )
             return None
         try:
             block_num = int(self.subtensor.substrate.get_block_number(receipt.block_hash))

@@ -894,7 +894,7 @@ def _underfunded(state: PurseState) -> str:
     return f'Your {state.backing.upper()} purse holds {state.purse} < the {state.floor} floor (`{fix}`).'
 
 
-def gate_provider(chain: str, client, config):
+def gate_provider(chain: str, client):
     """Read-only provider for the CLI's screens; None when unbuildable (screens fail open, the validator re-gates)."""
     from allways.assets import ASSET_REGISTRY
 
@@ -910,17 +910,17 @@ def gate_provider(chain: str, client, config):
         return None
 
 
-def declared_leg_providers(client, config, backing, from_chain, to_chain) -> dict:
+def declared_leg_providers(client, backing, from_chain, to_chain) -> dict:
     """The provider pricing a DECLARED alpha leg, keyed by chain — empty for an exact leg (builds nothing)."""
     if not backing or backing in (from_chain, to_chain):
         return {}
     leg = from_chain if family(from_chain) == backing else to_chain
-    return {leg: gate_provider(leg, client, config)}
+    return {leg: gate_provider(leg, client)}
 
 
-def candidate_providers(client, config, candidates, from_chain, to_chain) -> dict:
+def candidate_providers(client, candidates, from_chain, to_chain) -> dict:
     """Declared-leg providers shared by every selector, built once per backing on offer."""
     providers: dict = {}
     for backing in dict.fromkeys(c.backing for c in candidates):
-        providers.update(declared_leg_providers(client, config, backing, from_chain, to_chain))
+        providers.update(declared_leg_providers(client, backing, from_chain, to_chain))
     return providers
