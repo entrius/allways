@@ -109,6 +109,8 @@ pub const CANCEL_REASON_SOL_RESERVED: u8 = 3;
 /// An issuer-enabled ERC-20 transfer fee shaves every honest delivery's log below the pinned
 /// amount — a hub-wide no-fault condition, cancelled rather than slashed (V-M2/PAXG).
 pub const CANCEL_REASON_ERC20_FEE_ENABLED: u8 = 4;
+// 5 is CANCEL_REASON_SPL_FROZEN, owned by the Python mirror (allways/constants.py).
+pub const CANCEL_REASON_ALPHA_TRANSFER_DISABLED: u8 = 6;
 pub const CANCEL_REASON_OTHER: u8 = 255;
 
 /// Slots the draw's seed slot is pinned ahead of the arming crank. Three leader windows (4 slots
@@ -412,7 +414,7 @@ pub fn fulfillment_grace_secs(to_chain: &str) -> i64 {
         FULFILL_GRACE_BTC_SECS
     } else if to_chain.eq_ignore_ascii_case("sol") {
         FULFILL_GRACE_SOL_SECS
-    } else if to_chain.eq_ignore_ascii_case("tao") {
+    } else if crate::backing::family(to_chain).eq_ignore_ascii_case(BACKING_CHAIN_TAO) {
         FULFILL_GRACE_TAO_SECS
     } else {
         FULFILL_GRACE_DEFAULT_SECS
@@ -496,6 +498,8 @@ mod tests {
         assert_eq!(fulfillment_grace_secs("BTC"), FULFILL_GRACE_BTC_SECS);
         assert_eq!(fulfillment_grace_secs("sol"), FULFILL_GRACE_SOL_SECS);
         assert_eq!(fulfillment_grace_secs("tao"), FULFILL_GRACE_TAO_SECS);
+        assert_eq!(fulfillment_grace_secs("sn7"), FULFILL_GRACE_TAO_SECS);
+        assert_eq!(fulfillment_grace_secs("sn74"), FULFILL_GRACE_TAO_SECS);
         // An unknown chain must get a real grace, never 0 (that would reopen paid-and-slashed).
         assert_eq!(fulfillment_grace_secs("eth"), FULFILL_GRACE_DEFAULT_SECS);
         assert!(FULFILL_GRACE_DEFAULT_SECS > 0);

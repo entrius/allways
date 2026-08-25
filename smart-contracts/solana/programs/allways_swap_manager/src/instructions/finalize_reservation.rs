@@ -1,6 +1,6 @@
 use anchor_lang::prelude::*;
 
-use crate::backing;
+use crate::backing::{self, LegBind};
 use solana_keccak_hasher::hashv;
 
 use crate::constants::{
@@ -151,16 +151,16 @@ pub fn handler(
         ErrorCode::AmountAboveMax
     );
 
-    // Bind `collateral_amount` to the leg denominated in the backing asset — the leg lookup that
-    // closes the understated-collateral hole for any backing, not just SOL.
-    let expected = backing::collateral_leg_amount(
+    match backing::collateral_leg_bind(
         backing,
         &ctx.accounts.reservation.from_chain,
         from_amount,
         &ctx.accounts.reservation.to_chain,
         to_amount,
-    )?;
-    require!(collateral_amount as u128 == expected, ErrorCode::InvalidAmount);
+    )? {
+        LegBind::Exact(v) => require!(collateral_amount as u128 == v, ErrorCode::InvalidAmount),
+        LegBind::Declared => {} // bounded by swap_bounds above; understatement policed off-chain
+    }
 
     // Entry fuse for a backing that settles elsewhere: the relay must be provably alive (or the purse
     // read below is trusting a snapshot nobody is refreshing), and the miner must not still owe a
