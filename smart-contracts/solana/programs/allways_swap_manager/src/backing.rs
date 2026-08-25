@@ -10,27 +10,45 @@ use crate::constants::{
 use crate::error::ErrorCode;
 use crate::state::{BondAttestation, Config, MinerState};
 
-/// The leg denominated in `collateral_chain` — the amount the collateral is sized against. Validity is
-/// "backing ∈ legs": a swap whose legs don't include the backing asset has nothing to size against.
-pub fn collateral_leg_amount(
-    collateral_chain: &str,
+/// The backing family a chain settles in. An `sn<N>` alpha shares subtensor's account space, so a TAO
+/// penalty pays its holder directly — which is why the (quorum-bound) chain id may be trusted for this.
+pub fn family(chain: &str) -> &str {
+    match chain.strip_prefix("sn") {
+        Some(n) if !n.is_empty() && n.bytes().all(|b| b.is_ascii_digit()) => BACKING_CHAIN_TAO,
+        _ => chain,
+    }
+}
+
+/// Whether the backing amount is provable from the leg or declared off-chain.
+#[derive(Debug, PartialEq)]
+pub enum LegBind {
+    Exact(u128),
+    Declared,
+}
+
+/// Bind `collateral_amount` to the leg denominated in the backing: exact when that leg IS the backing
+/// asset, declared when it merely settles in its family. Validity is "backing ∈ leg families".
+pub fn collateral_leg_bind(
+    backing: &str,
     from_chain: &str,
     from_amount: u128,
     to_chain: &str,
     to_amount: u128,
-) -> Result<u128> {
-    if collateral_chain == from_chain {
-        Ok(from_amount)
-    } else if collateral_chain == to_chain {
-        Ok(to_amount)
+) -> Result<LegBind> {
+    // Exact legs first: sn7→tao still gets the free on-chain check on its tao leg.
+    if backing == from_chain {
+        Ok(LegBind::Exact(from_amount))
+    } else if backing == to_chain {
+        Ok(LegBind::Exact(to_amount))
+    } else if backing == family(from_chain) || backing == family(to_chain) {
+        Ok(LegBind::Declared)
     } else {
         err!(ErrorCode::BackingNotInLegs)
     }
 }
 
-/// The user's own address on the backing chain — whom a penalty settled there is owed to. Same leg
-/// lookup as `collateral_leg_amount`, but total: a timeout is terminal, so a backing that is somehow
-/// not a leg (finalize already rejects that) yields no payee rather than an error that wedges it.
+/// The user's address on the backing leg (exact leg first, as `collateral_leg_bind`) — whom a penalty
+/// settled there is owed to. Total: a timeout is terminal, so no leg yields no payee rather than an error.
 pub fn collateral_leg_user_addr(
     collateral_chain: &str,
     from_chain: &str,
@@ -38,13 +56,11 @@ pub fn collateral_leg_user_addr(
     to_chain: &str,
     user_to_addr: &str,
 ) -> String {
-    if collateral_chain == from_chain {
-        user_from_addr.to_string()
-    } else if collateral_chain == to_chain {
-        user_to_addr.to_string()
-    } else {
-        String::new()
-    }
+    let legs = [(from_chain, user_from_addr), (to_chain, user_to_addr)];
+    legs.iter()
+        .find(|(chain, _)| collateral_chain == *chain)
+        .or_else(|| legs.iter().find(|(chain, _)| collateral_chain == family(chain)))
+        .map_or_else(String::new, |(_, addr)| addr.to_string())
 }
 
 /// Swap-size bounds for a backing, in that asset's own smallest unit (0 max = unbounded).
@@ -73,7 +89,7 @@ pub fn backing_bit(collateral_chain: &str) -> Result<u8> {
 pub fn declarable_bit(collateral_chain: &str, from_chain: &str, to_chain: &str) -> Result<u8> {
     let bit = backing_bit(collateral_chain)?;
     require!(
-        collateral_chain == from_chain || collateral_chain == to_chain,
+        collateral_chain == family(from_chain) || collateral_chain == family(to_chain),
         ErrorCode::BackingNotInLegs
     );
     Ok(bit)
@@ -219,13 +235,48 @@ mod tests {
     }
 
     #[test]
-    fn leg_lookup_finds_the_backing_leg_on_either_side() {
-        // btc→sol with SOL backing: the dest leg. sol→btc: the source leg. Same rule, no pair branch.
-        assert_eq!(collateral_leg_amount("sol", "btc", 7, "sol", 11).unwrap(), 11);
-        assert_eq!(collateral_leg_amount("sol", "sol", 7, "btc", 11).unwrap(), 7);
-        // A TAO-backed leg is found by exactly the same lookup — the reason a TAO hub costs no diff.
-        assert_eq!(collateral_leg_amount("tao", "tao", 7, "btc", 11).unwrap(), 7);
-        assert_eq!(collateral_leg_amount("tao", "btc", 7, "tao", 11).unwrap(), 11);
+    fn subnet_ids_belong_to_the_tao_family() {
+        for chain in ["sn7", "sn74"] {
+            assert_eq!(family(chain), "tao");
+        }
+        for chain in ["sn", "sn7x", "snx", "tao", "sol", "btc"] {
+            assert_eq!(family(chain), chain);
+        }
+    }
+
+    #[test]
+    fn exact_leg_binding_matches_the_legacy_lookup() {
+        fn legacy_leg_amount(
+            backing: &str, from: &str, from_amt: u128, to: &str, to_amt: u128,
+        ) -> Result<u128> {
+            if backing == from {
+                Ok(from_amt)
+            } else if backing == to {
+                Ok(to_amt)
+            } else {
+                err!(ErrorCode::BackingNotInLegs)
+            }
+        }
+        let pairs = [
+            ("sol", "sol", "btc"), ("sol", "eth", "sol"),
+            ("tao", "tao", "btc"), ("tao", "eth", "tao"),
+            ("sol", "sol", "tao"), ("tao", "sol", "tao"),
+        ];
+        for (backing, from, to) in pairs {
+            let legacy = legacy_leg_amount(backing, from, 7, to, 11).unwrap();
+            assert_eq!(collateral_leg_bind(backing, from, 7, to, 11).unwrap(), LegBind::Exact(legacy));
+        }
+    }
+
+    #[test]
+    fn alpha_leg_binding_is_declared_only_for_tao_backing() {
+        assert_eq!(collateral_leg_bind("tao", "sn7", 7, "avax", 11).unwrap(), LegBind::Declared);
+        assert_eq!(collateral_leg_bind("tao", "sn7", 7, "sn74", 11).unwrap(), LegBind::Declared);
+        assert_eq!(collateral_leg_bind("sol", "sn7", 7, "sol", 11).unwrap(), LegBind::Exact(11));
+        // An alpha↔tao pair keeps the free on-chain check on its tao leg in BOTH directions.
+        assert_eq!(collateral_leg_bind("tao", "sn7", 7, "tao", 11).unwrap(), LegBind::Exact(11));
+        assert_eq!(collateral_leg_bind("tao", "tao", 7, "sn7", 11).unwrap(), LegBind::Exact(7));
+        assert!(collateral_leg_bind("sol", "sn7", 7, "avax", 11).is_err());
     }
 
     #[test]
@@ -235,6 +286,8 @@ mod tests {
         assert_eq!(collateral_leg_user_addr("tao", "tao", "u_src", "btc", "u_dst"), "u_src");
         assert_eq!(collateral_leg_user_addr("tao", "btc", "u_src", "tao", "u_dst"), "u_dst");
         assert_eq!(collateral_leg_user_addr("sol", "sol", "u_src", "tao", "u_dst"), "u_src");
+        assert_eq!(collateral_leg_user_addr("tao", "sn7", "u_src", "avax", "u_dst"), "u_src");
+        assert_eq!(collateral_leg_user_addr("tao", "sn7", "u_src", "tao", "u_dst"), "u_dst");
     }
 
     #[test]
@@ -242,12 +295,6 @@ mod tests {
         // Unreachable live (finalize rejects a backing that is not a leg), and it must stay unable to
         // fail: this feeds a terminal timeout, where an error would strand the swap forever.
         assert_eq!(collateral_leg_user_addr("tao", "btc", "u_src", "eth", "u_dst"), "");
-    }
-
-    #[test]
-    fn leg_lookup_refuses_a_backing_that_is_not_a_leg() {
-        // btc→eth backed by SOL has no SOL amount to size collateral against.
-        assert!(collateral_leg_amount("sol", "btc", 7, "eth", 11).is_err());
     }
 
     #[test]
@@ -335,6 +382,8 @@ mod tests {
     fn a_one_hub_pair_can_only_declare_its_hub() {
         // tao↔btc: BTC is not a hub and SOL is not a leg, so "tao" is the only declarable backing.
         assert_eq!(declarable_bit("tao", "tao", "btc").unwrap(), BACKING_BIT_TAO);
+        assert_eq!(declarable_bit("tao", "sn7", "avax").unwrap(), BACKING_BIT_TAO);
+        assert!(declarable_bit("tao", "btc", "avax").is_err());
         assert!(declarable_bit("sol", "tao", "btc").is_err()); // not a leg
         assert!(declarable_bit("btc", "tao", "btc").is_err()); // a leg, but not a hub
     }
