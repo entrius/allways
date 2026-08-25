@@ -1,4 +1,5 @@
 import re
+from itertools import combinations
 
 from allways.classes import MinerActivity
 
@@ -162,11 +163,14 @@ LAUNCH_SPOKES = (
 # it should not quote one — not a list we curate here and re-curate on every registration.
 LAUNCH_ALPHAS: tuple[str, ...] = tuple(f'sn{n}' for n in ALPHA_NETUIDS)
 # Every launch pair in canonical order: each hub against every spoke and alpha (sol↔tao lands once,
-# under SOL, because sol never appears in LAUNCH_SPOKES). Alpha↔spoke pairs are gated on the
-# emissions redesign and deliberately absent.
-LAUNCH_PAIRS: tuple[tuple[str, str], ...] = tuple(
-    (hub, spoke) for hub in HUB_CHAINS for spoke in LAUNCH_SPOKES if spoke != hub
-) + tuple((hub, alpha) for hub in HUB_CHAINS for alpha in LAUNCH_ALPHAS)
+# under SOL, because sol never appears in LAUNCH_SPOKES), then each alpha against every spoke and
+# the other alphas — each alpha anchors its own scoring family.
+LAUNCH_PAIRS: tuple[tuple[str, str], ...] = (
+    tuple((hub, spoke) for hub in HUB_CHAINS for spoke in LAUNCH_SPOKES if spoke != hub)
+    + tuple((hub, alpha) for hub in HUB_CHAINS for alpha in LAUNCH_ALPHAS)
+    + tuple((alpha, spoke) for alpha in LAUNCH_ALPHAS for spoke in LAUNCH_SPOKES if not is_hub(spoke))
+    + tuple(combinations(sorted(LAUNCH_ALPHAS), 2))
+)
 # Fixed burn: pools sum to MINER_POOL_SHARE instead of 1.0, so at least
 # BURN_RATE of every round recycles to RECYCLE_UID before any shortfall.
 BURN_RATE = 0.0
