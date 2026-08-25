@@ -1,7 +1,7 @@
 """Taker swap-intake — miner selection + on-chain amount derivation. No click, no owned RPC config.
 
 Mirrors the contract: ``collateral_amount`` is the leg denominated in the quote's BACKING (the
-bounded, collateral-backed notional) — ``backing.rs::collateral_leg_amount``, so a "sol"-backed
+bounded, collateral-backed notional) — ``backing.rs::collateral_leg_bind``, so a "sol"-backed
 quote is sized against its SOL leg and a "tao"-backed one against its TAO leg, in rao. Uses the
 shared ``calculate_to_amount`` so the CLI's pinned amounts agree with the miner + validator
 byte-for-byte. Every launch pair has a hub leg (sol↔spoke / tao↔spoke); a spoke↔spoke pair is
@@ -19,6 +19,7 @@ from allways.constants import (
     COLLATERAL_REQUIREMENT_BPS,
     NUMERAIRE_CHAIN,
     RATE_PRECISION,
+    family,
     hub_leg,
     required_collateral,
 )
@@ -167,13 +168,20 @@ def _bounds_for(
     return bounds_by_backing.get(backing, (min_swap, max_swap))
 
 
-def collateral_leg_amount(backing: str, from_chain: str, from_amount: int, to_chain: str, to_amount: int) -> int:
-    """The leg denominated in ``backing`` — the amount its collateral is sized against. Mirrors
-    ``backing.rs::collateral_leg_amount``: validity is "backing ∈ legs", nothing about the pair."""
+def leg_value(backing: str, from_chain: str, from_amount: int, to_chain: str, to_amount: int, providers=None) -> int:
+    """The backing's leg in the backing's units — twin of ``backing.rs::collateral_leg_bind``. Exact
+    when a leg IS the backing; a leg of the backing's family (an alpha) is DECLARED and priced at spot."""
     if backing == from_chain:
         return from_amount
     if backing == to_chain:
         return to_amount
+    for leg, amount in ((from_chain, from_amount), (to_chain, to_amount)):
+        if family(leg) != backing:
+            continue
+        provider = (providers or {}).get(leg)
+        if provider is None:
+            raise ValueError(f'{leg} leg is declared: a {leg} provider is needed to price it in {backing}')
+        return provider.value_rao(amount)
     raise ValueError(f'{from_chain}->{to_chain}: no leg is denominated in the "{backing}" backing')
 
 
@@ -183,12 +191,13 @@ def compute_intake_amounts(
     from_amount: int,
     rate_display: str,
     backing: str = NUMERAIRE_CHAIN,
+    providers=None,
 ) -> IntakeAmounts:
     """Derive (collateral_amount, from_amount, to_amount) for a swap of ``from_amount`` (source smallest-units).
 
     ``rate_display`` is the miner's canonical 'dest per 1 hub' rate. Requires one leg to be a hub.
     ``collateral_amount`` is the ``backing``'s leg, in that asset's own units — the figure
-    ``finalize_reservation`` bounds and collateralizes.
+    ``finalize_reservation`` bounds and collateralizes. ``providers`` prices a declared alpha leg.
     """
     if hub_leg(from_chain, to_chain) is None:
         raise ValueError(f'{from_chain}->{to_chain}: a hub leg (sol or tao) is required (every pair is hub<->spoke)')
@@ -197,7 +206,7 @@ def compute_intake_amounts(
     to_amount = calculate_to_amount(
         from_amount, rate_display, is_reverse, get_chain_def(canon_to).decimals, get_chain_def(canon_from).decimals
     )
-    collateral_amount = collateral_leg_amount(backing, from_chain, from_amount, to_chain, to_amount)
+    collateral_amount = leg_value(backing, from_chain, from_amount, to_chain, to_amount, providers)
     return IntakeAmounts(collateral_amount=collateral_amount, from_amount=from_amount, to_amount=to_amount)
 
 
