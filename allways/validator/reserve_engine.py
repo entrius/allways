@@ -113,7 +113,8 @@ def reserve_on_behalf(
 
     # Canonical source form at intake: the finalize hash + source-lock PDA are byte-keyed on this
     # string (V-C2), so a case variant of a live source would mint a second lock over one deposit.
-    src_asset = (getattr(validator, 'axon_assets', None) or {}).get(from_chain)
+    providers = getattr(validator, 'axon_assets', None) or {}
+    src_asset = providers.get(from_chain)
     if src_asset is not None:
         user_from_addr = src_asset.chain.normalize_address(user_from_addr)
 
@@ -160,8 +161,10 @@ def reserve_on_behalf(
             return ReserveResult(False, 'miner is busy with another swap on that hub; try again shortly')
 
     try:
-        amts = compute_intake_amounts(from_chain, to_chain, from_amount, rate_display_from_fixed(rate_fixed), backing)
-    except ValueError as e:
+        amts = compute_intake_amounts(
+            from_chain, to_chain, from_amount, rate_display_from_fixed(rate_fixed), backing, providers
+        )
+    except (ValueError, ProviderUnreachableError) as e:
         return ReserveResult(False, str(e))
     if amts.to_amount <= 0:
         return ReserveResult(False, 'non-positive dest amount for that source amount')
@@ -177,7 +180,6 @@ def reserve_on_behalf(
     # Deliverability gates — BEFORE any funds move: a dest that can't take delivery (malformed
     # address, or one that provably refuses transfers) must bounce here, not strand a paid swap
     # later. Format first: it's offline and a malformed address can never be delivered to.
-    providers = getattr(validator, 'axon_assets', {})
     provider = providers.get(to_chain)
     miner_quote = quote or client.get_quote(miner_pk, from_chain, to_chain, backing)
     verified = getattr(validator, 'assets', None)
@@ -409,7 +411,7 @@ def finalize_won_seats(validator, now: int) -> list:
             # The reservation lives at the queue's backing-seeded address, so the stored chain can
             # only agree; the fill is sized against THAT leg or the purse gate reads the wrong side.
             fill = compute_intake_amounts(
-                from_chain, to_chain, req['from_amount'], rate_display_from_fixed(resv.rate), backing
+                from_chain, to_chain, req['from_amount'], rate_display_from_fixed(resv.rate), backing, providers
             )
             client.finalize_reservation(
                 Pubkey.from_string(miner),
