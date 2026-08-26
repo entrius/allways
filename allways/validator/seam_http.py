@@ -55,8 +55,8 @@ def _make_handler(validator, secret: str):
     # store exceptions, so a transient RPC fault is retried rather than pinned for the bucket;
     # maxsize caps the table so a long-lived seam can't grow an entry per swap ever polled.
     @lru_cache(maxsize=512)
-    def cached_status(miner_hotkey: str, swap_key: str, _bucket: int):
-        return swap_status(validator, miner_hotkey, swap_key)
+    def cached_status(miner_hotkey: str, swap_key: str, from_chain: str, to_chain: str, _bucket: int):
+        return swap_status(validator, miner_hotkey, swap_key, from_chain, to_chain)
 
     @lru_cache(maxsize=512)
     def cached_deposit_scan(miner_hotkey: str, _bucket: int):
@@ -100,8 +100,15 @@ def _make_handler(validator, secret: str):
                 if url.path == '/status':
                     # Optional swap_key (hex, persisted by the consumer at claim time) resolves the
                     # swap directly — the only route to post-attestation stages, since vote_initiate
-                    # consumes the reservation at quorum.
-                    status = cached_status(q['miner_hotkey'], q.get('swap_key', ''), _ttl_bucket())
+                    # consumes the reservation at quorum. Optional from_chain/to_chain pick the
+                    # reservation slot carrying that pair (v3.1 holds one per hub).
+                    status = cached_status(
+                        q['miner_hotkey'],
+                        q.get('swap_key', ''),
+                        q.get('from_chain', ''),
+                        q.get('to_chain', ''),
+                        _ttl_bucket(),
+                    )
                     return self._send(200, status.__dict__)
                 if url.path == '/deposit-scan':
                     # Hash-finder for the offering's deposit watcher — /confirm stays the verifier.

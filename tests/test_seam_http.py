@@ -136,8 +136,8 @@ def test_status_forwards_optional_swap_key(server, monkeypatch):
     (and default it to '' when absent, preserving the reservation-path behavior)."""
     seen = []
 
-    def fake_status(validator, miner_hotkey, swap_key_hex=''):
-        seen.append((miner_hotkey, swap_key_hex))
+    def fake_status(validator, miner_hotkey, swap_key_hex='', from_chain='', to_chain=''):
+        seen.append((miner_hotkey, swap_key_hex, from_chain, to_chain))
         return SwapStatus('timed_out', 0, '', swap_key_hex)
 
     monkeypatch.setattr(seam_http, 'swap_status', fake_status)
@@ -145,4 +145,5 @@ def test_status_forwards_optional_swap_key(server, monkeypatch):
     code, payload = _req(server, 'GET', f'/status?miner_hotkey=hk&swap_key={key}')
     assert code == 200 and payload['stage'] == 'timed_out' and payload['swap_key'] == key
     _req(server, 'GET', '/status?miner_hotkey=hk')
-    assert seen == [('hk', key), ('hk', '')]
+    _req(server, 'GET', '/status?miner_hotkey=hk&from_chain=tao&to_chain=btc')
+    assert seen == [('hk', key, '', ''), ('hk', '', '', ''), ('hk', '', 'tao', 'btc')]
