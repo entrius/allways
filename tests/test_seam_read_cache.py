@@ -31,7 +31,7 @@ def counted(monkeypatch):
     """A seam whose chain reads are counted — each fixture builds a fresh memo."""
     calls = {'status': 0, 'scan': 0}
 
-    def fake_status(_validator, miner_hotkey, swap_key=''):
+    def fake_status(_validator, miner_hotkey, swap_key='', from_chain='', to_chain=''):
         calls['status'] += 1
         return SwapStatus('reserved', 999, f'user-{calls["status"]}', swap_key)
 
@@ -106,7 +106,7 @@ def test_failures_are_not_cached(counted, monkeypatch):
     server, calls = counted
     state = {'fail': True}
 
-    def flaky(_validator, _miner_hotkey, swap_key=''):
+    def flaky(_validator, _miner_hotkey, swap_key='', from_chain='', to_chain=''):
         if state['fail']:
             raise RuntimeError('getAccountInfo: HTTP 429')
         calls['status'] += 1

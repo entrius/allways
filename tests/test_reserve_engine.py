@@ -949,6 +949,23 @@ def test_swap_status_reads_tao_slot_when_sol_empty(tmp_path):
     store.close()
 
 
+def test_swap_status_by_pair_reads_that_pairs_slot_not_the_freshest(tmp_path):
+    # The offering tracks ONE seat; answering with the miner's other hub made it refund a won seat
+    # ("another user holds this miner") or adopt a stranger's reservation under the same pubkey.
+    from allways.validator.reserve_engine import swap_status
+
+    sol = _unclaimed_reservation(FUTURE + 500)  # fresher, btc->sol, a stranger
+    tao = SimpleNamespace(
+        **{**vars(_unclaimed_reservation(FUTURE)), 'user': 'ourTaoUser', 'from_chain': 'tao', 'to_chain': 'btc'}
+    )
+    client = StatusClient(reservation={'sol': sol, 'tao': tao})
+    validator, store = _status_validator(tmp_path, client)
+    assert swap_status(validator, HOTKEY).user == 'staleUserSOLpk'  # no pair: freshest, as before
+    assert swap_status(validator, HOTKEY, from_chain='tao', to_chain='btc').user == 'ourTaoUser'
+    assert swap_status(validator, HOTKEY, from_chain='eth', to_chain='sol').stage == 'none'
+    store.close()
+
+
 def test_status_by_key_detail_carries_leg_hashes(tmp_path):
     from allways.validator.reserve_engine import swap_status
 

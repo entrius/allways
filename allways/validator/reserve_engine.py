@@ -483,13 +483,18 @@ def _live_unclaimed_slots(client, miner_pk, now):
     return slots, 'No reservation for this miner'
 
 
-def _freshest_reservation(client, miner_pk):
+def _freshest_reservation(client, miner_pk, from_chain: str = '', to_chain: str = ''):
     """The miner's most-alive reservation across per-hub slots (v3.1) — ranked by max(reserved_until,
-    finalize_by) — so a tao-hub seat is seen by status, not just the SOL slot."""
+    finalize_by) — so a tao-hub seat is seen by status, not just the SOL slot. With a pair, only
+    the slot carrying that pair counts: a consumer tracking its own seat must not be answered with
+    the miner's OTHER hub (a fresher stranger there read as "our seat was lost", and a same-pubkey
+    stranger there was adopted as ours)."""
     best, best_at = None, -1
     for backing in BACKING_BITS:
         resv = client.get_reservation(miner_pk, backing)
         if resv is None:
+            continue
+        if from_chain and (resv.from_chain != from_chain or resv.to_chain != to_chain):
             continue
         at = max(int(getattr(resv, 'reserved_until', 0) or 0), int(getattr(resv, 'finalize_by', 0) or 0))
         if at > best_at:
@@ -735,18 +740,21 @@ class SwapStatus:
     detail: dict = field(default_factory=dict)
 
 
-def swap_status(validator, miner_hotkey: str, swap_key_hex: str = '') -> SwapStatus:
+def swap_status(
+    validator, miner_hotkey: str, swap_key_hex: str = '', from_chain: str = '', to_chain: str = ''
+) -> SwapStatus:
     """Current lifecycle stage for a reservation/swap — the offering polls this.
 
     With ``swap_key_hex`` the swap resolves by key (survives the reservation being consumed at
-    attestation quorum); without it, via the miner's live reservation (pre-attestation stages)."""
+    attestation quorum); without it, via the miner's live reservation (pre-attestation stages) —
+    the slot carrying ``from_chain``/``to_chain`` when given, else the freshest slot."""
     if swap_key_hex:
         return _swap_status_by_key(validator, swap_key_hex)
     client = validator.solana_client
     miner_pk = resolve_miner_pubkey(validator, miner_hotkey)
     if miner_pk is None:
         return SwapStatus('none')
-    reservation = _freshest_reservation(client, miner_pk)
+    reservation = _freshest_reservation(client, miner_pk, from_chain, to_chain)
     if reservation is None or reservation.reserved_until == 0:
         return SwapStatus('none')
     swap_key = bytes(reservation.claimed_swap_key)
