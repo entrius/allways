@@ -14,14 +14,28 @@ Currently live with SOL and TAO as hubs, each paired against BTC, ETH, USDC-on-A
 
 ## For agents
 
-The primary interface is machine-first. Every step of a swap — quote discovery, reservation, deposit, and settlement — is a CLI command (`alw swap now`) or a public API call (`api.all-ways.io`) with structured output, so an autonomous agent can clear a payment in another native asset without a human in the loop. In practice this is how the network is used today: agents operated by the team and by users originate swaps, and the miner and validator neurons in this repo are themselves unattended programs.
+Allways is designed to be operated by software, not clicked through by people. Every step of a swap — quote discovery, reservation, deposit, and settlement — is a CLI command (`alw swap now`) or a public API call (`api.all-ways.io`) with structured output, so an autonomous agent can clear a payment in another native asset as a single tool call, with no human in the loop, no exchange account, and no custodian holding its keys. This is how the network is used in practice: agents operated by the team and by users originate swaps today, and the miner and validator neurons in this repo are themselves unattended programs that quote, fulfill, and verify around the clock.
 
-- **Discover**: fetch live quotes per pair from the API and pick a rate.
-- **Reserve**: lock a miner's quote and collateral for the swap.
-- **Deposit**: send the source asset natively; the deposit is attested on-chain.
-- **Settle**: the miner delivers the destination asset to the agent's wallet; validators verify or slash.
+**Why agents need a settlement layer.** An agent's wallet is a single-chain identity, but the things it pays for are not. An LLM agent earning TAO may need to buy inference from a provider that bills in USDC; a trading agent holding SOL may need to settle an obligation in BTC; a multi-agent pipeline may split revenue across operators who each want a different native asset. Bridges and centralized exchanges break the autonomy model — they require accounts, KYC, custody, and a human to unblock them. Allways lets the agent stay self-custodial: it sends the source asset from its own wallet and receives the destination asset in its own wallet, and the protocol verifies the outcome on-chain.
 
-See the Swap guide at [docs.all-ways.io](https://docs.all-ways.io/) for the full lifecycle.
+**Swap lifecycle as tool calls.**
+
+- **Discover**: `GET` live quotes per pair from the API and select a rate, liquidity, and miner.
+- **Reserve**: lock that miner's quote and collateral for the swap window.
+- **Deposit**: send the source asset natively from the agent's wallet; validators attest the deposit on-chain.
+- **Settle**: the miner delivers the destination asset to the agent's wallet; validators verify the delivery or slash the miner's collateral to reimburse the agent.
+
+Each call returns machine-readable state (swap id, reservation window, deadlines, attestation status), so an agent can plan, retry, and reason over the full lifecycle without parsing prose.
+
+**Use cases in production and in reach.**
+
+- **Agent-to-agent payments**: an orchestrator pays sub-agents or tool providers in whatever asset they accept, funded from a single treasury.
+- **Inference and compute procurement**: convert earned TAO or SOL into the stablecoin or native token a GPU or model provider bills in.
+- **Treasury automation**: an agent rebalances a multi-chain treasury on a schedule or on a signal, without moving funds through a custodian.
+- **Autonomous market-making**: the reference miner is itself an agent — it posts quotes, manages collateral, and fulfills swaps programmatically; operators extend it with their own pricing and risk logic.
+- **Bittensor-native economics**: agents earning alpha or TAO on other subnets settle into the asset they actually spend, with SOL and TAO as hubs.
+
+See the Swap guide at [docs.all-ways.io](https://docs.all-ways.io/) for the full lifecycle and API reference.
 
 ## Miner Risk Disclaimer
 
@@ -123,10 +137,6 @@ there. Either way the user is made whole out of the bond that backed the quote.
 **Leaving.** A locked bond is not withdrawable on demand. Deactivate the purse
 (`alw miner deactivate --backing tao`), let in-flight swaps and their timeout windows drain, and
 validators unlock the bond once nothing is owed on it — then `alw vault withdraw` succeeds.
-
-## Emission recycling
-
-Miner rewards are scored on crown time — how long a miner held the best executable quote on a pair and had the capacity to back it. Pools sum to `MINER_POOL_SHARE` (10%), so a fixed 90% of every round (`BURN_RATE`, `allways/constants.py`) is recycled, and any share of the miner pool that no miner earned recycles on top of it. Recycled emission is routed to `RECYCLE_UID` (UID 53, the subnet-owner slot). The incentive shown on that UID on-chain is the burn, not a miner's earnings: with few active miners it reads as the majority of incentive by design. See `allways/validator/scoring.py`.
 
 ## Validator Storage Layout
 
