@@ -1,16 +1,41 @@
 # Allways
 
-**Universal Transaction Layer**
+**Settlement layer for agents and applications**
 
-Native transactions across independent assets — no wrapped tokens, no bridges, no custodian. Bittensor Subnet 7 (SN7).
+Native cross-chain transactions for programs that hold one asset and need to pay in another — no wrapped tokens, no bridges, no custodian. Bittensor Subnet 7 (SN7).
 
 [![Twitter](https://img.shields.io/twitter/follow/allways_io?style=social)](https://x.com/allways_io)
 
 ## Overview
 
-Allways creates a verification layer above independent systems. Assets move natively. Miners complete transactions, validators independently verify the results, and a smart contract enforces outcomes through collateral and slashing.
+Allways is a settlement layer built to be driven by software. An agent or application that holds SOL, TAO, BTC, or any supported asset submits a single swap and receives the destination asset natively in its own wallet — no account, no custodian, no bridge in the path. Allways creates a verification layer above independent systems: miners complete transactions, validators independently verify both legs on-chain, and a smart contract enforces outcomes through collateral and slashing.
 
 Currently live with SOL and TAO as hubs, each paired against BTC, ETH, USDC-on-Arbitrum, HYPE, BNB, AVAX, USDC-on-Base, USDC-on-Ethereum, CRO, ASTER, UNI, QNT, POL, USDC-on-Polygon, PAXG, and USDC-on-Solana — plus SOL ↔ TAO itself (hub-and-spoke: every pair has a SOL or TAO leg). Designed to scale to any verifiable asset.
+
+## For agents
+
+Allways is designed to be operated by software, not clicked through by people. Every step of a swap — quote discovery, reservation, deposit, and settlement — is a CLI command (`alw swap now`) or a public API call (`api.all-ways.io`) with structured output, so an autonomous agent can clear a payment in another native asset as a single tool call, with no human in the loop, no exchange account, and no custodian holding its keys. This is how the network is used in practice: agents operated by the team and by users originate swaps today, and the miner and validator neurons in this repo are themselves unattended programs that quote, fulfill, and verify around the clock.
+
+**Why agents need a settlement layer.** An agent's wallet is a single-chain identity, but the things it pays for are not. An LLM agent earning TAO may need to buy inference from a provider that bills in USDC; a trading agent holding SOL may need to settle an obligation in BTC; a multi-agent pipeline may split revenue across operators who each want a different native asset. Bridges and centralized exchanges break the autonomy model — they require accounts, KYC, custody, and a human to unblock them. Allways lets the agent stay self-custodial: it sends the source asset from its own wallet and receives the destination asset in its own wallet, and the protocol verifies the outcome on-chain.
+
+**Swap lifecycle as tool calls.**
+
+- **Discover**: `GET` live quotes per pair from the API and select a rate, liquidity, and miner.
+- **Reserve**: lock that miner's quote and collateral for the swap window.
+- **Deposit**: send the source asset natively from the agent's wallet; validators attest the deposit on-chain.
+- **Settle**: the miner delivers the destination asset to the agent's wallet; validators verify the delivery or slash the miner's collateral to reimburse the agent.
+
+Each call returns machine-readable state (swap id, reservation window, deadlines, attestation status), so an agent can plan, retry, and reason over the full lifecycle without parsing prose.
+
+**Use cases in production and in reach.**
+
+- **Agent-to-agent payments**: an orchestrator pays sub-agents or tool providers in whatever asset they accept, funded from a single treasury.
+- **Inference and compute procurement**: convert earned TAO or SOL into the stablecoin or native token a GPU or model provider bills in.
+- **Treasury automation**: an agent rebalances a multi-chain treasury on a schedule or on a signal, without moving funds through a custodian.
+- **Autonomous market-making**: the reference miner is itself an agent — it posts quotes, manages collateral, and fulfills swaps programmatically; operators extend it with their own pricing and risk logic.
+- **Bittensor-native economics**: agents earning alpha or TAO on other subnets settle into the asset they actually spend, with SOL and TAO as hubs.
+
+See the Swap guide at [docs.all-ways.io](https://docs.all-ways.io/) for the full lifecycle and API reference.
 
 ## Miner Risk Disclaimer
 
@@ -123,12 +148,7 @@ needs to persist across restarts.
 
 ## Miner Environment Variables
 
-- `BTC_PRIVATE_KEY`, `ETH_PRIVATE_KEY`, `ARB_PRIVATE_KEY`, `HYPE_PRIVATE_KEY`, `BNB_PRIVATE_KEY`, `AVAX_PRIVATE_KEY`, `BASE_PRIVATE_KEY`, `CRO_PRIVATE_KEY`, `{ETH,ARB,HYPE,BNB,AVAX,BASE,CRO}_RPC_URLS`, etc. — keyed by network, so assets sharing one share its config (ETH and ethusdc both ride the `ETH_*` vars). See `.env.example`.
-- `BTC_PRIVATE_KEY`, `ETH_PRIVATE_KEY`, `ARB_PRIVATE_KEY`, `HYPE_PRIVATE_KEY`, `BNB_PRIVATE_KEY`, `AVAX_PRIVATE_KEY`, `BASE_PRIVATE_KEY`, `{ETH,ARB,HYPE,BNB,AVAX,BASE}_RPC_URLS`, etc. — keyed by network, so assets sharing one share its config (ETH and ethusdc both ride the `ETH_*` vars; BNB and aster both ride the `BNB_*` vars). See `.env.example`.
-- `BTC_PRIVATE_KEY`, `ETH_PRIVATE_KEY`, `ARB_PRIVATE_KEY`, `HYPE_PRIVATE_KEY`, `BNB_PRIVATE_KEY`, `AVAX_PRIVATE_KEY`, `BASE_PRIVATE_KEY`, `{ETH,ARB,HYPE,BNB,AVAX,BASE}_RPC_URLS`, etc. — keyed by network, so assets sharing one share its config (ETH, ethusdc and uni all ride the `ETH_*` vars). See `.env.example`.
-- `BTC_PRIVATE_KEY`, `ETH_PRIVATE_KEY`, `ARB_PRIVATE_KEY`, `HYPE_PRIVATE_KEY`, `BNB_PRIVATE_KEY`, `AVAX_PRIVATE_KEY`, `BASE_PRIVATE_KEY`, `{ETH,ARB,HYPE,BNB,AVAX,BASE}_RPC_URLS`, etc. — keyed by network, so assets sharing one share its config (ETH, ethusdc and qnt all ride the `ETH_*` vars). See `.env.example`.
-- `BTC_PRIVATE_KEY`, `ETH_PRIVATE_KEY`, `ARB_PRIVATE_KEY`, `HYPE_PRIVATE_KEY`, `BNB_PRIVATE_KEY`, `AVAX_PRIVATE_KEY`, `BASE_PRIVATE_KEY`, `POL_PRIVATE_KEY`, `{ETH,ARB,HYPE,BNB,AVAX,BASE,POL}_RPC_URLS`, etc. — keyed by network, so assets sharing one share its config (ETH and ethusdc both ride the `ETH_*` vars). See `.env.example`.
-- `BTC_PRIVATE_KEY`, `ETH_PRIVATE_KEY`, `ARB_PRIVATE_KEY`, `HYPE_PRIVATE_KEY`, `BNB_PRIVATE_KEY`, `AVAX_PRIVATE_KEY`, `BASE_PRIVATE_KEY`, `{ETH,ARB,HYPE,BNB,AVAX,BASE}_RPC_URLS`, etc. — keyed by network, so assets sharing one share its config (ETH, ethusdc and paxg all ride the `ETH_*` vars). See `.env.example`.
+- `BTC_PRIVATE_KEY`, `ETH_PRIVATE_KEY`, `ARB_PRIVATE_KEY`, `HYPE_PRIVATE_KEY`, `BNB_PRIVATE_KEY`, `AVAX_PRIVATE_KEY`, `BASE_PRIVATE_KEY`, `CRO_PRIVATE_KEY`, `POL_PRIVATE_KEY`, `{ETH,ARB,HYPE,BNB,AVAX,BASE,CRO,POL}_RPC_URLS`, etc. — keyed by network, so assets sharing one share its config (ETH, ethusdc, uni, qnt and paxg all ride the `ETH_*` vars; BNB and aster both ride the `BNB_*` vars). See `.env.example`.
 
 ## Running a Local Subtensor Lite Node (Validators)
 
