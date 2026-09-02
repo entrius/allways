@@ -147,3 +147,20 @@ def test_on_record_or_unknown_network_vault_address_stays_quiet(capsys):
     vault_cli._warn_if_off_record('5AnyVault', 'local')  # no of-record entry
     vault_cli._warn_if_off_record('5AnyVault', None)
     assert capsys.readouterr().out == ''
+
+
+def test_success_report_hides_the_event_dump(capsys):
+    """Success reads as one green line + extrinsic; the raw event list is failure diagnostics."""
+    result = VaultCallResult(ok=True, events=['Balances.Withdraw', 'System.ExtrinsicSuccess'], extrinsic_hash='0xabc')
+    vault_cli._report(result, 'Posted 2.200000000 τ')
+    out = capsys.readouterr().out
+    assert 'Posted 2.200000000' in out
+    assert 'events:' not in out
+    assert '0xabc' in out
+
+
+def test_failure_report_keeps_the_event_dump(capsys):
+    result = VaultCallResult(ok=False, error='Unknown', events=['System.ExtrinsicFailed'], extrinsic_hash='0xdef')
+    vault_cli._report(result, 'unused')
+    out = capsys.readouterr().out
+    assert 'events: System.ExtrinsicFailed' in out
