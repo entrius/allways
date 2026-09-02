@@ -579,3 +579,36 @@ def test_screen_rejection_aborts_swap_now_before_any_bid():
     assert 'cannot accept' in result.output
     client.open_or_request.assert_not_called()
     client.get_reservation.assert_not_called()
+
+
+def test_send_with_uncontrolled_source_aborts_before_any_bid():
+    """Regression: `--send` with a source address the configured wallet can't sign for must abort
+    BEFORE the bid. The old order spent the reservation fee, finalized, and only then (inside
+    _auto_send_wizard) noticed can_send_from was false — stranding the taker on the manual
+    deadline path with real money committed (live tao incident, 2026-09-02)."""
+    from click.testing import CliRunner
+
+    from allways.cli.swap_commands.swap import swap_now_command
+
+    user = '68ToGUYjjYpqi7Atx7QyhbybR2RCfo2tkmgcoNR3DxYF'
+    client = MagicMock()
+    client.keypair.pubkey.return_value = user
+    bad_provider = MagicMock()
+    bad_provider.can_send_from.return_value = False
+
+    argv = ['--from', 'tao', '--to', 'aster', '--amount', '0.15']
+    argv += ['--from-address', 'tao-source-we-cannot-sign-for', '--receive-address', '0xUs']
+    argv += ['--yes', '--send']
+
+    with (
+        patch('allways.cli.swap_commands.swap.get_solana_cli_context', return_value=(None, client)),
+        patch('allways.cli.swap_commands.swap._gate_provider', return_value=None),
+        patch('allways.cli.swap_commands.swap._source_provider', return_value=bad_provider),
+    ):
+        result = CliRunner().invoke(swap_now_command, argv)
+
+    assert result.exit_code != 0
+    assert 'cannot send TAO from' in result.output
+    assert 'No bid was placed' in result.output
+    client.open_or_request.assert_not_called()  # the money-touching call never happened
+    client.get_config.assert_not_called()  # aborted before even reading chain config
