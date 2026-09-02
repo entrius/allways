@@ -12,10 +12,28 @@ prefix-match falls through to the raw string — so adding a new validator-side
 rejection still surfaces something useful, just untranslated.
 """
 
+import re
 from dataclasses import dataclass, field
 from typing import Callable, Optional
 
 from rich.console import Console
+
+# Rejection strings are meant to be terse identifiers, but an RPC failure can smuggle a whole
+# JSON-RPC error dict through — pull the human sentence out of the blob instead of printing it.
+_MAX_RAW_LEN = 140
+_ANCHOR_MSG_RE = re.compile(r'Error Message:\s*([^\'"]+)')  # Anchor error text inside sim logs
+_RPC_MSG_RE = re.compile(r"'message':\s*'([^']+)'")
+
+
+def _terse(raw: str) -> str:
+    """Compress a blob-length rejection to '<prefix>: <human message>'; short reasons pass through."""
+    if len(raw) <= _MAX_RAW_LEN:
+        return raw
+    m = _ANCHOR_MSG_RE.search(raw) or _RPC_MSG_RE.search(raw)
+    if m:
+        prefix = raw[: raw.index(':')] if ':' in raw[:40] else 'validator error'
+        return f'{prefix}: {m.group(1).strip().rstrip(".")}'
+    return raw[: _MAX_RAW_LEN - 1] + '…'
 
 
 @dataclass
@@ -355,7 +373,7 @@ def render_and_aggregate(
             console.print(f'  {label}{i}: [yellow]no response[/yellow] [dim]— timeout or validator down[/dim]')
         else:
             info.rejected += 1
-            console.print(f'  {label}{i}: [red]no[/red] [dim]{raw}[/dim]')
+            console.print(f'  {label}{i}: [red]no[/red] [dim]{_terse(raw)}[/dim]')
 
     # Rate-limited (429) with no accepts: transient by nature — a short backoff
     # and retry clears it. Set this before the no-response early-return below so
@@ -399,7 +417,7 @@ def render_and_aggregate(
         # so the user still gets *something* actionable. Treat as transient by default
         # so the user can choose to retry.
         info.category = 'unmatched'
-        info.headline = last_raw or 'Validators rejected the request.'
+        info.headline = _terse(last_raw) if last_raw else 'Validators rejected the request.'
         info.deterministic = False
         return info
 
@@ -411,7 +429,7 @@ def render_and_aggregate(
         return info
 
     category, _, det, builder = last_match
-    ctx.setdefault('raw_reason', last_raw)
+    ctx.setdefault('raw_reason', _terse(last_raw))
     info.category = category
     info.deterministic = det
     try:

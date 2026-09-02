@@ -224,3 +224,41 @@ def test_the_sol_collateral_refusal_is_untouched():
     info = _reason('Insufficient collateral: 10 < 1000000')
     assert info.category == 'insufficient_collateral'
     assert info.deterministic is True and 'alw collateral deposit' in info.headline
+
+
+# ─── blob-length rejections are compressed to one human line ─────────────────
+
+_ANCHOR_BLOB = (
+    "sendTransaction: {'code': -32002, 'message': 'Transaction simulation failed: Error processing "
+    "Instruction 0: custom program error: 0x1777', 'data': {'accounts': None, 'err': "
+    "{'InstructionError': [0, {'Custom': 6007}]}, 'logs': ['Program log: AnchorError thrown in "
+    'programs/allways_swap_manager/src/consensus.rs:67. Error Code: NotValidator. Error Number: 6007. '
+    "Error Message: Signer is not a whitelisted validator.'], 'unitsConsumed': 17165}}"
+)
+
+_RPC_BLOB = (
+    "sendTransaction: {'code': -32002, 'message': 'Transaction simulation failed: Attempt to debit an "
+    "account but found no record of a prior credit.', 'data': {'accounts': None, 'err': "
+    "'AccountNotFound', 'fee': None, 'innerInstructions': None, 'loadedAccountsDataSize': 0, "
+    "'logs': [], 'postBalances': None, 'preBalances': None, 'unitsConsumed': 0}}"
+)
+
+
+def test_anchor_error_blob_compresses_to_its_error_message():
+    info = render_and_aggregate(_silent_console(), [FakeResp(accepted=False, rejection_reason=_ANCHOR_BLOB)])
+    assert info.category == 'unmatched'
+    assert info.headline == 'sendTransaction: Signer is not a whitelisted validator'
+    assert '{' not in info.headline
+
+
+def test_rpc_error_blob_compresses_to_its_message():
+    info = render_and_aggregate(_silent_console(), [FakeResp(accepted=False, rejection_reason=_RPC_BLOB)])
+    assert 'Attempt to debit an account' in info.headline
+    assert '{' not in info.headline
+
+
+def test_unstructured_long_reason_is_clipped():
+    raw = 'x' * 500
+    info = render_and_aggregate(_silent_console(), [FakeResp(accepted=False, rejection_reason=raw)])
+    assert len(info.headline) <= 141
+    assert info.headline.endswith('…')

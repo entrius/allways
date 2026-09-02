@@ -79,7 +79,8 @@ def _report(result, ok_msg: str):
             console.print(f'[red]Call failed[/red]{f" [dim]({result.error})[/dim]" if result.error else ""}')
     else:
         console.print(f'[green]{ok_msg}[/green]')
-    if result.events:
+    # The raw event list is a diagnostic — only worth the noise when the call failed.
+    if not result.ok and result.events:
         console.print(f'  [dim]events: {", ".join(result.events)}[/dim]')
     console.print(f'  [dim]extrinsic: {result.extrinsic_hash}[/dim]\n')
 
