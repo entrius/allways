@@ -409,6 +409,21 @@ def swap_now_command(
     if _src_gate is not None:
         user_from_addr = _src_gate.chain.normalize_address(user_from_addr)
 
+    # `--send` is an explicit promise to drive the deposit in-process, so prove the configured
+    # wallet can actually sign for the pinned source address BEFORE any fee is spent. The old
+    # order only discovered a mismatch inside _auto_send_wizard — post-bid, post-finalize — and
+    # dropped the taker onto the manual deadline path with a live reservation and real money
+    # committed (hit live on a tao source 2026-09-02: config wallet vs a different --from-address).
+    if auto_send is True and not uses_solana_wallet(from_chain):
+        _pre = _source_provider(from_chain, client, config)
+        if _pre is None or not _pre.can_send_from(user_from_addr):
+            hint = f" (configured TAO wallet: '{config.get('wallet', '?')}')" if from_chain == 'tao' else ''
+            fail(
+                f'--send: this CLI cannot send {from_chain.upper()} from {user_from_addr}{hint}. '
+                'No bid was placed and no fee was spent. Fix --from-address or the configured '
+                'wallet/creds, or re-run without --send to use the manual deposit flow deliberately.'
+            )
+
     cfg = client.get_config()
     bounds = bounds_from_config(cfg) if cfg else {}
     min_swap, max_swap = hub_bounds(bounds, from_chain, to_chain)
