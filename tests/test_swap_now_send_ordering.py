@@ -51,11 +51,11 @@ def test_chain_unreachable_during_validator_resolve_moves_no_funds():
     with (
         patch.object(swap_mod, '_source_provider', return_value=provider),
         patch.object(swap_mod, 'get_cli_context', side_effect=TimeoutError('timed out')),
-        patch.object(swap_mod, 'discover_validators') as disc,
+        patch('allways.cli.swap_commands.post_tx.resolve_relay_axons') as resolver,
     ):
         assert _wizard(provider) is False  # clean fallback, not a crash
     provider.send_amount.assert_not_called()  # THE invariant: funds untouched
-    disc.assert_not_called()
+    resolver.assert_not_called()
 
 
 def test_relay_error_after_send_is_recoverable_not_a_traceback():
@@ -63,7 +63,7 @@ def test_relay_error_after_send_is_recoverable_not_a_traceback():
     with (
         patch.object(swap_mod, '_source_provider', return_value=provider),
         patch.object(swap_mod, 'get_cli_context', return_value=({'netuid': 1}, None, MagicMock(), None)),
-        patch.object(swap_mod, 'discover_validators', return_value=['axon']),
+        patch('allways.cli.swap_commands.post_tx.resolve_relay_axons', return_value=(['axon'], {}, 1)),
         patch.object(swap_mod, '_miner_hotkey', return_value='miner-hotkey'),
         patch('allways.cli.swap_commands.post_tx.relay_deposit', side_effect=TimeoutError('timed out')),
         pytest.raises(SystemExit),
@@ -79,7 +79,10 @@ def test_happy_path_passes_preresolved_axons_into_relay():
     with (
         patch.object(swap_mod, '_source_provider', return_value=provider),
         patch.object(swap_mod, 'get_cli_context', return_value=({'netuid': 1}, None, MagicMock(), None)),
-        patch.object(swap_mod, 'discover_validators', return_value=['axon-a', 'axon-b']),
+        patch(
+            'allways.cli.swap_commands.post_tx.resolve_relay_axons',
+            return_value=(['axon-a', 'axon-b'], {'hk': 'vali 1'}, 1),
+        ),
         patch.object(swap_mod, '_miner_hotkey', return_value='miner-hotkey'),
         patch.object(swap_mod, '_watch_swap'),
         patch('allways.cli.swap_commands.post_tx.relay_deposit', return_value='swapkeyhex') as relay,
@@ -88,3 +91,5 @@ def test_happy_path_passes_preresolved_axons_into_relay():
     # Validators resolved once, pre-send, and handed to relay_deposit so it does NOT reconnect after
     # the money is out.
     assert relay.call_args.kwargs['validator_axons'] == ['axon-a', 'axon-b']
+    assert relay.call_args.kwargs['validator_names'] == {'hk': 'vali 1'}
+    assert relay.call_args.kwargs['accepts_needed'] == 1
