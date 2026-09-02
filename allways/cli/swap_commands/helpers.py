@@ -896,7 +896,7 @@ def activation_prerequisites(backing: str) -> List[str]:
     if backing == pdas.BACKING_CHAIN_SOL:
         return ['Collateral posted (alw collateral deposit) — activation gates on the purse, not on quotes']
     return [
-        f'{backing.upper()} bond posted AND locked in the vault (alw vault post-collateral, alw vault lock)',
+        f'{backing.upper()} bond posted AND locked in the vault (alw vault deposit, alw vault lock)',
         'Validators have mirrored that bond to Solana — the attestation is written on their cadence,'
         ' so a fresh lock needs a minute',
     ]
@@ -907,7 +907,7 @@ def _underfunded(state: PurseState) -> str:
     if state.purse is None:
         return (
             f'Your {state.backing.upper()} purse has no LOCKED bond attested on Solana yet '
-            f'(`alw vault post-collateral` then `alw vault lock`, then give validators a minute).'
+            f'(`alw vault deposit` then `alw vault lock`, then give validators a minute).'
         )
-    fix = 'alw collateral deposit' if state.backing == pdas.BACKING_CHAIN_SOL else 'alw vault post-collateral'
+    fix = 'alw collateral deposit' if state.backing == pdas.BACKING_CHAIN_SOL else 'alw vault deposit'
     return f'Your {state.backing.upper()} purse holds {state.purse} < the {state.floor} floor (`{fix}`).'

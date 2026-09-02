@@ -36,7 +36,7 @@ except ImportError:  # pragma: no cover - dependency always present in practice
 
 @click.group('collateral', cls=StyledGroup, show_disclaimer=True)
 def collateral_group():
-    """Manage miner collateral."""
+    """Manage SOL collateral on Solana (the TAO bond lives under `alw vault`)."""
     pass
 
 
@@ -46,7 +46,8 @@ def collateral_group():
 def collateral_deposit(amount: float | None, yes: bool):
     """Deposit SOL collateral to the swap program.
 
-    [dim]Amount is in SOL, posted from your Solana keypair (SOLANA_KEYPAIR_PATH / solana-keypair config / ~/.solana/id.json).[/dim]
+    [dim]Amount is in SOL, posted from your Solana keypair (SOLANA_KEYPAIR_PATH / solana-keypair config / ~/.solana/id.json).
+    The SOL twin of `alw vault deposit` (TAO).[/dim]
 
     [dim]Examples:
         $ alw collateral deposit --amount 5.0

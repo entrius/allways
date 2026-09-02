@@ -103,9 +103,9 @@ alw miner post sol <addr> btc <addr> <rate>    # quote
 so activation waits on validators mirroring it to Solana rather than on a local read:
 
 ```bash
-alw collateral deposit 0.1                     # one-time identity deposit — see the note below
+alw collateral deposit --amount 0.1            # one-time identity deposit — see the note below
 alw miner bind-hotkey                          # the vault keys bonds by hotkey, joined via this binding
-alw vault post-collateral <TAO>                # bond into the vault (signed by the hotkey)
+alw vault deposit --amount <TAO>               # bond into the vault (signed by the hotkey)
 alw vault lock                                 # enter service — only a LOCKED bond is attested
                                                # wait a minute: validators mirror the bond to Solana
 alw miner activate --backing tao               # validators vote that purse active
