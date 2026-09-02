@@ -38,7 +38,6 @@ if os.environ.get('_ALW_COMPLETE'):
             _sys.modules[_pkg + _suffix] = _mock
 
 import json  # noqa: E402
-import re  # noqa: E402
 from pathlib import Path  # noqa: E402
 
 import click  # noqa: E402
@@ -136,6 +135,7 @@ def _effective_settings(config: dict) -> list:
     from allways.solana.program import CONFIG_KEYS as PROGRAM_CONFIG_KEYS
     from allways.solana.program import ENV_VAR as PROGRAM_ID_ENV
     from allways.solana.program import resolve_program_id
+    from allways.solana.rpc import redact_rpc_url
 
     def row(key, default=None):
         if key in config:
@@ -149,7 +149,7 @@ def _effective_settings(config: dict) -> list:
             return 'config'
         return derived or 'default'
 
-    rpc_url = re.sub(r'(api-key=)[^&]+', r'\1***', resolve_solana_rpc(config))
+    rpc_url = redact_rpc_url(resolve_solana_rpc(config))
     rpc_src = source(
         'SOLANA_RPC_URL', bool(config.get('solana-rpc')), 'solana-network' if config.get('solana-network') else ''
     )

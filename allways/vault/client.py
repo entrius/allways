@@ -22,8 +22,9 @@ from typing import Any, Dict, List, Optional, Sequence, Tuple
 
 from allways.vault import codec
 
-# Repo-relative default: the cargo-contract build artifact.
-DEFAULT_METADATA = (
+# A fresh cargo-contract build artifact (source checkout) wins; pip installs have no
+# smart-contracts/ tree and fall back to the copy shipped inside the package.
+_REPO_METADATA = (
     Path(__file__).resolve().parents[2]
     / 'smart-contracts'
     / 'ink-bond-vault'
@@ -31,6 +32,8 @@ DEFAULT_METADATA = (
     / 'ink'
     / 'allways_bond_vault.json'
 )
+_PACKAGED_METADATA = Path(__file__).resolve().parents[1] / 'metadata' / 'allways_bond_vault.json'
+DEFAULT_METADATA = _REPO_METADATA if _REPO_METADATA.exists() else _PACKAGED_METADATA
 
 # Dry-runs use a generous fixed budget; the actual charge is by weight used.
 DEFAULT_GAS = {'ref_time': 300_000_000_000, 'proof_size': 2_000_000}

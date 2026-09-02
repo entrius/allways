@@ -23,6 +23,7 @@ from allways.cli.swap_commands.helpers import (
     safe_read,
     set_json_output,
 )
+from allways.solana.rpc import redact_rpc_url
 
 
 def _tao_identity(config):
@@ -115,7 +116,7 @@ def status_command(miner_pk, as_json):
     if as_json:
         out = {
             'network': network,
-            'solana_rpc': client.rpc.url,
+            'solana_rpc': redact_rpc_url(client.rpc.url),
             'program_initialized': program_initialized,
             'halted': halted,
             'caller': str(caller) if caller else None,
@@ -148,7 +149,7 @@ def status_command(miner_pk, as_json):
 
     console.print('\n[bold]Allways Status[/bold]\n')
     console.print(f'  Network:      {network}')
-    console.print(f'  Solana RPC:   {client.rpc.url}')
+    console.print(f'  Solana RPC:   {redact_rpc_url(client.rpc.url)}')
     console.print(
         f'  Program:      {"[green]initialized[/green]" if program_initialized else "[red]not initialized[/red]"}'
         + ('  [red](halted)[/red]' if halted else '')
