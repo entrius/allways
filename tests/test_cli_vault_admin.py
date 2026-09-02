@@ -164,3 +164,11 @@ def test_failure_report_keeps_the_event_dump(capsys):
     vault_cli._report(result, 'unused')
     out = capsys.readouterr().out
     assert 'events: System.ExtrinsicFailed' in out
+
+
+def test_vault_deposit_takes_amount_flag_and_keeps_post_collateral_alias(monkeypatch):
+    client = _client(monkeypatch, post_collateral=VaultCallResult(ok=True, extrinsic_hash='0xabc'))
+    for cmd in ('deposit', 'post-collateral'):
+        res = CliRunner().invoke(vault_cli.vault_group, [cmd, '--amount', '1.5'])
+        assert res.exit_code == 0, res.output
+        assert client.post_collateral.call_args.args == (1_500_000_000,)

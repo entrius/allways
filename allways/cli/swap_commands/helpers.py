@@ -1,6 +1,7 @@
 import json
 import math
 import os
+import re
 import sys
 import time
 from dataclasses import dataclass, field
@@ -20,7 +21,7 @@ from allways.classes import SwapStatus
 from allways.cli.swap_commands.swap_intake import backing_purse, floors_from_config
 from allways.constants import NETUID_FINNEY, TAO_TO_RAO, declarable_backings
 from allways.solana import pdas
-from allways.solana.client import SolanaClientError
+from allways.solana.client import PROGRAM_ERRORS, SolanaClientError, program_error_code
 from allways.solana.layouts import hub_busy_until, hub_swap_on, lock_max
 from allways.solana.rpc import SolanaRpcError, SolanaRpcUnreachable, resolve_rpc_url
 
@@ -265,6 +266,24 @@ def live_unclaimed(resv) -> bool:
         return False
     now = int(time.time())
     return int(resv.reserved_until) > now and bytes(resv.claimed_swap_key) == EMPTY_SWAP_KEY
+
+
+# Operator next step per Anchor code where the IDL message alone is not actionable from the CLI.
+PROGRAM_ERROR_HINTS = {
+    6002: 'Deposit collateral first: alw collateral deposit',
+    6003: 'Deactivate before withdrawing: alw miner deactivate',
+    6015: 'Activate first: alw miner activate',
+}
+
+
+def solana_failure_message(err: Exception) -> str:
+    """One actionable line for a program/RPC failure — never the raw RPC dict or a traceback."""
+    code = program_error_code(err)
+    if code is not None:
+        name, msg = PROGRAM_ERRORS.get(code, ('UnknownError', 'Program rejected the transaction'))
+        return f'{PROGRAM_ERROR_HINTS.get(code, msg)} ({name} {code})'
+    rpc_message = re.search(r"'message': '([^']*)'", str(err))
+    return rpc_message.group(1) if rpc_message else str(err)
 
 
 def print_json(data) -> None:
@@ -877,7 +896,7 @@ def activation_prerequisites(backing: str) -> List[str]:
     if backing == pdas.BACKING_CHAIN_SOL:
         return ['Collateral posted (alw collateral deposit) — activation gates on the purse, not on quotes']
     return [
-        f'{backing.upper()} bond posted AND locked in the vault (alw vault post-collateral, alw vault lock)',
+        f'{backing.upper()} bond posted AND locked in the vault (alw vault deposit, alw vault lock)',
         'Validators have mirrored that bond to Solana — the attestation is written on their cadence,'
         ' so a fresh lock needs a minute',
     ]
@@ -888,7 +907,7 @@ def _underfunded(state: PurseState) -> str:
     if state.purse is None:
         return (
             f'Your {state.backing.upper()} purse has no LOCKED bond attested on Solana yet '
-            f'(`alw vault post-collateral` then `alw vault lock`, then give validators a minute).'
+            f'(`alw vault deposit` then `alw vault lock`, then give validators a minute).'
         )
-    fix = 'alw collateral deposit' if state.backing == pdas.BACKING_CHAIN_SOL else 'alw vault post-collateral'
+    fix = 'alw collateral deposit' if state.backing == pdas.BACKING_CHAIN_SOL else 'alw vault deposit'
     return f'Your {state.backing.upper()} purse holds {state.purse} < the {state.floor} floor (`{fix}`).'

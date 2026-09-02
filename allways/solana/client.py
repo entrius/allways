@@ -7,6 +7,7 @@ builders land in B1/B2 as the loop needs them.
 """
 
 import base64
+import json
 import re
 import time
 from dataclasses import dataclass
@@ -20,6 +21,7 @@ from solders.pubkey import Pubkey
 from solders.transaction import Transaction
 
 from allways.constants import VOTE_ROUND_TTL_SECS
+from allways.metadata import METADATA_DIR
 from allways.solana import layouts, pdas
 from allways.solana.program import resolve_program_id
 from allways.solana.rpc import SolanaRpc
@@ -152,22 +154,26 @@ def contract_reject_reason(err: Exception) -> Optional[str]:
     return 'miner is not available for reservation right now'
 
 
-# Contract ErrorCode names → Anchor codes (6000 + enum index). A landed failed tx stringifies as
-# {'Custom': N} with no name (see contract_reject_reason), so benign classification matches both forms.
-_ERROR_CODES = {
-    'NotValidator': 6007,
-    'AlreadyVoted': 6012,
-    'NotPending': 6031,
-    'ClaimNotExpired': 6033,
-    'ExtensionNotLater': 6034,
-    'ExtensionExceedsCeiling': 6035,
-    'PoolNotClosed': 6042,
-    'NoRequests': 6044,
-    'SeedSlotNotYetProduced': 6045,
-    'AlreadyFilled': 6046,
-    'WeightsUpdateTooSoon': 6050,
-    'AttestationWouldStrandSwap': 6067,
-}
+def _load_program_errors() -> dict:
+    idl = json.loads((METADATA_DIR / 'allways_swap_manager.json').read_text())
+    return {e['code']: (e['name'], e['msg']) for e in idl['errors']}
+
+
+# Anchor code → (ErrorCode name, message), straight from the packaged IDL — the one source of truth.
+PROGRAM_ERRORS = _load_program_errors()
+_ERROR_CODES = {name: code for code, (name, _) in PROGRAM_ERRORS.items()}
+
+
+def program_error_code(err: Exception) -> Optional[int]:
+    """The Anchor error code inside an RPC/confirm failure, or None when the failure is not a program
+    rejection. A pre-flight reject carries `Error Number: N` / `custom program error: 0xHEX`; a landed
+    failed tx surfaces as {'Custom': N} (see contract_reject_reason)."""
+    s = str(err)
+    m = re.search(r"'Custom':\s*(\d+)", s) or re.search(r'Error Number:\s*(\d+)', s)
+    if m:
+        return int(m.group(1))
+    m = re.search(r'custom program error:\s*0x([0-9a-fA-F]+)', s)
+    return int(m.group(1), 16) if m else None
 
 
 def benign_marker(err: Exception, names: Tuple[str, ...]) -> Optional[str]:
