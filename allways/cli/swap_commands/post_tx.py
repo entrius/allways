@@ -1,7 +1,8 @@
 """alw swap post-tx - Confirm a swap by relaying your source-chain deposit to the validators.
 
 After `alw swap now` reserves a miner and you've sent the source funds to that miner's address, this
-command relays the source-tx hash to every serving validator via a ``SwapConfirmSynapse``. Each
+command relays the source-tx hash to the contract's validator quorum (falling back to every serving
+validator when the quorum can't be resolved from chain) via a ``SwapConfirmSynapse``. Each
 validator independently verifies the deposit against the pinned on-chain ``Reservation`` — recipient =
 the reserved miner address, amount = the reserved amount, and crucially **sender = the reservation's
 pinned taker address** — then submits ``submit_swap_claim`` on-chain (→ ``PendingAttestation``).
@@ -18,9 +19,11 @@ import time
 import click
 
 from allways.cli.dendrite_lite import (
-    broadcast_synapse,
+    broadcast_until_quorum,
+    discover_quorum_axons,
     discover_validators,
     get_ephemeral_wallet,
+    resolve_dendrite_timeout,
 )
 from allways.cli.help import StyledCommand
 from allways.cli.swap_commands.helpers import (
@@ -33,6 +36,7 @@ from allways.cli.swap_commands.helpers import (
     live_unclaimed,
     load_pending_swap,
     loading,
+    votes_needed,
 )
 from allways.cli.validator_rejections import render_and_aggregate
 from allways.solana import pdas
@@ -178,8 +182,41 @@ def post_tx_command(tx_hash: str, tx_block: int, miner_hint: str):
     console.print(f'[dim]Track it with `alw view swap {swap_key} --watch`.[/dim]')
 
 
+def resolve_relay_axons(client, subtensor, netuid: int):
+    """The targets for the confirm relay: (axons, hotkey→label names, accepts needed).
+
+    Preferred: just the contract's validator quorum — non-members can't submit claims (the
+    program rejects them with NotValidator), so relaying to them only spammed their errors and
+    held the relay for the full timeout on dead axons. Falls back LOUDLY to every serving
+    validator when the quorum can't be fully resolved from chain (unbound validator, axon not
+    serving, config unreadable) — a noisier round beats missing the one validator that matters."""
+    try:
+        cfg = client.get_config()
+        needed = votes_needed(cfg)
+        axons, names = discover_quorum_axons(client, subtensor, netuid, cfg=cfg)
+        if len(axons) >= needed:
+            return axons, names, needed
+        console.print(
+            f'[yellow]Resolved only {len(axons)} of the {needed} quorum validator(s) from chain — '
+            'relaying to every serving validator instead.[/yellow]'
+        )
+    except Exception as e:  # noqa: BLE001 - the fallback must survive any decode/RPC hiccup
+        console.print(f'[yellow]Quorum resolution failed ({e}) — relaying to every serving validator instead.[/yellow]')
+    return discover_validators(subtensor, netuid), {}, 1
+
+
 def relay_deposit(
-    client, resv, miner_pk, miner_hotkey, tx_hash, tx_block=0, *, on_behalf_of=None, validator_axons=None
+    client,
+    resv,
+    miner_pk,
+    miner_hotkey,
+    tx_hash,
+    tx_block=0,
+    *,
+    on_behalf_of=None,
+    validator_axons=None,
+    validator_names=None,
+    accepts_needed=1,
 ) -> str | None:
     """Relay a source deposit to the validators (the shared core of ``post-tx`` and the ``swap now``
     auto-send). Returns the swap_key hex on acceptance, else None. Idempotent: validators re-verify the
@@ -219,17 +256,28 @@ def relay_deposit(
 
     if validator_axons is None:
         config, _wallet, subtensor, _ = get_cli_context(need_wallet=False)
-        validator_axons = discover_validators(subtensor, int(config['netuid']))
+        validator_axons, validator_names, accepts_needed = resolve_relay_axons(client, subtensor, int(config['netuid']))
     if not validator_axons:
         console.print('[red]No serving validators found on the metagraph.[/red]')
         return None
 
-    wallet = get_ephemeral_wallet()  # transport-only throwaway hotkey; auth is the on-chain deposit
+    import bittensor as bt  # lazy — only the relay needs a dendrite
+
+    # Transport-only throwaway hotkey; auth is the on-chain deposit.
+    dendrite = bt.Dendrite(wallet=get_ephemeral_wallet())
+    timeout = resolve_dendrite_timeout(60.0)
     info = None
     for attempt in range(_RELAY_ATTEMPTS):
         with loading(f'Relaying deposit to {len(validator_axons)} validator(s)...'):
-            responses = broadcast_synapse(wallet, validator_axons, synapse, timeout=60.0)
-        info = render_and_aggregate(console, responses, label='V', context={'miner_hotkey': miner_hotkey})
+            responses = broadcast_until_quorum(
+                dendrite, validator_axons, synapse, needed=accepts_needed, timeout=timeout
+            )
+        info = render_and_aggregate(
+            console, responses, label='V', context={'miner_hotkey': miner_hotkey}, names=validator_names
+        )
+        skipped = len(validator_axons) - len(responses)
+        if skipped > 0 and info.accepted >= accepts_needed:
+            console.print(f'  [dim]Quorum reached — stopped waiting on {skipped} slower validator(s).[/dim]')
         if attempt == _RELAY_ATTEMPTS - 1 or not _should_retry_relay(info):
             break
         console.print(

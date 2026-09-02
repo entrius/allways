@@ -19,7 +19,6 @@ import click
 from allways.chains import SUPPORTED_CHAINS, get_chain_def, uses_solana_wallet
 from allways.cli.dendrite_lite import (
     broadcast_synapse,
-    discover_validators,
     find_validator_axon,
     get_ephemeral_wallet,
     invalidate_axon_cache,
@@ -760,7 +759,7 @@ def _auto_send_wizard(client, config, resv, miner_pk, from_chain, to_chain, from
     if from_chain == 'tao' and not _unlock_coldkey_for_send(provider.wallet):
         return False
 
-    from allways.cli.swap_commands.post_tx import relay_deposit
+    from allways.cli.swap_commands.post_tx import relay_deposit, resolve_relay_axons
 
     # Resolve validators BEFORE moving funds. This is the fragile network step — a subtensor websocket
     # connect + metagraph read — and it needs nothing from the send. Doing it first means a transient
@@ -768,7 +767,9 @@ def _auto_send_wizard(client, config, resv, miner_pk, from_chain, to_chain, from
     # money is out (which stranded a deposit past its reservation TTL, with no claim, Swap, or refund).
     try:
         vconfig, _vw, subtensor, _ = get_cli_context(need_wallet=False)
-        validator_axons = discover_validators(subtensor, int(vconfig['netuid']))
+        validator_axons, validator_names, accepts_needed = resolve_relay_axons(
+            client, subtensor, int(vconfig['netuid'])
+        )
     except Exception as e:  # noqa: BLE001 - funds still safe → clean fallback, nothing lost
         console.print(f'[yellow]  Could not reach the chain to resolve validators ({e}); no funds moved.[/yellow]')
         return False
@@ -794,7 +795,16 @@ def _auto_send_wizard(client, config, resv, miner_pk, from_chain, to_chain, from
     # relay, so any failure must become a recoverable "re-run post-tx" instruction inside the TTL.
     miner_hotkey = _miner_hotkey(client, miner_pk)
     try:
-        swap_key = relay_deposit(client, resv, miner_pk, miner_hotkey, tx_hash, validator_axons=validator_axons)
+        swap_key = relay_deposit(
+            client,
+            resv,
+            miner_pk,
+            miner_hotkey,
+            tx_hash,
+            validator_axons=validator_axons,
+            validator_names=validator_names,
+            accepts_needed=accepts_needed,
+        )
     except Exception as e:  # noqa: BLE001 - money committed; convert any error into a re-run, never a crash
         fail(
             f'  Deposit sent ({tx_hash}) but the confirm relay errored: {e}. '

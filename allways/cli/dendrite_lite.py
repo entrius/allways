@@ -63,6 +63,38 @@ def discover_validators(
     return axons
 
 
+def discover_quorum_axons(client, subtensor: bt.Subtensor, netuid: int, cfg=None):
+    """Axons of the contract's whitelisted validators, plus a hotkey→label map for rendering.
+
+    Resolution chain: ``Config.validators`` → Binding (validator Solana pubkey → hotkey) →
+    metagraph axon. Only quorum members can ``submit_swap_claim``, so a confirm relayed anywhere
+    else buys noise, not progress. Returns only the members that fully resolve to a serving
+    axon — the caller decides whether that covers ``votes_needed`` or falls back to the
+    permissionless broadcast-all."""
+    from scalecodec.utils.ss58 import ss58_encode
+    from solders.pubkey import Pubkey
+
+    cfg = cfg or client.get_config()
+    hotkeys = set()
+    for entry in cfg.validators:
+        binding = client.get_binding(Pubkey.from_bytes(bytes(entry.key)))
+        if binding is None:
+            continue
+        hotkeys.add(ss58_encode(bytes(binding.hotkey), ss58_format=42))
+
+    axons: List[bt.AxonInfo] = []
+    names: dict = {}
+    if not hotkeys:
+        return axons, names
+    metagraph = subtensor.metagraph(netuid=netuid)
+    for uid in range(metagraph.n):
+        hotkey = metagraph.hotkeys[uid]
+        if hotkey in hotkeys and metagraph.axons[uid].is_serving:
+            axons.append(metagraph.axons[uid])
+            names[hotkey] = f'vali {uid}'
+    return axons, names
+
+
 def find_validator_axon(
     subtensor_factory: Callable[[], bt.Subtensor],
     netuid: int,
