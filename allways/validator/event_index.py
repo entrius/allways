@@ -96,7 +96,7 @@ class SolanaEventIndex:
         return written
 
     def _record_unattributed_outcome(self, rec: EventRecord, block_time: int) -> bool:
-        """Persist only the swap_key-keyed terminal facts (delivery hash + terminal/stale outcome)
+        """Persist only the swap_key-keyed terminal facts (delivery hash, refund facts, and terminal/stale outcome)
         for an event whose miner pubkey is unbound at ingest. These rows credit no UID — they are
         the seam's post-close truth read by /status — so they must land even when every
         crown-relevant effect is dropped. Idempotent upserts, so a later re-bind + re-ingest is a
@@ -109,7 +109,7 @@ class SolanaEventIndex:
         outcome = _OUTCOME_BY_EVENT.get(rec.name)
         if outcome is not None:
             swap_key = bytes(rec.fields['swap_key']).hex()
-            self.state_store.record_swap_outcome(swap_key, outcome, block_time)
+            self.state_store.record_swap_outcome(swap_key, outcome, block_time, refund=self._refund_facts(rec))
             dev_signal.emit('swap_outcome', swap_key=swap_key, outcome=outcome)
             return True
         return False
@@ -143,7 +143,9 @@ class SolanaEventIndex:
             )
             outcome = _OUTCOME_BY_EVENT.get(name)
             if outcome is not None:
-                self.state_store.record_swap_outcome(bytes(rec.fields['swap_key']).hex(), outcome, block_time)
+                self.state_store.record_swap_outcome(
+                    bytes(rec.fields['swap_key']).hex(), outcome, block_time, refund=self._refund_facts(rec)
+                )
                 dev_signal.emit('swap_outcome', swap_key=bytes(rec.fields['swap_key']).hex(), outcome=outcome)
             # SwapCompleted is the only swap event carrying realized legs — persist
             # them as a clearing-rate sample for the windowed volume read, in
@@ -370,6 +372,14 @@ class SolanaEventIndex:
         """A backing/collateral-chain field, defaulting to the SOL numéraire when absent — pre-split
         events carried no backing and were all sol-backed by construction (F4)."""
         return str(rec.fields.get(key, 'sol')).lower()
+
+    @staticmethod
+    def _refund_facts(rec: EventRecord) -> Optional[Tuple[str, Optional[int], Optional[str]]]:
+        if rec.name != 'SwapTimedOut':
+            return None
+        chain = SolanaEventIndex._backing(rec, 'collateral_chain')
+        # Off-chain backings settle on Bittensor — no Solana signature proves that payout.
+        return (chain, rec.fields.get('reimbursement'), rec.signature if chain == 'sol' else None)
 
     # ─── read interface (consumed by scoring's crown replay) ────────────
 
