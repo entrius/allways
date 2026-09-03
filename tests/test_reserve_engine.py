@@ -493,6 +493,18 @@ def test_closed_pda_by_key_with_recorded_slash_reports_timed_out(tmp_path):
     store.close()
 
 
+def test_closed_pda_by_key_carries_refund_facts(tmp_path):
+    from allways.validator.reserve_engine import swap_status
+
+    key = b'\x16' * 32
+    validator, store = _status_validator(tmp_path, StatusClient(swap=None))
+    store.record_swap_outcome(key.hex(), 'timed_out', 100, refund=('sol', 123, 'refundTx'))
+    s = swap_status(validator, HOTKEY, key.hex())
+    assert s.stage == 'timed_out'
+    assert s.detail == {'refund_chain': 'sol', 'refund_amount': 123, 'refund_tx_hash': 'refundTx'}
+    store.close()
+
+
 def test_closed_pda_by_key_with_unrecorded_outcome_reports_fulfilled(tmp_path):
     from allways.validator.reserve_engine import swap_status
 
