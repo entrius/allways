@@ -8,6 +8,7 @@ invariants before it signs — the caller (offering or CLI) is never trusted.
 import threading
 import time
 from dataclasses import dataclass, field
+from itertools import islice
 from typing import Optional
 
 import bittensor as bt
@@ -15,7 +16,7 @@ from bittensor import Keypair
 from solders.pubkey import Pubkey
 
 from allways.assets.asset import ProviderUnreachableError
-from allways.chains import SUPPORTED_CHAINS, canonical_pair
+from allways.chains import SUPPORTED_CHAINS, canonical_pair, get_chain_def
 from allways.cli.swap_commands.swap_intake import (
     MinerCandidate,
     backing_purse,
@@ -28,10 +29,12 @@ from allways.cli.swap_commands.swap_intake import (
     select_best_miner,
     swap_viable,
     unviable_reason,
+    viable_intakes,
 )
-from allways.constants import NUMERAIRE_CHAIN
+from allways.constants import NUMERAIRE_CHAIN, hub_leg
 from allways.solana.client import contract_reject_reason, swap_key_from_tx_hash
 from allways.solana.pdas import BACKING_BITS
+from allways.utils.rate import max_from_for_to_cap
 from allways.validator.binding import hotkey_ss58, verify_binding
 
 EMPTY_SWAP_KEY = b'\x00' * 32
@@ -657,21 +660,24 @@ class RateQuote:
     reason: str  # why quote is None ('' on a hit)
     levels: list  # top rate rungs [{rate_display, max_from_amount}], best first
     max_from_amount: int  # largest executable source amount across ALL quotes, not just shown rungs
+    min_from_amount: int  # the pair's hub minimum in source units; 0 = unset or unpriceable
+    candidates: list  # top bound intakes for the asked size, selector order — a tolerance band in one scan
 
 
 def rate_quote(validator, from_chain: str, to_chain: str, from_amount: int) -> RateQuote:
     """Everything ``/rate`` serves, from ONE candidate scan: the best executable quote for
     ``from_amount`` (source smallest-units; mirrors ``select_best_miner`` so the displayed rate ==
-    the reservable rate) plus the depth behind it. Rung order matches the selector's ranking (most
-    dest per source); same-rate quotes collapse to the deepest. Capacities are per-rung maxima,
-    never cumulative — a swap fills against a single miner."""
+    the reservable rate), the runners-up for that size, and the depth behind them. Rung order
+    matches the selector's ranking (most dest per source); same-rate quotes collapse to the deepest.
+    Capacities are per-rung maxima, never cumulative — a swap fills against a single miner."""
     client = validator.solana_client
     cfg = client.get_config()
     bounds = bounds_from_config(cfg)
     min_swap, max_swap = hub_bounds(bounds, from_chain, to_chain)
     cands = candidate_miners(client, from_chain, to_chain)
-    best = select_best_miner(cands, from_chain, to_chain, from_amount, min_swap, max_swap, bounds)
-    bq = _best_quote_result(validator, best) if best else None
+    ranked = _ranked_intakes(cands, from_chain, to_chain, from_amount, min_swap, max_swap, bounds)
+    bound = list(islice(_bound_intakes(validator, ranked), RATE_LEVELS_LIMIT))
+    bq = _best_quote(*bound[0]) if bound else None
     reason = '' if bq else unviable_reason(cands, from_chain, to_chain, from_amount, min_swap, max_swap, bounds)
     depth: dict = {}
     for cand in cands:
@@ -683,14 +689,52 @@ def rate_quote(validator, from_chain: str, to_chain: str, from_amount: int) -> R
     from_is_canon = from_chain == canonical_pair(from_chain, to_chain)[0]
     best_first = sorted(depth.items(), key=lambda kv: float(kv[0]), reverse=from_is_canon)
     levels = [{'rate_display': r, 'max_from_amount': m} for r, m in best_first[:RATE_LEVELS_LIMIT]]
-    return RateQuote(bq, reason, levels, max(depth.values(), default=0))
+    candidates = [
+        {
+            'miner_hotkey': hotkey,
+            'rate_display': cand.rate_display,
+            'to_amount': amts.to_amount,
+            'max_from_amount': max_intake_from_amount(cand, from_chain, to_chain, min_swap, max_swap, bounds),
+        }
+        for cand, amts, hotkey in bound
+    ]
+    min_from = _min_from_amount(min_swap, best_first[0][0] if best_first else None, from_chain, to_chain)
+    return RateQuote(bq, reason, levels, max(depth.values(), default=0), min_from, candidates)
 
 
-def _best_quote_result(validator, best) -> Optional[BestQuote]:
-    cand, amts = best
-    hotkey = _miner_hotkey_for(validator, cand.miner)
-    if hotkey is None:
-        return None
+def _ranked_intakes(cands, from_chain: str, to_chain: str, from_amount: int, min_swap: int, max_swap: int, bounds):
+    """``viable_intakes`` in ``select_best_miner``'s order (most dest, tie → "sol", then input order)."""
+    viable = viable_intakes(cands, from_chain, to_chain, from_amount, min_swap, max_swap, bounds)
+    return sorted(viable, key=lambda p: (p[1].to_amount, p[0].backing == NUMERAIRE_CHAIN), reverse=True)
+
+
+def _bound_intakes(validator, ranked):
+    """``ranked`` with each miner's hotkey; an unbound miner cannot be reserved through the seam, so it is skipped."""
+    for cand, amts in ranked:
+        hotkey = _miner_hotkey_for(validator, cand.miner)
+        if hotkey:
+            yield cand, amts, hotkey
+
+
+def _min_from_amount(min_swap: int, best_rate: Optional[str], from_chain: str, to_chain: str) -> int:
+    """The hub minimum in source units: as-is on the hub leg, else inverted at the best level rate (0 if no depth)."""
+    if min_swap <= 0 or from_chain == hub_leg(from_chain, to_chain):
+        return min_swap
+    if best_rate is None:
+        return 0
+    canon_from, canon_to = canonical_pair(from_chain, to_chain)
+    # One past the largest source whose hub leg still falls short of the minimum.
+    under = max_from_for_to_cap(
+        min_swap - 1,
+        best_rate,
+        from_chain != canon_from,
+        get_chain_def(canon_to).decimals,
+        get_chain_def(canon_from).decimals,
+    )
+    return under + 1
+
+
+def _best_quote(cand: MinerCandidate, amts, hotkey: str) -> BestQuote:
     return BestQuote(
         hotkey,
         str(cand.miner),
