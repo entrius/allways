@@ -575,7 +575,7 @@ class TestRateQuoteCandidates:
             get_binding=lambda pk: SimpleNamespace(hotkey=hotkeys[str(pk)]) if str(pk) in hotkeys else None,
         )
         return SimpleNamespace(solana_client=client), [
-            hotkey_ss58(hotkeys[str(pk)]) for pk in miners if str(pk) in hotkeys
+            hotkey_ss58(hotkeys[str(pk)]) if str(pk) in hotkeys else None for pk in miners
         ]
 
     def test_candidates_follow_selector_order_capped(self):
@@ -593,7 +593,7 @@ class TestRateQuoteCandidates:
             'max_from_amount': self.MAX,
         }
         assert rq.candidates[1]['to_amount'] == 55_000_000
-        assert rq.min_from_amount == self.MIN
+        assert rq.min_from_amount == self.MIN  # hub source: min_swap as-is
 
     def test_miss_carries_min_and_no_candidates(self):
         validator, _ = self._validator('sol', 'btc', ['0.5'])
@@ -602,19 +602,24 @@ class TestRateQuoteCandidates:
         assert rq.candidates == []
         assert rq.min_from_amount == self.MIN and rq.max_from_amount == self.MAX
 
-    def test_unbound_candidate_is_skipped_others_ride(self):
-        rates = ['0.5', '0.6', '0.55']
-        validator, hotkeys = self._validator('sol', 'btc', rates, unbound={2})
+    def test_unbound_miners_backfill_before_the_cap(self):
+        # 7 viable, the selector's top pick unbound: the quote is the best BOUND intake, the
+        # unbound one never rides, and the next bound miner backfills the fifth slot.
+        rates = ['0.5', '0.6', '0.5', '0.55', '0.45', '0.4', '0.3']
+        validator, hotkeys = self._validator('sol', 'btc', rates, unbound={1})
         rq = rate_quote(validator, 'sol', 'btc', self.SOL)
-        assert rq.quote.miner_hotkey == hotkeys[1]
-        assert [c['miner_hotkey'] for c in rq.candidates] == [hotkeys[1], hotkeys[0]]
+        assert rq.quote.miner_hotkey == hotkeys[3] == rq.candidates[0]['miner_hotkey']
+        assert rq.quote.to_amount == 55_000_000 == rq.candidates[0]['to_amount']
+        assert [c['miner_hotkey'] for c in rq.candidates] == [hotkeys[i] for i in (3, 0, 2, 4, 5)]
 
     def test_min_from_amount_is_in_source_units_for_a_spoke_source(self):
-        # btc→sol: the bound is on the SOL (dest) leg. The floor is the smallest BTC amount whose
-        # SOL leg reaches min_swap under the best rate — exact, so its predecessor falls short.
+        # btc→sol: the minimum is on the SOL (hub) leg. The floor is the smallest BTC amount whose
+        # SOL leg reaches min_swap at the best bound rate — exact, so its predecessor falls short.
         validator, _ = self._validator('btc', 'sol', ['0.5', '0.25'])
         rq = rate_quote(validator, 'btc', 'sol', 10_000_000)
         floor = rq.min_from_amount
         assert floor == 2_500_000  # 0.025 BTC at 0.25 BTC/SOL → exactly 0.1 SOL
         assert compute_intake_amounts('btc', 'sol', floor, '0.25').collateral_amount >= self.MIN
         assert compute_intake_amounts('btc', 'sol', floor - 1, '0.25').collateral_amount < self.MIN
+        # No bound candidate to price it at → 0.
+        assert rate_quote(validator, 'btc', 'sol', floor - 1).min_from_amount == 0

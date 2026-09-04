@@ -8,6 +8,7 @@ invariants before it signs — the caller (offering or CLI) is never trusted.
 import threading
 import time
 from dataclasses import dataclass, field
+from itertools import islice
 from typing import Optional
 
 import bittensor as bt
@@ -30,7 +31,7 @@ from allways.cli.swap_commands.swap_intake import (
     unviable_reason,
     viable_intakes,
 )
-from allways.constants import NUMERAIRE_CHAIN
+from allways.constants import NUMERAIRE_CHAIN, hub_leg
 from allways.solana.client import contract_reject_reason, swap_key_from_tx_hash
 from allways.solana.pdas import BACKING_BITS
 from allways.utils.rate import max_from_for_to_cap
@@ -659,10 +660,8 @@ class RateQuote:
     reason: str  # why quote is None ('' on a hit)
     levels: list  # top rate rungs [{rate_display, max_from_amount}], best first
     max_from_amount: int  # largest executable source amount across ALL quotes, not just shown rungs
-    min_from_amount: int  # smallest executable source amount across ALL quotes; 0 = no floor
-    # Top executable intakes for the asked size, selector order — lets a consumer walk a tolerance
-    # band without another scan: [{miner_hotkey, rate_display, to_amount, max_from_amount}].
-    candidates: list
+    min_from_amount: int  # the pair's hub minimum in source units; 0 = unset or unpriceable
+    candidates: list  # top bound intakes for the asked size, selector order — a tolerance band in one scan
 
 
 def rate_quote(validator, from_chain: str, to_chain: str, from_amount: int) -> RateQuote:
@@ -676,17 +675,15 @@ def rate_quote(validator, from_chain: str, to_chain: str, from_amount: int) -> R
     bounds = bounds_from_config(cfg)
     min_swap, max_swap = hub_bounds(bounds, from_chain, to_chain)
     cands = candidate_miners(client, from_chain, to_chain)
-    ranked = _ranked_intakes(cands, from_chain, to_chain, from_amount, min_swap, max_swap, bounds)[:RATE_LEVELS_LIMIT]
-    hotkeys = [_miner_hotkey_for(validator, cand.miner) for cand, _ in ranked]
-    bq = _best_quote(ranked[0], hotkeys[0]) if hotkeys and hotkeys[0] else None
+    ranked = _ranked_intakes(cands, from_chain, to_chain, from_amount, min_swap, max_swap, bounds)
+    bound = list(islice(_bound_intakes(validator, ranked), RATE_LEVELS_LIMIT))
+    bq = _best_quote(*bound[0]) if bound else None
     reason = '' if bq else unviable_reason(cands, from_chain, to_chain, from_amount, min_swap, max_swap, bounds)
     depth: dict = {}
-    floors = []
     for cand in cands:
         cap = max_intake_from_amount(cand, from_chain, to_chain, min_swap, max_swap, bounds)
         if cap > 0:
             depth[cand.rate_display] = max(depth.get(cand.rate_display, 0), cap)
-            floors.append(_min_intake_from_amount(cand, from_chain, to_chain, bounds))
     # Rates are canonical 'dest per 1 canonical-source': when the taker sends the canonical
     # source (the hub leg), higher is better; sending the spoke side, lower is better.
     from_is_canon = from_chain == canonical_pair(from_chain, to_chain)[0]
@@ -699,32 +696,37 @@ def rate_quote(validator, from_chain: str, to_chain: str, from_amount: int) -> R
             'to_amount': amts.to_amount,
             'max_from_amount': max_intake_from_amount(cand, from_chain, to_chain, min_swap, max_swap, bounds),
         }
-        for (cand, amts), hotkey in zip(ranked, hotkeys)
-        if hotkey  # an unbound miner cannot be reserved through the seam — skip, the rest still ride
+        for cand, amts, hotkey in bound
     ]
-    return RateQuote(bq, reason, levels, max(depth.values(), default=0), min(floors, default=0), candidates)
+    min_from = _min_from_amount(min_swap, bq.rate_display if bq else None, from_chain, to_chain)
+    return RateQuote(bq, reason, levels, max(depth.values(), default=0), min_from, candidates)
 
 
 def _ranked_intakes(cands, from_chain: str, to_chain: str, from_amount: int, min_swap: int, max_swap: int, bounds):
-    """``viable_intakes`` in ``select_best_miner``'s order — most dest first, exact tie → "sol"
-    backing, then input order (stable sort) — so the first entry IS the selector's pick."""
+    """``viable_intakes`` in ``select_best_miner``'s order (most dest, tie → "sol", then input order)."""
     viable = viable_intakes(cands, from_chain, to_chain, from_amount, min_swap, max_swap, bounds)
     return sorted(viable, key=lambda p: (p[1].to_amount, p[0].backing == NUMERAIRE_CHAIN), reverse=True)
 
 
-def _min_intake_from_amount(cand: MinerCandidate, from_chain: str, to_chain: str, bounds) -> int:
-    """Smallest source amount this candidate's size gate admits — ``max_intake_from_amount``'s floor
-    twin: the backing's min bound, carried to the source leg through the same exact maths."""
-    lo = bounds.get(cand.backing, (0, 0))[0]
-    if lo <= 0 or cand.backing == from_chain:
-        return lo
-    if cand.backing != to_chain:
+def _bound_intakes(validator, ranked):
+    """``ranked`` with each miner's hotkey; an unbound miner cannot be reserved through the seam, so it is skipped."""
+    for cand, amts in ranked:
+        hotkey = _miner_hotkey_for(validator, cand.miner)
+        if hotkey:
+            yield cand, amts, hotkey
+
+
+def _min_from_amount(min_swap: int, best_rate: Optional[str], from_chain: str, to_chain: str) -> int:
+    """The hub minimum in source units: as-is on the hub leg, else inverted at the best bound rate (0 if none)."""
+    if min_swap <= 0 or from_chain == hub_leg(from_chain, to_chain):
+        return min_swap
+    if best_rate is None:
         return 0
     canon_from, canon_to = canonical_pair(from_chain, to_chain)
-    # One past the largest source whose dest leg still falls short of the bound.
+    # One past the largest source whose hub leg still falls short of the minimum.
     under = max_from_for_to_cap(
-        lo - 1,
-        cand.rate_display,
+        min_swap - 1,
+        best_rate,
         from_chain != canon_from,
         get_chain_def(canon_to).decimals,
         get_chain_def(canon_from).decimals,
@@ -732,8 +734,7 @@ def _min_intake_from_amount(cand: MinerCandidate, from_chain: str, to_chain: str
     return under + 1
 
 
-def _best_quote(best, hotkey: str) -> BestQuote:
-    cand, amts = best
+def _best_quote(cand: MinerCandidate, amts, hotkey: str) -> BestQuote:
     return BestQuote(
         hotkey,
         str(cand.miner),
