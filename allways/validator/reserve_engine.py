@@ -36,6 +36,7 @@ from allways.solana.client import contract_reject_reason, swap_key_from_tx_hash
 from allways.solana.pdas import BACKING_BITS
 from allways.utils.rate import max_from_for_to_cap
 from allways.validator.binding import hotkey_ss58, verify_binding
+from allways.validator.solana_swap_loop import attest_reject_reason
 
 EMPTY_SWAP_KEY = b'\x00' * 32
 
@@ -822,6 +823,7 @@ def swap_status(
         detail['from_tx_hash'] = swap.from_tx_hash
         detail['to_tx_hash'] = swap.to_tx_hash
     stage = _swap_stage(validator, swap, swap_key)
+    _add_reject_reason(validator, swap, stage, detail)
     return SwapStatus(stage, reservation.reserved_until, str(reservation.user), swap_key.hex(), detail)
 
 
@@ -855,7 +857,18 @@ def _swap_status_by_key(validator, swap_key_hex: str) -> SwapStatus:
         'from_tx_hash': swap.from_tx_hash,
         'to_tx_hash': swap.to_tx_hash,
     }
+    _add_reject_reason(validator, swap, stage, detail)
     return SwapStatus(stage, 0, str(swap.user), swap_key_hex, detail)
+
+
+def _add_reject_reason(validator, swap, stage: str, detail: dict) -> None:
+    """While a live claim awaits attestation, surface why the loop refuses it (absent when it doesn't)."""
+    if swap is None or stage != 'claimed':
+        return
+    loop = validator.solana_swap_loop
+    reason = attest_reject_reason(loop.providers, swap, loop.fee_divisor)
+    if reason is not None:
+        detail['reject_reason'] = reason
 
 
 # On-chain Swap.status is a borsh enum object; map by its variant name (not int()).

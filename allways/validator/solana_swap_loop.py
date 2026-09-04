@@ -19,7 +19,7 @@ from solders.pubkey import Pubkey
 from allways import dev_signal
 from allways.assets.asset import ProviderUnreachableError
 from allways.chains import compute_extension_target_secs, get_chain_def
-from allways.constants import CANCEL_REASON_OTHER, EXTENSION_PADDING_SECONDS
+from allways.constants import CANCEL_REASON_INVALID_DEST, CANCEL_REASON_OTHER, EXTENSION_PADDING_SECONDS
 from allways.solana import pdas
 from allways.solana.client import benign_marker, swap_from_solana, swap_key_from_tx_hash
 from allways.utils.rate import apply_fee_deduction, expected_swap_amounts
@@ -35,7 +35,7 @@ class SwapDecision(Enum):
     EXTEND_TIMEOUT = 'extend_timeout'  # dest valid-but-unconfirmed near timeout -> slide timeout_at
     WAIT = 'wait'  # in-flight, nothing to do yet
     SKIP = 'skip'  # provider unreachable / unverifiable this round
-    REJECT = 'reject'  # to_amount inconsistent with pinned rate -> never attest (terminal no-op)
+    REJECT = 'reject'  # PendingAttestation that can never attest (attest_reject_reason) -> terminal no-op
 
 
 class SwapAction(NamedTuple):
@@ -108,6 +108,24 @@ def is_tx_fresh(info: Any, floor_unix: int, grace: int = 0) -> bool:
     return block_time >= floor_unix - grace
 
 
+def attest_reject_reason(providers: Dict[str, Any], swap: Any, fee_divisor: int) -> Optional[str]:
+    """Why a PendingAttestation claim must never attest, or None. Offline and deterministic (quorum
+    votes); shared by the loop and the seam's /status."""
+    to_provider = providers.get(swap.to_chain)
+    # A malformed dest is unpayable by construction.
+    if to_provider is not None and not to_provider.chain.is_valid_address(swap.user_to_addr):
+        return 'dest address invalid — refusing to attest'
+    # D1: to_amount must agree with the pinned (unforgeable) miner rate.
+    expected_to, _ = expected_swap_amounts(swap, fee_divisor)
+    if expected_to == 0 or abs(int(swap.to_amount) - expected_to) > 1:
+        return f'to_amount {swap.to_amount} != pinned-rate {expected_to}'
+    # V-H1: a self-transfer is slashed; normalize per chain to catch the EVM checksum-variants a raw compare misses.
+    norm = to_provider.chain.normalize_address if to_provider is not None else (lambda a: a)
+    if swap.miner_to_addr and norm(swap.user_to_addr) == norm(swap.miner_to_addr):
+        return 'dest == miner delivery address (poisoned) — refusing to attest'
+    return None
+
+
 class SolanaSwapLoop:
     def __init__(
         self,
@@ -125,7 +143,7 @@ class SolanaSwapLoop:
         # cannot get anywhere else: the reimbursement address of a live off-chain-backed swap
         # (the Swap PDA closes at the verdict), and the moment to refuse an initiate.
         self.relay = relay
-        self.reject_warned: Set[str] = set()  # dedupe rate-reject warnings, one per swap key
+        self.reject_warned: Set[str] = set()  # dedupe reject warnings, one per swap key
 
     def expected_user_receives(self, swap: Any) -> int:
         """Dest amount the miner must deliver = 99% of the pinned to_amount (Option A)."""
@@ -184,17 +202,10 @@ class SolanaSwapLoop:
         return True
 
     def _dest_refuses(self, swap: Any) -> bool:
-        """Evidence the dest can't receive (or the check is unavailable) — either way, never slash on it.
-
-        Beyond issuer refusal (blacklist/pause), a malformed dest address is undeliverable by
-        construction and never the miner's fault. A self-represented taker reserves on-chain directly,
-        bypassing the reserve-time address gate, so this slash-side check is the miner's only guard
-        against a poisoned (e.g. zero-address) reservation."""
+        """Evidence the dest can't receive (or the check is unavailable) — either way, never slash on it."""
         provider = self.providers.get(swap.to_chain)
         if provider is None:
             return False
-        if not provider.chain.is_valid_address(swap.user_to_addr):
-            return True
         try:
             return provider.delivery_refused(swap.user_to_addr, int(swap.initiated_at))
         except Exception as e:
@@ -323,7 +334,7 @@ class SolanaSwapLoop:
         if not overdue:
             return SwapAction(SwapDecision.WAIT, reason=f'{why} — awaiting a verifiable+fresh dest leg')
         if self._dest_refuses(swap):
-            # No SOUND cancel evidence, but the dest may refuse (getCode / malformed / check unreachable):
+            # No SOUND cancel evidence, but the dest may refuse (getCode / check unreachable):
             # defer the slash to protect a live miner. An undeliverable dest never recovers, so at the
             # max_extend_at ceiling still TIMEOUT — else has_active_swap never clears and collateral freezes.
             # A dest that GENUINELY refuses yields sound evidence → REFUSE above, well before the ceiling; so
@@ -338,17 +349,15 @@ class SolanaSwapLoop:
             )
         return SwapAction(SwapDecision.TIMEOUT, reason=f'{why} + overdue — dest unverifiable, slashing')
 
-    def _reject_logged(self, swap: Any, expected_to: int) -> None:
-        """Warn once per swap key that to_amount diverges from the pinned rate (security-relevant, greppable)."""
+    def _reject_logged(self, swap: Any, reason: str) -> None:
+        """Warn once per swap key why the claim will never attest (greppable)."""
         key = _swap_key_hex(swap.swap_key)
         if key in self.reject_warned:
             return
         self.reject_warned.add(key)
-        bt.logging.warning(
-            f'{self._label(swap)}: REJECT — to_amount {swap.to_amount} inconsistent with pinned rate '
-            f'{swap.rate} (expected {expected_to}); refusing to attest [swap_key {key}]'
-        )
-        dev_signal.emit('d1_reject', swap_key=key, expected=expected_to, got=int(swap.to_amount))
+        bt.logging.warning(f'{self._label(swap)}: REJECT — {reason} [swap_key {key}]')
+        # Event name is load-bearing: the alw-utils E2E suite waits on 'd1_reject'.
+        dev_signal.emit('d1_reject', swap_key=key, reason=reason)
 
     def _claim_is_stale(self, reservation: Any, swap: Any, now: int) -> bool:
         """A PendingAttestation claim is orphaned when its reservation can no longer carry it to attestation:
@@ -368,21 +377,10 @@ class SolanaSwapLoop:
         # source landing after the ceiling is the taker's tail risk (nothing moved on our side to refund).
         if self._claim_is_stale(reservation, swap, now):
             return SwapAction(SwapDecision.CANCEL, reason='reservation expired/superseded — reaping stale claim')
-        # D1: refuse to attest if to_amount is inconsistent with the pinned (unforgeable) miner rate.
-        expected_to, _ = expected_swap_amounts(swap, self.fee_divisor)
-        if expected_to == 0 or abs(int(swap.to_amount) - expected_to) > 1:
-            self._reject_logged(swap, expected_to)
-            return SwapAction(SwapDecision.REJECT, reason=f'to_amount {swap.to_amount} != pinned-rate {expected_to}')
-        # V-H1 (authoritative, chain-aware): never attest a swap whose payout address equals the miner's
-        # own delivery address — normalized per-chain, so it catches the EVM checksum-variants the on-chain
-        # raw compare misses. Equal addresses force a self-transfer the anti-wash verifier slashes; the
-        # taker poisoned it, so refuse before the miner is obligated (routed + self-represented alike).
-        to_provider = self.providers.get(swap.to_chain)
-        norm = to_provider.chain.normalize_address if to_provider is not None else (lambda a: a)
-        if swap.miner_to_addr and norm(swap.user_to_addr) == norm(swap.miner_to_addr):
-            return SwapAction(
-                SwapDecision.REJECT, reason='dest == miner delivery address (poisoned) — refusing to attest'
-            )
+        reason = attest_reject_reason(self.providers, swap, self.fee_divisor)
+        if reason:
+            self._reject_logged(swap, reason)
+            return SwapAction(SwapDecision.REJECT, reason=reason)
         # Source deposit must exist, confirm, be sent BY the reserved user, AND be fresh vs the
         # Reservation before we'd attest — sender pin matches the relay's confirm_deposit check.
         s_status, info = self._fetch_leg(
@@ -436,13 +434,24 @@ class SolanaSwapLoop:
         # No dest provider here → can't verify locally. SKIP below the ceiling (a re-enabled spoke or a
         # provider-equipped peer still resolves it); past max_extend_at TIMEOUT so a permanently unverifiable
         # pair frees the collateral instead of freezing it forever (only network-wide gaps reach quorum).
-        if status in ('Active', 'Fulfilled') and self.providers.get(swap.to_chain) is None:
-            if now < int(swap.max_extend_at):
-                return SwapAction(SwapDecision.SKIP, reason=f'no provider for dest {swap.to_chain} — cannot verify yet')
-            return SwapAction(
-                SwapDecision.TIMEOUT,
-                reason=f'no provider for dest {swap.to_chain} past max_extend_at — terminal, else collateral freezes',
-            )
+        if status in ('Active', 'Fulfilled'):
+            provider = self.providers.get(swap.to_chain)
+            if provider is None:
+                if now < int(swap.max_extend_at):
+                    return SwapAction(
+                        SwapDecision.SKIP, reason=f'no provider for dest {swap.to_chain} — cannot verify yet'
+                    )
+                return SwapAction(
+                    SwapDecision.TIMEOUT,
+                    reason=f'no provider for dest {swap.to_chain} past max_extend_at — terminal, else collateral freezes',
+                )
+            # Offline and before any RPC, so an unreachable provider can never turn a malformed dest into a slash.
+            if not provider.chain.is_valid_address(swap.user_to_addr):
+                return SwapAction(
+                    SwapDecision.REFUSE,
+                    reason='dest address invalid — cancel, no slash/fee/strike',
+                    reason_code=CANCEL_REASON_INVALID_DEST,
+                )
         if status == 'PendingAttestation':
             return self._decide_pending_attestation(swap, now)
         if status == 'Active':

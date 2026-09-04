@@ -109,6 +109,11 @@ pub const CANCEL_REASON_SOL_RESERVED: u8 = 3;
 /// An issuer-enabled ERC-20 transfer fee shaves every honest delivery's log below the pinned
 /// amount — a hub-wide no-fault condition, cancelled rather than slashed (V-M2/PAXG).
 pub const CANCEL_REASON_ERC20_FEE_ENABLED: u8 = 4;
+/// The issuer froze the destination's SPL token account: undeliverable through no fault of the miner.
+pub const CANCEL_REASON_SPL_FROZEN: u8 = 5;
+/// The destination fails the chain's offline format check: unpayable by construction, never the
+/// miner's fault.
+pub const CANCEL_REASON_INVALID_DEST: u8 = 6;
 pub const CANCEL_REASON_OTHER: u8 = 255;
 
 /// Slots the draw's seed slot is pinned ahead of the arming crank. Three leader windows (4 slots
