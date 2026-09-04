@@ -249,27 +249,20 @@ def _send_reserve_synapse(axon, synapse) -> tuple:
     return accepted, reason, int(getattr(resp, 'pool_closes_at', 0) or 0)
 
 
-def _reserve_routed(client, miner, user, router_hotkey, netuid, synapse, pool_window, finalize_window):
+def _reserve_routed(client, miner, user, router_hotkey, netuid, synapse, pool_window, finalize_window, subtensor):
     """Validator-routed reservation: ask ``router_hotkey`` to enter the pool for us, then wait for the
     seat to go live with OUR pubkey pinned — no self-crank, no finalize (the router does both, #558).
     Raises ``_RoutedUnavailable`` for any failure before a pool was entered; terminal post-entry
-    outcomes (lost, unresolved) ``fail`` with re-run guidance. The subtensor connection is lazy —
-    a fresh axon-cache hit sends the synapse without ever syncing the chain."""
-    memo = {}
-
-    def _subtensor():
-        if 'st' not in memo:
-            _cfg, _wallet, memo['st'], _ = get_cli_context(need_wallet=False)
-        return memo['st']
-
-    axon = find_validator_axon(_subtensor, netuid, router_hotkey)
+    outcomes (lost, unresolved) ``fail`` with re-run guidance. ``subtensor`` is the caller's lazy getter —
+    a fresh axon-cache hit sends the synapse without this function ever syncing the chain."""
+    axon = find_validator_axon(subtensor, netuid, router_hotkey)
     if axon is None:
         raise _RoutedUnavailable(f'router {router_hotkey[:8]}… is not a serving validator on netuid {netuid}')
 
     accepted, reason, pool_closes_at = _send_reserve_synapse(axon, synapse)
     if not accepted:
         # A cached axon may be stale (validators move IPs): refresh once, then retry the send.
-        fresh_axon = find_validator_axon(_subtensor, netuid, router_hotkey, fresh=True)
+        fresh_axon = find_validator_axon(subtensor, netuid, router_hotkey, fresh=True)
         if fresh_axon is not None and (fresh_axon.ip, fresh_axon.port) != (axon.ip, axon.port):
             accepted, reason, pool_closes_at = _send_reserve_synapse(fresh_axon, synapse)
         if not accepted:
@@ -392,6 +385,13 @@ def swap_now_command(
 
     config, client = get_solana_cli_context(need_keypair=True)
     config = config or {}
+    memo = {}
+
+    def _subtensor():
+        if 'st' not in memo:
+            _cfg, _wallet, memo['st'], _ = get_cli_context(need_wallet=False)
+        return memo['st']
+
     user = client.keypair.pubkey()
     router_hotkey = (router_opt or config.get('router') or '').strip()
     routed = bool(router_hotkey) and not no_router
@@ -405,7 +405,7 @@ def swap_now_command(
         fail(f'--from-address (your source-chain address) is required for a non-{NUMERAIRE_CHAIN.upper()} source.')
     # Canonical source form before anything commits it: the finalize hash + source-lock PDA are
     # byte-keyed on this string (V-C2), so a cased variant would mint a divergent lock on-chain.
-    _src_gate = _gate_provider(from_chain, client, config)
+    _src_gate = _gate_provider(from_chain, client, config, _subtensor)
     if _src_gate is not None:
         user_from_addr = _src_gate.chain.normalize_address(user_from_addr)
 
@@ -460,7 +460,9 @@ def swap_now_command(
         cand, amts = best
 
     # Deliverability screens — before the fee-charging entry AND before sending into a doomed swap.
-    _screen_deliverability(client, config, cand, from_chain, to_chain, receive_address_opt, user_from_addr, from_amount)
+    _screen_deliverability(
+        client, config, cand, from_chain, to_chain, receive_address_opt, user_from_addr, from_amount, _subtensor
+    )
 
     # Resume a seat this taker already holds rather than paying for a second bid: a prior run may have
     # bid + drawn (or even finalized) but crashed on a transient RPC before instructing the send. The
@@ -549,7 +551,7 @@ def swap_now_command(
             )
             netuid = int(config.get('netuid') or NETUID_FINNEY)
             resv = _reserve_routed(
-                client, cand.miner, user, router_hotkey, netuid, synapse, pool_window, finalize_window
+                client, cand.miner, user, router_hotkey, netuid, synapse, pool_window, finalize_window, _subtensor
             )
         except _RoutedUnavailable as e:
             console.print(f'  [yellow]Routing failed[/yellow]: {e}')
@@ -644,7 +646,7 @@ def _deadline_lines(reserved_until: int, want_send: bool, now: Optional[int] = N
     return lines
 
 
-def _gate_provider(chain: str, client, config):
+def _gate_provider(chain: str, client, config, subtensor):
     """Read-only provider for deliverability screens (no send creds, no startup check).
     None when it can't be built — the screens fail open; routed flows are re-gated by the
     validator either way."""
@@ -653,14 +655,21 @@ def _gate_provider(chain: str, client, config):
     spec = next((s for s in ASSET_REGISTRY if s.chain_id == chain), None)
     if spec is None:
         return None
-    avail = {'solana_rpc_url': client.rpc.url, 'solana_keypair': client.keypair}
+    avail = {
+        'solana_rpc_url': lambda: client.rpc.url,
+        'solana_keypair': lambda: client.keypair,
+        'subtensor': subtensor,
+    }
     try:
-        return spec.cls(**{k: avail[k] for k in spec.kwarg_names if k in avail})
+        return spec.cls(**{k: avail[k]() for k in spec.kwarg_names if k in avail})
     except Exception:  # noqa: BLE001 - unbuildable provider (missing env) → screens fail open
+        console.print(f'  [yellow]could not check {chain.upper()} address here[/yellow]')
         return None
 
 
-def _screen_deliverability(client, config, cand, from_chain, to_chain, receive_addr, user_from_addr, from_amount):
+def _screen_deliverability(
+    client, config, cand, from_chain, to_chain, receive_addr, user_from_addr, from_amount, subtensor
+):
     """Pre-reserve deliverability screens — bounce BEFORE any fee is spent.
 
     Self-represented flows have no validator to gate for them (F7), so mirror the
@@ -669,14 +678,14 @@ def _screen_deliverability(client, config, cand, from_chain, to_chain, receive_a
     miner's receive address must accept the source funds (T18). The source-address probe is a
     courtesy warning only — a frozen source just means the deposit fails and the reservation
     lapses unclaimed. A leg whose provider can't be built read-only fails open, as before."""
-    dest_provider = _gate_provider(to_chain, client, config)
+    dest_provider = _gate_provider(to_chain, client, config, subtensor)
     quote = client.get_quote(cand.miner, from_chain, to_chain, cand.backing)
     if dest_provider is not None:
         # Validity only — deliverability is NOT predicted at reserve time (not a boundary; the sound
         # check is the delivery-time reverted-tx proof). A malformed address can never be delivered to.
         if not dest_provider.chain.is_valid_address(receive_addr):
             fail(f'  {receive_addr!r} is not a valid {to_chain.upper()} address. No funds moved.')
-    src_provider = _gate_provider(from_chain, client, config)
+    src_provider = _gate_provider(from_chain, client, config, subtensor)
     if src_provider is None:
         return
     miner_addr = getattr(quote, 'miner_from_addr', '') if quote else ''

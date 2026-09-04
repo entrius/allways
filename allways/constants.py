@@ -57,8 +57,10 @@ CANCEL_REASON_SOL_RESERVED = 3
 # honest delivery on the token would false-slash — a hub-wide, no-fault condition (V-M2/PAXG).
 CANCEL_REASON_ERC20_FEE_ENABLED = 4
 # The issuer froze the destination's SPL token account (USDC's mint carries a freeze authority):
-# undeliverable through no fault of the miner. Python-side first; mirror into constants.rs next release.
+# undeliverable through no fault of the miner.
 CANCEL_REASON_SPL_FROZEN = 5
+# The destination fails the chain's offline format check: unpayable by construction, never the miner's fault.
+CANCEL_REASON_INVALID_DEST = 6
 CANCEL_REASON_OTHER = 255
 
 BTC_MIN_FEE_RATE = 5

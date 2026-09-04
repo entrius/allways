@@ -497,7 +497,9 @@ def _screen(gate, from_chain, to_chain, client=None):
 
     cand = types.SimpleNamespace(miner='miner-pk', rate_display='150', backing='sol')
     with patch('allways.cli.swap_commands.swap._gate_provider', return_value=gate):
-        _screen_deliverability(client or MagicMock(), {}, cand, from_chain, to_chain, 'recvaddr', 'useraddr', 10**6)
+        _screen_deliverability(
+            client or MagicMock(), {}, cand, from_chain, to_chain, 'recvaddr', 'useraddr', 10**6, lambda: MagicMock()
+        )
     return gate
 
 

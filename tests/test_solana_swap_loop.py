@@ -8,6 +8,7 @@ Mocks the solana client (get_swaps / get_reservation) + chain providers; no chai
 from types import SimpleNamespace
 
 from allways.assets.asset import ProviderUnreachableError
+from allways.constants import CANCEL_REASON_INVALID_DEST
 from allways.solana.client import benign_marker, swap_key_from_tx_hash
 from allways.validator.solana_swap_loop import (
     _BENIGN_RESOLVE_MARKERS,
@@ -209,12 +210,12 @@ def test_active_overdue_refusing_dest_waits_no_slash():
     assert loop.decide(make_swap(status='Active', timeout_at=1000), now=1500).decision == SwapDecision.WAIT
 
 
-def test_overdue_malformed_dest_addr_waits_no_slash():
-    # A self-represented taker can reserve with a poison dest (e.g. 0x0) the reserve gate never saw.
-    # A malformed dest is undeliverable through no fault of the miner — the slash gate must not fire.
+def test_active_invalid_dest_refuses_before_ceiling():
     loop, providers = loop_with(result=None)
     providers['sol'].valid_addr = False
-    assert loop.decide(make_swap(status='Active', timeout_at=1000), now=1500).decision == SwapDecision.WAIT
+    action = loop.decide(make_swap(status='Active', timeout_at=1000), now=1500)
+    assert action.decision == SwapDecision.REFUSE
+    assert action.reason_code == CANCEL_REASON_INVALID_DEST
 
 
 def test_fulfilled_sound_cancel_evidence_refuses_no_slash():
@@ -263,12 +264,21 @@ def test_active_refusing_dest_past_ceiling_times_out():
     assert loop.decide(swap, now=1500).decision == SwapDecision.TIMEOUT
 
 
-def test_active_malformed_dest_addr_past_ceiling_times_out():
-    # Same terminal exit for a malformed (undeliverable) dest address once past the ceiling.
+def test_active_invalid_dest_refuses_past_ceiling():
     loop, providers = loop_with(result=None)
     providers['sol'].valid_addr = False
     swap = make_swap(status='Active', timeout_at=1000, max_extend_at=1200)
-    assert loop.decide(swap, now=1500).decision == SwapDecision.TIMEOUT
+    action = loop.decide(swap, now=1500)
+    assert action.decision == SwapDecision.REFUSE
+    assert action.reason_code == CANCEL_REASON_INVALID_DEST
+
+
+def test_fulfilled_invalid_dest_refuses_when_provider_is_reachable():
+    loop, providers = loop_with(result=True)
+    providers['sol'].valid_addr = False
+    action = loop.decide(make_swap(status='Fulfilled'), now=1500)
+    assert action.decision == SwapDecision.REFUSE
+    assert action.reason_code == CANCEL_REASON_INVALID_DEST
 
 
 def test_fulfilled_overdue_but_verifiable_still_confirms():
@@ -292,6 +302,22 @@ def test_fulfilled_pending_dest_at_ceiling_overdue_times_out():
 def test_pending_attestation_source_ok_attests():
     loop, _ = loop_with(result=True)
     assert loop.decide(make_swap(status='PendingAttestation'), now=1500).decision == SwapDecision.ATTEST
+
+
+def test_pending_attestation_invalid_dest_rejects_once_without_a_vote():
+    swap = make_swap(status='PendingAttestation')
+    providers = {'btc': RecordingProvider(True), 'sol': RecordingProvider(True, valid_addr=False)}
+    client = VoteRecordingClient([('pk1', swap)])
+    loop = SolanaSwapLoop(client, providers, fee_divisor=100)
+
+    action = loop.decide(swap, now=1500)
+    assert action.decision == SwapDecision.REJECT
+    assert action.reason == 'dest address invalid — refusing to attest'
+    assert len(loop.reject_warned) == 1
+    loop.decide(swap, now=1500)
+    assert len(loop.reject_warned) == 1
+    loop.run_once(now=1500)
+    assert client.calls == []
 
 
 def test_pending_attestation_rejects_dest_equal_to_miner_delivery():
