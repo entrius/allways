@@ -422,6 +422,9 @@ def _live_swap(variant: str):
         from_amount=1_000_000_000,
         to_amount=210_000,
         miner_from_addr='minerSOLaddr',
+        miner_to_addr='minerBTCaddr',
+        user_to_addr='userBTCaddr',
+        rate='0.0021',
         from_tx_hash='srcTxHash',
         to_tx_hash='',
     )
@@ -430,6 +433,9 @@ def _live_swap(variant: str):
 def _status_validator(tmp_path, client):
     validator, store = _stage_validator(tmp_path)
     validator.solana_client = client
+    validator.solana_swap_loop = SimpleNamespace(
+        providers={'btc': _gate_asset(lambda addr, amt: True)}, fee_divisor=100
+    )
     return validator, store
 
 
@@ -479,6 +485,37 @@ def test_initiated_swap_resolves_by_key_after_reservation_consumed(tmp_path):
     assert s.stage == 'active' and s.swap_key == key.hex() and s.reserved_until == 0
     assert s.detail['from_chain'] == 'sol' and s.detail['to_amount'] == 210_000
     assert client.swap_keys_queried == [key]
+    store.close()
+
+
+def test_reject_reason_only_surfaces_for_invalid_pending_attestation(tmp_path):
+    from allways.validator.reserve_engine import swap_status
+
+    key = b'\x15' * 32
+    reservation = SimpleNamespace(
+        reserved_until=FUTURE,
+        claimed_swap_key=key,
+        user='userSOLpk',
+        from_chain='sol',
+        to_chain='btc',
+        from_amount=1_000_000_000,
+        to_amount=210_000,
+        miner_from_addr='minerSOLaddr',
+    )
+    swap = _live_swap('PendingAttestation')
+    validator, store = _status_validator(tmp_path, StatusClient(swap=swap, reservation=reservation))
+
+    validator.solana_swap_loop.providers['btc'].chain.is_valid_address = lambda address: False
+    reason = 'dest address invalid — refusing to attest'
+    assert swap_status(validator, HOTKEY).detail['reject_reason'] == reason
+    assert swap_status(validator, HOTKEY, key.hex()).detail['reject_reason'] == reason
+
+    validator.solana_swap_loop.providers['btc'].chain.is_valid_address = lambda address: True
+    assert 'reject_reason' not in swap_status(validator, HOTKEY).detail
+
+    swap.status = type('Active', (), {})()
+    validator.solana_swap_loop.providers['btc'].chain.is_valid_address = lambda address: False
+    assert 'reject_reason' not in swap_status(validator, HOTKEY, key.hex()).detail
     store.close()
 
 
