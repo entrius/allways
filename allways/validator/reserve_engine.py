@@ -797,6 +797,9 @@ def _swap_status_by_key(validator, swap_key_hex: str) -> SwapStatus:
         to_tx_hash = validator.state_store.get_swap_fulfillment(swap_key_hex)
         if to_tx_hash:
             detail['to_tx_hash'] = to_tx_hash
+        refund = validator.state_store.get_swap_refund(swap_key_hex)
+        if refund:
+            detail.update(refund)
         return SwapStatus(stage, swap_key=swap_key_hex, detail=detail)
     # Same detail shape as the reservation path — the Swap PDA carries the full legs.
     detail = {

@@ -451,20 +451,55 @@ class ValidatorStateStore:
 
     # ─── swap_outcomes (terminal per-swap truth for the seam) ───────────
 
-    def record_swap_outcome(self, swap_key: str, outcome: str, block_time: int) -> None:
+    def record_swap_outcome(
+        self,
+        swap_key: str,
+        outcome: str,
+        block_time: int,
+        refund: Optional[Tuple[str, Optional[int], Optional[str]]] = None,
+    ) -> None:
         """Persist a swap's terminal outcome (``completed`` | ``timed_out``) keyed by
-        swap_key hex. Upsert: a cursor-reset re-ingest of the same event is a no-op."""
+        swap_key hex. Upsert: a cursor-reset re-ingest of the same event is a no-op; the
+        COALESCEs ensure a re-ingest or factless outcome write never blanks refund facts."""
+        refund_chain, refund_amount, refund_tx = refund or (None, None, None)
         self._execute(
             """
-            INSERT INTO swap_outcomes (swap_key, outcome, block_time) VALUES (?, ?, ?)
-            ON CONFLICT(swap_key) DO UPDATE SET outcome = excluded.outcome, block_time = excluded.block_time
+            INSERT INTO swap_outcomes
+                (swap_key, outcome, block_time, refund_chain, refund_amount, refund_tx)
+            VALUES (?, ?, ?, ?, ?, ?)
+            ON CONFLICT(swap_key) DO UPDATE SET
+                outcome = excluded.outcome,
+                block_time = excluded.block_time,
+                refund_chain = COALESCE(excluded.refund_chain, refund_chain),
+                refund_amount = COALESCE(excluded.refund_amount, refund_amount),
+                refund_tx = COALESCE(excluded.refund_tx, refund_tx)
             """,
-            (swap_key, outcome, block_time),
+            (
+                swap_key,
+                outcome,
+                block_time,
+                refund_chain,
+                str(refund_amount) if refund_amount is not None else None,
+                refund_tx,
+            ),
         )
 
     def get_swap_outcome(self, swap_key: str) -> Optional[str]:
         row = self._fetchone('SELECT outcome FROM swap_outcomes WHERE swap_key = ?', (swap_key,))
         return row['outcome'] if row is not None else None
+
+    def get_swap_refund(self, swap_key: str) -> Optional[dict]:
+        row = self._fetchone(
+            'SELECT refund_chain, refund_amount, refund_tx FROM swap_outcomes WHERE swap_key = ?', (swap_key,)
+        )
+        if row is None or row['refund_amount'] is None:
+            return None
+        refund = {'refund_amount': int(row['refund_amount'])}
+        if row['refund_chain'] is not None:
+            refund['refund_chain'] = row['refund_chain']
+        if row['refund_tx'] is not None:
+            refund['refund_tx_hash'] = row['refund_tx']
+        return refund
 
     def prune_swap_outcomes(self, cutoff_block: int) -> None:
         """Drop outcome (and fulfillment-hash) rows older than ``cutoff_block``. No anchor row —
@@ -912,6 +947,13 @@ class ValidatorStateStore:
             cols = [row[1] for row in conn.execute('PRAGMA table_info(swap_outcomes)')]
             if cols and 'outcome' not in cols:
                 conn.execute('DROP TABLE swap_outcomes')
+                cols = []
+            if cols and 'refund_chain' not in cols:
+                conn.execute('ALTER TABLE swap_outcomes ADD COLUMN refund_chain TEXT')
+            if cols and 'refund_amount' not in cols:
+                conn.execute('ALTER TABLE swap_outcomes ADD COLUMN refund_amount TEXT')
+            if cols and 'refund_tx' not in cols:
+                conn.execute('ALTER TABLE swap_outcomes ADD COLUMN refund_tx TEXT')
             # Pre-M2 deployments lack the clearing_rates idempotency key. Purge unkeyed rows:
             # NULL keys never collide with ON CONFLICT(swap_key), so a post-upgrade replay would
             # double-count them — a one-time <=2h volume gap buys a safe dedup invariant.
@@ -1042,7 +1084,10 @@ class ValidatorStateStore:
                 CREATE TABLE IF NOT EXISTS swap_outcomes (
                     swap_key    TEXT PRIMARY KEY,
                     outcome     TEXT NOT NULL,
-                    block_time  INTEGER NOT NULL
+                    block_time  INTEGER NOT NULL,
+                    refund_chain TEXT,
+                    refund_amount TEXT,
+                    refund_tx   TEXT
                 );
 
                 -- Delivery-leg tx hash per swap (SwapFulfilled), keyed by swap_key hex.
