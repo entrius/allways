@@ -15,7 +15,7 @@ from bittensor import Keypair
 from solders.pubkey import Pubkey
 
 from allways.assets.asset import ProviderUnreachableError
-from allways.chains import SUPPORTED_CHAINS, canonical_pair
+from allways.chains import SUPPORTED_CHAINS, canonical_pair, get_chain_def
 from allways.cli.swap_commands.swap_intake import (
     MinerCandidate,
     backing_purse,
@@ -28,10 +28,12 @@ from allways.cli.swap_commands.swap_intake import (
     select_best_miner,
     swap_viable,
     unviable_reason,
+    viable_intakes,
 )
 from allways.constants import NUMERAIRE_CHAIN
 from allways.solana.client import contract_reject_reason, swap_key_from_tx_hash
 from allways.solana.pdas import BACKING_BITS
+from allways.utils.rate import max_from_for_to_cap
 from allways.validator.binding import hotkey_ss58, verify_binding
 
 EMPTY_SWAP_KEY = b'\x00' * 32
@@ -657,40 +659,81 @@ class RateQuote:
     reason: str  # why quote is None ('' on a hit)
     levels: list  # top rate rungs [{rate_display, max_from_amount}], best first
     max_from_amount: int  # largest executable source amount across ALL quotes, not just shown rungs
+    min_from_amount: int  # smallest executable source amount across ALL quotes; 0 = no floor
+    # Top executable intakes for the asked size, selector order — lets a consumer walk a tolerance
+    # band without another scan: [{miner_hotkey, rate_display, to_amount, max_from_amount}].
+    candidates: list
 
 
 def rate_quote(validator, from_chain: str, to_chain: str, from_amount: int) -> RateQuote:
     """Everything ``/rate`` serves, from ONE candidate scan: the best executable quote for
     ``from_amount`` (source smallest-units; mirrors ``select_best_miner`` so the displayed rate ==
-    the reservable rate) plus the depth behind it. Rung order matches the selector's ranking (most
-    dest per source); same-rate quotes collapse to the deepest. Capacities are per-rung maxima,
-    never cumulative — a swap fills against a single miner."""
+    the reservable rate), the runners-up for that size, and the depth behind them. Rung order
+    matches the selector's ranking (most dest per source); same-rate quotes collapse to the deepest.
+    Capacities are per-rung maxima, never cumulative — a swap fills against a single miner."""
     client = validator.solana_client
     cfg = client.get_config()
     bounds = bounds_from_config(cfg)
     min_swap, max_swap = hub_bounds(bounds, from_chain, to_chain)
     cands = candidate_miners(client, from_chain, to_chain)
-    best = select_best_miner(cands, from_chain, to_chain, from_amount, min_swap, max_swap, bounds)
-    bq = _best_quote_result(validator, best) if best else None
+    ranked = _ranked_intakes(cands, from_chain, to_chain, from_amount, min_swap, max_swap, bounds)[:RATE_LEVELS_LIMIT]
+    hotkeys = [_miner_hotkey_for(validator, cand.miner) for cand, _ in ranked]
+    bq = _best_quote(ranked[0], hotkeys[0]) if hotkeys and hotkeys[0] else None
     reason = '' if bq else unviable_reason(cands, from_chain, to_chain, from_amount, min_swap, max_swap, bounds)
     depth: dict = {}
+    floors = []
     for cand in cands:
         cap = max_intake_from_amount(cand, from_chain, to_chain, min_swap, max_swap, bounds)
         if cap > 0:
             depth[cand.rate_display] = max(depth.get(cand.rate_display, 0), cap)
+            floors.append(_min_intake_from_amount(cand, from_chain, to_chain, bounds))
     # Rates are canonical 'dest per 1 canonical-source': when the taker sends the canonical
     # source (the hub leg), higher is better; sending the spoke side, lower is better.
     from_is_canon = from_chain == canonical_pair(from_chain, to_chain)[0]
     best_first = sorted(depth.items(), key=lambda kv: float(kv[0]), reverse=from_is_canon)
     levels = [{'rate_display': r, 'max_from_amount': m} for r, m in best_first[:RATE_LEVELS_LIMIT]]
-    return RateQuote(bq, reason, levels, max(depth.values(), default=0))
+    candidates = [
+        {
+            'miner_hotkey': hotkey,
+            'rate_display': cand.rate_display,
+            'to_amount': amts.to_amount,
+            'max_from_amount': max_intake_from_amount(cand, from_chain, to_chain, min_swap, max_swap, bounds),
+        }
+        for (cand, amts), hotkey in zip(ranked, hotkeys)
+        if hotkey  # an unbound miner cannot be reserved through the seam — skip, the rest still ride
+    ]
+    return RateQuote(bq, reason, levels, max(depth.values(), default=0), min(floors, default=0), candidates)
 
 
-def _best_quote_result(validator, best) -> Optional[BestQuote]:
+def _ranked_intakes(cands, from_chain: str, to_chain: str, from_amount: int, min_swap: int, max_swap: int, bounds):
+    """``viable_intakes`` in ``select_best_miner``'s order — most dest first, exact tie → "sol"
+    backing, then input order (stable sort) — so the first entry IS the selector's pick."""
+    viable = viable_intakes(cands, from_chain, to_chain, from_amount, min_swap, max_swap, bounds)
+    return sorted(viable, key=lambda p: (p[1].to_amount, p[0].backing == NUMERAIRE_CHAIN), reverse=True)
+
+
+def _min_intake_from_amount(cand: MinerCandidate, from_chain: str, to_chain: str, bounds) -> int:
+    """Smallest source amount this candidate's size gate admits — ``max_intake_from_amount``'s floor
+    twin: the backing's min bound, carried to the source leg through the same exact maths."""
+    lo = bounds.get(cand.backing, (0, 0))[0]
+    if lo <= 0 or cand.backing == from_chain:
+        return lo
+    if cand.backing != to_chain:
+        return 0
+    canon_from, canon_to = canonical_pair(from_chain, to_chain)
+    # One past the largest source whose dest leg still falls short of the bound.
+    under = max_from_for_to_cap(
+        lo - 1,
+        cand.rate_display,
+        from_chain != canon_from,
+        get_chain_def(canon_to).decimals,
+        get_chain_def(canon_from).decimals,
+    )
+    return under + 1
+
+
+def _best_quote(best, hotkey: str) -> BestQuote:
     cand, amts = best
-    hotkey = _miner_hotkey_for(validator, cand.miner)
-    if hotkey is None:
-        return None
     return BestQuote(
         hotkey,
         str(cand.miner),

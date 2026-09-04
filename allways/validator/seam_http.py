@@ -90,10 +90,15 @@ def _make_handler(validator, secret: str):
             q = {k: v[0] for k, v in parse_qs(url.query).items()}
             try:
                 if url.path == '/rate':
-                    # Depth rides along on hit AND miss — the offering's oversize copy ("max right
-                    # now is X") needs the true max exactly when no quote fits the asked size.
+                    # Depth rides along on hit AND miss — the offering's size copy ("min/max right
+                    # now is X") needs the true bounds exactly when no quote fits the asked size.
                     rq = rate_quote(validator, q['from'], q['to'], int(q['amount']))
-                    depth = {'levels': rq.levels, 'max_from_amount': rq.max_from_amount}
+                    depth = {
+                        'levels': rq.levels,
+                        'max_from_amount': rq.max_from_amount,
+                        'min_from_amount': rq.min_from_amount,
+                        'candidates': rq.candidates,
+                    }
                     if rq.quote is None:
                         return self._send(404, {'error': rq.reason, **depth})
                     return self._send(200, {**rq.quote.__dict__, **depth})

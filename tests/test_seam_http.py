@@ -11,6 +11,10 @@ from allways.validator import seam_http
 from allways.validator.reserve_engine import BestQuote, ConfirmResult, RateQuote, ReserveResult, SwapStatus
 
 SECRET = 'test-secret'
+CANDIDATES = [
+    {'miner_hotkey': 'hk', 'rate_display': '0.0021', 'to_amount': 210000, 'max_from_amount': 2_000_000_000},
+    {'miner_hotkey': 'hk2', 'rate_display': '0.0020', 'to_amount': 200000, 'max_from_amount': 900_000_000},
+]
 
 
 @pytest.fixture
@@ -25,6 +29,8 @@ def server(monkeypatch):
             '',
             [{'rate_display': '0.0021', 'max_from_amount': 2_000_000_000}],
             2_000_000_000,
+            100_000_000,
+            CANDIDATES,
         ),
     )
     monkeypatch.setattr(seam_http, 'swap_status', lambda *a, **k: SwapStatus('reserved', 999, 'user', ''))
@@ -107,10 +113,11 @@ def test_rate(server):
     assert code == 200 and payload['to_amount'] == 210000 and payload['miner_hotkey'] == 'hk'
     assert payload['levels'] == [{'rate_display': '0.0021', 'max_from_amount': 2_000_000_000}]
     assert payload['max_from_amount'] == 2_000_000_000
+    assert payload['min_from_amount'] == 100_000_000 and payload['candidates'] == CANDIDATES
 
 
 def test_rate_miss_carries_depth(server, monkeypatch):
-    """The oversize UX needs the true max exactly when nothing fits — depth must ride the 404 too."""
+    """The size UX needs the true min/max exactly when nothing fits — depth must ride the 404 too."""
     monkeypatch.setattr(
         seam_http,
         'rate_quote',
@@ -119,11 +126,14 @@ def test_rate_miss_carries_depth(server, monkeypatch):
             'miner collateral too low (needs 1.1000 SOL)',
             [{'rate_display': '0.0021', 'max_from_amount': 900_000_000}],
             900_000_000,
+            100_000_000,
+            [],
         ),
     )
     code, payload = _req(server, 'GET', '/rate?from=sol&to=btc&amount=1000000000')
     assert code == 404 and 'collateral too low' in payload['error']
     assert payload['max_from_amount'] == 900_000_000 and len(payload['levels']) == 1
+    assert payload['min_from_amount'] == 100_000_000 and payload['candidates'] == []
 
 
 def test_status(server):
