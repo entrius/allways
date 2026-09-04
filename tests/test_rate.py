@@ -614,12 +614,21 @@ class TestRateQuoteCandidates:
 
     def test_min_from_amount_is_in_source_units_for_a_spoke_source(self):
         # btc→sol: the minimum is on the SOL (hub) leg. The floor is the smallest BTC amount whose
-        # SOL leg reaches min_swap at the best bound rate — exact, so its predecessor falls short.
+        # SOL leg reaches min_swap at the best level rate — exact, so its predecessor falls short.
         validator, _ = self._validator('btc', 'sol', ['0.5', '0.25'])
         rq = rate_quote(validator, 'btc', 'sol', 10_000_000)
         floor = rq.min_from_amount
         assert floor == 2_500_000  # 0.025 BTC at 0.25 BTC/SOL → exactly 0.1 SOL
         assert compute_intake_amounts('btc', 'sol', floor, '0.25').collateral_amount >= self.MIN
         assert compute_intake_amounts('btc', 'sol', floor - 1, '0.25').collateral_amount < self.MIN
-        # No bound candidate to price it at → 0.
-        assert rate_quote(validator, 'btc', 'sol', floor - 1).min_from_amount == 0
+
+    def test_spoke_source_miss_below_min_still_carries_the_floor(self):
+        # The level rate prices the floor even when nothing fits the asked size.
+        validator, _ = self._validator('btc', 'sol', ['0.5', '0.25'])
+        rq = rate_quote(validator, 'btc', 'sol', 2_500_000 - 1)
+        assert rq.quote is None and 'below min swap' in rq.reason
+        assert rq.min_from_amount == 2_500_000 and rq.candidates == []
+
+    def test_spoke_source_min_is_zero_without_depth(self):
+        validator, _ = self._validator('btc', 'sol', [])
+        assert rate_quote(validator, 'btc', 'sol', 10_000_000).min_from_amount == 0

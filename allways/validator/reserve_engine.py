@@ -698,7 +698,7 @@ def rate_quote(validator, from_chain: str, to_chain: str, from_amount: int) -> R
         }
         for cand, amts, hotkey in bound
     ]
-    min_from = _min_from_amount(min_swap, bq.rate_display if bq else None, from_chain, to_chain)
+    min_from = _min_from_amount(min_swap, best_first[0][0] if best_first else None, from_chain, to_chain)
     return RateQuote(bq, reason, levels, max(depth.values(), default=0), min_from, candidates)
 
 
@@ -717,7 +717,7 @@ def _bound_intakes(validator, ranked):
 
 
 def _min_from_amount(min_swap: int, best_rate: Optional[str], from_chain: str, to_chain: str) -> int:
-    """The hub minimum in source units: as-is on the hub leg, else inverted at the best bound rate (0 if none)."""
+    """The hub minimum in source units: as-is on the hub leg, else inverted at the best level rate (0 if no depth)."""
     if min_swap <= 0 or from_chain == hub_leg(from_chain, to_chain):
         return min_swap
     if best_rate is None:
