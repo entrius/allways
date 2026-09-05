@@ -9,7 +9,6 @@ Usage:
 """
 
 import os
-import sys
 import threading
 import time
 from functools import partial
@@ -60,7 +59,7 @@ from allways.validator.seam_http import maybe_start_seam  # noqa: E402
 from allways.validator.solana_swap_loop import SolanaSwapLoop  # noqa: E402
 from allways.validator.state_store import ValidatorStateStore  # noqa: E402
 from allways.validator.storage import DatabaseStorage  # noqa: E402
-from neurons.base.neuron import validator_mode  # noqa: E402
+from neurons.base.neuron import exit_for_restart, validator_mode  # noqa: E402
 from neurons.base.validator import BaseValidatorNeuron  # noqa: E402
 
 WANDB_ENTITY = os.getenv('WANDB_ENTITY', 'entrius-gittensor')
@@ -283,13 +282,10 @@ if __name__ == '__main__':
         while True:
             forward_age = time.time() - validator.last_forward_time
             if not validator.thread.is_alive():
-                bt.logging.error(f'Forward thread is dead (last forward {forward_age:.0f}s ago) — exiting for restart')
-                sys.exit(1)
+                exit_for_restart(f'Forward thread is dead (last forward {forward_age:.0f}s ago)')
             if forward_age > FORWARD_STALL_THRESHOLD_SECONDS:
-                bt.logging.error(
-                    f'Forward progress stalled for {forward_age:.0f}s '
-                    f'(>{FORWARD_STALL_THRESHOLD_SECONDS}s) — exiting for restart'
+                exit_for_restart(
+                    f'Forward progress stalled for {forward_age:.0f}s (>{FORWARD_STALL_THRESHOLD_SECONDS}s)'
                 )
-                sys.exit(1)
             bt.logging.info(f'Validator running... step={validator.step} (last forward {forward_age:.0f}s ago)')
             time.sleep(60)

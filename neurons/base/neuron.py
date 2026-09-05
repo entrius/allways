@@ -1,5 +1,7 @@
 import copy
 import os
+import sys
+import threading
 import time
 from abc import ABC, abstractmethod
 from typing import Callable
@@ -14,6 +16,16 @@ from allways.utils.config import add_args, check_config, config
 from allways.utils.misc import ttl_get_block
 
 VALIDATOR_MODES = ('full', 'vote', 'watch')
+
+
+def exit_for_restart(reason: str, grace_secs: float = 30.0) -> None:
+    """Log and exit so the supervisor restarts the neuron."""
+    bt.logging.error(f'{reason} — exiting for restart')
+    # A wedged non-daemon thread would hold the interpreter at shutdown forever; the timer will not.
+    timer = threading.Timer(grace_secs, lambda: os._exit(1))
+    timer.daemon = True
+    timer.start()
+    sys.exit(1)
 
 
 def validator_mode() -> str:

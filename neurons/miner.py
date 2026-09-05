@@ -7,7 +7,6 @@ Usage:
 """
 
 import os
-import sys
 import time
 from pathlib import Path
 from typing import Dict
@@ -29,6 +28,7 @@ from allways.solana import keys  # noqa: E402
 from allways.solana.client import AllwaysSolanaClient  # noqa: E402
 from allways.solana.rpc import assert_cluster_safe, resolve_rpc_url  # noqa: E402
 from neurons.base.miner import BaseMinerNeuron  # noqa: E402
+from neurons.base.neuron import exit_for_restart  # noqa: E402
 
 
 class Miner(BaseMinerNeuron):
@@ -271,13 +271,10 @@ if __name__ == '__main__':
         while True:
             forward_age = time.time() - miner.last_forward_time
             if not miner.thread.is_alive():
-                bt.logging.error(f'Forward thread is dead (last forward {forward_age:.0f}s ago) — exiting for restart')
-                sys.exit(1)
+                exit_for_restart(f'Forward thread is dead (last forward {forward_age:.0f}s ago)')
             if forward_age > FORWARD_STALL_THRESHOLD_SECONDS:
-                bt.logging.error(
-                    f'Forward progress stalled for {forward_age:.0f}s '
-                    f'(>{FORWARD_STALL_THRESHOLD_SECONDS}s) — exiting for restart'
+                exit_for_restart(
+                    f'Forward progress stalled for {forward_age:.0f}s (>{FORWARD_STALL_THRESHOLD_SECONDS}s)'
                 )
-                sys.exit(1)
             bt.logging.info(f'Miner running... step={miner.step} (last forward {forward_age:.0f}s ago)')
             time.sleep(60)
