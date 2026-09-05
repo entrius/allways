@@ -104,6 +104,14 @@ def _reserve(client, from_amount=1_000_000_000):
     return result, validator.state_store
 
 
+def test_reserve_refuses_a_fill_the_in_flight_obligations_leave_uncovered():
+    # 10**12 lamports gross, all but 1 SOL already obligated on the sol hub: a 1 SOL fill needs 1.1.
+    client = FakeClient()
+    client.miner_state.reserved_collateral = [10**12 - 10**9, 0]
+    r, _ = _reserve(client)
+    assert not r.ok and 'collateral too low' in r.reason
+
+
 def test_open_happy_path_persists_routed_request():
     # Two-phase: reserve_on_behalf places a BID after a viability pre-check, then queues the
     # user's details for finalize_won_seats (the winner names the fill at finalize).

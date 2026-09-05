@@ -19,10 +19,10 @@ from allways.assets.asset import ProviderUnreachableError
 from allways.chains import SUPPORTED_CHAINS, canonical_pair, get_chain_def
 from allways.cli.swap_commands.swap_intake import (
     MinerCandidate,
-    backing_purse,
     bounds_from_config,
     candidate_miners,
     compute_intake_amounts,
+    free_purse,
     hub_bounds,
     max_intake_from_amount,
     rate_display_from_fixed,
@@ -71,7 +71,7 @@ def _best_offer(client, miner_pk, miner_state, from_chain: str, to_chain: str, f
         if q is None:
             continue
         backing = str(getattr(q, 'collateral_chain', NUMERAIRE_CHAIN) or NUMERAIRE_CHAIN)
-        purse = backing_purse(client, miner_pk, miner_state, backing)
+        purse = free_purse(client, miner_pk, miner_state, backing)
         if purse is None:
             continue  # no locked bond behind it — the contract's entry gate would refuse the bid
         offers[backing] = q
@@ -170,7 +170,7 @@ def reserve_on_behalf(
     if amts.to_amount <= 0:
         return ReserveResult(False, 'non-positive dest amount for that source amount')
 
-    purse = backing_purse(client, miner_pk, miner_state, backing)
+    purse = free_purse(client, miner_pk, miner_state, backing)
     if purse is None:
         return ReserveResult(False, f'no locked {backing} bond backs that offer')
     min_swap, max_swap = bounds.get(backing, (0, 0))

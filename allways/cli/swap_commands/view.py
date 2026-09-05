@@ -37,7 +37,7 @@ from allways.cli.swap_commands.helpers import (
     set_json_output,
     votes_needed,
 )
-from allways.cli.swap_commands.swap_intake import backing_purse, rate_display_from_fixed
+from allways.cli.swap_commands.swap_intake import free_purse, rate_display_from_fixed
 from allways.constants import FEE_DIVISOR
 from allways.solana.client import swap_from_solana
 from allways.utils.rate import apply_fee_deduction, directional_rate
@@ -243,7 +243,7 @@ def view_rates(pair, full, sort_by, min_capacity, search, as_json):
                 if needle not in hay:
                     continue
             backing = getattr(q, 'collateral_chain', None) or 'sol'
-            purse = backing_purse(client, q.miner, e.state, backing)
+            purse = free_purse(client, q.miner, e.state, backing)
             if purse is None:
                 continue
             capacity = from_rao(purse) if backing == 'tao' else from_lamports(purse)
