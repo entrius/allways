@@ -24,6 +24,7 @@ from allways.validator.reserve_engine import (
     reserve_on_behalf,
     scan_deposit,
     swap_status,
+    verdict_epoch,
 )
 
 SEAM_HOST = os.environ.get('ALLWAYS_SEAM_HOST', '127.0.0.1')
@@ -54,8 +55,10 @@ def _make_handler(validator, secret: str):
     # is not required to be hashable, and no module-level table pins it alive. lru_cache does not
     # store exceptions, so a transient RPC fault is retried rather than pinned for the bucket;
     # maxsize caps the table so a long-lived seam can't grow an entry per swap ever polled.
+    # `_epoch` keys the memo on the pool-verdict epoch: a read still in flight when a 'rejected' verdict
+    # is published or cleared lands under the old key, so the next poll re-reads instead of inheriting it.
     @lru_cache(maxsize=512)
-    def cached_status(miner_hotkey: str, swap_key: str, from_chain: str, to_chain: str, _bucket: int):
+    def cached_status(miner_hotkey: str, swap_key: str, from_chain: str, to_chain: str, _bucket: int, _epoch: int):
         return swap_status(validator, miner_hotkey, swap_key, from_chain, to_chain)
 
     @lru_cache(maxsize=512)
@@ -113,6 +116,7 @@ def _make_handler(validator, secret: str):
                         q.get('from_chain', ''),
                         q.get('to_chain', ''),
                         _ttl_bucket(),
+                        verdict_epoch(),
                     )
                     return self._send(200, status.__dict__)
                 if url.path == '/deposit-scan':

@@ -86,6 +86,37 @@ def _best_offer(client, miner_pk, miner_state, from_chain: str, to_chain: str, f
 
 
 @dataclass
+class RoutedRejection:
+    """A finalize the contract refused. The whole queue on that pool lost the round with it."""
+
+    reason: str
+    users: list
+
+
+# Keyed per (miner pubkey, from_chain, to_chain); the next request on that pool clears it. Memory-only:
+# after a restart the offering falls back to its own backstop. The epoch counts every change so the
+# seam's /status memo (keyed on it) can never serve a verdict from across one.
+_routed_rejections: dict = {}
+_verdict_epoch = 0
+
+
+def verdict_epoch() -> int:
+    return _verdict_epoch
+
+
+def _publish_verdict(key: tuple, verdict: RoutedRejection) -> None:
+    global _verdict_epoch
+    _routed_rejections[key] = verdict
+    _verdict_epoch += 1
+
+
+def _clear_verdict(key: tuple) -> None:
+    global _verdict_epoch
+    if _routed_rejections.pop(key, None) is not None:
+        _verdict_epoch += 1
+
+
+@dataclass
 class ReserveResult:
     ok: bool
     reason: str = ''
@@ -235,6 +266,7 @@ def reserve_on_behalf(
     validator.state_store.upsert_routed_request(
         str(miner_pk), from_chain, to_chain, backing, str(user_pk), user_from_addr, user_to_addr, from_amount, now
     )
+    _clear_verdict((str(miner_pk), from_chain, to_chain))
     pool = client.get_pool(miner_pk, backing)
     closes_at = int(getattr(pool, 'closes_at', 0) or 0) if pool else 0
     if closes_at:
@@ -434,6 +466,11 @@ def finalize_won_seats(validator, now: int) -> list:
                 bt.logging.warning(f'routed sweep {miner[:8]}: finalize transport fault, retrying next step: {e}')
                 continue
             bt.logging.warning(f'routed sweep {miner[:8]}: finalize rejected ({reason}), dropping queue')
+            # Every queued user lost this round; /status carries the verdict so the offering can
+            # refund at once instead of waiting out its "reservation never landed" backstop. Published
+            # BEFORE the delete: a request landing in between clears it and is then dropped with the
+            # queue — the slow backstop, never a fast fail on a seat that could still land.
+            _publish_verdict((miner, from_chain, to_chain), RoutedRejection(reason, [q['user_pubkey'] for q in queue]))
             store.delete_routed_requests(miner, from_chain, to_chain, backing)
             continue
         bt.logging.info(f'routed sweep {miner[:8]}: finalized seat for {req["user_pubkey"][:8]} (FIFO of queue)')
@@ -776,9 +813,13 @@ class SwapStatus:
     swap directly — required for post-attestation stages, because ``vote_initiate`` consumes
     the reservation at attestation quorum, so the reservation stops referencing the swap the
     moment it goes ``active``. Without ``swap_key``, resolution walks the miner's reservation
-    and only the pre-attestation stages (``none``/``reserved``/``claimed``) are reliably visible."""
+    and only the pre-attestation stages (``none``/``reserved``/``claimed``) are reliably visible.
 
-    stage: str  # none | reserved | claimed | active | fulfilled | completed | timed_out | cancelled | expired
+    ``rejected`` replaces ``none`` while the pool's last draw was refused by the contract: ``detail``
+    carries the ``reason`` and the ``users`` who lost the round, so the offering fails them at once."""
+
+    # none | rejected | reserved | claimed | active | fulfilled | completed | timed_out | cancelled | expired
+    stage: str
     reserved_until: int = 0
     user: str = ''
     swap_key: str = ''
@@ -801,13 +842,13 @@ def swap_status(
         return SwapStatus('none')
     reservation = _freshest_reservation(client, miner_pk, from_chain, to_chain)
     if reservation is None or reservation.reserved_until == 0:
-        return SwapStatus('none')
+        return _idle_status(miner_pk, from_chain, to_chain)
     swap_key = bytes(reservation.claimed_swap_key)
     # An expired UNCLAIMED reservation is dead — the pool can be re-entered over it. Reporting it as
     # 'reserved' with its stale user makes the offering's win-detection read "another validator's user
     # holds this miner" and mark won draws lost. A claimed one still speaks through its swap's stage.
     if swap_key == EMPTY_SWAP_KEY and int(reservation.reserved_until) < time.time():
-        return SwapStatus('none')
+        return _idle_status(miner_pk, from_chain, to_chain)
     # detail carries what the offering needs to instruct the user (where + how much to send).
     detail = {
         'from_chain': reservation.from_chain,
@@ -825,6 +866,14 @@ def swap_status(
     stage = _swap_stage(validator, swap, swap_key)
     _add_reject_reason(validator, swap, stage, detail)
     return SwapStatus(stage, reservation.reserved_until, str(reservation.user), swap_key.hex(), detail)
+
+
+def _idle_status(miner_pk, from_chain: str, to_chain: str) -> SwapStatus:
+    """No live reservation: ``rejected`` if the pool's last draw was refused, else ``none``."""
+    rejection = _routed_rejections.get((str(miner_pk), from_chain, to_chain))
+    if rejection is None:
+        return SwapStatus('none')
+    return SwapStatus('rejected', detail={'reason': rejection.reason, 'users': rejection.users})
 
 
 def _swap_status_by_key(validator, swap_key_hex: str) -> SwapStatus:

@@ -112,6 +112,18 @@ def test_reserve_refuses_a_fill_the_in_flight_obligations_leave_uncovered():
     assert not r.ok and 'collateral too low' in r.reason
 
 
+def test_a_new_request_clears_the_pool_rejection_verdict():
+    from allways.validator import reserve_engine
+
+    key = (str(MINER_PK), 'sol', 'btc')
+    reserve_engine._routed_rejections[key] = reserve_engine.RoutedRejection('Insufficient collateral', ['u'])
+    try:
+        r, _ = _reserve(FakeClient())
+        assert r.ok and key not in reserve_engine._routed_rejections
+    finally:
+        reserve_engine._routed_rejections.clear()
+
+
 def test_open_happy_path_persists_routed_request():
     # Two-phase: reserve_on_behalf places a BID after a viability pre-check, then queues the
     # user's details for finalize_won_seats (the winner names the fill at finalize).
@@ -470,6 +482,24 @@ def test_expired_unclaimed_reservation_reports_none(tmp_path):
     client = StatusClient(reservation=_unclaimed_reservation(int(_time.time()) - 5))
     validator, _ = _status_validator(tmp_path, client)
     assert swap_status(validator, HOTKEY).stage == 'none'
+
+
+def test_pool_rejection_reports_rejected_with_its_users_until_a_seat_is_live(tmp_path):
+    from allways.validator import reserve_engine
+    from allways.validator.reserve_engine import swap_status
+
+    key = (str(MINER_PK), 'btc', 'sol')
+    reserve_engine._routed_rejections[key] = reserve_engine.RoutedRejection('Insufficient collateral', ['userA'])
+    try:
+        validator, _ = _status_validator(tmp_path, StatusClient(reservation=None))
+        s = swap_status(validator, HOTKEY, from_chain='btc', to_chain='sol')
+        assert s.stage == 'rejected' and s.detail == {'reason': 'Insufficient collateral', 'users': ['userA']}
+        assert swap_status(validator, HOTKEY, from_chain='sol', to_chain='btc').stage == 'none'  # other pool
+        # A live reservation is a newer round — it speaks, the stale verdict does not.
+        validator.solana_client = StatusClient(reservation=_unclaimed_reservation(FUTURE))
+        assert swap_status(validator, HOTKEY, from_chain='btc', to_chain='sol').stage == 'reserved'
+    finally:
+        reserve_engine._routed_rejections.clear()
 
 
 def test_live_unclaimed_reservation_reports_reserved(tmp_path):

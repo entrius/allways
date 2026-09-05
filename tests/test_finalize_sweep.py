@@ -10,6 +10,7 @@ from types import SimpleNamespace
 from solders.keypair import Keypair as SolKeypair
 
 from allways.constants import RATE_PRECISION
+from allways.validator import reserve_engine
 from allways.validator.reserve_engine import ROUTED_REQUEST_TTL_SECS, draw_pool_winner, finalize_won_seats
 from allways.validator.state_store import ValidatorStateStore
 
@@ -273,8 +274,12 @@ def test_contract_rejection_drops_queue(tmp_path):
     client.finalize_reservation = _raise
     v = _validator(tmp_path, client)
     _queue(v.state_store, USER_A)
+    _queue(v.state_store, USER_B)
     assert finalize_won_seats(v, NOW) == []
     assert v.state_store.distinct_routed_pools() == []
+    # The verdict outlives the queue so /status can fail every queued user at once.
+    verdict = reserve_engine._routed_rejections.pop((MINER, 'sol', 'btc'))
+    assert verdict.reason == 'Miner already has an active reservation' and verdict.users == [USER_A, USER_B]
     v.state_store.close()
 
 
