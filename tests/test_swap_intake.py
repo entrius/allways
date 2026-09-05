@@ -264,3 +264,28 @@ def test_max_intake_spoke_source_respects_max_swap():
     at_max = compute_intake_amounts('btc', 'sol', max_from, '0.5')
     past_max = compute_intake_amounts('btc', 'sol', max_from + 1, '0.5')
     assert at_max.collateral_amount <= MAX < past_max.collateral_amount
+
+
+def test_candidate_purse_is_net_of_in_flight_reservations():
+    # The finalize gate nets `reserved_collateral[hub]` off the purse; a candidate sized on the gross
+    # purse would pass every pre-check and be refused on-chain at the draw.
+    from types import SimpleNamespace
+
+    from allways.cli.swap_commands.swap_intake import candidate_miners
+
+    q = SimpleNamespace(miner='m', from_chain='tao', to_chain='sol', rate=15 * 10**17)
+    busy = SimpleNamespace(active=True, collateral=3 * SOL, reserved_collateral=[2 * SOL, 7 * SOL])
+    out = candidate_miners(_FakeCandClient(quotes=[q], states={'m': busy}), 'tao', 'sol')
+    assert out[0].collateral == SOL  # sol hub is slot 0; the tao slot's obligation does not count
+
+
+def test_candidate_purse_floors_at_zero_and_tolerates_a_pre_v33_state():
+    from types import SimpleNamespace
+
+    from allways.cli.swap_commands.swap_intake import candidate_miners
+
+    q = SimpleNamespace(miner='m', from_chain='tao', to_chain='sol', rate=15 * 10**17)
+    over = SimpleNamespace(active=True, collateral=SOL, reserved_collateral=[2 * SOL])
+    old = SimpleNamespace(active=True, collateral=SOL)
+    assert candidate_miners(_FakeCandClient([q], {'m': over}), 'tao', 'sol')[0].collateral == 0
+    assert candidate_miners(_FakeCandClient([q], {'m': old}), 'tao', 'sol')[0].collateral == SOL

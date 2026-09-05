@@ -22,6 +22,8 @@ from allways.constants import (
     hub_leg,
     required_collateral,
 )
+from allways.solana.layouts import hub_reserved_collateral
+from allways.solana.pdas import BACKING_BITS
 from allways.utils.rate import (
     calculate_to_amount,
     is_executable_rate,
@@ -94,7 +96,7 @@ def candidate_miners(client, from_chain: str, to_chain: str) -> List[MinerCandid
         if ms is None or not ms.active:
             continue
         backing = getattr(q, 'collateral_chain', NUMERAIRE_CHAIN) or NUMERAIRE_CHAIN
-        purse = backing_purse(client, q.miner, ms, backing)
+        purse = free_purse(client, q.miner, ms, backing)
         if purse is None:
             continue  # no locked bond behind the offer — the contract would refuse the reserve
         out.append(
@@ -122,6 +124,17 @@ def backing_purse(client, miner, miner_state, backing: str) -> Optional[int]:
     if attestation is None or not attestation.locked:
         return None
     return int(attestation.effective_balance)
+
+
+def free_purse(client, miner, miner_state, backing: str) -> Optional[int]:
+    """What a NEW swap can draw on: ``backing_purse`` net of collateral already obligated to in-flight
+    swaps on that hub. ``finalize_reservation`` gates on the same net figure, so a candidate sized on
+    the gross purse passes every pre-check here and is refused on-chain at the draw."""
+    bit = BACKING_BITS.get(backing)
+    purse = backing_purse(client, miner, miner_state, backing) if bit else None
+    if purse is None:
+        return None  # an unknown backing is one offer skipped, never a KeyError across every quote
+    return max(purse - hub_reserved_collateral(miner_state, bit), 0)
 
 
 def floors_from_config(cfg) -> Dict[str, int]:

@@ -25,9 +25,9 @@ from allways.cli.swap_commands.helpers import (
 )
 from allways.cli.swap_commands.swap_intake import (
     MinerCandidate,
-    backing_purse,
     bounds_from_config,
     compute_intake_amounts,
+    free_purse,
     hub_bounds,
     rate_display_from_fixed,
     select_best_miner,
@@ -104,8 +104,8 @@ def quote_command(from_chain: str, to_chain: str, amount: Decimal, as_json: bool
             if q.from_chain == from_chain and q.to_chain == to_chain:
                 backing = getattr(q, 'collateral_chain', None) or 'sol'
                 # The purse the contract will check for THIS offer — local lamports for a
-                # sol-backed quote, the attested effective bond for any other.
-                purse = backing_purse(client, q.miner, e.state, backing)
+                # sol-backed quote, the attested effective bond for any other — net of in-flight swaps.
+                purse = free_purse(client, q.miner, e.state, backing)
                 if purse is None:
                     continue
                 candidates.append(
