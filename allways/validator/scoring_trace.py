@@ -210,6 +210,8 @@ def diagnose_non_earner(
         # latest_rates carries no backing, so diagnose against the pair's hub-leg
         # lane (its pricing anchor); the plain pair key keeps direct callers working.
         trace = direction_traces.get((from_c, to_c, hub_leg(from_c, to_c))) or direction_traces.get((from_c, to_c))
+        if trace is not None and trace.pool <= 0:
+            return f'dead_pair ({from_c}→{to_c}: no qualified fill in the pool window, pool=0)'
         if trace is None or trace.best_rate <= 0:
             continue
         best = trace.best_rate

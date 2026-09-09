@@ -475,22 +475,27 @@ def qualified_volume_shares(
 def compute_direction_pools(
     clearing_volumes: Dict[Tuple[str, str], Dict[str, Tuple[int, int]]],
 ) -> Dict[Tuple[str, str, str], float]:
-    """Volume-weighted pools from a trailing window of realized swaps
+    """Volume-weighted pools from a trailing window of QUALIFIED swaps
     (``get_clearing_volumes`` shape), keyed by lane ``(from, to, backing)``.
-    Each hub↔spoke *pair* earns ``(1−α)/pairs + α × its share of hub-leg
-    notional``, split evenly between its two directions — weighting at pair
-    level means one leg can't be inflated without inflating the whole pair —
-    then evenly again across each direction's backing lanes (F4, budget-
-    neutral: sol↔tao's pair pool splits across its two lanes, spokes carry
-    one). No volume anywhere → the equal split. Pools sum to
-    ``MINER_POOL_SHARE``, not 1.0 — the burn lives here.
+    A pair is LIVE iff it cleared qualified volume in the window; only live
+    pairs are paid. Each live pair earns ``(1−α)/live_pairs_in_family + α × its
+    share of the family's hub-leg notional``, split evenly between its two
+    directions — weighting at pair level means one leg can't be inflated
+    without inflating the whole pair — then evenly again across each
+    direction's backing lanes (F4, budget-neutral: sol↔tao's pair pool splits
+    across its two lanes, spokes carry one). A dead pair's lanes are present at
+    0.0. No volume anywhere → the equal split over the whole registry (the
+    day-one / silent-network fallback). Pools sum to ``MINER_POOL_SHARE``,
+    not 1.0 — the burn lives here.
 
     Volumes are the pair's HUB-leg notional, so they are only comparable
     within one hub's family (lamports vs rao — converting across would smuggle
-    a price oracle in). Each hub family therefore holds a FIXED share of the
-    pool (proportional to its pair count) and the α-blend runs within it; a
-    single-family registry reduces exactly to the old global blend. Volume is
-    never split by backing — same non-comparability argument."""
+    a price oracle in). Each hub family therefore holds a share of the pool
+    proportional to its LIVE pair count — oracle-free, and a registered-but-
+    unfilled pair moves nothing — and the α-blend runs within it. So the floor
+    scales with activity, not registry size: adding dead pairs changes nobody's
+    pool, and keeping a pair funded costs one qualified fill per window. Volume
+    is never split by backing — same non-comparability argument."""
     pair_directions: Dict[Tuple[str, str], List[Tuple[str, str]]] = {}
     for from_chain, to_chain in DIRECTION_POOLS:
         pair_directions.setdefault(canonical_pair(from_chain, to_chain), []).append((from_chain, to_chain))
@@ -505,7 +510,8 @@ def compute_direction_pools(
             volume += sum(sums[leg] for sums in clearing_volumes.get((from_chain, to_chain), {}).values())
         pair_volumes[pair] = volume
 
-    if sum(pair_volumes.values()) <= 0:
+    live_pairs = {pair for pair, volume in pair_volumes.items() if volume > 0}
+    if not live_pairs:
         return {
             (from_chain, to_chain, backing): pool / len(declarable_backings(from_chain, to_chain))
             for (from_chain, to_chain), pool in DIRECTION_POOLS.items()
@@ -517,14 +523,14 @@ def compute_direction_pools(
         families.setdefault(hub_leg(*pair) or pair[0], []).append(pair)
 
     pools: Dict[Tuple[str, str, str], float] = {}
-    total_pairs = len(pair_directions)
     for family_pairs in families.values():
-        family_share = len(family_pairs) / total_pairs
-        family_volume = sum(pair_volumes[p] for p in family_pairs)
-        equal_pair_share = 1.0 / len(family_pairs)
+        family_live = [p for p in family_pairs if p in live_pairs]
+        family_share = len(family_live) / len(live_pairs)
+        family_volume = sum(pair_volumes[p] for p in family_live)
+        equal_pair_share = 1.0 / len(family_live) if family_live else 0.0
         for pair in family_pairs:
-            if family_volume <= 0:
-                pair_share = equal_pair_share
+            if pair not in live_pairs:
+                pair_share = 0.0  # dead this window: no qualified fill, no pool
             else:
                 volume_share = pair_volumes[pair] / family_volume
                 pair_share = (1.0 - POOL_VOLUME_ALPHA) * equal_pair_share + POOL_VOLUME_ALPHA * volume_share
@@ -618,6 +624,8 @@ def calculate_miner_rewards(self: Validator, current_time: int) -> Tuple[np.ndar
         if storage_enabled:
             intervals = []
             intervals_by_dir[(from_chain, to_chain, backing)] = intervals
+        if pool <= 0:
+            continue  # dead pair this window — nothing to pay; the trace still lists it at pool=0
         min_swap_hub, max_swap_hub = swap_bounds.get(backing, (0, 0))
         # Ineligible miners are not crown candidates on this lane (see lane_eligible_hotkeys).
         lane_candidates = lane_eligible_hotkeys(
@@ -780,6 +788,8 @@ def snapshot_current_miner_scores(
     for (from_chain, to_chain, backing), pool in pools.items():
         trace = DirectionTrace(pool=pool)
         qvol, _ = qualified_volume_shares(lane_volumes.get((from_chain, to_chain, backing), {}), from_chain, to_chain)
+        if pool <= 0:
+            continue  # dead pair this window — nothing to pay; the trace still lists it at pool=0
         min_swap_hub, max_swap_hub = swap_bounds.get(backing, (0, 0))
         lane_candidates = lane_eligible_hotkeys(
             live_states, rewardable_hotkeys, from_chain, to_chain, ts, backing=backing, recent_fills=recent_fills

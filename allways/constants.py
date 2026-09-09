@@ -147,8 +147,8 @@ LAUNCH_PAIRS: tuple[tuple[str, str], ...] = tuple(
 BURN_RATE = 0.0
 MINER_POOL_SHARE = 1.0 - BURN_RATE
 # Direction registry and the equal-split fallback: one entry per hub↔spoke direction
-# (both ways). The per-round pool values are volume-weighted at pair level
-# (scoring.compute_direction_pools); these constants are what zero volume falls back to.
+# (both ways). The per-round pool values are volume-weighted at pair level over LIVE pairs
+# (scoring.compute_direction_pools); these constants are what a silent network falls back to.
 DIRECTION_POOLS: dict[tuple[str, str], float] = {
     pair: MINER_POOL_SHARE / (2 * len(LAUNCH_PAIRS))
     for hub, spoke in LAUNCH_PAIRS
@@ -156,9 +156,11 @@ DIRECTION_POOLS: dict[tuple[str, str], float] = {
 }
 # Volume-weighted pools: each pair's emission share follows the QUALIFIED hub-leg notional it
 # cleared over the trailing window (fills reserved on a crown-holding miner — clearing_rates
-# .qualified), blended with the equal split so a quiet pair never starves and a busy one is
-# capped at α + (1−α)/pairs. Weighting sits at PAIR level and splits evenly between the two
-# legs — one leg can't be inflated without inflating the pair.
+# .qualified), blended with an equal split over the family's LIVE pairs (≥1 qualified fill in
+# the window) so a small live pair never starves and a busy one is capped at α + (1−α)/live.
+# A pair with no qualified fill this window is dead: no pool, and it dilutes nobody — the floor
+# scales with activity, not registry size. Weighting sits at PAIR level and splits evenly
+# between the two legs — one leg can't be inflated without inflating the pair.
 POOL_VOLUME_WINDOW_SECS = 24 * 3600  # flat trailing window the pool volumes sum over
 POOL_VOLUME_ALPHA = 0.66  # blend dial: 0 = frozen equal split, 1 = pure volume share
 # Quality-volume slice: each lane pool pays (1−β) on crown time and β on qualified volume share
