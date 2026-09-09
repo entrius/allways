@@ -86,14 +86,22 @@ alw --help
 
 ## Miner Onboarding
 
-Bond, then activate, then quote — in that order, for either backing. A quote is a promise that
+The fast path is the wizard — it creates or picks the wallet, generates the signing keys, writes
+`.env`, runs a preflight, then walks the on-chain sequence in order and resumes on re-run:
+
+```bash
+alw miner init          # step by step; every prompt has a flag, -y runs it unattended
+alw doctor              # the preflight on its own
+```
+
+The manual sequence it automates: bond, then activate, then quote — in that order, for either backing. A quote is a promise that
 one specific bond answers for, so `set_quote` refuses a purse you are not already serving
 (`MinerNotActive`). Quoting before activation is rejected, not queued.
 
 **SOL-backed** (collateral held on Solana):
 
 ```bash
-alw collateral deposit <SOL>                   # fund the local purse (bind-hotkey needs it — see below)
+alw collateral deposit --amount <SOL>          # fund the local purse (bind-hotkey needs it — see below)
 alw miner bind-hotkey                          # bind your hotkey to your Solana pubkey (once)
 alw miner activate                             # validators vote you active
 alw miner post sol <addr> btc <addr> <rate>    # quote
