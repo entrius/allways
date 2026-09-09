@@ -49,6 +49,7 @@ VAULT_DIRTYING_EVENTS = {
 
 _ATTRIBUTION_TTL_SECS = 300
 _VAULT_CURSOR_KEY = 'vault_event_block'
+_VAULT_POLL_MAX_BLOCKS = 50  # two substrate reads per block; keeps one step's catch-up under the stall watchdog
 _EXIT_KEY_PREFIX = 'exit:'
 
 
@@ -424,8 +425,11 @@ class BondRelay:
         start = int(cursor) + 1
         if start > head:
             return
+        # A long outage is walked one window per step; the cursor advances each step instead of
+        # only once the whole gap is read, which never happened before the watchdog fired.
+        end = min(head, start + _VAULT_POLL_MAX_BLOCKS - 1)
         try:
-            events = self.vault.poll_events(start, head)
+            events = self.vault.poll_events(start, end)
         except Exception as e:
             bt.logging.warning(f'relay: vault event poll failed: {e}')
             return
@@ -436,7 +440,7 @@ class BondRelay:
             miner = self.miner_for(str(ev.fields.get(field)))
             if miner is not None:
                 self.mark_dirty(miner)
-        self.store.set_relay_meta(_VAULT_CURSOR_KEY, head)
+        self.store.set_relay_meta(_VAULT_CURSOR_KEY, end)
 
     def _vault_head(self) -> Optional[int]:
         try:

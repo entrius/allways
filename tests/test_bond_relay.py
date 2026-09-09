@@ -92,6 +92,7 @@ class FakeVault:
         return VaultCallResult(ok=True)
 
     def poll_events(self, start, end):
+        self.calls.append(('poll_events', start, end))
         return self.events
 
 
@@ -1028,3 +1029,16 @@ def test_attestation_does_not_recharge_fees_the_retired_vault_settled():
     # A fee earned under the CURRENT generation still nets off, exactly as before.
     store.record_relay_fee('new', MINER, 'tao', 2_000_000, NOW, vault_generation=1)
     assert attestation_job.compute(relay, MINER, HOTKEY).effective_balance == 798_000_000
+
+
+def test_vault_event_poll_walks_a_long_gap_one_window_per_step():
+    vault = FakeVault()
+    vault.head = lambda: 1000
+    relay = _relay(vault=vault)
+    relay.store.set_relay_meta('vault_event_block', 0)
+
+    relay.poll_vault_events()
+    relay.poll_vault_events()
+
+    assert [c for c in vault.calls if c[0] == 'poll_events'] == [('poll_events', 1, 50), ('poll_events', 51, 100)]
+    assert relay.store.get_relay_meta('vault_event_block') == '100'
