@@ -2,8 +2,8 @@
 
 Reward per miner and lane is ``eligible × pool × [(1−β) × crown_share × capacity
 + β × qualified_volume_share]``, where ``eligible`` is a flat 0/1 gate read off the
-on-chain ``MinerState`` counters (B3.3) and the β slice pays fills that were reserved
-on a crown holder (``fill_held_crown``). Any shortfall recycles
+on-chain timeout counter plus a fill inside the trailing activity window, and the β
+slice pays fills that were reserved on a crown holder (``fill_held_crown``). Any shortfall recycles
 to ``RECYCLE_UID`` — the burn is dynamic (whatever the pool did not earn) and
 deliberate: it keeps a penalty absolute rather than something weight
 normalization stretches back to 100%. Entry is ``score_and_reward_miners``.
@@ -29,11 +29,11 @@ from allways.constants import (
     CLEARING_RETENTION_SECS,
     CROWN_RATE_BAND,
     DIRECTION_POOLS,
+    ELIGIBILITY_FILL_WINDOW_SECS,
     EVENT_RETENTION_SECS,
     HUB_CHAINS,
     MAX_FAILED_SWAPS,
     MAX_SCORING_BACKFILL_SECS,
-    MIN_SUCCESSFUL_SWAPS,
     MINER_POOL_SHARE,
     POOL_VOLUME_ALPHA,
     POOL_VOLUME_WINDOW_SECS,
@@ -182,17 +182,35 @@ def prune_crown_events(self: Validator, current_time: int) -> None:
     self.state_store.prune_swap_outcomes(current_time - SWAP_OUTCOME_RETENTION_SECS)
 
 
-def is_eligible(miner_state, now: Optional[int] = None) -> bool:
-    """The GLOBAL strike gate off the on-chain ``MinerState`` counters (B3.3):
-    eligible iff the miner has at least ``MIN_SUCCESSFUL_SWAPS`` successes and at
-    most ``MAX_FAILED_SWAPS`` failures — counted across every hub (one reputation).
+def is_eligible(
+    miner_state,
+    now: Optional[int] = None,
+    *,
+    hotkey: Optional[str] = None,
+    recent_fills: Optional[Set[str]] = None,
+) -> bool:
+    """The GLOBAL binary gate, one reputation across every hub: at most ``MAX_FAILED_SWAPS``
+    lifetime timeouts (on-chain ``MinerState`` counter) AND a completed fill inside the trailing
+    ``ELIGIBILITY_FILL_WINDOW_SECS`` — ``recent_fills`` is that window's hotkey set
+    (``recent_fill_hotkeys``). ``recent_fills=None`` means the ledger is younger than the window
+    (fresh validator DB) and the gate is strikes-only. No warm-up count: the first fill qualifies.
 
     The settlement exclusion moved per-hub in v3.1: see ``direction_eligible``,
     which zeroes only the settling hub's contribution instead of the whole miner."""
     del now  # strikes are time-free; kept in the signature for its many call sites
-    return (
-        int(miner_state.successful_swaps) >= MIN_SUCCESSFUL_SWAPS and int(miner_state.failed_swaps) <= MAX_FAILED_SWAPS
-    )
+    if int(miner_state.failed_swaps) > MAX_FAILED_SWAPS:
+        return False
+    if recent_fills is None:
+        return True
+    return hotkey in recent_fills
+
+
+def recent_fill_hotkeys(store: ValidatorStateStore, now: int) -> Optional[Set[str]]:
+    """The activity gate's input for one round: hotkeys with a fill in the trailing window, or
+    None while this validator's clearing ledger is younger than the window (strikes-only)."""
+    if now - store.clearing_ledger_since(now) < ELIGIBILITY_FILL_WINDOW_SECS:
+        return None
+    return store.get_recent_fill_hotkeys(now - ELIGIBILITY_FILL_WINDOW_SECS, now)
 
 
 def hub_free(miner_state, backing: str, now: int) -> bool:
@@ -207,7 +225,16 @@ def hub_free(miner_state, backing: str, now: int) -> bool:
     return now >= int(settling[idx]) if idx < len(settling) else True
 
 
-def direction_eligible(miner_state, from_chain: str, to_chain: str, now: int, backing: Optional[str] = None) -> bool:
+def direction_eligible(
+    miner_state,
+    from_chain: str,
+    to_chain: str,
+    now: int,
+    backing: Optional[str] = None,
+    *,
+    hotkey: Optional[str] = None,
+    recent_fills: Optional[Set[str]] = None,
+) -> bool:
     """Per-lane gate: the global strikes AND the lane's own hub not mid-settle. ``backing`` names
     the lane (V-2 fix, shipped with the F4 dual-backing lanes): a miner mid-TAO-settle is zeroed on
     the (sol↔tao, tao) lane only — the honest SOL-backed lane keeps earning, and the exclusion
@@ -215,7 +242,7 @@ def direction_eligible(miner_state, from_chain: str, to_chain: str, now: int, ba
 
     ``backing=None`` is the pair-level reading — eligible while ANY declarable lane's hub is clean.
     A spoke pair names exactly one hub, so the two readings agree there."""
-    if not is_eligible(miner_state, now):
+    if not is_eligible(miner_state, now, hotkey=hotkey, recent_fills=recent_fills):
         return False
     if backing is not None:
         return hub_free(miner_state, backing, now)
@@ -232,6 +259,7 @@ def lane_eligible_hotkeys(
     to_chain: str,
     now: int,
     backing: Optional[str] = None,
+    recent_fills: Optional[Set[str]] = None,
 ) -> Set[str]:
     """The crown-candidate set for one lane: on-metagraph hotkeys that also pass
     ``direction_eligible`` right now. Ineligibility (strikes, or the lane's hub
@@ -244,7 +272,10 @@ def lane_eligible_hotkeys(
     return {
         hk
         for hk in rewardable_hotkeys
-        if hk in live_states and direction_eligible(live_states[hk], from_chain, to_chain, now, backing=backing)
+        if hk in live_states
+        and direction_eligible(
+            live_states[hk], from_chain, to_chain, now, backing=backing, hotkey=hk, recent_fills=recent_fills
+        )
     }
 
 
@@ -314,10 +345,14 @@ def build_eligibility(
     metagraph,
     attribution: Optional[Dict[str, str]] = None,
     now: Optional[int] = None,
+    recent_fills: Optional[Set[str]] = None,
 ) -> Dict[str, bool]:
     """``{hotkey: eligible_bool}`` for on-metagraph miners — ``is_eligible`` over the
     on-chain ``MinerState`` counters (see ``live_miner_states``)."""
-    return {hk: is_eligible(ms, now) for hk, ms in live_miner_states(solana_client, metagraph, attribution).items()}
+    return {
+        hk: is_eligible(ms, now, hotkey=hk, recent_fills=recent_fills)
+        for hk, ms in live_miner_states(solana_client, metagraph, attribution).items()
+    }
 
 
 @dataclass
@@ -530,7 +565,10 @@ def calculate_miner_rewards(self: Validator, current_time: int) -> Tuple[np.ndar
         bt.logging.warning(f'quote reconcile failed, skipping this round: {e}')
     # The global (strike) view feeds the trace log; rows gate per lane so a TAO settle zeroes
     # only tao-lane contributions while sol-lane rows keep earning (V-2, F4).
-    eligibility = {hk: is_eligible(ms, current_time) for hk, ms in live_states.items()}
+    recent_fills = recent_fill_hotkeys(self.state_store, current_time)
+    eligibility = {
+        hk: is_eligible(ms, current_time, hotkey=hk, recent_fills=recent_fills) for hk, ms in live_states.items()
+    }
 
     direction_traces: Dict[Tuple[str, str, str], DirectionTrace] = {}
     weighting_traces: Dict[str, WeightingTrace] = {}
@@ -569,7 +607,13 @@ def calculate_miner_rewards(self: Validator, current_time: int) -> Tuple[np.ndar
         min_swap_hub, max_swap_hub = swap_bounds.get(backing, (0, 0))
         # Ineligible miners are not crown candidates on this lane (see lane_eligible_hotkeys).
         lane_candidates = lane_eligible_hotkeys(
-            live_states, rewardable_hotkeys, from_chain, to_chain, current_time, backing=backing
+            live_states,
+            rewardable_hotkeys,
+            from_chain,
+            to_chain,
+            current_time,
+            backing=backing,
+            recent_fills=recent_fills,
         )
         crown_time = replay_crown_time_window(
             store=self.state_store,
@@ -604,7 +648,9 @@ def calculate_miner_rewards(self: Validator, current_time: int) -> Tuple[np.ndar
             crown_time=crown_time,
             cap_weighted_time=trace.cap_weighted_time,
             eligibility={
-                hk: direction_eligible(ms, from_chain, to_chain, current_time, backing=backing)
+                hk: direction_eligible(
+                    ms, from_chain, to_chain, current_time, backing=backing, hotkey=hk, recent_fills=recent_fills
+                )
                 for hk, ms in live_states.items()
             },
             qvol_share=qvol,
@@ -714,6 +760,7 @@ def snapshot_current_miner_scores(
         bt.logging.warning(f'swap-bounds read failed in live score snapshot: {e}')
         swap_bounds = {}
     rows: List[ScoreRow] = []
+    recent_fills = recent_fill_hotkeys(self.state_store, ts)
     lane_volumes = self.state_store.get_qualified_lane_volumes(ts - POOL_VOLUME_WINDOW_SECS, ts)
     pools = compute_direction_pools(lane_volumes_to_directions(lane_volumes))
     for (from_chain, to_chain, backing), pool in pools.items():
@@ -721,7 +768,7 @@ def snapshot_current_miner_scores(
         qvol, _ = qualified_volume_shares(lane_volumes.get((from_chain, to_chain, backing), {}), from_chain, to_chain)
         min_swap_hub, max_swap_hub = swap_bounds.get(backing, (0, 0))
         lane_candidates = lane_eligible_hotkeys(
-            live_states, rewardable_hotkeys, from_chain, to_chain, ts, backing=backing
+            live_states, rewardable_hotkeys, from_chain, to_chain, ts, backing=backing, recent_fills=recent_fills
         )
         crown_time = replay_crown_time_window(
             store=self.state_store,
@@ -747,7 +794,10 @@ def snapshot_current_miner_scores(
             crown_time=crown_time,
             cap_weighted_time=trace.cap_weighted_time,
             eligibility={
-                hk: direction_eligible(ms, from_chain, to_chain, ts, backing=backing) for hk, ms in live_states.items()
+                hk: direction_eligible(
+                    ms, from_chain, to_chain, ts, backing=backing, hotkey=hk, recent_fills=recent_fills
+                )
+                for hk, ms in live_states.items()
             },
             qvol_share=qvol,
         )
@@ -1175,6 +1225,7 @@ def snapshot_current_crown_holders(
     except Exception as e:
         bt.logging.warning(f'swap-bounds read failed in live snapshot: {e}')
         swap_bounds = {}
+    recent_fills = recent_fill_hotkeys(self.state_store, ts)
     rows_by_direction: Dict[Tuple[str, str, str], List[Tuple[str, str, str, str, float, float, int]]] = {}
     for from_chain, to_chain in DIRECTION_POOLS:
         for backing in declarable_backings(from_chain, to_chain):
@@ -1182,7 +1233,7 @@ def snapshot_current_crown_holders(
             bounds_set = min_swap_hub > 0 or max_swap_hub > 0
             purse_known = direction_purse_known(backing)
             lane_candidates = lane_eligible_hotkeys(
-                live_states, rewardable_hotkeys, from_chain, to_chain, ts, backing=backing
+                live_states, rewardable_hotkeys, from_chain, to_chain, ts, backing=backing, recent_fills=recent_fills
             )
             rates, activity, active_set, collaterals = reconstruct_window_start_state(
                 self.state_store,
@@ -1251,7 +1302,13 @@ def fill_held_crown(
     try:
         live_states = live_miner_states(self.solana_client, self.metagraph)
         lane_candidates = lane_eligible_hotkeys(
-            live_states, rewardable_hotkeys, from_chain, to_chain, at_time, backing=backing
+            live_states,
+            rewardable_hotkeys,
+            from_chain,
+            to_chain,
+            at_time,
+            backing=backing,
+            recent_fills=recent_fill_hotkeys(self.state_store, at_time),
         )
     except Exception as e:
         bt.logging.warning(f'fill_held_crown: eligibility read failed, judging against every miner: {e}')

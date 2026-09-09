@@ -455,6 +455,27 @@ class ValidatorStateStore:
             lane[r['hotkey']] = (from_sum + int(r['from_amount']), to_sum + int(r['to_amount']))
         return volumes
 
+    def get_recent_fill_hotkeys(self, start_time: int, end_time: int) -> Set[str]:
+        """Hotkeys with at least one completed fill in ``(start_time, end_time]`` — the
+        activity half of the eligibility gate. Any lane, qualified or not."""
+        rows = self._fetchall(
+            'SELECT DISTINCT hotkey FROM clearing_rates WHERE block_num > ? AND block_num <= ?',
+            (start_time, end_time),
+        )
+        return {r['hotkey'] for r in rows}
+
+    LEDGER_SINCE_KEY = 'clearing_ledger_since'
+
+    def clearing_ledger_since(self, now: int) -> int:
+        """When this database started recording fills — stamped ``now`` on first call and kept
+        thereafter. The activity gate reads strikes-only until the ledger is a full window old,
+        so a fresh validator DB cannot zero every miner while it catches up."""
+        stored = self.get_relay_meta(self.LEDGER_SINCE_KEY)
+        if stored is not None:
+            return int(stored)
+        self.set_relay_meta(self.LEDGER_SINCE_KEY, str(int(now)))
+        return int(now)
+
     def get_last_reserve_start(self, hotkey: str, hub: str, before: int) -> Optional[int]:
         """Block time of the miner's most recent RESERVE_START on ``hub`` strictly before
         ``before`` — a completed swap's reservation instant (one live swap per hub, so the last

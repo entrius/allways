@@ -11,7 +11,7 @@ from types import SimpleNamespace
 import bittensor as bt
 from solders.keypair import Keypair as SolKeypair
 
-from allways.constants import MAX_FAILED_SWAPS, MIN_SUCCESSFUL_SWAPS
+from allways.constants import MAX_FAILED_SWAPS
 from allways.validator.scoring import build_eligibility, direction_eligible, is_eligible
 
 
@@ -48,18 +48,18 @@ class _Client:
 
 
 def test_attributes_pubkey_to_hotkey_then_gates():
-    """Two bound miners: one above the success floor (eligible), one below."""
+    """Two bound miners: one with a fill in the activity window (eligible), one without."""
     m1, m2 = SolKeypair().pubkey(), SolKeypair().pubkey()
     hk1, hk2 = _hotkey(), _hotkey()
     client = _Client(
         bindings=[_binding(m1, hk1), _binding(m2, hk2)],
         states=[
-            _miner_state(m1, MIN_SUCCESSFUL_SWAPS, 0),
-            _miner_state(m2, MIN_SUCCESSFUL_SWAPS - 1, 0),
+            _miner_state(m1, 0, 0),
+            _miner_state(m2, 50, 0),
         ],
     )
     metagraph = SimpleNamespace(hotkeys=[hk1.ss58_address, hk2.ss58_address])
-    assert build_eligibility(client, metagraph) == {
+    assert build_eligibility(client, metagraph, recent_fills={hk1.ss58_address}) == {
         hk1.ss58_address: True,
         hk2.ss58_address: False,
     }
@@ -117,9 +117,10 @@ def _ns_hub(successful, failed, tao_settling_until=0):
 
 
 def test_is_eligible_boundaries():
-    assert is_eligible(_ns(MIN_SUCCESSFUL_SWAPS, MAX_FAILED_SWAPS))
-    assert not is_eligible(_ns(MIN_SUCCESSFUL_SWAPS - 1, 0))
+    assert is_eligible(_ns(0, MAX_FAILED_SWAPS))
     assert not is_eligible(_ns(99, MAX_FAILED_SWAPS + 1))
+    assert is_eligible(_ns(0, 0), hotkey='hk', recent_fills={'hk'})
+    assert not is_eligible(_ns(99, 0), hotkey='hk', recent_fills=set())
 
 
 def test_a_tao_settle_zeroes_only_tao_directions():

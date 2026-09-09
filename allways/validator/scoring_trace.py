@@ -203,7 +203,7 @@ def diagnose_non_earner(
     if hotkey not in ever_active:
         return 'not_active_during_window'
     if not eligible:
-        return 'ineligible'  # < MIN_SUCCESSFUL_SWAPS successes or > MAX_FAILED_SWAPS failures
+        return 'ineligible'  # > MAX_FAILED_SWAPS timeouts, or no completed fill in the activity window
 
     outbid_parts: List[str] = []
     for (from_c, to_c), own in latest_rates.items():

@@ -173,12 +173,14 @@ CLEARING_RETENTION_SECS = POOL_VOLUME_WINDOW_SECS + MAX_SCORING_BACKFILL_SECS
 # depth-weighted band (#614) already splits crown by collateral, so a convex ramp on top counted
 # depth twice. Still capped at 1.0 — depth past required earns nothing extra, never pay-to-win.
 CAPACITY_CURVE_EXPONENT: float = 1.0
-# Flat eligibility gate (B3.3): read off the on-chain MinerState counters,
-# replacing the success_rate³ × credibility ramp. A miner is crown-eligible iff
-# it has at least MIN_SUCCESSFUL_SWAPS successes and at most MAX_FAILED_SWAPS
-# failures — a binary 0/1 multiplier, no ramp.
-MIN_SUCCESSFUL_SWAPS: int = 2
+# Binary eligibility gate: at most MAX_FAILED_SWAPS lifetime timeouts (the on-chain MinerState
+# counter, never resets) AND at least one completed swap inside the trailing
+# ELIGIBILITY_FILL_WINDOW_SECS (the validator's clearing ledger). No warm-up count: a miner is
+# eligible from its first completed fill and stays so only by keeping delivering — any fill on any
+# lane counts, real or self, qualified or not. The window must fit inside CLEARING_RETENTION_SECS.
 MAX_FAILED_SWAPS: int = 2
+ELIGIBILITY_FILL_WINDOW_SECS: int = 12 * 3600
+assert ELIGIBILITY_FILL_WINDOW_SECS <= CLEARING_RETENTION_SECS, 'the fill window must be inside clearing retention'
 # Live-state reconcile (scoring-round backstop for lost events): a miner's event-derived
 # active/collateral state is only corrected against the live chain read after its event
 # stream has been quiet this long, so a stale RPC read never fights an in-flight event.

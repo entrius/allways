@@ -12,10 +12,10 @@ import pytest
 from allways.classes import ActivityTransition, MinerActivity
 from allways.constants import (
     DIRECTION_POOLS,
+    ELIGIBILITY_FILL_WINDOW_SECS,
     LAUNCH_PAIRS,
     MAX_FAILED_SWAPS,
     MAX_SCORING_BACKFILL_SECS,
-    MIN_SUCCESSFUL_SWAPS,
     MINER_POOL_SHARE,
     POOL_VOLUME_ALPHA,
     QUALITY_VOLUME_BETA,
@@ -40,6 +40,7 @@ from allways.validator.scoring import (
     lane_volumes_to_directions,
     make_crown_predicates,
     qualified_volume_shares,
+    recent_fill_hotkeys,
     replay_crown_time_window,
     score_and_reward_miners,
     scoring_window_bounds,
@@ -221,6 +222,7 @@ def make_validator(
     miner_counters: dict[str, tuple[int, int]] | None = None,
     all_eligible: bool = True,
     settling: dict[str, int] | None = None,
+    recent_fills: set[str] | None = None,
 ) -> SimpleNamespace:
     """Build a SimpleNamespace stand-in for the validator.
 
@@ -229,13 +231,20 @@ def make_validator(
     exercise capacity weighting pass explicit ``max_swap_amount`` and
     ``collaterals`` overrides.
 
-    Eligibility (B3.3) is read off on-chain ``MinerState`` counters via
-    ``solana_client``. ``miner_counters`` maps hotkey → (successful, failed)
-    swaps; when omitted, every hotkey gets ``(MIN_SUCCESSFUL_SWAPS, 0)`` if
-    ``all_eligible`` (the default — a "passes the gate" miner) else ``(0, 0)``
-    (no proven successes → ineligible).
+    Eligibility is the strike counter off on-chain ``MinerState`` (``miner_counters``
+    maps hotkey → (successful, failed); successes are no longer read) AND a fill in
+    the trailing activity window, seeded as an UNQUALIFIED clearing row one second
+    before ``block`` (inert for pools and β) for ``recent_fills`` — default every
+    hotkey if ``all_eligible`` else none. The ledger is stamped old so the window
+    gate is live (a fresh ledger reads strikes-only).
     """
     store = ValidatorStateStore(db_path=tmp_path / 'state.db')
+    # Ledger older than the window at ``block`` so the activity gate is live (young = strikes-only).
+    store.set_relay_meta(ValidatorStateStore.LEDGER_SINCE_KEY, str(block - ELIGIBILITY_FILL_WINDOW_SECS))
+    if recent_fills is None:
+        recent_fills = set(hotkeys) if all_eligible else set()
+    for hotkey in recent_fills:
+        store.insert_clearing_rate(block - 1, hotkey, 'btc', 'sol', 1, 1, f'elig-{hotkey}')
     watcher = make_watcher(store, active=set(hotkeys))
     collaterals = collaterals or {}
     # Mirror the cold-bootstrap collateral anchor: scoring now reads collateral
@@ -259,8 +268,7 @@ def make_validator(
     database_storage = MagicMock()
     database_storage.is_enabled.return_value = False
     if miner_counters is None:
-        default = (MIN_SUCCESSFUL_SWAPS, 0) if all_eligible else (0, 0)
-        miner_counters = {hk: default for hk in hotkeys}
+        miner_counters = {hk: (0, 0) for hk in hotkeys}
     return SimpleNamespace(
         block=block,
         # Seed one window back so scoring_window_bounds yields the same window
@@ -296,32 +304,47 @@ def _miner_state(successful: int, failed: int, settling_until: int = 0) -> Simpl
 
 
 class TestIsEligibleHelper:
-    """Flat binary gate: eligible iff successes >= MIN_SUCCESSFUL_SWAPS (2) and
-    failures <= MAX_FAILED_SWAPS (2). Replaces success_rate³ × credibility."""
+    """Binary gate: failures <= MAX_FAILED_SWAPS (lifetime, on-chain) AND a fill in the
+    trailing activity window (``recent_fills``). No success minimum. ``recent_fills=None``
+    = ledger younger than the window → strikes only."""
 
-    def test_below_min_successes_ineligible(self):
-        assert is_eligible(_miner_state(0, 0)) is False
-        assert is_eligible(_miner_state(1, 0)) is False  # one short of the floor
-
-    def test_at_min_successes_eligible(self):
-        assert is_eligible(_miner_state(MIN_SUCCESSFUL_SWAPS, 0)) is True  # boundary
-
-    def test_above_min_successes_eligible(self):
-        assert is_eligible(_miner_state(50, 0)) is True
-
-    def test_at_max_failures_still_eligible(self):
-        # 2 failures tolerated at the boundary, given enough successes.
-        assert is_eligible(_miner_state(2, MAX_FAILED_SWAPS)) is True
-
-    def test_above_max_failures_ineligible(self):
-        # One failure past the cap kills eligibility regardless of success count.
+    def test_strikes_only_when_ledger_is_young(self):
+        assert is_eligible(_miner_state(0, 0)) is True
+        assert is_eligible(_miner_state(0, MAX_FAILED_SWAPS)) is True  # boundary
         assert is_eligible(_miner_state(50, MAX_FAILED_SWAPS + 1)) is False
 
-    def test_both_gates_must_pass(self):
-        # Enough successes but too many failures → out.
-        assert is_eligible(_miner_state(3, 3)) is False
-        # Few failures but too few successes → out.
-        assert is_eligible(_miner_state(1, 0)) is False
+    def test_activity_window_gates_once_ledger_is_old(self):
+        assert is_eligible(_miner_state(0, 0), hotkey='hk_a', recent_fills={'hk_a'}) is True
+        assert is_eligible(_miner_state(50, 0), hotkey='hk_a', recent_fills=set()) is False
+        assert is_eligible(_miner_state(50, 0), hotkey='hk_a', recent_fills={'hk_b'}) is False
+
+    def test_strikes_override_activity(self):
+        assert is_eligible(_miner_state(50, MAX_FAILED_SWAPS + 1), hotkey='hk_a', recent_fills={'hk_a'}) is False
+
+    def test_no_success_minimum(self):
+        # The first completed fill is enough: zero lifetime successes, one fill in the window.
+        assert is_eligible(_miner_state(0, 0), hotkey='hk_new', recent_fills={'hk_new'}) is True
+
+
+class TestRecentFillHotkeys:
+    def test_young_ledger_reads_none(self, tmp_path: Path):
+        store = ValidatorStateStore(db_path=tmp_path / 'state.db')
+        now = 100_000
+        assert recent_fill_hotkeys(store, now) is None  # stamps ledger_since = now
+        assert recent_fill_hotkeys(store, now + ELIGIBILITY_FILL_WINDOW_SECS - 1) is None
+        assert recent_fill_hotkeys(store, now + ELIGIBILITY_FILL_WINDOW_SECS) == set()
+        store.close()
+
+    def test_window_is_trailing_and_half_open(self, tmp_path: Path):
+        store = ValidatorStateStore(db_path=tmp_path / 'state.db')
+        store.set_relay_meta(ValidatorStateStore.LEDGER_SINCE_KEY, '0')
+        now = 100_000
+        w = ELIGIBILITY_FILL_WINDOW_SECS
+        store.insert_clearing_rate(now - w, 'hk_old', 'btc', 'sol', 1, 1, 'k1')  # at the edge — out
+        store.insert_clearing_rate(now - w + 1, 'hk_in', 'btc', 'sol', 1, 1, 'k2')
+        store.insert_clearing_rate(now, 'hk_now', 'sol', 'tao', 1, 1, 'k3', qualified=False)
+        assert recent_fill_hotkeys(store, now) == {'hk_in', 'hk_now'}
+        store.close()
 
 
 class TestBuildEligibility:
@@ -329,8 +352,8 @@ class TestBuildEligibility:
 
     def test_maps_metagraph_hotkeys_to_gate(self):
         metagraph = make_metagraph(['hk_a', 'hk_b'])
-        client = FakeSolanaClient({'hk_a': (MIN_SUCCESSFUL_SWAPS, 0), 'hk_b': (0, 0)})
-        elig = build_eligibility(client, metagraph)
+        client = FakeSolanaClient({'hk_a': (5, 0), 'hk_b': (5, 0)})
+        elig = build_eligibility(client, metagraph, recent_fills={'hk_a'})
         assert elig == {'hk_a': True, 'hk_b': False}
 
     def test_off_metagraph_miner_dropped(self):
@@ -1351,11 +1374,11 @@ class TestCalculateMinerRewards:
         v.state_store.close()
 
     def test_ineligible_miner_earns_nothing(self, tmp_path: Path):
-        """A crown-holding miner below the success floor gates to weight 0 and
-        the whole pool recycles — the flat gate is a hard 0/1 multiplier."""
+        """A crown-holding miner with no fill in the activity window gates to weight 0
+        and the whole pool recycles — the gate is a hard 0/1 multiplier."""
         hotkeys = pad_hotkeys_to_cover_recycle(['hk_a'])
-        # hk_a holds the crown but has only 1 successful swap (< MIN=2).
-        v = make_validator(tmp_path, hotkeys=hotkeys, miner_counters={'hk_a': (1, 0)})
+        # hk_a holds the crown but has not completed a swap inside the window.
+        v = make_validator(tmp_path, hotkeys=hotkeys, recent_fills=set())
         conn = v.state_store.require_connection()
         conn.execute(
             'INSERT INTO rate_events (hotkey, from_chain, to_chain, rate, block) VALUES (?, ?, ?, ?, ?)',
@@ -2301,7 +2324,7 @@ class TestQualityVolumeSlice:
         v = make_validator(
             tmp_path,
             hotkeys,
-            miner_counters={'hk_a': (MIN_SUCCESSFUL_SWAPS, 0), 'hk_b': (MIN_SUCCESSFUL_SWAPS, MAX_FAILED_SWAPS + 1)},
+            miner_counters={'hk_a': (5, 0), 'hk_b': (5, MAX_FAILED_SWAPS + 1)},
         )
         self.seed_sol_btc_crown(v, 'hk_a')
         self.insert_volume(v, 'hk_b', from_amount=1_000_000_000)
@@ -2494,7 +2517,7 @@ class TestFillHeldCrown:
         idx.ingest(completed('pk_b', b'\x02' * 32, 9_860, 9_900), attribution)
         vols = v.state_store.get_qualified_lane_volumes(9_700, 10_000)
         assert vols == {('btc', 'sol', 'sol'): {'hk_a': (100_000, 200_000_000)}}
-        assert set(v.state_store.get_clearing_volumes(9_700, 10_000)[('btc', 'sol')]) == {'hk_a', 'hk_b'}
+        assert {'hk_a', 'hk_b'} <= set(v.state_store.get_clearing_volumes(9_700, 10_000)[('btc', 'sol')])
         v.state_store.close()
 
     def test_no_qualifier_means_unqualified(self, tmp_path: Path):
@@ -2593,27 +2616,61 @@ class TestEligibilityGateEndToEnd:
         )
         conn.commit()
 
-    def test_one_short_of_floor_earns_nothing(self, tmp_path: Path):
-        """One success below MIN_SUCCESSFUL_SWAPS (2) → ineligible → 0."""
+    def test_no_fill_in_window_earns_nothing(self, tmp_path: Path):
+        """Lapsed activity → ineligible → 0, however many lifetime successes."""
         hotkeys = pad_hotkeys_to_cover_recycle(['hk_a'])
-        v = make_validator(tmp_path, hotkeys, miner_counters={'hk_a': (MIN_SUCCESSFUL_SWAPS - 1, 0)})
+        v = make_validator(tmp_path, hotkeys, miner_counters={'hk_a': (50, 0)}, recent_fills=set())
         self.seed_btc_tao_crown(v, 'hk_a')
         rewards, _ = calculate_miner_rewards(v, v.block)
         assert rewards[0] == 0.0
         v.state_store.close()
 
-    def test_at_floor_earns_full_crown_share(self, tmp_path: Path):
-        """Exactly MIN_SUCCESSFUL_SWAPS successes → eligible → full crown share
-        (the whole btc→tao pool, no ramp scaling)."""
+    def test_first_fill_in_window_earns_full_crown_share(self, tmp_path: Path):
+        """Zero lifetime successes but one fill inside the window → eligible → full
+        crown share (no warm-up count)."""
         hotkeys = pad_hotkeys_to_cover_recycle(['hk_a'])
-        v = make_validator(tmp_path, hotkeys, miner_counters={'hk_a': (MIN_SUCCESSFUL_SWAPS, 0)})
+        v = make_validator(tmp_path, hotkeys, miner_counters={'hk_a': (0, 0)}, recent_fills={'hk_a'})
         self.seed_btc_tao_crown(v, 'hk_a')
         rewards, _ = calculate_miner_rewards(v, v.block)
         np.testing.assert_allclose(rewards[0], CROWN_SLICE * POOL_SOL_BTC, atol=1e-6)
         v.state_store.close()
 
+    def test_fill_just_outside_window_lapses(self, tmp_path: Path):
+        """The window is trailing from scoring time: a fill exactly one window ago is out,
+        one second inside is in."""
+        hotkeys = pad_hotkeys_to_cover_recycle(['hk_a'])
+        w = ELIGIBILITY_FILL_WINDOW_SECS
+        v = make_validator(tmp_path / 'out', hotkeys, block=w + 10_000, recent_fills=set())
+        v.state_store.insert_clearing_rate(10_000, 'hk_a', 'btc', 'sol', 1, 1, 'edge')
+        self.seed_btc_tao_crown(v, 'hk_a')
+        rewards, _ = calculate_miner_rewards(v, v.block)
+        assert rewards[0] == 0.0
+        v.state_store.close()
+
+        v = make_validator(tmp_path / 'in', hotkeys, block=w + 10_000, recent_fills=set())
+        v.state_store.insert_clearing_rate(10_001, 'hk_a', 'btc', 'sol', 1, 1, 'edge')
+        self.seed_btc_tao_crown(v, 'hk_a')
+        rewards, _ = calculate_miner_rewards(v, v.block)
+        np.testing.assert_allclose(rewards[0], CROWN_SLICE * POOL_SOL_BTC, atol=1e-6)
+        v.state_store.close()
+
+    def test_young_ledger_is_strikes_only(self, tmp_path: Path):
+        """A validator whose clearing ledger is younger than the window must not zero the
+        network: with no fill on record the miner still earns, strikes still bite."""
+        hotkeys = pad_hotkeys_to_cover_recycle(['hk_a', 'hk_b'])
+        v = make_validator(
+            tmp_path, hotkeys, miner_counters={'hk_a': (0, 0), 'hk_b': (9, MAX_FAILED_SWAPS + 1)}, recent_fills=set()
+        )
+        v.state_store.set_relay_meta(ValidatorStateStore.LEDGER_SINCE_KEY, str(v.block - 60))
+        self.seed_btc_tao_crown(v, 'hk_a')
+        self.seed_btc_tao_crown(v, 'hk_b')
+        rewards, _ = calculate_miner_rewards(v, v.block)
+        assert rewards[0] > 0.0
+        assert rewards[1] == 0.0
+        v.state_store.close()
+
     def test_at_failure_cap_still_eligible(self, tmp_path: Path):
-        """Failures exactly at MAX_FAILED_SWAPS (2), with enough successes →
+        """Failures exactly at MAX_FAILED_SWAPS (2), with a fill in the window →
         still eligible → full crown share."""
         hotkeys = pad_hotkeys_to_cover_recycle(['hk_a'])
         v = make_validator(tmp_path, hotkeys, miner_counters={'hk_a': (8, MAX_FAILED_SWAPS)})
@@ -2636,7 +2693,7 @@ class TestEligibilityGateEndToEnd:
         """An ineligible holder's crown share recycles to the owner UID, not to
         other miners — pool conservation holds."""
         hotkeys = pad_hotkeys_to_cover_recycle(['hk_a'])
-        v = make_validator(tmp_path, hotkeys, miner_counters={'hk_a': (1, 0)})
+        v = make_validator(tmp_path, hotkeys, recent_fills=set())
         self.seed_btc_tao_crown(v, 'hk_a')
         rewards, _ = calculate_miner_rewards(v, v.block)
         recycle_uid = RECYCLE_UID if RECYCLE_UID < len(rewards) else 0
@@ -3013,8 +3070,8 @@ class TestScoreSnapshots:
             tmp_path,
             hotkeys,
             miner_counters={
-                'hk_struck': (MIN_SUCCESSFUL_SWAPS, MAX_FAILED_SWAPS + 1),
-                'hk_ok': (MIN_SUCCESSFUL_SWAPS, 0),
+                'hk_struck': (5, MAX_FAILED_SWAPS + 1),
+                'hk_ok': (5, 0),
             },
         )
         v.database_storage.is_enabled.return_value = True
