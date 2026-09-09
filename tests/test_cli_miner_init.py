@@ -164,7 +164,7 @@ def test_configure_only_writes_config_env_and_keys(sandbox):
     assert stat.S_IMODE(keypair.stat().st_mode) == 0o600
 
     env = se.read_env(sandbox.project / '.env')
-    assert env['NETUID'] == '19' and env['SUBTENSOR_NETWORK'] == 'test'
+    assert env['NETUID'] == '19' and env['SUBTENSOR_NETWORK'] == 'test' and env['ALLWAYS_IMAGE_TAG'] == 'test'
     assert env['WALLET_NAME'] == 'w' and env['HOTKEY_NAME'] == 'h' and env['WALLET_PATH'] == str(sandbox.wallets)
     assert env['SOLANA_RPC_URL'] == 'http://rpc.test'
     assert env['ETH_NETWORK'] == 'sepolia' and env['BTC_NETWORK'] == 'testnet4'
@@ -223,3 +223,26 @@ def test_typed_confirm_requires_the_exact_word(monkeypatch):
     assert miner_init._typed_confirm(s, 'bind', 'why') is True
     s.yes = True
     assert miner_init._typed_confirm(s, 'bind', 'why') is True
+
+
+def test_activate_retries_across_the_metagraph_sync_window(monkeypatch):
+    """After a fresh registration, activation keeps retrying (bounded) until validators resync."""
+    s = miner_init.Setup(project_dir=os.getcwd(), registered_now=True)
+    calls = []
+
+    class Ctx:
+        def invoke(self, cmd, **kw):
+            calls.append(kw['backing'])
+            if len(calls) < 3:
+                raise SystemExit(1)
+
+    slept = []
+    monkeypatch.setattr(miner_init.time, 'sleep', lambda secs: slept.append(secs))
+    assert miner_init._activate_with_retry(Ctx(), s, 'sol') is True
+    assert calls == ['sol', 'sol', 'sol'] and len(slept) == 2
+
+    # not freshly registered → one attempt only
+    s2 = miner_init.Setup(project_dir=os.getcwd())
+    calls.clear()
+    assert miner_init._activate_with_retry(Ctx(), s2, 'sol') is False
+    assert calls == ['sol']

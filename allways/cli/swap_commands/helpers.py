@@ -723,6 +723,12 @@ def get_effective_config() -> dict:
     return config
 
 
+def wallet_path() -> Optional[str]:
+    """Wallet dir the CLI reads: WALLET_PATH (the same var docker compose mounts) or bittensor's default."""
+    raw = os.environ.get('WALLET_PATH')
+    return os.path.expanduser(raw) if raw else None
+
+
 def get_cli_context(
     need_wallet: bool = True,
     need_client: bool = False,
@@ -743,6 +749,7 @@ def get_cli_context(
             wallet = bt.Wallet(
                 name=config.get('wallet', 'default'),
                 hotkey=config.get('hotkey', 'default'),
+                path=wallet_path(),
             )
     # Ensure netuid is resolved for callers
     if 'netuid' not in config:

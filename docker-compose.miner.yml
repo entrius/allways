@@ -1,6 +1,6 @@
 services:
   miner:
-    image: entrius/allways:latest
+    image: entrius/allways:${ALLWAYS_IMAGE_TAG:-latest}   # testnet miners: ALLWAYS_IMAGE_TAG=test
     container_name: aw-miner
     restart: unless-stopped
     entrypoint: /app/scripts/miner-entrypoint.sh

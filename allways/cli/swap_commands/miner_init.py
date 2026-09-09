@@ -42,7 +42,12 @@ from allways.constants import TAO_HUB_VAULT_ADDRESSES
 from allways.solana.pdas import BACKING_CHAIN_SOL, BACKING_CHAIN_TAO
 
 COMPOSE_FILE = 'docker-compose.miner.yml'
+IMAGE_TAGS = {'testnet': 'test', 'mainnet': 'latest'}  # entrius/allways:<tag>, read by the compose file
 CONTAINER = 'aw-miner'
+# Validators learn of a new registration on their next metagraph sync (epoch_length 150 blocks ≈ 30 min),
+# so an activation right after registering must be retried across that window.
+ACTIVATE_RETRY_SECS = 180
+ACTIVATE_WAIT_AFTER_REGISTER_MINS = 35
 Check = Tuple[Optional[bool], str, str]
 
 
@@ -58,6 +63,8 @@ class Setup:
     solana_keypair: Optional[Path] = None
     env_values: Dict[str, str] = field(default_factory=dict)
     addresses: Dict[str, str] = field(default_factory=dict)
+    registered_now: bool = False
+    activate_wait_mins: Optional[int] = None  # None = auto: wait only after a fresh registration
 
     @property
     def env_path(self) -> Path:
@@ -128,7 +135,9 @@ def step_network(s: Setup, preset: Optional[str]) -> None:
     bundle['vault-address'] = TAO_HUB_VAULT_ADDRESSES[bundle['network']]
     _save_config(bundle)
     apply_chain_network_env(get_effective_config())
-    s.env_values.update(NETUID=bundle['netuid'], SUBTENSOR_NETWORK=bundle['network'])
+    s.env_values.update(
+        NETUID=bundle['netuid'], SUBTENSOR_NETWORK=bundle['network'], ALLWAYS_IMAGE_TAG=IMAGE_TAGS[s.env]
+    )
     ui.draw_done(
         console,
         f'{s.env}: netuid {bundle["netuid"]} · subtensor {bundle["network"]} · solana {bundle["solana-network"]}',
@@ -553,33 +562,59 @@ def _bind(ctx, s: Setup, client, pubkey, wallet) -> bool:
     return True
 
 
+def _unlock_coldkey(s: Setup, wallet) -> bool:
+    """Cache the coldkey password the way the miner does, so burned_register never prompts under -y."""
+    if not wallet.coldkey_file.is_encrypted():
+        return True
+    password = s.env_values.get('MINER_BITTENSOR_COLDKEY_PASSWORD') or os.environ.get(
+        'MINER_BITTENSOR_COLDKEY_PASSWORD'
+    )
+    if not password and s.yes:
+        console.print(
+            '  [red]Coldkey is encrypted; pass --coldkey-password (or unset -y) so registration can sign.[/red]'
+        )
+        return False
+    if password:
+        wallet.coldkey_file.save_password_to_env(password)
+    try:
+        wallet.unlock_coldkey()
+    except Exception as e:
+        console.print(f'  [red]Could not unlock coldkey: {e}[/red]')
+        return False
+    return True
+
+
 def _register(s: Setup, subtensor, wallet, netuid: int) -> bool:
     hot = wallet.hotkey.ss58_address
     ui.draw_step(
         console,
         10,
         f'Register on subnet {netuid}',
-        'Burns the registration cost from the coldkey. The coldkey password is asked for here.',
+        'Burns the registration cost from the coldkey. An encrypted coldkey asks for its password here.',
     )
     uid = subtensor.get_uid_for_hotkey_on_subnet(hot, netuid)
     if uid is not None:
         ui.draw_done(console, f'already registered as uid {uid}')
         return True
     try:
-        cost = subtensor.get_subnet_burn_cost(netuid)
-        console.print(f'  Registration cost: [bold]{cost}[/bold]')
+        console.print(f'  Registration cost: [bold]{subtensor.recycle(netuid)}[/bold]')
     except Exception:
         pass
+    manual = f'btcli subnet register --netuid {netuid} --wallet.name {s.wallet} --wallet.hotkey {s.hotkey} --network {s.bundle["network"]}'
     if not s.yes and not click.confirm('  Register now?', default=True):
-        _resume_hint(f'btcli subnet register --netuid {netuid} --wallet.name {s.wallet} --wallet.hotkey {s.hotkey}')
+        _resume_hint(manual)
+        return False
+    if not _unlock_coldkey(s, wallet):
+        _resume_hint(manual)
         return False
     resp = subtensor.burned_register(wallet, netuid)
     ok = bool(getattr(resp, 'success', resp))
     if not ok:
         console.print(f'  [red]{getattr(resp, "message", "registration failed")}[/red]')
-        _resume_hint(f'btcli subnet register --netuid {netuid}')
+        _resume_hint(manual)
         return False
     uid = subtensor.get_uid_for_hotkey_on_subnet(hot, netuid)
+    s.registered_now = True
     ui.draw_done(console, f'registered as uid {uid}')
     return True
 
@@ -660,9 +695,34 @@ def _run_container(s: Setup) -> bool:
     return True
 
 
-def _activate(ctx, s: Setup, client, pubkey) -> bool:
+def _activate_with_retry(ctx, s: Setup, backing: str) -> bool:
+    """Broadcast activation; after a fresh registration keep retrying until validators have resynced."""
     from allways.cli.swap_commands.miner_commands import miner_activate
 
+    wait_mins = s.activate_wait_mins
+    if wait_mins is None:
+        wait_mins = ACTIVATE_WAIT_AFTER_REGISTER_MINS if s.registered_now else 0
+    deadline = time.time() + wait_mins * 60
+    attempt = 0
+    while True:
+        attempt += 1
+        try:
+            ctx.invoke(miner_activate, backing=backing)
+            return True
+        except SystemExit:
+            pass
+        remaining = deadline - time.time()
+        if remaining <= 0:
+            return False
+        pause = min(ACTIVATE_RETRY_SECS, remaining)
+        console.print(
+            f'  [dim]Validators pick up a new registration on their next metagraph sync (up to ~30 min). '
+            f'Retrying in {max(1, round(pause / 60))} min — attempt {attempt}, {round(remaining / 60)} min left.[/dim]'
+        )
+        time.sleep(pause)
+
+
+def _activate(ctx, s: Setup, client, pubkey) -> bool:
     ui.draw_step(
         console, 13, 'Activate', 'Tells validators each purse is ready; they verify and vote it live on-chain.'
     )
@@ -673,9 +733,7 @@ def _activate(ctx, s: Setup, client, pubkey) -> bool:
         if states[backing].lit:
             ui.draw_done(console, f'{backing} purse already serving')
             continue
-        try:
-            ctx.invoke(miner_activate, backing=backing)
-        except SystemExit:
+        if not _activate_with_retry(ctx, s, backing):
             ok = False
             _resume_hint(f'alw miner activate --backing {backing}')
     return ok
@@ -747,6 +805,12 @@ def _take_global_flags(network, wallet, hotkey):
     help='Checkout holding .env + docker-compose.miner.yml',
 )
 @click.option(
+    '--activate-wait',
+    type=int,
+    default=None,
+    help='Minutes to keep retrying activation (default: 35 after a fresh registration, else 0)',
+)
+@click.option(
     '--configure-only', is_flag=True, help='Stop after writing config + preflight; skip the on-chain go-live steps'
 )
 @click.option(
@@ -764,6 +828,7 @@ def init_command(
     solana_rpc,
     coldkey_password,
     project_dir,
+    activate_wait,
     configure_only,
     yes,
 ):
@@ -778,7 +843,7 @@ def init_command(
         $ alw doctor[/dim]
     """
     network, wallet, hotkey = _take_global_flags(network, wallet, hotkey)
-    s = Setup(project_dir=project_dir.resolve(), yes=yes)
+    s = Setup(project_dir=project_dir.resolve(), yes=yes, activate_wait_mins=activate_wait)
     ui.draw_logo(console, 'Welcome to the Allways miner setup!')
     console.print('[dim]Order matters on-chain: deposit → bind → register → (bond) → run → activate → quote.[/dim]')
     if not (s.project_dir / COMPOSE_FILE).is_file():
