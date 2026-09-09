@@ -290,6 +290,7 @@ if __name__ == '__main__':
                     f'Forward progress stalled for {forward_age:.0f}s '
                     f'(>{FORWARD_STALL_THRESHOLD_SECONDS}s) — exiting for restart'
                 )
-                sys.exit(1)
+                # sys.exit would join the executor thread the stalled forward is blocked in.
+                os._exit(1)
             bt.logging.info(f'Validator running... step={validator.step} (last forward {forward_age:.0f}s ago)')
             time.sleep(60)
