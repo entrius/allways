@@ -83,6 +83,18 @@ DO UPDATE SET eligible    = EXCLUDED.eligible,
               vol_share   = EXCLUDED.vol_share
 """
 
+# direction_pools: per-round pool ledger, EVERY lane every round (dead lanes at
+# pool=0) — flushed with miner_scores so the dashboard can chart emission per
+# hub / pair / lane over time from one table. Idempotent on retry of the round.
+BULK_UPSERT_DIRECTION_POOLS = """
+INSERT INTO direction_pools (round_ts, from_chain, to_chain, backing, pool, qualified_volume, live)
+VALUES (%s, %s, %s, %s, %s, %s, %s)
+ON CONFLICT (round_ts, from_chain, to_chain, backing)
+DO UPDATE SET pool             = EXCLUDED.pool,
+              qualified_volume = EXCLUDED.qualified_volume,
+              live             = EXCLUDED.live
+"""
+
 # current_miner_scores: the live mid-round tip of miner_scores, wiped and
 # rewritten every forward step. The table only ever holds the in-progress round,
 # so the wipe is unconditional (no per-direction bookkeeping needed).

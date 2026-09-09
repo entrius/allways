@@ -731,6 +731,7 @@ def calculate_miner_rewards(self: Validator, current_time: int) -> Tuple[np.ndar
             crown_window_bounds_by_direction={lane: (window_start, window_end) for lane in pools},
             miner_score_rows=miner_score_tuples(score_rows, cursor_ts),
             crown_holders_max_ts=cursor_ts,
+            direction_pool_rows=direction_pool_tuples(direction_traces, cursor_ts),
         )
 
     return rewards, set(range(n_uids))
@@ -755,6 +756,16 @@ def miner_score_tuples(score_rows: List[ScoreRow], ts: int) -> List[Tuple]:
             r.qvol_share,
         )
         for r in score_rows
+    ]
+
+
+def direction_pool_tuples(direction_traces: Dict[Tuple[str, str, str], DirectionTrace], ts: int) -> List[Tuple]:
+    """Shape the round's pools for the ``direction_pools`` ledger: one row per lane,
+    dead lanes included at pool 0 — ``(round_ts, from, to, backing, pool, qualified_volume,
+    live)``. Hub / pair emission over time is a plain sum over these."""
+    return [
+        (ts, from_chain, to_chain, backing, trace.pool, int(trace.qualified_volume), trace.pool > 0)
+        for (from_chain, to_chain, backing), trace in direction_traces.items()
     ]
 
 

@@ -3075,6 +3075,23 @@ class TestScoreSnapshots:
         np.testing.assert_allclose(reward, expected, atol=1e-9)
         np.testing.assert_allclose(reward, rewards[0], atol=1e-6)
 
+    def test_round_flush_writes_every_lane_pool(self, tmp_path: Path):
+        """direction_pools rows: one per lane every round, dead lanes at pool 0 / live
+        False, live lanes carrying the qualified volume the β slice paid on; the
+        pools sum to the miner pool share."""
+        v = self._solo_with_storage(tmp_path)
+        calculate_miner_rewards(v, v.block)
+        rows = v.database_storage.flush_scoring_window.call_args.kwargs['direction_pool_rows']
+        by_lane = {(r[1], r[2], r[3]): r for r in rows}
+        assert set(by_lane) == set(compute_direction_pools({}))  # every lane, every round
+        assert all(r[0] == v.block for r in rows)
+        live = by_lane[('btc', 'sol', 'sol')]
+        assert live[4] == pytest.approx(POOL_BUSY_PAIR_LEG) and live[5] == 1_000_000_000 and live[6] is True
+        dead = by_lane[('sol', 'eth', 'sol')]
+        assert dead[4] == 0.0 and dead[5] == 0 and dead[6] is False
+        assert sum(r[4] for r in rows) == pytest.approx(MINER_POOL_SHARE)
+        v.state_store.close()
+
     def test_ineligible_miner_is_not_a_crown_candidate(self, tmp_path: Path):
         """An ineligible miner (strikes / hub mid-settle) is removed from crown
         CANDIDACY, not merely zeroed at payout: a lane whose only poster is
