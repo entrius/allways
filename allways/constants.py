@@ -169,10 +169,11 @@ QUALITY_VOLUME_BETA = 0.25
 # clearing_rates rows must outlive the pool volume window (plus stall headroom) — the
 # crown tables only need SCORING_WINDOW_SECS, but pools read a full day back.
 CLEARING_RETENTION_SECS = POOL_VOLUME_WINDOW_SECS + MAX_SCORING_BACKFILL_SECS
-# Capacity curve exponent: capacity = min(1, (collateral / required)^k). Linear (k=1) since the
-# depth-weighted band (#614) already splits crown by collateral, so a convex ramp on top counted
-# depth twice. Still capped at 1.0 — depth past required earns nothing extra, never pay-to-win.
-CAPACITY_CURVE_EXPONENT: float = 1.0
+# Capacity curve exponent (>1 = convex): capacity = min(1, (collateral / required)^k). Convex so
+# thin-parked collateral is penalised harder than linear (a miner backing the best rate on a sliver
+# earns a smaller slice than the ratio alone), pushing miners to deepen. Still capped at 1.0 — depth
+# past required earns nothing extra, so it never becomes pay-to-win.
+CAPACITY_CURVE_EXPONENT: float = 2.0
 # Binary eligibility gate: at most MAX_FAILED_SWAPS lifetime timeouts (the on-chain MinerState
 # counter, never resets) AND at least one completed swap inside the trailing
 # ELIGIBILITY_FILL_WINDOW_SECS (the validator's clearing ledger), judged PER PURSE: a lane is live
