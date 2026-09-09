@@ -1,8 +1,9 @@
 """Crown-time scoring pipeline.
 
-Reward per miner is ``eligible × pool × crown_share × capacity``, where
-``eligible`` is a flat 0/1 gate read off the on-chain ``MinerState`` counters
-(B3.3) — it replaces the old ``sr³ × credibility ramp``. Any shortfall recycles
+Reward per miner and lane is ``eligible × pool × [(1−β) × crown_share × capacity
++ β × qualified_volume_share]``, where ``eligible`` is a flat 0/1 gate read off the
+on-chain ``MinerState`` counters (B3.3) and the β slice pays fills that were reserved
+on a crown holder (``fill_held_crown``). Any shortfall recycles
 to ``RECYCLE_UID`` — the burn is dynamic (whatever the pool did not earn) and
 deliberate: it keeps a penalty absolute rather than something weight
 normalization stretches back to 100%. Entry is ``score_and_reward_miners``.
@@ -28,6 +29,7 @@ from allways.constants import (
     CLEARING_RETENTION_SECS,
     CROWN_RATE_BAND,
     DIRECTION_POOLS,
+    EVENT_RETENTION_SECS,
     HUB_CHAINS,
     MAX_FAILED_SWAPS,
     MAX_SCORING_BACKFILL_SECS,
@@ -35,6 +37,7 @@ from allways.constants import (
     MINER_POOL_SHARE,
     POOL_VOLUME_ALPHA,
     POOL_VOLUME_WINDOW_SECS,
+    QUALITY_VOLUME_BETA,
     RATE_PRECISION,
     RECYCLE_UID,
     REWARD_MINER_STATES,
@@ -61,6 +64,7 @@ if TYPE_CHECKING:
 class DirectionTrace:
     pool: float = 0.0
     crown_time: Dict[str, float] = field(default_factory=dict)
+    qualified_volume: int = 0  # lane's qualified hub-leg notional over the pool window
     cap_weighted_time: Dict[str, float] = field(default_factory=dict)
     unfilled_time: int = 0
     best_rate: float = 0.0
@@ -160,11 +164,12 @@ def build_halted_rewards(self: Validator) -> Tuple[np.ndarray, Set[int]]:
 
 
 def prune_crown_events(self: Validator, current_time: int) -> None:
-    """Trim the crown-time event tables to one trailing window. The Solana
-    event tables are keyed by unix blockTime, so the cutoff is on that axis;
+    """Trim the crown-time event tables to ``EVENT_RETENTION_SECS`` (the scoring
+    backfill cap plus the longest swap life, so ``fill_held_crown`` can still replay a
+    completed fill's reservation instant). Keyed by unix blockTime, so the cutoff is on that axis;
     this also takes over the active/activity/collateral pruning the deleted
     substrate event_watcher used to own (each preserves a per-hotkey anchor)."""
-    cutoff = current_time - SCORING_WINDOW_SECS
+    cutoff = current_time - EVENT_RETENTION_SECS
     if cutoff <= 0:
         return
     self.state_store.prune_events_older_than(cutoff)
@@ -334,6 +339,7 @@ class ScoreRow:
     crown_share: float
     capacity: float
     reward: float
+    qvol_share: float = 0.0  # share of the lane's qualified volume the β slice paid on
 
 
 def build_direction_score_rows(
@@ -344,17 +350,24 @@ def build_direction_score_rows(
     crown_time: Dict[str, float],
     cap_weighted_time: Dict[str, float],
     eligibility: Dict[str, bool],
+    qvol_share: Optional[Dict[str, float]] = None,
 ) -> List[ScoreRow]:
-    """Per-holder factors + reward for one lane — the single place the
+    """Per-miner factors + reward for one lane — the single place the
     reward multiplication lives, shared by the round scorer
     (``calculate_miner_rewards``) and the live tip
     (``snapshot_current_miner_scores``) so the two can never disagree.
-    One row per crown holder — only crown holders earn."""
+    One row per crown holder or qualified filler: the lane pool pays (1−β) on
+    crown time × capacity and β on qualified volume share (``qvol_share``,
+    ``qualified_volume_shares``). A lane with neither pays nobody; a lane
+    with no qualified volume leaves its β slice to the recycle."""
+    qvol_share = qvol_share or {}
     total_crown_dir = sum(crown_time.values())
     rows: List[ScoreRow] = []
-    if total_crown_dir <= 0:
+    if total_crown_dir <= 0 and not qvol_share:
         return rows
-    for hotkey, secs in crown_time.items():
+    ordered = list(crown_time) + [hk for hk in qvol_share if hk not in crown_time]
+    for hotkey in ordered:
+        secs = crown_time.get(hotkey, 0.0)
         # Capacity is integrated over time during the replay, so the effective
         # multiplier is the time-weighted average over the miner's crown
         # intervals. Reading current collateral here would let a post-window
@@ -362,7 +375,10 @@ def build_direction_score_rows(
         cap_secs = cap_weighted_time.get(hotkey, 0.0)
         cap = (cap_secs / secs) if secs > 0 else 0.0
         eligible = eligibility.get(hotkey, False)
-        crown_share_dir = secs / total_crown_dir
+        crown_share_dir = (secs / total_crown_dir) if total_crown_dir > 0 else 0.0
+        qv = qvol_share.get(hotkey, 0.0)
+        # The β slice is not capacity-scaled: a completed fill was backed by construction.
+        share = (1.0 - QUALITY_VOLUME_BETA) * crown_share_dir * cap + QUALITY_VOLUME_BETA * qv
         rows.append(
             ScoreRow(
                 hotkey=hotkey,
@@ -373,10 +389,38 @@ def build_direction_score_rows(
                 pool=pool,
                 crown_share=crown_share_dir,
                 capacity=cap,
-                reward=(1.0 if eligible else 0.0) * pool * crown_share_dir * cap,
+                reward=(1.0 if eligible else 0.0) * pool * share,
+                qvol_share=qv,
             )
         )
     return rows
+
+
+def lane_volumes_to_directions(
+    lane_volumes: Dict[Tuple[str, str, str], Dict[str, Tuple[int, int]]],
+) -> Dict[Tuple[str, str], Dict[str, Tuple[int, int]]]:
+    """Collapse the per-lane qualified volumes into the pair-direction shape
+    ``compute_direction_pools`` reads — pool volume is never split by backing."""
+    out: Dict[Tuple[str, str], Dict[str, Tuple[int, int]]] = {}
+    for (from_chain, to_chain, _backing), by_hotkey in lane_volumes.items():
+        direction = out.setdefault((from_chain, to_chain), {})
+        for hotkey, (from_sum, to_sum) in by_hotkey.items():
+            prev_from, prev_to = direction.get(hotkey, (0, 0))
+            direction[hotkey] = (prev_from + from_sum, prev_to + to_sum)
+    return out
+
+
+def qualified_volume_shares(
+    lane_volume: Dict[str, Tuple[int, int]], from_chain: str, to_chain: str
+) -> Tuple[Dict[str, float], int]:
+    """``({hotkey: share}, total)`` of one lane's qualified hub-leg notional — the
+    β slice's per-miner split. Empty when nothing qualified cleared on the lane."""
+    leg = 0 if from_chain == hub_leg(from_chain, to_chain) else 1
+    notional = {hk: sums[leg] for hk, sums in lane_volume.items() if sums[leg] > 0}
+    total = sum(notional.values())
+    if total <= 0:
+        return {}, 0
+    return {hk: n / total for hk, n in notional.items()}, total
 
 
 def compute_direction_pools(
@@ -507,15 +551,17 @@ def calculate_miner_rewards(self: Validator, current_time: int) -> Tuple[np.ndar
         bt.logging.warning(f'swap-bounds read failed: {e}')
         swap_bounds = {}
 
-    # Pools follow realized demand: one volume read for the trailing day, shared
-    # by every direction this round so the pools it pays sum to exactly 1.
-    pools = compute_direction_pools(
-        self.state_store.get_clearing_volumes(current_time - POOL_VOLUME_WINDOW_SECS, current_time)
-    )
+    # Pools follow qualified demand: one volume read for the trailing day feeds both the
+    # pair-level pool weighting and each lane's β slice, so the pools it pays sum to exactly 1.
+    lane_volumes = self.state_store.get_qualified_lane_volumes(current_time - POOL_VOLUME_WINDOW_SECS, current_time)
+    pools = compute_direction_pools(lane_volumes_to_directions(lane_volumes))
 
     for (from_chain, to_chain, backing), pool in pools.items():
         trace = DirectionTrace(pool=pool)
         direction_traces[(from_chain, to_chain, backing)] = trace
+        qvol, trace.qualified_volume = qualified_volume_shares(
+            lane_volumes.get((from_chain, to_chain, backing), {}), from_chain, to_chain
+        )
         intervals: Optional[List[Tuple[int, int, Dict[str, float], float]]] = None
         if storage_enabled:
             intervals = []
@@ -542,9 +588,12 @@ def calculate_miner_rewards(self: Validator, current_time: int) -> Tuple[np.ndar
         )
         total_crown_dir = sum(crown_time.values())
 
-        bt.logging.debug(f'V1 scoring [{from_chain}→{to_chain}|{backing}]: total_crown={total_crown_dir:.1f}s')
+        bt.logging.debug(
+            f'V1 scoring [{from_chain}→{to_chain}|{backing}]: total_crown={total_crown_dir:.1f}s '
+            f'qualified_volume={trace.qualified_volume}'
+        )
 
-        if total_crown_dir == 0:
+        if total_crown_dir == 0 and not qvol:
             continue  # empty bucket — pool recycles via the remainder below
 
         rows = build_direction_score_rows(
@@ -558,13 +607,17 @@ def calculate_miner_rewards(self: Validator, current_time: int) -> Tuple[np.ndar
                 hk: direction_eligible(ms, from_chain, to_chain, current_time, backing=backing)
                 for hk, ms in live_states.items()
             },
+            qvol_share=qvol,
         )
         for row in rows:
             uid = hotkey_to_uid.get(row.hotkey)
             if uid is None:
                 continue  # dereg'd mid-window; credit forfeited
             wt = weighting_traces.setdefault(row.hotkey, WeightingTrace())
-            wt.record_capacity(factor=row.capacity)
+            if row.crown_share > 0:
+                wt.record_capacity(factor=row.capacity)
+            if row.qvol_share > 0:
+                wt.record_qvol(share=row.qvol_share)
             wt.record_eligibility(eligible=row.eligible)
             rewards[uid] += row.reward
             score_rows.append(row)
@@ -631,6 +684,7 @@ def miner_score_tuples(score_rows: List[ScoreRow], ts: int) -> List[Tuple]:
             r.crown_share,
             r.capacity,
             r.reward,
+            r.qvol_share,
         )
         for r in score_rows
     ]
@@ -660,9 +714,11 @@ def snapshot_current_miner_scores(
         bt.logging.warning(f'swap-bounds read failed in live score snapshot: {e}')
         swap_bounds = {}
     rows: List[ScoreRow] = []
-    pools = compute_direction_pools(self.state_store.get_clearing_volumes(ts - POOL_VOLUME_WINDOW_SECS, ts))
+    lane_volumes = self.state_store.get_qualified_lane_volumes(ts - POOL_VOLUME_WINDOW_SECS, ts)
+    pools = compute_direction_pools(lane_volumes_to_directions(lane_volumes))
     for (from_chain, to_chain, backing), pool in pools.items():
         trace = DirectionTrace(pool=pool)
+        qvol, _ = qualified_volume_shares(lane_volumes.get((from_chain, to_chain, backing), {}), from_chain, to_chain)
         min_swap_hub, max_swap_hub = swap_bounds.get(backing, (0, 0))
         lane_candidates = lane_eligible_hotkeys(
             live_states, rewardable_hotkeys, from_chain, to_chain, ts, backing=backing
@@ -681,7 +737,7 @@ def snapshot_current_miner_scores(
             backing=backing,
             purse_known=direction_purse_known(backing),
         )
-        if not crown_time:
+        if not crown_time and not qvol:
             continue
         dir_rows = build_direction_score_rows(
             from_chain,
@@ -693,6 +749,7 @@ def snapshot_current_miner_scores(
             eligibility={
                 hk: direction_eligible(ms, from_chain, to_chain, ts, backing=backing) for hk, ms in live_states.items()
             },
+            qvol_share=qvol,
         )
         rows.extend(dir_rows)
     return miner_score_tuples(rows, ts)
@@ -700,11 +757,10 @@ def snapshot_current_miner_scores(
 
 def capacity_factor(collateral_rao: int, max_swap_amount_rao: int) -> float:
     """min(1, (collateral / required_collateral(max_swap))^k) — full credit means holding enough
-    to accept a max_swap fill at the contract's 1.10× gate. The exponent k (CAPACITY_CURVE_EXPONENT,
-    >1) makes the ramp convex: backing a rate on a sliver of the band earns less than the raw ratio,
-    so thin-parked collateral is penalised harder and depth is worth posting. Still capped at 1.0 —
-    collateral past the requirement earns nothing extra, so it never becomes pay-to-win. Fail-safe to
-    1.0 when bounds unset."""
+    to accept a max_swap fill at the contract's 1.10× gate. k is CAPACITY_CURVE_EXPONENT (1 = linear:
+    the depth-weighted band already makes depth rivalrous, so the ramp is the raw ratio). Capped at
+    1.0 — collateral past the requirement earns nothing extra, so it never becomes pay-to-win.
+    Fail-safe to 1.0 when bounds unset."""
     if max_swap_amount_rao <= 0:
         return 1.0
     if collateral_rao <= 0:
@@ -1170,6 +1226,70 @@ def snapshot_current_crown_holders(
             else:
                 rows_by_direction[(from_chain, to_chain, backing)] = []
     return rows_by_direction
+
+
+def fill_held_crown(
+    self: Validator,
+    hotkey: str,
+    from_chain: str,
+    to_chain: str,
+    backing: str,
+    collateral_amount: int,
+    at_time: int,
+) -> bool:
+    """Quality-volume test for one completed fill: did ``hotkey`` hold the lane's crown at
+    ``at_time`` (its reservation instant), judged for a fill of ``collateral_amount`` hub units?
+    Same reconstruct + ``crown_holders_at_instant`` the live snapshot runs, with two deliberate
+    differences: the reserved miner is always a candidate (it was takeable by construction — its own
+    RESERVE_START lands at this instant), and can-fund is bound to THIS swap's size rather than the
+    min swap, so a fill the seam routed past a too-thin crown holder still counts. Crown movement
+    after ``at_time`` never changes the answer. Competitor eligibility reads the live counters (an
+    approximation the paid crown makes too)."""
+    rewardable_hotkeys: Set[str] = set(self.metagraph.hotkeys)
+    if hotkey not in rewardable_hotkeys:
+        return False
+    try:
+        live_states = live_miner_states(self.solana_client, self.metagraph)
+        lane_candidates = lane_eligible_hotkeys(
+            live_states, rewardable_hotkeys, from_chain, to_chain, at_time, backing=backing
+        )
+    except Exception as e:
+        bt.logging.warning(f'fill_held_crown: eligibility read failed, judging against every miner: {e}')
+        lane_candidates = set(rewardable_hotkeys)
+    lane_candidates = set(lane_candidates) | {hotkey}
+    try:
+        swap_bounds = bounds_from_config(self.solana_config_cache.config())
+    except Exception as e:
+        bt.logging.warning(f'swap-bounds read failed in fill_held_crown: {e}')
+        swap_bounds = {}
+    min_swap_hub, max_swap_hub = swap_bounds.get(backing, (0, 0))
+    purse_known = direction_purse_known(backing)
+    rates, activity, active_set, collaterals = reconstruct_window_start_state(
+        self.state_store, self.event_index, from_chain, to_chain, at_time, lane_candidates, backing
+    )
+    canon_from, _ = canonical_pair(from_chain, to_chain)
+    lower_rate_wins = from_chain != canon_from
+    rewardable_by_state = rewardable_by_activity(activity, lane_candidates, lane_serving_hubs(backing)) | {hotkey}
+    executable_check, _ = make_crown_predicates(from_chain, to_chain, min_swap_hub, max_swap_hub, collaterals)
+    bounds_set = min_swap_hub > 0 or max_swap_hub > 0
+    need = required_collateral(int(collateral_amount))
+
+    def can_back(hk: str, _rate: float) -> bool:
+        # The reserved miner backed this exact size on-chain — that reservation is the proof.
+        return hk == hotkey or collaterals.get(hk, 0) >= need
+
+    holders = crown_holders_at_instant(
+        rates,
+        lane_candidates,
+        rewardable_by_state=rewardable_by_state,
+        active=active_set | {hotkey},
+        lower_rate_wins=lower_rate_wins,
+        executable_rate_check=executable_check,
+        # Same permissive reading as the paid crown when bounds are unset (contract sentinel).
+        can_fund_at_rate=can_back if bounds_set and purse_known and need > 0 else None,
+        rate_band=CROWN_RATE_BAND,
+    )
+    return hotkey in holders
 
 
 def intervals_to_crown_rows(

@@ -37,9 +37,13 @@ class WeightingTrace:
 
     capacity_factor: float = 1.0
     eligible: bool = False
+    qvol_share: float = 0.0  # summed across lanes — a diagnostic, not a paid figure
 
     def record_capacity(self, factor: float) -> None:
         self.capacity_factor = factor
+
+    def record_qvol(self, share: float) -> None:
+        self.qvol_share += share
 
     def record_eligibility(self, eligible: bool) -> None:
         self.eligible = eligible
@@ -75,7 +79,8 @@ def log_scoring_trace(
             if hk in hotkey_to_uid
         )
         lines.append(
-            f'  [{from_c}→{to_c}|{backing}] pool={trace.pool:g} holders={{{holders}}} unfilled={trace.unfilled_time}s'
+            f'  [{from_c}→{to_c}|{backing}] pool={trace.pool:g} holders={{{holders}}} '
+            f'unfilled={trace.unfilled_time}s qvol={trace.qualified_volume}'
         )
 
     # Log everyone paid OR holding crown — an ineligible crown holder earning 0 must appear.
@@ -93,6 +98,8 @@ def log_scoring_trace(
         extras = ''
         if wt is not None:
             extras = f' cap={wt.capacity_factor:.2f}'
+            if wt.qvol_share > 0:
+                extras += f' qvol={wt.qvol_share:.2f}'
         lines.append(
             f'  uid={uid} hotkey={hk[:8]}.. crown_s={crown_secs:.0f} eligible={eligible}{extras} reward={crown_reward:.3f}'
         )

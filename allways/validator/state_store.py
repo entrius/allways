@@ -408,23 +408,71 @@ class ValidatorStateStore:
         from_amount: int,
         to_amount: int,
         swap_key: str,
+        backing: str = 'sol',
+        qualified: bool = False,
     ) -> None:
         """Persist one completed swap's realized legs, keyed by ``swap_key`` hex so a
         cursor-reset / RPC-prune re-ingest can't double-count volume. ``block_num`` is
-        the unix ``blockTime``; the legs are stored as decimal strings (u128-safe)."""
+        the unix ``blockTime``; the legs are stored as decimal strings (u128-safe).
+        ``qualified`` = the fill was reserved on a crown holder (scoring.fill_held_crown)."""
         self._execute(
             """
-            INSERT INTO clearing_rates (block_num, hotkey, from_chain, to_chain, from_amount, to_amount, swap_key)
-            VALUES (?, ?, ?, ?, ?, ?, ?)
+            INSERT INTO clearing_rates
+                (block_num, hotkey, from_chain, to_chain, from_amount, to_amount, swap_key, backing, qualified)
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
             ON CONFLICT(swap_key) DO NOTHING
             """,
-            (block_num, hotkey, from_chain, to_chain, str(int(from_amount)), str(int(to_amount)), swap_key),
+            (
+                block_num,
+                hotkey,
+                from_chain,
+                to_chain,
+                str(int(from_amount)),
+                str(int(to_amount)),
+                swap_key,
+                backing,
+                1 if qualified else 0,
+            ),
         )
+
+    def get_qualified_lane_volumes(
+        self, start_time: int, end_time: int
+    ) -> Dict[Tuple[str, str, str], Dict[str, Tuple[int, int]]]:
+        """``{(from_chain, to_chain, backing): {hotkey: (from_amount_sum, to_amount_sum)}}`` over
+        ``(start_time, end_time]``, QUALIFIED fills only — the series both the pool weighting and
+        the β quality-volume slice read. Summed in Python (legs are TEXT, u128-safe)."""
+        rows = self._fetchall(
+            """
+            SELECT from_chain, to_chain, backing, hotkey, from_amount, to_amount FROM clearing_rates
+            WHERE qualified = 1 AND block_num > ? AND block_num <= ?
+            """,
+            (start_time, end_time),
+        )
+        volumes: Dict[Tuple[str, str, str], Dict[str, Tuple[int, int]]] = {}
+        for r in rows:
+            lane = volumes.setdefault((r['from_chain'], r['to_chain'], r['backing']), {})
+            from_sum, to_sum = lane.get(r['hotkey'], (0, 0))
+            lane[r['hotkey']] = (from_sum + int(r['from_amount']), to_sum + int(r['to_amount']))
+        return volumes
+
+    def get_last_reserve_start(self, hotkey: str, hub: str, before: int) -> Optional[int]:
+        """Block time of the miner's most recent RESERVE_START on ``hub`` strictly before
+        ``before`` — a completed swap's reservation instant (one live swap per hub, so the last
+        reserve edge before its SwapCompleted is its own). NULL-hub legacy rows match any hub."""
+        row = self._fetchone(
+            """
+            SELECT block_num FROM activity_events
+            WHERE hotkey = ? AND kind = ? AND block_num < ? AND (hub IS NULL OR hub = ?)
+            ORDER BY block_num DESC, id DESC LIMIT 1
+            """,
+            (hotkey, int(ActivityTransition.RESERVE_START), before, hub),
+        )
+        return int(row['block_num']) if row is not None else None
 
     def get_clearing_volumes(self, start_time: int, end_time: int) -> Dict[Tuple[str, str], Dict[str, Tuple[int, int]]]:
         """``{(from_chain, to_chain): {hotkey: (from_amount_sum, to_amount_sum)}}``
-        over ``(start_time, end_time]`` — the windowed realized-volume read.
-        Scoring no longer consumes it; the dashboard and treasury reporting do.
+        over ``(start_time, end_time]`` — the windowed realized-volume read, ALL fills.
+        Reporting reads this; scoring reads ``get_qualified_lane_volumes``.
         Summed in Python: the legs are stored as TEXT (u128-safe) and SQL SUM
         would coerce them to float."""
         rows = self._fetchall(
@@ -998,6 +1046,14 @@ class ValidatorStateStore:
             cols = [row[1] for row in conn.execute('PRAGMA table_info(activity_events)')]
             if cols and 'hub' not in cols:
                 conn.execute('ALTER TABLE activity_events ADD COLUMN hub TEXT')
+            # Quality volume: a clearing row carries the backing it drew on and whether the fill
+            # was reserved on a crown holder. Pre-upgrade rows read unqualified (no reservation
+            # replay behind them) — they age out of the pool window within a day.
+            cols = [row[1] for row in conn.execute('PRAGMA table_info(clearing_rates)')]
+            if cols and 'backing' not in cols:
+                conn.execute("ALTER TABLE clearing_rates ADD COLUMN backing TEXT NOT NULL DEFAULT 'sol'")
+            if cols and 'qualified' not in cols:
+                conn.execute('ALTER TABLE clearing_rates ADD COLUMN qualified INTEGER NOT NULL DEFAULT 0')
             conn.executescript(
                 """
                 CREATE TABLE IF NOT EXISTS rate_events (
@@ -1068,7 +1124,9 @@ class ValidatorStateStore:
                     to_chain    TEXT NOT NULL,
                     from_amount TEXT NOT NULL,
                     to_amount   TEXT NOT NULL,
-                    swap_key    TEXT
+                    swap_key    TEXT,
+                    backing     TEXT NOT NULL DEFAULT 'sol',
+                    qualified   INTEGER NOT NULL DEFAULT 0
                 );
                 CREATE INDEX IF NOT EXISTS idx_clearing_rates_dir_block
                     ON clearing_rates(from_chain, to_chain, block_num);
