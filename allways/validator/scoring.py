@@ -182,18 +182,22 @@ def prune_crown_events(self: Validator, current_time: int) -> None:
     self.state_store.prune_swap_outcomes(current_time - SWAP_OUTCOME_RETENTION_SECS)
 
 
+RecentFills = Dict[str, Set[str]]  # {backing: hotkeys that delivered on that purse in the window}
+
+
 def is_eligible(
     miner_state,
     now: Optional[int] = None,
     *,
     hotkey: Optional[str] = None,
-    recent_fills: Optional[Set[str]] = None,
+    recent_fills: Optional[RecentFills] = None,
 ) -> bool:
     """The GLOBAL binary gate, one reputation across every hub: at most ``MAX_FAILED_SWAPS``
-    lifetime timeouts (on-chain ``MinerState`` counter) AND a completed fill inside the trailing
-    ``ELIGIBILITY_FILL_WINDOW_SECS`` — ``recent_fills`` is that window's hotkey set
-    (``recent_fill_hotkeys``). ``recent_fills=None`` means the ledger is younger than the window
-    (fresh validator DB) and the gate is strikes-only. No warm-up count: the first fill qualifies.
+    lifetime timeouts (on-chain ``MinerState`` counter) AND a completed fill on ANY purse inside
+    the trailing ``ELIGIBILITY_FILL_WINDOW_SECS`` (``recent_fills``, from ``recent_fill_hotkeys``).
+    The per-purse reading — a lane is live only while its OWN backing delivered — is
+    ``purse_active`` / ``direction_eligible``. ``recent_fills=None`` means the ledger is younger
+    than the window (fresh validator DB) and the gate is strikes-only. No warm-up count.
 
     The settlement exclusion moved per-hub in v3.1: see ``direction_eligible``,
     which zeroes only the settling hub's contribution instead of the whole miner."""
@@ -202,12 +206,21 @@ def is_eligible(
         return False
     if recent_fills is None:
         return True
-    return hotkey in recent_fills
+    return any(hotkey in hotkeys for hotkeys in recent_fills.values())
 
 
-def recent_fill_hotkeys(store: ValidatorStateStore, now: int) -> Optional[Set[str]]:
-    """The activity gate's input for one round: hotkeys with a fill in the trailing window, or
-    None while this validator's clearing ledger is younger than the window (strikes-only)."""
+def purse_active(hotkey: Optional[str], backing: str, recent_fills: Optional[RecentFills]) -> bool:
+    """Whether ``hotkey`` delivered a fill drawing on ``backing`` inside the activity window.
+    None (young ledger) reads active."""
+    if recent_fills is None:
+        return True
+    return hotkey in recent_fills.get(backing, ())
+
+
+def recent_fill_hotkeys(store: ValidatorStateStore, now: int) -> Optional[RecentFills]:
+    """The activity gate's input for one round: per purse, the hotkeys with a fill in the
+    trailing window — or None while this validator's clearing ledger is younger than the window
+    (strikes-only)."""
     if now - store.clearing_ledger_since(now) < ELIGIBILITY_FILL_WINDOW_SECS:
         return None
     return store.get_recent_fill_hotkeys(now - ELIGIBILITY_FILL_WINDOW_SECS, now)
@@ -233,9 +246,10 @@ def direction_eligible(
     backing: Optional[str] = None,
     *,
     hotkey: Optional[str] = None,
-    recent_fills: Optional[Set[str]] = None,
+    recent_fills: Optional[RecentFills] = None,
 ) -> bool:
-    """Per-lane gate: the global strikes AND the lane's own hub not mid-settle. ``backing`` names
+    """Per-lane gate: the global strikes AND the lane's own hub not mid-settle AND that hub
+    active (a fill drawing on it inside the activity window). ``backing`` names
     the lane (V-2 fix, shipped with the F4 dual-backing lanes): a miner mid-TAO-settle is zeroed on
     the (sol↔tao, tao) lane only — the honest SOL-backed lane keeps earning, and the exclusion
     self-clears at the deadline, matching the contract's per-hub ``check_entry_gates``.
@@ -245,11 +259,11 @@ def direction_eligible(
     if not is_eligible(miner_state, now, hotkey=hotkey, recent_fills=recent_fills):
         return False
     if backing is not None:
-        return hub_free(miner_state, backing, now)
+        return hub_free(miner_state, backing, now) and purse_active(hotkey, backing, recent_fills)
     hubs = [c for c in (from_chain, to_chain) if c in BACKING_BITS]
     if not hubs:
         return True
-    return any(hub_free(miner_state, hub, now) for hub in hubs)
+    return any(hub_free(miner_state, hub, now) and purse_active(hotkey, hub, recent_fills) for hub in hubs)
 
 
 def lane_eligible_hotkeys(
@@ -259,7 +273,7 @@ def lane_eligible_hotkeys(
     to_chain: str,
     now: int,
     backing: Optional[str] = None,
-    recent_fills: Optional[Set[str]] = None,
+    recent_fills: Optional[RecentFills] = None,
 ) -> Set[str]:
     """The crown-candidate set for one lane: on-metagraph hotkeys that also pass
     ``direction_eligible`` right now. Ineligibility (strikes, or the lane's hub
@@ -345,7 +359,7 @@ def build_eligibility(
     metagraph,
     attribution: Optional[Dict[str, str]] = None,
     now: Optional[int] = None,
-    recent_fills: Optional[Set[str]] = None,
+    recent_fills: Optional[RecentFills] = None,
 ) -> Dict[str, bool]:
     """``{hotkey: eligible_bool}`` for on-metagraph miners — ``is_eligible`` over the
     on-chain ``MinerState`` counters (see ``live_miner_states``)."""

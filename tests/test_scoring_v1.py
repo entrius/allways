@@ -23,6 +23,7 @@ from allways.constants import (
     SCORING_WINDOW_BLOCKS,
     required_collateral,
 )
+from allways.solana.pdas import BACKING_BITS
 from allways.utils.rate import is_executable_rate, min_executable_hub_leg
 from allways.validator import scoring as scoring_mod
 from allways.validator.event_index import SolanaEventIndex
@@ -34,11 +35,13 @@ from allways.validator.scoring import (
     crown_can_fund,
     crown_depth_shares,
     crown_holders_at_instant,
+    direction_eligible,
     due_for_scoring,
     fill_held_crown,
     is_eligible,
     lane_volumes_to_directions,
     make_crown_predicates,
+    purse_active,
     qualified_volume_shares,
     recent_fill_hotkeys,
     replay_crown_time_window,
@@ -233,8 +236,8 @@ def make_validator(
 
     Eligibility is the strike counter off on-chain ``MinerState`` (``miner_counters``
     maps hotkey → (successful, failed); successes are no longer read) AND a fill in
-    the trailing activity window, seeded as an UNQUALIFIED clearing row one second
-    before ``block`` (inert for pools and β) for ``recent_fills`` — default every
+    the trailing activity window, seeded per purse as UNQUALIFIED clearing rows one
+    second before ``block`` (inert for pools and β) for ``recent_fills`` — default every
     hotkey if ``all_eligible`` else none. The ledger is stamped old so the window
     gate is live (a fresh ledger reads strikes-only).
     """
@@ -244,7 +247,9 @@ def make_validator(
     if recent_fills is None:
         recent_fills = set(hotkeys) if all_eligible else set()
     for hotkey in recent_fills:
-        store.insert_clearing_rate(block - 1, hotkey, 'btc', 'sol', 1, 1, f'elig-{hotkey}')
+        # One fill per purse: the gate is per backing, and these tests quote under both.
+        for hub in BACKING_BITS:
+            store.insert_clearing_rate(block - 1, hotkey, 'btc', 'sol', 1, 1, f'elig-{hotkey}-{hub}', backing=hub)
     watcher = make_watcher(store, active=set(hotkeys))
     collaterals = collaterals or {}
     # Mirror the cold-bootstrap collateral anchor: scoring now reads collateral
@@ -314,16 +319,34 @@ class TestIsEligibleHelper:
         assert is_eligible(_miner_state(50, MAX_FAILED_SWAPS + 1)) is False
 
     def test_activity_window_gates_once_ledger_is_old(self):
-        assert is_eligible(_miner_state(0, 0), hotkey='hk_a', recent_fills={'hk_a'}) is True
-        assert is_eligible(_miner_state(50, 0), hotkey='hk_a', recent_fills=set()) is False
-        assert is_eligible(_miner_state(50, 0), hotkey='hk_a', recent_fills={'hk_b'}) is False
+        assert is_eligible(_miner_state(0, 0), hotkey='hk_a', recent_fills={'sol': {'hk_a'}}) is True
+        assert is_eligible(_miner_state(50, 0), hotkey='hk_a', recent_fills={}) is False
+        assert is_eligible(_miner_state(50, 0), hotkey='hk_a', recent_fills={'sol': {'hk_b'}}) is False
 
     def test_strikes_override_activity(self):
-        assert is_eligible(_miner_state(50, MAX_FAILED_SWAPS + 1), hotkey='hk_a', recent_fills={'hk_a'}) is False
+        assert (
+            is_eligible(_miner_state(50, MAX_FAILED_SWAPS + 1), hotkey='hk_a', recent_fills={'sol': {'hk_a'}}) is False
+        )
 
     def test_no_success_minimum(self):
         # The first completed fill is enough: zero lifetime successes, one fill in the window.
-        assert is_eligible(_miner_state(0, 0), hotkey='hk_new', recent_fills={'hk_new'}) is True
+        assert is_eligible(_miner_state(0, 0), hotkey='hk_new', recent_fills={'tao': {'hk_new'}}) is True
+
+    def test_global_reading_is_any_purse_lane_reading_is_own_purse(self):
+        """A tao-only fill keeps the miner globally eligible but only the tao lanes live."""
+        fills = {'tao': {'hk_a'}}
+        ms = _miner_state(0, 0)
+        assert is_eligible(ms, hotkey='hk_a', recent_fills=fills) is True
+        assert purse_active('hk_a', 'tao', fills) is True
+        assert purse_active('hk_a', 'sol', fills) is False
+        assert direction_eligible(ms, 'sol', 'tao', 0, backing='tao', hotkey='hk_a', recent_fills=fills) is True
+        assert direction_eligible(ms, 'sol', 'tao', 0, backing='sol', hotkey='hk_a', recent_fills=fills) is False
+        assert direction_eligible(ms, 'btc', 'sol', 0, backing='sol', hotkey='hk_a', recent_fills=fills) is False
+        # Pair-level reading: live while ANY of the pair's hubs is active.
+        assert direction_eligible(ms, 'sol', 'tao', 0, hotkey='hk_a', recent_fills=fills) is True
+        assert direction_eligible(ms, 'btc', 'sol', 0, hotkey='hk_a', recent_fills=fills) is False
+        # Young ledger: everything reads active.
+        assert purse_active('hk_a', 'sol', None) is True
 
 
 class TestRecentFillHotkeys:
@@ -332,7 +355,7 @@ class TestRecentFillHotkeys:
         now = 100_000
         assert recent_fill_hotkeys(store, now) is None  # stamps ledger_since = now
         assert recent_fill_hotkeys(store, now + ELIGIBILITY_FILL_WINDOW_SECS - 1) is None
-        assert recent_fill_hotkeys(store, now + ELIGIBILITY_FILL_WINDOW_SECS) == set()
+        assert recent_fill_hotkeys(store, now + ELIGIBILITY_FILL_WINDOW_SECS) == {}
         store.close()
 
     def test_window_is_trailing_and_half_open(self, tmp_path: Path):
@@ -342,8 +365,8 @@ class TestRecentFillHotkeys:
         w = ELIGIBILITY_FILL_WINDOW_SECS
         store.insert_clearing_rate(now - w, 'hk_old', 'btc', 'sol', 1, 1, 'k1')  # at the edge — out
         store.insert_clearing_rate(now - w + 1, 'hk_in', 'btc', 'sol', 1, 1, 'k2')
-        store.insert_clearing_rate(now, 'hk_now', 'sol', 'tao', 1, 1, 'k3', qualified=False)
-        assert recent_fill_hotkeys(store, now) == {'hk_in', 'hk_now'}
+        store.insert_clearing_rate(now, 'hk_now', 'sol', 'tao', 1, 1, 'k3', backing='tao', qualified=False)
+        assert recent_fill_hotkeys(store, now) == {'sol': {'hk_in'}, 'tao': {'hk_now'}}
         store.close()
 
 
@@ -353,7 +376,7 @@ class TestBuildEligibility:
     def test_maps_metagraph_hotkeys_to_gate(self):
         metagraph = make_metagraph(['hk_a', 'hk_b'])
         client = FakeSolanaClient({'hk_a': (5, 0), 'hk_b': (5, 0)})
-        elig = build_eligibility(client, metagraph, recent_fills={'hk_a'})
+        elig = build_eligibility(client, metagraph, recent_fills={'sol': {'hk_a'}})
         assert elig == {'hk_a': True, 'hk_b': False}
 
     def test_off_metagraph_miner_dropped(self):
@@ -3302,6 +3325,25 @@ class TestDualBackingLanes:
         rewards_by_lane = {(r[2], r[3], r[4]): r[9] for r in rows if r[1] == 'hk_a'}
         assert rewards_by_lane[('sol', 'tao', 'sol')] > 0
         assert rewards_by_lane[('sol', 'tao', 'tao')] > 0
+        v.state_store.close()
+
+    def test_activity_is_per_purse(self, tmp_path: Path):
+        """A dual-purse miner whose only fill in the window drew on the TAO purse earns the
+        tao lane and nothing on the sol lane — a dead SOL watcher can't ride a live TAO purse."""
+        hotkeys = pad_hotkeys_to_cover_recycle(['hk_a'])
+        v = make_validator(tmp_path, hotkeys, collaterals={'hk_a': 550_000_000}, recent_fills=set(), **self.BOUNDS)
+        v.state_store.insert_clearing_rate(v.block - 1, 'hk_a', 'sol', 'tao', 1, 1, 'tao-fill', backing='tao')
+        v.database_storage.is_enabled.return_value = True
+        self._seed_quote(v, 'hk_a', 'sol')
+        self._seed_quote(v, 'hk_a', 'tao')
+        self._fund_tao(v, 'hk_a')
+
+        rewards, _ = calculate_miner_rewards(v, v.block)
+
+        np.testing.assert_allclose(rewards[0], CROWN_SLICE * self.LANE_POOL, atol=1e-6)
+        rows = v.database_storage.flush_scoring_window.call_args.kwargs['miner_score_rows']
+        lanes = {(r[2], r[3], r[4]) for r in rows if r[1] == 'hk_a' and r[9] > 0}
+        assert lanes == {('sol', 'tao', 'tao')}
         v.state_store.close()
 
     def test_tao_backed_quote_alone_earns_the_tao_lane(self, tmp_path: Path):

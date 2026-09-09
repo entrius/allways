@@ -175,9 +175,10 @@ CLEARING_RETENTION_SECS = POOL_VOLUME_WINDOW_SECS + MAX_SCORING_BACKFILL_SECS
 CAPACITY_CURVE_EXPONENT: float = 1.0
 # Binary eligibility gate: at most MAX_FAILED_SWAPS lifetime timeouts (the on-chain MinerState
 # counter, never resets) AND at least one completed swap inside the trailing
-# ELIGIBILITY_FILL_WINDOW_SECS (the validator's clearing ledger). No warm-up count: a miner is
-# eligible from its first completed fill and stays so only by keeping delivering — any fill on any
-# lane counts, real or self, qualified or not. The window must fit inside CLEARING_RETENTION_SECS.
+# ELIGIBILITY_FILL_WINDOW_SECS (the validator's clearing ledger), judged PER PURSE: a lane is live
+# only while its backing hub delivered a fill in the window, so a miner with a dead SOL watcher and
+# a live TAO purse earns on tao lanes alone. No warm-up count: a purse is eligible from its first
+# completed fill, real or self, qualified or not. The window must fit inside CLEARING_RETENTION_SECS.
 MAX_FAILED_SWAPS: int = 2
 ELIGIBILITY_FILL_WINDOW_SECS: int = 12 * 3600
 assert ELIGIBILITY_FILL_WINDOW_SECS <= CLEARING_RETENTION_SECS, 'the fill window must be inside clearing retention'

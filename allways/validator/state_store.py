@@ -455,14 +455,18 @@ class ValidatorStateStore:
             lane[r['hotkey']] = (from_sum + int(r['from_amount']), to_sum + int(r['to_amount']))
         return volumes
 
-    def get_recent_fill_hotkeys(self, start_time: int, end_time: int) -> Set[str]:
-        """Hotkeys with at least one completed fill in ``(start_time, end_time]`` — the
-        activity half of the eligibility gate. Any lane, qualified or not."""
+    def get_recent_fill_hotkeys(self, start_time: int, end_time: int) -> Dict[str, Set[str]]:
+        """``{backing: {hotkey}}`` — per purse, the hotkeys that completed a fill drawing on it in
+        ``(start_time, end_time]``: the activity half of the eligibility gate. Any lane, qualified
+        or not; a hub with no fills is absent."""
         rows = self._fetchall(
-            'SELECT DISTINCT hotkey FROM clearing_rates WHERE block_num > ? AND block_num <= ?',
+            'SELECT DISTINCT hotkey, backing FROM clearing_rates WHERE block_num > ? AND block_num <= ?',
             (start_time, end_time),
         )
-        return {r['hotkey'] for r in rows}
+        out: Dict[str, Set[str]] = {}
+        for r in rows:
+            out.setdefault(r['backing'], set()).add(r['hotkey'])
+        return out
 
     LEDGER_SINCE_KEY = 'clearing_ledger_since'
 

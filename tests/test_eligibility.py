@@ -59,7 +59,7 @@ def test_attributes_pubkey_to_hotkey_then_gates():
         ],
     )
     metagraph = SimpleNamespace(hotkeys=[hk1.ss58_address, hk2.ss58_address])
-    assert build_eligibility(client, metagraph, recent_fills={hk1.ss58_address}) == {
+    assert build_eligibility(client, metagraph, recent_fills={'sol': {hk1.ss58_address}}) == {
         hk1.ss58_address: True,
         hk2.ss58_address: False,
     }
@@ -119,8 +119,8 @@ def _ns_hub(successful, failed, tao_settling_until=0):
 def test_is_eligible_boundaries():
     assert is_eligible(_ns(0, MAX_FAILED_SWAPS))
     assert not is_eligible(_ns(99, MAX_FAILED_SWAPS + 1))
-    assert is_eligible(_ns(0, 0), hotkey='hk', recent_fills={'hk'})
-    assert not is_eligible(_ns(99, 0), hotkey='hk', recent_fills=set())
+    assert is_eligible(_ns(0, 0), hotkey='hk', recent_fills={'sol': {'hk'}})
+    assert not is_eligible(_ns(99, 0), hotkey='hk', recent_fills={})
 
 
 def test_a_tao_settle_zeroes_only_tao_directions():
