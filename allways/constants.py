@@ -12,6 +12,8 @@ PROGRAM_ID = '6JVBEj5w27J2SVjERmv2c7wXgFee9nSSBKUJevHehyBD'
 # ─── Polling ──────────────────────────────────────────────
 # Bittensor base-neuron heartbeat, not the scoring/forward cadence.
 MINER_POLL_INTERVAL_SECONDS = 12
+# The miner resubscribes its program feed this often, then catches up from chain (one MinerState read idle).
+MINER_FEED_RESUBSCRIBE_SECONDS = 300
 VALIDATOR_POLL_INTERVAL_SECONDS = 12
 # Consecutive polls of zero block progress before we force a substrate reconnect.
 STALE_BLOCK_POLL_THRESHOLD = 30
