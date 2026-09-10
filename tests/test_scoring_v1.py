@@ -28,6 +28,7 @@ from allways.utils.rate import is_executable_rate, min_executable_hub_leg
 from allways.validator import scoring as scoring_mod
 from allways.validator.event_index import SolanaEventIndex
 from allways.validator.scoring import (
+    DirectionTrace,
     build_direction_score_rows,
     build_eligibility,
     calculate_miner_rewards,
@@ -36,6 +37,7 @@ from allways.validator.scoring import (
     crown_depth_shares,
     crown_holders_at_instant,
     direction_eligible,
+    direction_pool_tuples,
     due_for_scoring,
     fill_held_crown,
     is_eligible,
@@ -3087,10 +3089,20 @@ class TestScoreSnapshots:
         assert all(r[0] == v.block for r in rows)
         live = by_lane[('btc', 'sol', 'sol')]
         assert live[4] == pytest.approx(POOL_BUSY_PAIR_LEG) and live[5] == 1_000_000_000 and live[6] is True
+        quiet_leg = by_lane[('sol', 'btc', 'sol')]  # no fill of its own, rides its live pair
+        assert quiet_leg[5] == 0 and quiet_leg[6] is True
         dead = by_lane[('sol', 'eth', 'sol')]
         assert dead[4] == 0.0 and dead[5] == 0 and dead[6] is False
         assert sum(r[4] for r in rows) == pytest.approx(MINER_POOL_SHARE)
         v.state_store.close()
+
+    def test_silent_network_fallback_pays_every_lane_with_no_pair_live(self):
+        """The fallback pays every lane (pool > 0) but no pair cleared a qualified fill, so
+        the ledger's live flag stays False everywhere — live is pair volume, not pool > 0."""
+        traces = {lane: DirectionTrace(pool=pool) for lane, pool in compute_direction_pools({}).items()}
+        rows = direction_pool_tuples(traces, 4_600)
+        assert all(r[4] > 0 for r in rows)
+        assert not any(r[6] for r in rows)
 
     def test_ineligible_miner_is_not_a_crown_candidate(self, tmp_path: Path):
         """An ineligible miner (strikes / hub mid-settle) is removed from crown

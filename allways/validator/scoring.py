@@ -762,9 +762,25 @@ def miner_score_tuples(score_rows: List[ScoreRow], ts: int) -> List[Tuple]:
 def direction_pool_tuples(direction_traces: Dict[Tuple[str, str, str], DirectionTrace], ts: int) -> List[Tuple]:
     """Shape the round's pools for the ``direction_pools`` ledger: one row per lane,
     dead lanes included at pool 0 — ``(round_ts, from, to, backing, pool, qualified_volume,
-    live)``. Hub / pair emission over time is a plain sum over these."""
+    live)``. Hub / pair emission over time is a plain sum over these.
+
+    ``live`` is the PAIR's liveness — qualified volume on any of its lanes, the same test
+    ``compute_direction_pools`` pays on — not ``pool > 0``: the silent-network fallback pays
+    every lane with no pair live, and the ledger must say so."""
+    pair_volume: Dict[Tuple[str, str], int] = {}
+    for (from_chain, to_chain, _backing), trace in direction_traces.items():
+        pair = canonical_pair(from_chain, to_chain)
+        pair_volume[pair] = pair_volume.get(pair, 0) + int(trace.qualified_volume)
     return [
-        (ts, from_chain, to_chain, backing, trace.pool, int(trace.qualified_volume), trace.pool > 0)
+        (
+            ts,
+            from_chain,
+            to_chain,
+            backing,
+            trace.pool,
+            int(trace.qualified_volume),
+            pair_volume[canonical_pair(from_chain, to_chain)] > 0,
+        )
         for (from_chain, to_chain, backing), trace in direction_traces.items()
     ]
 
