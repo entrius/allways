@@ -193,30 +193,24 @@ def step_wallet(s: Setup, wallet: Optional[str], hotkey: Optional[str]) -> None:
     ui.draw_kv(console, [('coldkey', _pub_ss58(w, 'coldkey') or '?'), ('hotkey', _pub_ss58(w, 'hotkey') or '?')])
 
 
-def step_chains(s: Setup, backing: Optional[str], chains: Optional[str]) -> None:
+def step_backing(s: Setup, backing: Optional[str], chains: Optional[str]) -> None:
     ui.draw_step(
         console,
         3,
-        'Backing and chains',
+        'Backing',
         'SOL purse: a failed delivery refunds the user instantly in SOL. TAO bond: reimburses in TAO after timeout.',
-        'Then pick every chain family you will quote — each needs one signing key. SOL and TAO are always on.',
     )
     s.backing = backing or _prompt(s, 'Backing', default='sol', type=click.Choice(['sol', 'tao', 'both']))
-    families = se.optional_families()
-    env = se.read_env(s.env_path)
-    ui.draw_kv(console, ((f.prefix.lower(), ', '.join(f.assets)) for f in families))
-    default = ','.join(f.prefix.lower() for f in families if env.get(f.key_env))
-    raw = chains if chains is not None else _prompt(s, 'Chains (comma-separated; blank = none)', default=default)
-    while True:
+    # Every spoke gets a key: an unfunded key costs nothing, and what you quote is decided later by
+    # `alw miner post` and by which addresses you fund. --chains narrows it for operators who want fewer.
+    if chains is None:
+        s.families = [f.prefix for f in se.optional_families()]
+    else:
         try:
-            s.families = se.parse_family_list(raw or '')
-            break
+            s.families = se.parse_family_list(chains)
         except ValueError as e:
-            if s.yes:
-                fail(str(e))
-            console.print(f'  [red]{e}[/red]')
-            raw = click.prompt('Chains', default=default)
-    ui.draw_done(console, f'{s.backing} backing · spokes: {", ".join(f.lower() for f in s.families) or "none"}')
+            fail(str(e))
+    ui.draw_done(console, f'{s.backing} backing')
 
 
 def _solana_keypair(s: Setup, flag: Optional[str]) -> None:
@@ -238,25 +232,22 @@ def _solana_keypair(s: Setup, flag: Optional[str]) -> None:
     s.addresses['SOL'] = str(kp.pubkey())
 
 
-def _family_key(s: Setup, fam: se.KeyFamily, env: Dict[str, str]) -> None:
-    network = s.bundle.get(network_key(fam.network_chain)) if fam.network_chain else 'mainnet'
-    s.env_values[fam.network_env] = network
+def _family_network(s: Setup, fam: se.KeyFamily) -> str:
+    return s.bundle.get(network_key(fam.network_chain)) if fam.network_chain else 'mainnet'
+
+
+def _usable_key(s: Setup, fam: se.KeyFamily, env: Dict[str, str]) -> Optional[str]:
+    """The family's key from .env if it derives an address; a broken one is replaced only on a yes."""
     existing = env.get(fam.key_env)
-    derive = (lambda k: se.btc_address(k, network)) if fam.kind == 'btc' else se.evm_address
-    addr = derive(existing) if existing else None
-    if existing and addr is None:
-        ui.draw_warn(console, f'{fam.key_env} in .env is not a usable key')
-        if not _prompt(s, f'  Replace {fam.key_env} with a fresh key?', default=False, type=bool):
-            return
-        existing = None
     if not existing:
-        key, addr = se.generate_btc_key(network) if fam.kind == 'btc' else se.generate_evm_key()
-        s.env_values[fam.key_env] = key
-    ui.draw_done(
-        console,
-        f'{fam.prefix} key {"kept from .env" if existing else "generated"} ({network}; {", ".join(fam.assets)})',
-    )
-    s.addresses[fam.prefix] = addr
+        return None
+    derive = (lambda k: se.btc_address(k, _family_network(s, fam))) if fam.kind == 'btc' else se.evm_address
+    if derive(existing) is not None:
+        return existing
+    ui.draw_warn(console, f'{fam.key_env} in .env is not a usable key')
+    if _prompt(s, f'  Replace {fam.key_env} with a fresh key?', default=False, type=bool):
+        return None
+    return existing
 
 
 def step_keys(s: Setup, solana_keypair: Optional[str]) -> None:
@@ -270,13 +261,42 @@ def step_keys(s: Setup, solana_keypair: Optional[str]) -> None:
     coldkey = _pub_ss58(_bt_wallet(s.wallet, s.hotkey), 'coldkey')
     s.addresses['TAO'] = coldkey or '?'
     env = se.read_env(s.env_path)
-    by_prefix = {f.prefix: f for f in se.optional_families()}
-    for prefix in s.families:
-        _family_key(s, by_prefix[prefix], env)
+    families = [f for f in se.optional_families() if f.prefix in s.families]
+    # Every family's network follows the chosen environment, keyed or not — a testnet .env never
+    # carries a mainnet spoke network waiting for someone to paste a key next to it.
+    for fam in se.optional_families():
+        if fam.network_chain:
+            s.env_values[fam.network_env] = _family_network(s, fam)
+    # One EVM key serves every EVM chain (nonces are per chain, and the keys share one .env anyway),
+    # so the operator funds one address. A family that already has its own key keeps it.
+    existing = {f.prefix: _usable_key(s, f, env) for f in families}
+    evm_key = next((existing[f.prefix] for f in families if f.kind == 'evm' and existing[f.prefix]), None)
+    generated: List[str] = []
+    if evm_key is None and any(f.kind == 'evm' for f in families):
+        evm_key, _ = se.generate_evm_key()
+    evm_groups: Dict[str, List[str]] = {}  # address → families, so a shared key prints once
+    for fam in families:
+        key = existing[fam.prefix]
+        if key is None:
+            key = evm_key if fam.kind == 'evm' else se.generate_btc_key(_family_network(s, fam))[0]
+            s.env_values[fam.key_env] = key
+            generated.append(fam.prefix.lower())
+        if fam.kind == 'btc':
+            s.addresses['BTC'] = se.btc_address(key, _family_network(s, fam)) or '?'
+        else:
+            evm_groups.setdefault(se.evm_address(key) or '?', []).append(fam.prefix.lower())
+    for i, (addr, prefixes) in enumerate(evm_groups.items()):
+        s.addresses['EVM' if i == 0 else f'EVM {i + 1}'] = f'{addr}  ({", ".join(prefixes)})'
+    kept = [f.prefix.lower() for f in families if existing[f.prefix]]
+    if generated:
+        ui.draw_done(console, f'generated spoke keys: {", ".join(generated)}')
+    if kept:
+        ui.draw_done(console, f'kept from .env: {", ".join(kept)}')
     console.print()
     ui.draw_kv(console, s.addresses.items())
     console.print(
-        '  [dim]Each spoke wallet needs the asset it pays out plus gas; the Solana keypair covers fees.[/dim]'
+        '  [dim]Fund only the chains you will quote: each spoke address needs the asset it pays out plus gas;'
+        ' the Solana keypair covers fees. Unfunded keys cost nothing.[/dim]'
     )
 
 
@@ -285,7 +305,9 @@ def step_rpc(s: Setup, solana_rpc: Optional[str]) -> None:
         console,
         5,
         'Solana RPC',
-        'Public endpoints rate-limit; on mainnet use a keyed provider (Helius, Triton, QuickNode…).',
+        'The miner polls the Allways program here every 12 s and sends its fulfillment transactions through it.',
+        'Public endpoints throttle it. Use a keyed one (Helius, Triton, QuickNode…): a free Helius key is'
+        " enough to rehearse on testnet; a 24/7 mainnet miner outgrows the free tier's monthly credits.",
     )
     current = se.read_env(s.env_path).get('SOLANA_RPC_URL') or os.environ.get('SOLANA_RPC_URL')
     default = current or SOLANA_NETWORKS[s.bundle['solana-network']]
@@ -298,17 +320,33 @@ def step_rpc(s: Setup, solana_rpc: Optional[str]) -> None:
     )
 
 
+def _coldkey_encrypted(s: Setup) -> bool:
+    """True unless the coldkey keyfile is readable and plainly unencrypted (then there's nothing to store)."""
+    try:
+        return bool(_bt_wallet(s.wallet, s.hotkey).coldkey_file.is_encrypted())
+    except Exception:
+        return True
+
+
 def step_write_env(s: Setup, coldkey_password: Optional[str]) -> None:
     ui.draw_step(console, 6, 'Write configuration', f'{s.env_path} feeds docker compose, the miner, and alw.')
     s.env_values.setdefault('PORT', '8091')
     s.env_values.setdefault('LOG_LEVEL', 'info')
-    if coldkey_password is None and not s.yes:
-        coldkey_password = click.prompt(
-            'Coldkey password for headless starts (blank = prompt at each start)',
-            default='',
-            hide_input=True,
-            show_default=False,
+    if coldkey_password is None and not s.yes and _coldkey_encrypted(s):
+        # Whatever the backing: the miner pays TAO out of the coldkey on every TAO-delivering fill, so it
+        # unlocks it at boot — and the container runs detached, with no terminal to answer a prompt.
+        console.print(
+            '  [dim]The miner signs TAO payouts with your coldkey and unlocks it at boot. The container runs'
+            ' detached and cannot prompt, so an encrypted coldkey needs its password stored here.[/dim]'
         )
+        coldkey_password = click.prompt(
+            'Coldkey password (stored in .env, mode 600)', default='', hide_input=True, show_default=False
+        )
+        if not coldkey_password:
+            ui.draw_warn(
+                console,
+                'No password stored: the miner exits at boot until MINER_BITTENSOR_COLDKEY_PASSWORD is set in .env.',
+            )
     if coldkey_password:
         s.env_values['MINER_BITTENSOR_COLDKEY_PASSWORD'] = coldkey_password
     se.write_env(s.env_path, s.env_values, template=s.project_dir / '.env.example')
@@ -319,7 +357,21 @@ def step_write_env(s: Setup, coldkey_password: Optional[str]) -> None:
 # ─── Step 7: preflight (alw doctor) ─────────────────────────────────────────
 
 
-def _check_docker(project_dir: Path, env: Dict[str, str]) -> List[Check]:
+def _container_row(serving: bool) -> Check:
+    """The container is a post-go-live fact: before any purse serves it is not a failure (go-live starts it);
+    once one serves, a missing miner means reservations on it time out."""
+    if container_running():
+        return (True, 'miner container', 'running')
+    if serving:
+        return (
+            False,
+            'miner container',
+            'not running here, yet a purse is serving — its swaps time out unless your miner runs elsewhere',
+        )
+    return (None, 'miner container', 'not started yet (go-live starts it)')
+
+
+def _check_docker(project_dir: Path, env: Dict[str, str], serving: bool = False) -> List[Check]:
     rows: List[Check] = []
     docker = shutil.which('docker')
     rows.append((bool(docker), 'docker', docker or 'not on PATH — install Docker Engine + compose plugin'))
@@ -340,7 +392,7 @@ def _check_docker(project_dir: Path, env: Dict[str, str]) -> List[Check]:
             wp if ok else f'{wp or "unset"} — must be an absolute existing dir (compose does not expand ~)',
         )
     )
-    rows.append((container_running(), 'miner container', 'running' if container_running() else 'not running'))
+    rows.append(_container_row(serving))
     return rows
 
 
@@ -353,14 +405,24 @@ def _check_keys(env: Dict[str, str], config: dict) -> List[Check]:
         rows.append((True, 'solana keypair', f'{keys.load_keypair(path).pubkey()}  {path}'))
     except Exception as e:
         rows.append((False, 'solana keypair', f'{path}: {e}'))
+    by_address: Dict[str, List[str]] = {}  # one row per distinct spoke address, however many chains share it
+    unset: List[str] = []
     for fam in se.optional_families():
         key = env.get(fam.key_env)
         if not key:
-            rows.append((None, fam.key_env, 'not set (fine unless you quote ' + '/'.join(fam.assets) + ')'))
+            unset.append(fam.prefix.lower())
             continue
         net = env.get(fam.network_env) or config.get(network_key(fam.network_chain), '') if fam.network_chain else ''
         addr = se.btc_address(key, net or 'mainnet') if fam.kind == 'btc' else se.evm_address(key)
-        rows.append((addr is not None, fam.key_env, f'{addr}  ({net})' if addr else 'unusable key'))
+        if addr is None:
+            rows.append((False, fam.key_env, 'unusable key'))
+            continue
+        by_address.setdefault(addr, []).append(f'{fam.prefix.lower()} ({net})' if net else fam.prefix.lower())
+    for addr, fams in by_address.items():
+        label = 'BTC key' if addr and fams[0].startswith('btc') else 'EVM key'
+        rows.append((True, label, f'{addr}  {", ".join(fams)}'))
+    if unset:
+        rows.append((None, 'spoke keys not set', f'{", ".join(unset)} (fine unless you quote them)'))
     return rows
 
 
@@ -482,8 +544,10 @@ def run_doctor(project_dir: Path) -> List[Check]:
     wallet_rows, hot = _check_wallet(config)
     rows += wallet_rows
     rows += _check_keys(env, config)
-    rows += _check_chain(config, hot)
-    rows += _check_docker(project_dir, env)
+    chain_rows = _check_chain(config, hot)
+    rows += chain_rows
+    serving = any(ok for ok, label, _ in chain_rows if label.endswith(' purse'))
+    rows += _check_docker(project_dir, env, serving)
     return rows
 
 
@@ -662,7 +726,7 @@ def _bond(ctx, s: Setup, subtensor, config, wallet, floors) -> bool:
     return True
 
 
-def _run_container(s: Setup) -> bool:
+def _run_container(s: Setup, serving: bool = False) -> bool:
     ui.draw_step(
         console,
         12,
@@ -672,6 +736,14 @@ def _run_container(s: Setup) -> bool:
     if container_running():
         ui.draw_done(console, f'{CONTAINER} is running')
         return True
+    if serving and not _typed_confirm(
+        s,
+        'start',
+        'A purse is already serving but no miner runs here, so this identity is probably mining elsewhere.'
+        ' Two miners on one identity both fulfill the same swaps.',
+    ):
+        console.print('  [yellow]Skipped — stop the other miner first, or run this on its box.[/yellow]')
+        return False
     cmd = ['docker', 'compose', '-f', COMPOSE_FILE, 'up', '-d']
     console.print(f'  $ {" ".join(cmd)}')
     if not s.yes and not click.confirm('  Start it now?', default=True):
@@ -757,7 +829,9 @@ def go_live(ctx, s: Setup) -> bool:
         return False
     if BACKING_CHAIN_TAO in s.backings and not _bond(ctx, s, subtensor, config, wallet, floors):
         return False
-    if not _run_container(s):
+    ms = client.get_miner_state(pubkey)
+    serving = ms is not None and any(st.lit for st in purse_states(client, pubkey, ms, client.get_config()))
+    if not _run_container(s, serving):
         return False
     return _activate(ctx, s, client, pubkey)
 
@@ -791,7 +865,9 @@ def _take_global_flags(network, wallet, hotkey):
     '--backing', type=click.Choice(['sol', 'tao', 'both']), default=None, help='Which purse(s) back your quotes'
 )
 @click.option(
-    '--chains', default=None, help='Comma-separated spoke families to key: btc,eth,arb,hype,bnb,avax,base,cro,pol'
+    '--chains',
+    default=None,
+    help='Only key these spoke families (default: all): btc,eth,arb,hype,bnb,avax,base,cro,pol',
 )
 @click.option(
     '--solana-keypair', default=None, help='Keypair path (default ./data/solana/id.json; generated if missing)'
@@ -854,7 +930,7 @@ def init_command(
 
     step_network(s, network)
     step_wallet(s, wallet, hotkey)
-    step_chains(s, backing, chains)
+    step_backing(s, backing, chains)
     step_keys(s, solana_keypair)
     step_rpc(s, solana_rpc)
     step_write_env(s, coldkey_password)

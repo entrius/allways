@@ -215,6 +215,62 @@ def test_unknown_chain_fails_under_yes(sandbox):
     assert 'DOGE' in result.output
 
 
+def _run_all_chains(sandbox, *extra):
+    """The default path: no --chains, so every spoke family gets a key and nothing is asked."""
+    args = [
+        '--network', 'testnet', '--wallet', 'w', '--hotkey', 'h', '--backing', 'sol',
+        '--solana-rpc', 'http://rpc.test', '--project-dir', str(sandbox.project), '--configure-only', '-y', *extra,
+    ]  # fmt: skip
+    return CliRunner().invoke(miner_init.init_command, args)
+
+
+def test_default_keys_every_family_with_one_shared_evm_key(sandbox):
+    result = _run_all_chains(sandbox)
+    assert result.exit_code == 0, result.output
+    env = se.read_env(sandbox.project / '.env')
+    evm = [f for f in se.optional_families() if f.kind == 'evm']
+    keys = {env[f.key_env] for f in evm}
+    assert len(keys) == 1 and se.evm_address(keys.pop()) in result.output  # one address to fund, printed once
+    assert se.btc_address(env['BTC_PRIVATE_KEY'], env['BTC_NETWORK']) is not None
+    assert 'Chains (comma' not in result.output
+
+
+def test_every_family_network_follows_the_environment_even_unkeyed(sandbox):
+    assert _run(sandbox, '--chains', 'eth').exit_code == 0
+    env = se.read_env(sandbox.project / '.env')
+    for fam in se.optional_families():
+        if fam.network_chain:
+            want = miner_init.ENV_BUNDLES['testnet'].get(miner_init.network_key(fam.network_chain))
+            assert env[fam.network_env] == want, fam.prefix
+    assert 'ARB_PRIVATE_KEY' not in env  # narrowed by --chains: networks set, no key
+
+
+def test_an_existing_evm_key_is_shared_to_the_unkeyed_families(sandbox):
+    key, addr = se.generate_evm_key()
+    (sandbox.project / '.env').write_text(f'ARB_PRIVATE_KEY={key}\n')
+    assert _run_all_chains(sandbox).exit_code == 0
+    env = se.read_env(sandbox.project / '.env')
+    assert all(env[f.key_env] == key for f in se.optional_families() if f.kind == 'evm')
+
+
+def test_container_is_informational_until_a_purse_serves(monkeypatch):
+    monkeypatch.setattr(miner_init, 'container_running', lambda: False)
+    assert miner_init._container_row(serving=False)[0] is None
+    assert miner_init._container_row(serving=True)[0] is False
+    monkeypatch.setattr(miner_init, 'container_running', lambda: True)
+    assert miner_init._container_row(serving=True)[0] is True
+
+
+def test_second_miner_on_a_serving_identity_needs_a_typed_word(monkeypatch):
+    monkeypatch.setattr(miner_init, 'container_running', lambda: False)
+    monkeypatch.setattr(miner_init.click, 'prompt', lambda *a, **k: 'yes')
+    started = []
+    monkeypatch.setattr(miner_init.subprocess, 'run', lambda *a, **k: started.append(a))
+    s = miner_init.Setup(project_dir=os.getcwd())
+    assert miner_init._run_container(s, serving=True) is False
+    assert not started
+
+
 def test_typed_confirm_requires_the_exact_word(monkeypatch):
     s = miner_init.Setup(project_dir=os.getcwd())
     monkeypatch.setattr(miner_init.click, 'prompt', lambda *a, **k: 'nope')
