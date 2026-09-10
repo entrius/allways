@@ -362,3 +362,13 @@ def test_fund_survives_a_failed_balance_read(monkeypatch):
         raise ConnectionError('rpc down')
 
     assert miner_init._fund(s, boom, {}) is False
+
+
+def test_reusing_an_existing_evm_key_is_reported_as_shared_not_generated(sandbox):
+    key, _ = se.generate_evm_key()
+    (sandbox.project / '.env').write_text(f'ARB_PRIVATE_KEY={key}\n')
+    result = _run_all_chains(sandbox)
+    assert result.exit_code == 0, result.output
+    out = ' '.join(result.output.split())
+    assert 'your ARB key now also covers: eth' in out
+    assert 'generated: btc' in out  # only the BTC key was minted

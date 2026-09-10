@@ -280,17 +280,19 @@ def step_keys(s: Setup, solana_keypair: Optional[str]) -> None:
     # One EVM key serves every EVM chain (nonces are per chain, and the keys share one .env anyway),
     # so the operator funds one address. A family that already has its own key keeps it.
     existing = {f.prefix: _usable_key(s, f, env) for f in families}
-    evm_key = next((existing[f.prefix] for f in families if f.kind == 'evm' and existing[f.prefix]), None)
-    generated: List[str] = []
+    evm_source = next((f.prefix for f in families if f.kind == 'evm' and existing[f.prefix]), None)
+    evm_key = existing[evm_source] if evm_source else None
     if evm_key is None and any(f.kind == 'evm' for f in families):
         evm_key, _ = se.generate_evm_key()
+    generated: List[str] = []  # freshly minted
+    shared: List[str] = []  # handed the operator's existing EVM key
     evm_groups: Dict[str, List[str]] = {}  # address → families, so a shared key prints once
     for fam in families:
         key = existing[fam.prefix]
         if key is None:
             key = evm_key if fam.kind == 'evm' else se.generate_btc_key(_family_network(s, fam))[0]
             s.env_values[fam.key_env] = key
-            generated.append(fam.prefix.lower())
+            (shared if fam.kind == 'evm' and evm_source else generated).append(fam.prefix.lower())
         if fam.kind == 'btc':
             s.addresses['BTC'] = se.btc_address(key, _family_network(s, fam)) or '?'
         else:
@@ -298,10 +300,15 @@ def step_keys(s: Setup, solana_keypair: Optional[str]) -> None:
     for i, (addr, prefixes) in enumerate(evm_groups.items()):
         s.addresses['EVM' if i == 0 else f'EVM {i + 1}'] = f'{addr}  ({", ".join(prefixes)})'
     kept = [f.prefix.lower() for f in families if existing[f.prefix]]
-    if generated:
-        ui.draw_done(console, f'generated spoke keys: {", ".join(generated)}')
     if kept:
         ui.draw_done(console, f'kept from .env: {", ".join(kept)}')
+    if shared:
+        ui.draw_done(
+            console,
+            f'your {evm_source} key now also covers: {", ".join(shared)} (one EVM key works on every EVM chain)',
+        )
+    if generated:
+        ui.draw_done(console, f'generated: {", ".join(generated)}')
     console.print()
     ui.draw_kv(console, s.addresses.items())
     console.print(
