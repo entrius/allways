@@ -8,7 +8,7 @@ disabled-state result.
 import os
 import time
 from dataclasses import dataclass, field
-from typing import Dict, List, Tuple
+from typing import Dict, List, Optional, Tuple
 
 import bittensor as bt
 
@@ -124,6 +124,7 @@ class DatabaseStorage:
         crown_window_bounds_by_direction: Dict[Tuple[str, str, str], Tuple[int, int]],
         miner_score_rows: List[Tuple],
         crown_holders_max_ts: int,
+        direction_pool_rows: Optional[List[Tuple]] = None,
     ) -> StorageResult:
         """All-or-nothing flush for one scoring window.
 
@@ -136,6 +137,8 @@ class DatabaseStorage:
           two can never disagree about a round.
         - `crown_holders_max_ts` advances the sync_cursor watermark so the
           dashboard can render an "as-of <unix ts>" freshness signal.
+        - `direction_pool_rows`: the round's pool per lane, every lane (dead
+          lanes at 0) — the emission-over-time ledger, same transaction.
 
         rate_history is not written here — the indexer owns it (real-time,
         per QuoteSet event), including its freshness cursor.
@@ -163,6 +166,10 @@ class DatabaseStorage:
                 result.stored_counts['crown_holders'] = crown_inserted
 
                 result.stored_counts['miner_scores'] = self.repo.store_miner_scores_bulk(miner_score_rows, commit=False)
+                if direction_pool_rows:
+                    result.stored_counts['direction_pools'] = self.repo.store_direction_pools_bulk(
+                        direction_pool_rows, commit=False
+                    )
 
                 self.repo.set_sync_cursor('crown_holders_max_ts', crown_holders_max_ts, commit=False)
 

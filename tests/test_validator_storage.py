@@ -61,6 +61,10 @@ class FakeRepo:
         self.conn._maybe_fail()
         return len(rows)
 
+    def store_direction_pools_bulk(self, rows, commit=False):
+        self.conn._maybe_fail()
+        return len(rows)
+
     def delete_crown_in_range(self, from_chain, to_chain, backing, lo, hi, commit=False):
         self.conn._maybe_fail()
 
@@ -185,6 +189,37 @@ def test_halt_flush_clears_live_score_tip(monkeypatch):
     result = storage.flush_halt_window(directions=[('sol', 'btc', 'sol')], window_start=0, window_end=100, max_ts=100)
     assert result.success
     assert calls == [[]]
+
+
+def test_scoring_flush_writes_direction_pools_in_the_same_transaction(monkeypatch):
+    """The round's per-lane pools ride the same all-or-nothing flush as the crown
+    ledger and miner_scores; an absent/empty list writes nothing (older callers)."""
+    conn = FakeConnection()
+    storage = make_storage(monkeypatch, [conn])
+    seen = []
+    storage.repo.store_crown_holders_bulk = lambda rows, commit=False: len(rows)
+    storage.repo.store_miner_scores_bulk = lambda rows, commit=False: len(rows)
+    storage.repo.store_direction_pools_bulk = lambda rows, commit=False: seen.append(rows) or len(rows)
+    lane = ('sol', 'btc', 'sol')
+    rows = [(4_600, 'sol', 'btc', 'sol', 0.5, 12_345, True), (4_600, 'btc', 'sol', 'sol', 0.0, 0, False)]
+    result = storage.flush_scoring_window(
+        crown_rows_by_direction={lane: []},
+        crown_window_bounds_by_direction={lane: (1_000, 4_600)},
+        miner_score_rows=[],
+        crown_holders_max_ts=4_600,
+        direction_pool_rows=rows,
+    )
+    assert result.success and result.stored_counts['direction_pools'] == 2
+    assert seen == [rows]
+    assert conn.commits == 1
+
+    result = storage.flush_scoring_window(
+        crown_rows_by_direction={lane: []},
+        crown_window_bounds_by_direction={lane: (1_000, 4_600)},
+        miner_score_rows=[],
+        crown_holders_max_ts=4_600,
+    )
+    assert result.success and 'direction_pools' not in result.stored_counts
 
 
 def test_scoring_flush_trims_pre_window_tails(monkeypatch):
