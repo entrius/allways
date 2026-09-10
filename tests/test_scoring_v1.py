@@ -2877,6 +2877,29 @@ class TestNonEarnerDiagnosis:
         )
         assert reason.startswith('competitive_but_unfilled'), reason
 
+    def test_dead_pair_never_masks_a_live_pairs_reason(self):
+        """A miner quoting a dead pair AND a live pair it lost on reads the live reason;
+        dead_pair is reported only when nothing else explains the zero."""
+        from allways.validator.scoring import DirectionTrace
+        from allways.validator.scoring_trace import diagnose_non_earner
+
+        dead = DirectionTrace(pool=0.0)
+        kwargs = dict(
+            eligible=True,
+            ever_active={'hk'},
+            collaterals={'hk': 500_000_000},
+            swap_bounds={'sol': (100_000_000, 500_000_000)},
+        )
+        reason = diagnose_non_earner(
+            'hk',
+            {('eth', 'sol'): 1.0, ('btc', 'sol'): 281.0},
+            direction_traces={('eth', 'sol'): dead, ('btc', 'sol'): self._trace(280.0)},
+            **kwargs,
+        )
+        assert reason.startswith('outbid'), reason
+        reason = diagnose_non_earner('hk', {('eth', 'sol'): 1.0}, direction_traces={('eth', 'sol'): dead}, **kwargs)
+        assert reason.startswith('dead_pair (eth→sol'), reason
+
 
 class TestNonEarnerLinesUseLiveRates:
     """non_earner_lines must source rates from the round's live on-chain quotes.
