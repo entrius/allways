@@ -81,6 +81,10 @@ SCORING_WINDOW_BLOCKS = 300  # ~1 hour at 12s/block — scoring cadence and wind
 # seconds. The scoring *cadence* (due_for_scoring) stays subtensor-block-gated.
 SCORING_WINDOW_SECS = 3600  # ~1 hour — crown replay window width
 MAX_SCORING_BACKFILL_SECS = 2 * SCORING_WINDOW_SECS  # ~2 hours — backfill cap after a stall
+# Retention of the crown event tables (rate/active/activity/collateral). Must cover the backfill
+# cap AND the longest swap life: a completed fill is judged against the crown as it stood at its
+# reservation (fill_held_crown), up to base timeout + 140 min extensions + settlement grace earlier.
+EVENT_RETENTION_SECS = 4 * 3600
 # Crown reward-state policy (D4): the only place that decides which MinerActivity
 # states earn crown. "All busy forfeits" = only AVAILABLE; add MinerActivity.FULFILLING
 # here to reward in-flight miners, with no other logic change.
@@ -150,12 +154,18 @@ DIRECTION_POOLS: dict[tuple[str, str], float] = {
     for hub, spoke in LAUNCH_PAIRS
     for pair in ((hub, spoke), (spoke, hub))
 }
-# Volume-weighted pools: each pair's emission share follows the SOL notional it cleared
-# over the trailing window, blended with the equal split so a quiet pair never starves
-# and a busy one is capped at α + (1−α)/pairs. Weighting sits at PAIR level and splits
-# evenly between the two legs — one leg can't be inflated without inflating the pair.
+# Volume-weighted pools: each pair's emission share follows the QUALIFIED hub-leg notional it
+# cleared over the trailing window (fills reserved on a crown-holding miner — clearing_rates
+# .qualified), blended with the equal split so a quiet pair never starves and a busy one is
+# capped at α + (1−α)/pairs. Weighting sits at PAIR level and splits evenly between the two
+# legs — one leg can't be inflated without inflating the pair.
 POOL_VOLUME_WINDOW_SECS = 24 * 3600  # flat trailing window the pool volumes sum over
 POOL_VOLUME_ALPHA = 0.66  # blend dial: 0 = frozen equal split, 1 = pure volume share
+# Quality-volume slice: each lane pool pays (1−β) on crown time and β on qualified volume share
+# (a miner's qualified hub-leg notional over the lane's, same trailing window). A fill qualifies
+# iff the miner held the lane's crown at reservation, judged at the fill's own size. A lane with
+# no qualified volume recycles its β slice — standing on a dead pair earns (1−β) of it.
+QUALITY_VOLUME_BETA = 0.25
 # clearing_rates rows must outlive the pool volume window (plus stall headroom) — the
 # crown tables only need SCORING_WINDOW_SECS, but pools read a full day back.
 CLEARING_RETENTION_SECS = POOL_VOLUME_WINDOW_SECS + MAX_SCORING_BACKFILL_SECS
@@ -164,12 +174,15 @@ CLEARING_RETENTION_SECS = POOL_VOLUME_WINDOW_SECS + MAX_SCORING_BACKFILL_SECS
 # earns a smaller slice than the ratio alone), pushing miners to deepen. Still capped at 1.0 — depth
 # past required earns nothing extra, so it never becomes pay-to-win.
 CAPACITY_CURVE_EXPONENT: float = 2.0
-# Flat eligibility gate (B3.3): read off the on-chain MinerState counters,
-# replacing the success_rate³ × credibility ramp. A miner is crown-eligible iff
-# it has at least MIN_SUCCESSFUL_SWAPS successes and at most MAX_FAILED_SWAPS
-# failures — a binary 0/1 multiplier, no ramp.
-MIN_SUCCESSFUL_SWAPS: int = 2
+# Binary eligibility gate: at most MAX_FAILED_SWAPS lifetime timeouts (the on-chain MinerState
+# counter, never resets) AND at least one completed swap inside the trailing
+# ELIGIBILITY_FILL_WINDOW_SECS (the validator's clearing ledger), judged PER PURSE: a lane is live
+# only while its backing hub delivered a fill in the window, so a miner with a dead SOL watcher and
+# a live TAO purse earns on tao lanes alone. No warm-up count: a purse is eligible from its first
+# completed fill, real or self, qualified or not. The window must fit inside CLEARING_RETENTION_SECS.
 MAX_FAILED_SWAPS: int = 2
+ELIGIBILITY_FILL_WINDOW_SECS: int = 12 * 3600
+assert ELIGIBILITY_FILL_WINDOW_SECS <= CLEARING_RETENTION_SECS, 'the fill window must be inside clearing retention'
 # Live-state reconcile (scoring-round backstop for lost events): a miner's event-derived
 # active/collateral state is only corrected against the live chain read after its event
 # stream has been quiet this long, so a stale RPC read never fights an in-flight event.

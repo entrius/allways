@@ -60,9 +60,17 @@ class SolanaEventIndex:
     ``reservation_ttl_fn`` (the solana config cache getter) supplies the TTL used to synthesize each
     reservation's RESERVE_EXPIRE, since ``reserved_until`` isn't carried on the ``PoolResolved`` event."""
 
-    def __init__(self, state_store: ValidatorStateStore, reservation_ttl_fn: Optional[Callable[[], int]] = None):
+    def __init__(
+        self,
+        state_store: ValidatorStateStore,
+        reservation_ttl_fn: Optional[Callable[[], int]] = None,
+        fill_qualifier: Optional[Callable[[str, str, str, str, int, int], bool]] = None,
+    ):
         self.state_store = state_store
         self._reservation_ttl_fn = reservation_ttl_fn
+        # (hotkey, from_chain, to_chain, backing, collateral_amount, reserved_at) → held crown at
+        # reservation? Bound to scoring.fill_held_crown by the validator; None = every fill unqualified.
+        self._fill_qualifier = fill_qualifier
 
     # ─── write path ─────────────────────────────────────────────────────
 
@@ -153,14 +161,20 @@ class SolanaEventIndex:
             # deliberately ignored: the attest gate already refused any swap whose
             # legs disagree with the pinned rate, and the legs are the realized truth.
             if name == 'SwapCompleted':
+                from_chain, to_chain = self._chain(rec, 'from_chain'), self._chain(rec, 'to_chain')
+                backing = self._backing(rec, 'collateral_chain')
                 self.state_store.insert_clearing_rate(
                     block_time,
                     hotkey,
-                    self._chain(rec, 'from_chain'),
-                    self._chain(rec, 'to_chain'),
+                    from_chain,
+                    to_chain,
                     int(rec.fields['from_amount']),
                     int(rec.fields['to_amount']),
                     bytes(rec.fields['swap_key']).hex(),
+                    backing=backing,
+                    qualified=self._fill_qualified(
+                        hotkey, from_chain, to_chain, backing, int(rec.fields.get('collateral_amount', 0)), block_time
+                    ),
                 )
             return True
         if name == 'StaleClaimClosed':
@@ -362,6 +376,23 @@ class SolanaEventIndex:
         except (KeyError, TypeError) as e:
             bt.logging.debug(f'SolanaEventIndex: {rec.name} missing miner field: {e}')
             return None
+
+    def _fill_qualified(
+        self, hotkey: str, from_chain: str, to_chain: str, backing: str, collateral_amount: int, completed_at: int
+    ) -> bool:
+        """Quality-volume flag for a completed fill: was the miner in the lane's crown when the
+        swap was reserved (its last RESERVE_START on that hub before completion)? Fail-closed —
+        no qualifier, no reservation edge on record, or a failed evaluation all read unqualified."""
+        if self._fill_qualifier is None:
+            return False
+        reserved_at = self.state_store.get_last_reserve_start(hotkey, backing, completed_at)
+        if reserved_at is None:
+            return False
+        try:
+            return bool(self._fill_qualifier(hotkey, from_chain, to_chain, backing, collateral_amount, reserved_at))
+        except Exception as e:
+            bt.logging.warning(f'fill qualification failed for {hotkey[:8]}.. {from_chain}→{to_chain}: {e}')
+            return False
 
     @staticmethod
     def _chain(rec: EventRecord, key: str) -> str:

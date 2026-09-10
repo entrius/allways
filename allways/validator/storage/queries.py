@@ -68,17 +68,19 @@ DO UPDATE SET credit = EXCLUDED.credit,
 
 # miner_scores: per-round factor snapshots — what the validator actually paid,
 # one row per (round, hotkey, lane), flushed in the same transaction as
-# the crown ledger. Idempotent on retry of the same round.
+# the crown ledger. Idempotent on retry of the same round. vol_share carries
+# the lane's qualified-volume share the β slice paid on (the pre-#594 column).
 BULK_UPSERT_MINER_SCORES = """
 INSERT INTO miner_scores (round_ts, hotkey, from_chain, to_chain, backing, eligible,
-                          pool, crown_share, capacity, reward)
-VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s)
+                          pool, crown_share, capacity, reward, vol_share)
+VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s)
 ON CONFLICT (round_ts, hotkey, from_chain, to_chain, backing)
 DO UPDATE SET eligible    = EXCLUDED.eligible,
               pool        = EXCLUDED.pool,
               crown_share = EXCLUDED.crown_share,
               capacity    = EXCLUDED.capacity,
-              reward      = EXCLUDED.reward
+              reward      = EXCLUDED.reward,
+              vol_share   = EXCLUDED.vol_share
 """
 
 # current_miner_scores: the live mid-round tip of miner_scores, wiped and
@@ -90,6 +92,6 @@ DELETE FROM current_miner_scores
 
 BULK_INSERT_CURRENT_MINER_SCORES = """
 INSERT INTO current_miner_scores (ts, hotkey, from_chain, to_chain, backing, eligible,
-                                  pool, crown_share, capacity, reward, updated_at)
-VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, NOW())
+                                  pool, crown_share, capacity, reward, vol_share, updated_at)
+VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, NOW())
 """

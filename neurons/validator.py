@@ -56,6 +56,7 @@ from allways.validator.floor_sweep import CollateralFloorSweep  # noqa: E402
 from allways.validator.forward import forward  # noqa: E402
 from allways.validator.relay.wiring import build_bond_relay  # noqa: E402
 from allways.validator.reserve_engine import CrankScheduler  # noqa: E402
+from allways.validator.scoring import fill_held_crown  # noqa: E402
 from allways.validator.seam_http import maybe_start_seam  # noqa: E402
 from allways.validator.solana_swap_loop import SolanaSwapLoop  # noqa: E402
 from allways.validator.state_store import ValidatorStateStore  # noqa: E402
@@ -166,7 +167,13 @@ class Validator(BaseValidatorNeuron):
         self.floor_sweep = CollateralFloorSweep(self.solana_client, read_only=solana_read_only)
         # event_index synthesizes each reservation's RESERVE_EXPIRE at
         # block_time + reservation_ttl_secs, read off the config cache (D4).
-        self.event_index = SolanaEventIndex(self.state_store, self.solana_config_cache.reservation_ttl_secs)
+        # A completed fill is flagged qualified iff the miner held the lane's crown at reservation
+        # (quality volume) — the check needs the metagraph + config, so it's bound here.
+        self.event_index = SolanaEventIndex(
+            self.state_store,
+            self.solana_config_cache.reservation_ttl_secs,
+            fill_qualifier=partial(fill_held_crown, self),
+        )
 
         # Forces one scoring pass per fresh process so a mid-window restart
         # doesn't leave self.scores stale until the next scoring boundary
