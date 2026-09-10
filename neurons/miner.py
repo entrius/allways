@@ -22,12 +22,18 @@ from bittensor import Keypair as BtKeypair  # noqa: E402
 
 from allways.assets import create_assets  # noqa: E402
 from allways.chains import apply_testnet_network_defaults  # noqa: E402
-from allways.constants import FORWARD_STALL_THRESHOLD_SECONDS, NETUID_FINNEY, NUMERAIRE_CHAIN  # noqa: E402
+from allways.constants import (  # noqa: E402
+    FORWARD_STALL_THRESHOLD_SECONDS,
+    MINER_FEED_RESUBSCRIBE_SECONDS,
+    NETUID_FINNEY,
+    NUMERAIRE_CHAIN,
+)
 from allways.miner.fulfillment import SwapFulfiller  # noqa: E402
 from allways.miner.swap_poller import SwapPoller  # noqa: E402
 from allways.solana import keys  # noqa: E402
 from allways.solana.client import AllwaysSolanaClient  # noqa: E402
-from allways.solana.rpc import assert_cluster_safe, resolve_rpc_url  # noqa: E402
+from allways.solana.program_feed import ProgramEventFeed  # noqa: E402
+from allways.solana.rpc import assert_cluster_safe, resolve_rpc_url, resolve_ws_url  # noqa: E402
 from neurons.base.miner import BaseMinerNeuron  # noqa: E402
 
 
@@ -89,7 +95,18 @@ class Miner(BaseMinerNeuron):
         # Bind the bt hotkey ↔ Solana pubkey so on-chain state (keyed by pubkey) attributes to this UID.
         self.ensure_hotkey_bound()
 
-        self.swap_poller = SwapPoller(self.solana_client, self.solana_pubkey)
+        # Swaps are pushed: the feed carries only txs that mention this miner, and SwapInitiated wakes the loop.
+        # While it is down (or on an endpoint with no WebSocket) the poller syncs from chain every pass instead.
+        self.program_feed = ProgramEventFeed(
+            resolve_ws_url(solana_rpc_url),
+            self.solana_client.program_id,
+            mentions=self.solana_pubkey,
+            max_session_secs=MINER_FEED_RESUBSCRIBE_SECONDS,
+        )
+        self.swap_poller = SwapPoller(
+            self.solana_client, self.solana_pubkey, feed=self.program_feed, wake=self.wake_event.set
+        )
+        self.program_feed.start()
 
         hotkey = self.wallet.hotkey.ss58_address
         sent_cache_path = Path.home() / '.allways' / 'miner' / f'sent_cache_{hotkey[:12]}.json'
