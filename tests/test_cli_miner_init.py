@@ -134,7 +134,7 @@ def sandbox(tmp_path, monkeypatch):
         coldkeypub=SimpleNamespace(ss58_address='5Cold'), hotkey=SimpleNamespace(ss58_address='5Hot')
     )
     monkeypatch.setattr(miner_init, '_bt_wallet', lambda name, hotkey: stub)
-    monkeypatch.setattr(miner_init, 'run_doctor', lambda project_dir: [(True, 'stub', 'ok')])
+    monkeypatch.setattr(miner_init, 'run_doctor', lambda project_dir, container=True: [(True, 'stub', 'ok')])
 
     project = tmp_path / 'proj'
     project.mkdir()
@@ -388,3 +388,57 @@ def test_rpc_api_key_is_never_echoed(sandbox, monkeypatch):
     miner_init.step_rpc(s, None)
     assert shown and 'SECRETKEY0123456789' not in shown[0] and 'api-key=***' in shown[0]
     assert s.env_values['SOLANA_RPC_URL'] == keyed
+
+
+def test_helius_key_builds_the_url_and_is_never_echoed(sandbox):
+    args = [
+        '--network', 'testnet', '--wallet', 'w', '--hotkey', 'h', '--backing', 'sol',
+        '--helius-key', 'HELIUSKEY0123456789abc', '--project-dir', str(sandbox.project), '--configure-only', '-y',
+    ]  # fmt: skip
+    result = CliRunner().invoke(miner_init.init_command, args)
+    assert result.exit_code == 0, result.output
+    env = se.read_env(sandbox.project / '.env')
+    assert env['SOLANA_RPC_URL'] == miner_init.HELIUS_RPC['devnet']
+    assert env['SOLANA_RPC_API_KEY'] == 'HELIUSKEY0123456789abc'
+    assert 'HELIUSKEY0123456789abc' not in result.output and 'api-key=***' in result.output
+
+
+def test_blank_helius_key_falls_back_to_the_public_endpoint(sandbox, monkeypatch):
+    monkeypatch.setattr(miner_init.click, 'prompt', lambda text, **k: '')
+    monkeypatch.delenv('SOLANA_RPC_API_KEY', raising=False)
+    s = miner_init.Setup(project_dir=sandbox.project, env='testnet')
+    miner_init.step_rpc(s, None)
+    assert s.env_values['SOLANA_RPC_URL'] == miner_init.SOLANA_NETWORKS['devnet']
+    assert 'SOLANA_RPC_API_KEY' not in s.env_values
+
+
+def test_keypair_outside_the_mount_is_copied_where_the_container_reads_it(sandbox, tmp_path):
+    from allways.solana import keys
+
+    outside = tmp_path / 'elsewhere' / 'miner.json'
+    outside.parent.mkdir()
+    kp = keys.load_or_create(str(outside))
+    result = _run_all_chains(sandbox, '--solana-keypair', str(outside))
+    assert result.exit_code == 0, result.output
+    mounted = sandbox.project / 'data' / 'solana' / 'id.json'
+    assert keys.load_keypair(str(mounted)).pubkey() == kp.pubkey()
+    assert stat.S_IMODE(mounted.stat().st_mode) == 0o600
+    assert 'copy this key' not in result.output
+
+
+def test_wizard_preflight_leaves_the_container_to_doctor(monkeypatch, tmp_path):
+    monkeypatch.setattr(miner_init, 'get_effective_config', lambda: {'netuid': '19'})
+    monkeypatch.setattr(miner_init, '_check_wallet', lambda config: ([], None))
+    monkeypatch.setattr(miner_init, '_check_keys', lambda env, config: [])
+    monkeypatch.setattr(miner_init, '_check_chain', lambda config, hot: [])
+    monkeypatch.setattr(miner_init, 'container_running', lambda: False)
+    labels = lambda rows: [label for _, label, _ in rows]  # noqa: E731
+    assert 'miner container' in labels(miner_init.run_doctor(tmp_path))
+    assert 'miner container' not in labels(miner_init.run_doctor(tmp_path, container=False))
+
+
+def test_rpc_errors_never_quote_the_keyed_url():
+    err = ConnectionError(
+        '401 Client Error: Unauthorized for url: https://devnet.helius-rpc.com/?api-key=LEAKME0123456789'
+    )
+    assert 'LEAKME0123456789' not in miner_init._scrub(err) and 'api-key=***' in miner_init._scrub(err)
