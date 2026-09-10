@@ -372,3 +372,19 @@ def test_reusing_an_existing_evm_key_is_reported_as_shared_not_generated(sandbox
     out = ' '.join(result.output.split())
     assert 'your ARB key now also covers: eth' in out
     assert 'generated: btc' in out  # only the BTC key was minted
+
+
+def test_rpc_api_key_is_never_echoed(sandbox, monkeypatch):
+    keyed = 'https://devnet.helius-rpc.com/?api-key=SECRETKEY0123456789'
+    result = _run_all_chains(sandbox, '--solana-rpc', keyed)
+    assert result.exit_code == 0, result.output
+    assert 'SECRETKEY0123456789' not in result.output
+    assert se.read_env(sandbox.project / '.env')['SOLANA_RPC_URL'] == keyed  # stored whole, shown masked
+
+    shown = []
+    monkeypatch.setattr(miner_init.click, 'prompt', lambda text, **k: shown.append(text) or k['default'])
+    s = miner_init.Setup(project_dir=sandbox.project, env='testnet')
+    monkeypatch.setenv('SOLANA_RPC_URL', keyed)
+    miner_init.step_rpc(s, None)
+    assert shown and 'SECRETKEY0123456789' not in shown[0] and 'api-key=***' in shown[0]
+    assert s.env_values['SOLANA_RPC_URL'] == keyed

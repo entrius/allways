@@ -318,20 +318,22 @@ def step_keys(s: Setup, solana_keypair: Optional[str]) -> None:
 
 
 def step_rpc(s: Setup, solana_rpc: Optional[str]) -> None:
+    from allways.solana.rpc import redact_rpc_url
+
     ui.draw_step(
         console,
         5,
         'Solana RPC',
-        'The miner polls the Allways program here every 12 s and sends its fulfillment transactions through it.',
-        'Public endpoints throttle it. Use a keyed one (Helius, Triton, QuickNode…): a free Helius key is'
-        " enough to rehearse on testnet; a 24/7 mainnet miner outgrows the free tier's monthly credits.",
+        'The miner listens for its swaps here over a WebSocket feed and sends its transactions through it.',
+        'Public endpoints rate-limit. Use a keyed one: a free Helius key (helius.dev) is enough for a 24/7 miner.',
     )
     current = se.read_env(s.env_path).get('SOLANA_RPC_URL') or os.environ.get('SOLANA_RPC_URL')
     default = current or SOLANA_NETWORKS[s.bundle['solana-network']]
-    url = solana_rpc or _prompt(s, 'Solana RPC URL', default=default)
+    # A keyed URL carries its API key: the default is shown redacted and the result is echoed redacted.
+    url = solana_rpc or _prompt(s, f'Solana RPC URL [{redact_rpc_url(default)}]', default=default, show_default=False)
     s.env_values['SOLANA_RPC_URL'] = url
     os.environ['SOLANA_RPC_URL'] = url
-    ui.draw_done(console, f'Solana RPC {url}')
+    ui.draw_done(console, f'Solana RPC {redact_rpc_url(url)}')
     console.print(
         '  [dim]Spoke RPCs ({PREFIX}_RPC_URLS, BTC_ESPLORA_URLS) keep public defaults — edit .env to add keyed ones.[/dim]'
     )
