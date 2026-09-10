@@ -12,6 +12,7 @@ import shutil
 import subprocess
 import time
 from dataclasses import dataclass, field
+from functools import partial
 from pathlib import Path
 from typing import Dict, List, Optional, Tuple
 
@@ -37,8 +38,8 @@ from allways.cli.swap_commands.helpers import (
     purse_states,
     resolve_solana_keypair_path,
 )
-from allways.cli.swap_commands.swap_intake import floors_from_config
-from allways.constants import TAO_HUB_VAULT_ADDRESSES
+from allways.cli.swap_commands.swap_intake import bounds_from_config, floors_from_config
+from allways.constants import MIN_BALANCE_FOR_TX_RAO, TAO_HUB_VAULT_ADDRESSES, required_collateral
 from allways.solana.pdas import BACKING_CHAIN_SOL, BACKING_CHAIN_TAO
 
 COMPOSE_FILE = 'docker-compose.miner.yml'
@@ -48,6 +49,12 @@ CONTAINER = 'aw-miner'
 # so an activation right after registering must be retried across that window.
 ACTIVATE_RETRY_SECS = 180
 ACTIVATE_WAIT_AFTER_REGISTER_MINS = 35
+# SOL kept on the keypair past the collateral floor: rent for the miner's state, binding and first quote
+# accounts plus transaction fees. A headroom figure, not a contract value.
+SOL_SETUP_HEADROOM_LAMPORTS = 50_000_000
+# Preflight rows the go-live sequence itself resolves (fund → deposit → bind → register → bond → start →
+# activate): a fresh miner fails all of them by definition, so they never gate the "continue?" prompt.
+GO_LIVE_ROWS = ('SOL balance', 'SOL collateral', 'hotkey binding', 'TAO bond', 'miner container')
 Check = Tuple[Optional[bool], str, str]
 
 
@@ -166,6 +173,9 @@ def step_wallet(s: Setup, wallet: Optional[str], hotkey: Optional[str]) -> None:
     if wallets:
         ui.draw_kv(console, ((n, ', '.join(h) or '[dim]no hotkeys[/dim]') for n, h in wallets.items()))
         console.print('  [dim]Name an existing coldkey, or "new" to create one.[/dim]')
+    console.print(
+        '  [dim]Already have a coldkey elsewhere? Import it first with `btcli w regen_coldkey`, then re-run.[/dim]'
+    )
     default_wallet = existing.get('wallet') if existing.get('wallet') in wallets else next(iter(wallets), 'new')
     name = wallet or _prompt(s, 'Coldkey', default=default_wallet)
     if name == 'new':
@@ -566,7 +576,98 @@ def _resume_hint(cmd: str) -> None:
     console.print(f'\n  [dim]Fix the above, then re-run `alw miner init` (it resumes) or `{cmd}` directly.[/dim]')
 
 
-def _deposit(ctx, s: Setup, client, pubkey, floors) -> bool:
+def _capacity_note(backings: Tuple[str, ...], bounds: Dict[str, Tuple[int, int]]) -> None:
+    """Minimum collateral activates a purse; the crown pays on capacity, which is full only once the purse
+    can back a max-size swap (the contract's 1.10× gate) — so show where that is, per backing."""
+    parts = []
+    for backing in backings:
+        max_swap = bounds.get(backing, (0, 0))[1]
+        if max_swap <= 0:
+            continue
+        fmt = from_lamports if backing == BACKING_CHAIN_SOL else from_rao
+        unit = backing.upper()
+        parts.append(
+            f'{unit}: max swap {fmt(max_swap):.4f} {unit}, full capacity at {fmt(required_collateral(max_swap)):.4f} {unit}'
+        )
+    if not parts:
+        return
+    console.print(
+        '  [yellow]More emissions are received when you maximize collateral up to the max swap size (make sure you'
+        ' can fund swaps at your rates and collateral size!).[/yellow]'
+    )
+    for part in parts:
+        console.print(f'  [yellow]  {part}[/yellow]')
+
+
+def _funding_rows(s: Setup, client, subtensor, config, wallet, pubkey, netuid: int, floors) -> List[Check]:
+    """One row per wallet go-live spends from, with what it needs for the steps still to do."""
+    from allways.vault import BondVaultClient
+
+    rows: List[Check] = []
+    posted = client.get_collateral_lamports(pubkey) or 0
+    sol_need = max(floors[BACKING_CHAIN_SOL] - posted, 0) + SOL_SETUP_HEADROOM_LAMPORTS
+    sol_have = client.rpc.get_account_lamports(pubkey) or 0
+    why = 'collateral floor + ~0.05 rent/fees' if posted < floors[BACKING_CHAIN_SOL] else '~0.05 rent/fees'
+    rows.append(
+        (
+            sol_have >= sol_need,
+            'Solana keypair',
+            f'{pubkey}  {from_lamports(sol_have):.4f} / {from_lamports(sol_need):.4f} SOL  ({why})',
+        )
+    )
+    hot = wallet.hotkey.ss58_address
+    if subtensor.get_uid_for_hotkey_on_subnet(hot, netuid) is None:
+        cold = wallet.coldkeypub.ss58_address
+        need = int(subtensor.recycle(netuid).rao) + MIN_BALANCE_FOR_TX_RAO
+        have = int(subtensor.get_balance(cold).rao)
+        rows.append(
+            (have >= need, 'coldkey', f'{cold}  {from_rao(have):.4f} / {from_rao(need):.4f} TAO  (registration + fees)')
+        )
+    if BACKING_CHAIN_TAO in s.backings:
+        bonded = BondVaultClient.from_config(subtensor, config).get_collateral(hot) or 0
+        if bonded < floors[BACKING_CHAIN_TAO]:
+            need = floors[BACKING_CHAIN_TAO] - bonded + MIN_BALANCE_FOR_TX_RAO
+            have = int(subtensor.get_balance(hot).rao)
+            rows.append(
+                (
+                    have >= need,
+                    'hotkey',
+                    f'{hot}  {from_rao(have):.4f} / {from_rao(need):.4f} TAO  (bond floor + fees; the hotkey signs the bond)',
+                )
+            )
+    return rows
+
+
+def _fund(s: Setup, gather, bounds) -> bool:
+    ui.draw_step(console, 8, 'Fund the miner', 'Go-live spends from these wallets. Send at least the amounts shown.')
+    _capacity_note(s.backings, bounds)
+    console.print(
+        '  [dim]Spoke addresses (EVM, BTC) are inventory for the chains you quote — not needed to go live.[/dim]'
+    )
+    while True:
+        try:
+            rows = gather()
+        except Exception as e:  # one dead RPC reads as unfunded, not a crash: fix it and press Enter
+            rows = [(False, 'balance read', str(e))]
+        console.print(ui.check_table(rows))
+        if all(ok for ok, _, _ in rows):
+            ui.draw_done(console, 'funded')
+            return True
+        if s.yes:
+            console.print('  [red]Underfunded.[/red]')
+            _resume_hint('alw doctor')
+            return False
+        answer = click.prompt(
+            '  Fund the addresses above, then press Enter to re-check (q to stop; `alw miner init` resumes later)',
+            default='',
+            show_default=False,
+        )
+        if answer.strip().lower().startswith('q'):
+            console.print('  [dim]Stopped. Re-run `alw miner init` once funded — every earlier step is kept.[/dim]')
+            return False
+
+
+def _deposit(ctx, s: Setup, client, pubkey, floors, bounds=None) -> bool:
     from allways.cli.swap_commands.collateral import collateral_deposit
 
     need = floors[BACKING_CHAIN_SOL]
@@ -576,11 +677,13 @@ def _deposit(ctx, s: Setup, client, pubkey, floors) -> bool:
         if BACKING_CHAIN_SOL in s.backings
         else 'identity deposit (TAO-only miners still stake the minimum once)'
     )
-    ui.draw_step(console, 8, f'Deposit {what}', 'Binding requires a live stake, so this comes first.')
+    ui.draw_step(console, 9, f'Deposit {what}', 'Binding requires a live stake, so this comes first.')
     if have >= need and client.get_miner_state(pubkey) is not None:
         ui.draw_done(console, f'{from_lamports(have):.4f} SOL already posted (floor {from_lamports(need):.4f})')
         return True
     shortfall = from_lamports(max(need - have, 0))
+    if BACKING_CHAIN_SOL in s.backings and bounds:
+        _capacity_note((BACKING_CHAIN_SOL,), bounds)
     amount = float(_prompt(s, 'Amount to deposit (SOL)', default=f'{shortfall:.4f}' if shortfall else '1.0'))
     try:
         ctx.invoke(collateral_deposit, amount=amount, yes=True)
@@ -596,7 +699,7 @@ def _bind(ctx, s: Setup, client, pubkey, wallet) -> bool:
 
     ui.draw_step(
         console,
-        9,
+        10,
         'Bind hotkey ↔ Solana pubkey',
         'Permanent in both directions. Bind BEFORE registering so nobody can squat your hotkey.',
     )
@@ -652,7 +755,7 @@ def _register(s: Setup, subtensor, wallet, netuid: int) -> bool:
     hot = wallet.hotkey.ss58_address
     ui.draw_step(
         console,
-        10,
+        11,
         f'Register on subnet {netuid}',
         'Burns the registration cost from the coldkey. An encrypted coldkey asks for its password here.',
     )
@@ -689,7 +792,7 @@ def _bond(ctx, s: Setup, subtensor, config, wallet, floors) -> bool:
 
     ui.draw_step(
         console,
-        11,
+        12,
         'Post and lock the TAO bond',
         'The hotkey signs vault calls. Locking is not self-service to undo: exit is deactivate → settle → unlock.',
     )
@@ -729,7 +832,7 @@ def _bond(ctx, s: Setup, subtensor, config, wallet, floors) -> bool:
 def _run_container(s: Setup, serving: bool = False) -> bool:
     ui.draw_step(
         console,
-        12,
+        13,
         'Start the miner',
         'Start BEFORE activating: an active purse that nobody serves gets reserved, times out, and is slashed.',
     )
@@ -796,7 +899,7 @@ def _activate_with_retry(ctx, s: Setup, backing: str) -> bool:
 
 def _activate(ctx, s: Setup, client, pubkey) -> bool:
     ui.draw_step(
-        console, 13, 'Activate', 'Tells validators each purse is ready; they verify and vote it live on-chain.'
+        console, 14, 'Activate', 'Tells validators each purse is ready; they verify and vote it live on-chain.'
     )
     ms = client.get_miner_state(pubkey)
     states = {st.backing: st for st in purse_states(client, pubkey, ms, client.get_config())}
@@ -818,10 +921,14 @@ def go_live(ctx, s: Setup) -> bool:
     pubkey = client.keypair.pubkey()
     wallet = _bt_wallet(s.wallet, s.hotkey)
     netuid = int(config.get('netuid', 7))
-    floors = floors_from_config(client.get_config())
+    cfg = client.get_config()
+    floors, bounds = floors_from_config(cfg), bounds_from_config(cfg)
     subtensor = bt.Subtensor(network=config.get('network', 'finney'))
 
-    if not _deposit(ctx, s, client, pubkey, floors):
+    gather = partial(_funding_rows, s, client, subtensor, config, wallet, pubkey, netuid, floors)
+    if not _fund(s, gather, bounds):
+        return False
+    if not _deposit(ctx, s, client, pubkey, floors, bounds):
         return False
     if not _bind(ctx, s, client, pubkey, wallet):
         return False
@@ -921,7 +1028,9 @@ def init_command(
     network, wallet, hotkey = _take_global_flags(network, wallet, hotkey)
     s = Setup(project_dir=project_dir.resolve(), yes=yes, activate_wait_mins=activate_wait)
     ui.draw_logo(console, 'Welcome to the Allways miner setup!')
-    console.print('[dim]Order matters on-chain: deposit → bind → register → (bond) → run → activate → quote.[/dim]')
+    console.print(
+        '[dim]Order matters on-chain: fund → deposit → bind → register → (bond) → run → activate → quote.[/dim]'
+    )
     if not (s.project_dir / COMPOSE_FILE).is_file():
         ui.draw_warn(
             console,
@@ -939,20 +1048,27 @@ def init_command(
     if configure_only:
         _finish(s, live=False)
         return
-    failed = [c for ok, c, _ in rows if ok is False]
+    failed = [c for ok, c, _ in rows if ok is False and not _go_live_row(c)]
     if (
         failed
         and not yes
-        and not click.confirm(f'\n{len(failed)} check(s) failed. Continue to go-live anyway?', default=False)
+        and not click.confirm(f'\n{len(failed)} check(s) failed ({", ".join(failed)}). Continue anyway?', default=False)
     ):
         _finish(s, live=False)
         return
+    console.print(
+        '  [dim]Rows marked ✗ for funding, collateral, binding, registration, bond, purses and the container are what go-live does next.[/dim]'
+    )
     if not yes and not click.confirm(
-        '\nContinue to go-live (deposit → bind → register → bond → run → activate)?', default=True
+        '\nContinue to go-live (fund → deposit → bind → register → bond → run → activate)?', default=True
     ):
         _finish(s, live=False)
         return
     _finish(s, live=go_live(ctx, s))
+
+
+def _go_live_row(label: str) -> bool:
+    return label in GO_LIVE_ROWS or label.startswith('registered on SN') or label.endswith(' purse')
 
 
 def _finish(s: Setup, live: bool) -> None:
@@ -977,6 +1093,11 @@ def _finish(s: Setup, live: bool) -> None:
                 ('alw miner init', 'resume the go-live sequence'),
             ],
         )
+    console.print(
+        '[yellow]Stay eligible: your miner must complete a swap on each hub it backs every 12 hours to keep earning'
+        ' emissions. 3 failed swaps anywhere make it permanently ineligible — re-registering does not reset that;'
+        ' a fresh start needs a new hotkey and Solana keypair.[/yellow]'
+    )
     console.print(
         f'[dim]Back up: {se.wallets_root()}/{s.wallet}, {s.solana_keypair}, and {s.env_path} — they ARE the miner.[/dim]\n'
     )

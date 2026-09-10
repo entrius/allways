@@ -302,3 +302,63 @@ def test_activate_retries_across_the_metagraph_sync_window(monkeypatch):
     calls.clear()
     assert miner_init._activate_with_retry(Ctx(), s2, 'sol') is False
     assert calls == ['sol']
+
+
+def test_fund_rechecks_on_enter_and_stops_on_q(monkeypatch):
+    s = miner_init.Setup(project_dir=os.getcwd(), backing='sol')
+    checks = iter([[(False, 'Solana keypair', 'short')], [(True, 'Solana keypair', 'ok')]])
+    answers = iter([''])
+    monkeypatch.setattr(miner_init.click, 'prompt', lambda *a, **k: next(answers))
+    assert miner_init._fund(s, lambda: next(checks), {}) is True  # Enter re-checked, now funded
+
+    monkeypatch.setattr(miner_init.click, 'prompt', lambda *a, **k: 'q')
+    assert miner_init._fund(s, lambda: [(False, 'coldkey', 'short')], {}) is False
+
+
+def test_fund_under_yes_stops_instead_of_waiting(monkeypatch):
+    s = miner_init.Setup(project_dir=os.getcwd(), backing='sol', yes=True)
+    monkeypatch.setattr(miner_init.click, 'prompt', lambda *a, **k: pytest.fail('must not prompt under -y'))
+    assert miner_init._fund(s, lambda: [(False, 'Solana keypair', 'short')], {}) is False
+
+
+def test_capacity_note_names_max_swap_and_full_capacity_per_backing(capsys):
+    from allways.constants import required_collateral
+
+    bounds = {'sol': (100_000_000, 5_000_000_000), 'tao': (50_000_000, 2_000_000_000)}
+    with miner_init.console.capture() as cap:
+        miner_init._capacity_note(('sol', 'tao'), bounds)
+    out = cap.get()
+    assert 'max swap 5.0000 SOL' in out and 'max swap 2.0000 TAO' in out
+    assert f'{required_collateral(5_000_000_000) / 1e9:.4f} SOL' in out
+    assert 'More emissions' in out
+
+
+def test_preflight_gate_ignores_what_go_live_does_itself():
+    for label in (
+        'SOL balance',
+        'SOL collateral',
+        'hotkey binding',
+        'registered on SN19',
+        'TAO bond',
+        'sol purse',
+        'miner container',
+    ):
+        assert miner_init._go_live_row(label), label
+    for label in ('solana rpc + program', 'coldkey', 'EVM key', 'docker', 'WALLET_PATH'):
+        assert not miner_init._go_live_row(label), label
+
+
+def test_finish_states_the_activity_window_and_strike_rule(sandbox):
+    result = _run_all_chains(sandbox)
+    assert result.exit_code == 0, result.output
+    out = ' '.join(result.output.split())  # rich wraps to the terminal width
+    assert '12 hours' in out and '3 failed swaps' in out
+
+
+def test_fund_survives_a_failed_balance_read(monkeypatch):
+    s = miner_init.Setup(project_dir=os.getcwd(), backing='sol', yes=True)
+
+    def boom():
+        raise ConnectionError('rpc down')
+
+    assert miner_init._fund(s, boom, {}) is False
