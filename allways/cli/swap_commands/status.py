@@ -22,6 +22,7 @@ from allways.cli.swap_commands.helpers import (
     resolve_solana_keypair_path,
     safe_read,
     set_json_output,
+    wallet_path,
 )
 from allways.solana.rpc import redact_rpc_url
 
@@ -36,7 +37,7 @@ def _tao_identity(config):
     import bittensor as bt
 
     try:
-        ss58 = bt.Wallet(name=name).coldkeypub.ss58_address
+        ss58 = bt.Wallet(name=name, path=wallet_path()).coldkeypub.ss58_address
     except Exception:
         return None
     try:
@@ -54,7 +55,7 @@ def _configured_hotkey_ss58(config):
     import bittensor as bt
 
     try:
-        return bt.Wallet(name=config['wallet'], hotkey=config['hotkey']).hotkey.ss58_address
+        return bt.Wallet(name=config['wallet'], hotkey=config['hotkey'], path=wallet_path()).hotkey.ss58_address
     except Exception:
         return None
 
