@@ -12,6 +12,7 @@ import shutil
 import subprocess
 import time
 from dataclasses import dataclass, field
+from functools import partial
 from pathlib import Path
 from typing import Dict, List, Optional, Tuple
 
@@ -37,18 +38,35 @@ from allways.cli.swap_commands.helpers import (
     purse_states,
     resolve_solana_keypair_path,
 )
-from allways.cli.swap_commands.swap_intake import floors_from_config
-from allways.constants import TAO_HUB_VAULT_ADDRESSES
+from allways.cli.swap_commands.swap_intake import bounds_from_config, floors_from_config
+from allways.constants import MIN_BALANCE_FOR_TX_RAO, TAO_HUB_VAULT_ADDRESSES, required_collateral
 from allways.solana.pdas import BACKING_CHAIN_SOL, BACKING_CHAIN_TAO
 
 COMPOSE_FILE = 'docker-compose.miner.yml'
 IMAGE_TAGS = {'testnet': 'test', 'mainnet': 'latest'}  # entrius/allways:<tag>, read by the compose file
 CONTAINER = 'aw-miner'
+# Keyed Solana hosts the wizard composes a pasted Helius key onto (SOLANA_RPC_API_KEY).
+HELIUS_RPC = {'devnet': 'https://devnet.helius-rpc.com/', 'mainnet': 'https://mainnet.helius-rpc.com/'}
 # Validators learn of a new registration on their next metagraph sync (epoch_length 150 blocks ≈ 30 min),
 # so an activation right after registering must be retried across that window.
 ACTIVATE_RETRY_SECS = 180
 ACTIVATE_WAIT_AFTER_REGISTER_MINS = 35
+# SOL kept on the keypair past the collateral floor: rent for the miner's state, binding and first quote
+# accounts plus transaction fees. A headroom figure, not a contract value.
+SOL_SETUP_HEADROOM_LAMPORTS = 50_000_000
+# Preflight rows the go-live sequence itself resolves (fund → deposit → bind → register → bond → start →
+# activate): a fresh miner fails all of them by definition, so they never gate the "continue?" prompt.
+GO_LIVE_ROWS = ('SOL balance', 'SOL collateral', 'hotkey binding', 'TAO bond', 'miner container')
 Check = Tuple[Optional[bool], str, str]
+
+
+def _scrub(err: Exception) -> str:
+    """An exception's text with every URL redacted — RPC errors quote the keyed URL they failed on."""
+    import re
+
+    from allways.solana.rpc import redact_rpc_url
+
+    return re.sub(r'(?:https?|wss?)://[^\s\'"<>]+', lambda m: redact_rpc_url(m.group(0)), str(err))
 
 
 @dataclass
@@ -166,6 +184,9 @@ def step_wallet(s: Setup, wallet: Optional[str], hotkey: Optional[str]) -> None:
     if wallets:
         ui.draw_kv(console, ((n, ', '.join(h) or '[dim]no hotkeys[/dim]') for n, h in wallets.items()))
         console.print('  [dim]Name an existing coldkey, or "new" to create one.[/dim]')
+    console.print(
+        '  [dim]Already have a coldkey elsewhere? Import it first with `btcli w regen_coldkey`, then re-run.[/dim]'
+    )
     default_wallet = existing.get('wallet') if existing.get('wallet') in wallets else next(iter(wallets), 'new')
     name = wallet or _prompt(s, 'Coldkey', default=default_wallet)
     if name == 'new':
@@ -193,30 +214,24 @@ def step_wallet(s: Setup, wallet: Optional[str], hotkey: Optional[str]) -> None:
     ui.draw_kv(console, [('coldkey', _pub_ss58(w, 'coldkey') or '?'), ('hotkey', _pub_ss58(w, 'hotkey') or '?')])
 
 
-def step_chains(s: Setup, backing: Optional[str], chains: Optional[str]) -> None:
+def step_backing(s: Setup, backing: Optional[str], chains: Optional[str]) -> None:
     ui.draw_step(
         console,
         3,
-        'Backing and chains',
+        'Backing',
         'SOL purse: a failed delivery refunds the user instantly in SOL. TAO bond: reimburses in TAO after timeout.',
-        'Then pick every chain family you will quote — each needs one signing key. SOL and TAO are always on.',
     )
     s.backing = backing or _prompt(s, 'Backing', default='sol', type=click.Choice(['sol', 'tao', 'both']))
-    families = se.optional_families()
-    env = se.read_env(s.env_path)
-    ui.draw_kv(console, ((f.prefix.lower(), ', '.join(f.assets)) for f in families))
-    default = ','.join(f.prefix.lower() for f in families if env.get(f.key_env))
-    raw = chains if chains is not None else _prompt(s, 'Chains (comma-separated; blank = none)', default=default)
-    while True:
+    # Every spoke gets a key: an unfunded key costs nothing, and what you quote is decided later by
+    # `alw miner post` and by which addresses you fund. --chains narrows it for operators who want fewer.
+    if chains is None:
+        s.families = [f.prefix for f in se.optional_families()]
+    else:
         try:
-            s.families = se.parse_family_list(raw or '')
-            break
+            s.families = se.parse_family_list(chains)
         except ValueError as e:
-            if s.yes:
-                fail(str(e))
-            console.print(f'  [red]{e}[/red]')
-            raw = click.prompt('Chains', default=default)
-    ui.draw_done(console, f'{s.backing} backing · spokes: {", ".join(f.lower() for f in s.families) or "none"}')
+            fail(str(e))
+    ui.draw_done(console, f'{s.backing} backing')
 
 
 def _solana_keypair(s: Setup, flag: Optional[str]) -> None:
@@ -233,30 +248,49 @@ def _solana_keypair(s: Setup, flag: Optional[str]) -> None:
     s.solana_keypair = path
     _save_config({'solana-keypair': str(path)})
     ui.draw_done(console, f'{"generated" if created else "using"} Solana keypair {path}')
-    if path.parent != default.parent.resolve():
-        ui.draw_warn(console, f'docker mounts ./data/solana as the miner keypair dir — copy this key to {default}')
+    _mount_keypair(path, kp.pubkey(), default)
     s.addresses['SOL'] = str(kp.pubkey())
 
 
-def _family_key(s: Setup, fam: se.KeyFamily, env: Dict[str, str]) -> None:
-    network = s.bundle.get(network_key(fam.network_chain)) if fam.network_chain else 'mainnet'
-    s.env_values[fam.network_env] = network
+def _mount_keypair(path: Path, pubkey, mounted: Path) -> None:
+    """Compose mounts only ./data/solana (read-only) into the container, so the miner can only run as the
+    key at ./data/solana/id.json: copy the chosen keypair there. Never overwrite a different key."""
+    from allways.solana import keys
+
+    mounted = mounted.resolve()
+    if path == mounted:
+        return
+    if not mounted.exists():
+        mounted.parent.mkdir(parents=True, exist_ok=True)
+        shutil.copyfile(path, mounted)
+        os.chmod(mounted, 0o600)
+        ui.draw_done(console, 'copied it to ./data/solana/id.json, where the miner container reads it')
+        return
+    other = keys.load_keypair(str(mounted)).pubkey()
+    if other != pubkey:
+        ui.draw_warn(
+            console,
+            f'./data/solana/id.json is a different keypair ({other}); the container would run as that one.'
+            ' Move it aside and re-run.',
+        )
+
+
+def _family_network(s: Setup, fam: se.KeyFamily) -> str:
+    return s.bundle.get(network_key(fam.network_chain)) if fam.network_chain else 'mainnet'
+
+
+def _usable_key(s: Setup, fam: se.KeyFamily, env: Dict[str, str]) -> Optional[str]:
+    """The family's key from .env if it derives an address; a broken one is replaced only on a yes."""
     existing = env.get(fam.key_env)
-    derive = (lambda k: se.btc_address(k, network)) if fam.kind == 'btc' else se.evm_address
-    addr = derive(existing) if existing else None
-    if existing and addr is None:
-        ui.draw_warn(console, f'{fam.key_env} in .env is not a usable key')
-        if not _prompt(s, f'  Replace {fam.key_env} with a fresh key?', default=False, type=bool):
-            return
-        existing = None
     if not existing:
-        key, addr = se.generate_btc_key(network) if fam.kind == 'btc' else se.generate_evm_key()
-        s.env_values[fam.key_env] = key
-    ui.draw_done(
-        console,
-        f'{fam.prefix} key {"kept from .env" if existing else "generated"} ({network}; {", ".join(fam.assets)})',
-    )
-    s.addresses[fam.prefix] = addr
+        return None
+    derive = (lambda k: se.btc_address(k, _family_network(s, fam))) if fam.kind == 'btc' else se.evm_address
+    if derive(existing) is not None:
+        return existing
+    ui.draw_warn(console, f'{fam.key_env} in .env is not a usable key')
+    if _prompt(s, f'  Replace {fam.key_env} with a fresh key?', default=False, type=bool):
+        return None
+    return existing
 
 
 def step_keys(s: Setup, solana_keypair: Optional[str]) -> None:
@@ -270,45 +304,131 @@ def step_keys(s: Setup, solana_keypair: Optional[str]) -> None:
     coldkey = _pub_ss58(_bt_wallet(s.wallet, s.hotkey), 'coldkey')
     s.addresses['TAO'] = coldkey or '?'
     env = se.read_env(s.env_path)
-    by_prefix = {f.prefix: f for f in se.optional_families()}
-    for prefix in s.families:
-        _family_key(s, by_prefix[prefix], env)
+    families = [f for f in se.optional_families() if f.prefix in s.families]
+    # Every family's network follows the chosen environment, keyed or not — a testnet .env never
+    # carries a mainnet spoke network waiting for someone to paste a key next to it.
+    for fam in se.optional_families():
+        if fam.network_chain:
+            s.env_values[fam.network_env] = _family_network(s, fam)
+    # One EVM key serves every EVM chain (nonces are per chain, and the keys share one .env anyway),
+    # so the operator funds one address. A family that already has its own key keeps it.
+    existing = {f.prefix: _usable_key(s, f, env) for f in families}
+    evm_source = next((f.prefix for f in families if f.kind == 'evm' and existing[f.prefix]), None)
+    evm_key = existing[evm_source] if evm_source else None
+    if evm_key is None and any(f.kind == 'evm' for f in families):
+        evm_key, _ = se.generate_evm_key()
+    generated: List[str] = []  # freshly minted
+    shared: List[str] = []  # handed the operator's existing EVM key
+    evm_groups: Dict[str, List[str]] = {}  # address → families, so a shared key prints once
+    for fam in families:
+        key = existing[fam.prefix]
+        if key is None:
+            key = evm_key if fam.kind == 'evm' else se.generate_btc_key(_family_network(s, fam))[0]
+            s.env_values[fam.key_env] = key
+            (shared if fam.kind == 'evm' and evm_source else generated).append(fam.prefix.lower())
+        if fam.kind == 'btc':
+            s.addresses['BTC'] = se.btc_address(key, _family_network(s, fam)) or '?'
+        else:
+            evm_groups.setdefault(se.evm_address(key) or '?', []).append(fam.prefix.lower())
+    for i, (addr, prefixes) in enumerate(evm_groups.items()):
+        s.addresses['EVM' if i == 0 else f'EVM {i + 1}'] = f'{addr}  ({", ".join(prefixes)})'
+    kept = [f.prefix.lower() for f in families if existing[f.prefix]]
+    if kept:
+        ui.draw_done(console, f'kept from .env: {", ".join(kept)}')
+    if shared:
+        ui.draw_done(
+            console,
+            f'your {evm_source} key now also covers: {", ".join(shared)} (one EVM key works on every EVM chain)',
+        )
+    if generated:
+        ui.draw_done(console, f'generated: {", ".join(generated)}')
     console.print()
     ui.draw_kv(console, s.addresses.items())
     console.print(
-        '  [dim]Each spoke wallet needs the asset it pays out plus gas; the Solana keypair covers fees.[/dim]'
+        '  [dim]Fund only the chains you will quote: each spoke address needs the asset it pays out plus gas;'
+        ' the Solana keypair covers fees. Unfunded keys cost nothing.[/dim]'
     )
 
 
-def step_rpc(s: Setup, solana_rpc: Optional[str]) -> None:
+def step_rpc(s: Setup, solana_rpc: Optional[str], helius_key: Optional[str] = None) -> None:
+    from allways.solana.rpc import redact_rpc_url, resolve_rpc_url
+
     ui.draw_step(
         console,
         5,
         'Solana RPC',
-        'Public endpoints rate-limit; on mainnet use a keyed provider (Helius, Triton, QuickNode…).',
+        'Use a free Helius key: it covers a 24/7 miner, and it is what we run. Sign up at helius.dev and copy the'
+        ' API key.',
     )
-    current = se.read_env(s.env_path).get('SOLANA_RPC_URL') or os.environ.get('SOLANA_RPC_URL')
-    default = current or SOLANA_NETWORKS[s.bundle['solana-network']]
-    url = solana_rpc or _prompt(s, 'Solana RPC URL', default=default)
+    cluster = s.bundle['solana-network']
+    env = se.read_env(s.env_path)
+    current_url = env.get('SOLANA_RPC_URL') or os.environ.get('SOLANA_RPC_URL')
+    current_key = env.get('SOLANA_RPC_API_KEY') or os.environ.get('SOLANA_RPC_API_KEY')
+    keyed = bool(current_key) or 'api-key=' in (current_url or '')
+    if solana_rpc:  # another provider, URL as given (a stale Helius key must not ride along)
+        url, key = solana_rpc, None
+    elif helius_key:
+        url, key = HELIUS_RPC[cluster], helius_key
+    elif s.yes:
+        url, key = current_url or SOLANA_NETWORKS[cluster], current_key
+    else:
+        if keyed:
+            os.environ['SOLANA_RPC_API_KEY'] = current_key or ''
+            hint = f'Enter keeps {redact_rpc_url(resolve_rpc_url(current_url))}'
+        else:
+            hint = 'blank = public endpoint, rate-limited'
+        entered = click.prompt(f'Helius API key ({hint})', default='', hide_input=True, show_default=False).strip()
+        if entered:
+            url, key = HELIUS_RPC[cluster], entered
+        elif keyed:
+            url, key = current_url or HELIUS_RPC[cluster], current_key
+        else:
+            url, key = SOLANA_NETWORKS[cluster], None
     s.env_values['SOLANA_RPC_URL'] = url
     os.environ['SOLANA_RPC_URL'] = url
-    ui.draw_done(console, f'Solana RPC {url}')
-    console.print(
-        '  [dim]Spoke RPCs ({PREFIX}_RPC_URLS, BTC_ESPLORA_URLS) keep public defaults — edit .env to add keyed ones.[/dim]'
-    )
+    if key:
+        s.env_values['SOLANA_RPC_API_KEY'] = key
+        os.environ['SOLANA_RPC_API_KEY'] = key
+    else:
+        os.environ.pop('SOLANA_RPC_API_KEY', None)
+        if current_key:
+            s.env_values['SOLANA_RPC_API_KEY'] = ''
+    full = resolve_rpc_url(url)
+    ui.draw_done(console, f'Solana RPC {redact_rpc_url(full)}')
+    if 'api-key=' not in full and not solana_rpc:
+        console.print(
+            '  [dim]Public endpoint: fine to look around, but it rate-limits. Add a Helius key before going live.[/dim]'
+        )
+
+
+def _coldkey_encrypted(s: Setup) -> bool:
+    """True unless the coldkey keyfile is readable and plainly unencrypted (then there's nothing to store)."""
+    try:
+        return bool(_bt_wallet(s.wallet, s.hotkey).coldkey_file.is_encrypted())
+    except Exception:
+        return True
 
 
 def step_write_env(s: Setup, coldkey_password: Optional[str]) -> None:
     ui.draw_step(console, 6, 'Write configuration', f'{s.env_path} feeds docker compose, the miner, and alw.')
     s.env_values.setdefault('PORT', '8091')
     s.env_values.setdefault('LOG_LEVEL', 'info')
-    if coldkey_password is None and not s.yes:
-        coldkey_password = click.prompt(
-            'Coldkey password for headless starts (blank = prompt at each start)',
-            default='',
-            hide_input=True,
-            show_default=False,
+    if coldkey_password is None and not s.yes and _coldkey_encrypted(s):
+        # Whatever the backing: the miner pays TAO out of the coldkey on every TAO-delivering fill, so it
+        # unlocks it at boot — and the container runs detached, with no terminal to answer a prompt.
+        console.print(
+            '  Your miner supports TAO (always as a spoke, and as a hub if you back with TAO), and every TAO payout'
+            " is sent from this coldkey — including SOL→TAO swaps on a SOL purse. Enter the coldkey's password so"
+            ' those payouts can go through; the miner runs in the background and cannot ask for it later.'
         )
+        coldkey_password = click.prompt(
+            'Coldkey password (kept in .env, mode 600)', default='', hide_input=True, show_default=False
+        )
+        if not coldkey_password:
+            ui.draw_warn(
+                console,
+                'No password stored — if the TAO coldkey cannot be unlocked at boot, the miner exits.',
+            )
     if coldkey_password:
         s.env_values['MINER_BITTENSOR_COLDKEY_PASSWORD'] = coldkey_password
     se.write_env(s.env_path, s.env_values, template=s.project_dir / '.env.example')
@@ -319,7 +439,21 @@ def step_write_env(s: Setup, coldkey_password: Optional[str]) -> None:
 # ─── Step 7: preflight (alw doctor) ─────────────────────────────────────────
 
 
-def _check_docker(project_dir: Path, env: Dict[str, str]) -> List[Check]:
+def _container_row(serving: bool) -> Check:
+    """The container is a post-go-live fact: before any purse serves it is not a failure (go-live starts it);
+    once one serves, a missing miner means reservations on it time out."""
+    if container_running():
+        return (True, 'miner container', 'running')
+    if serving:
+        return (
+            False,
+            'miner container',
+            'not running here, yet a purse is serving — its swaps time out unless your miner runs elsewhere',
+        )
+    return (None, 'miner container', 'not started yet (go-live starts it)')
+
+
+def _check_docker(project_dir: Path, env: Dict[str, str], serving: bool = False) -> List[Check]:
     rows: List[Check] = []
     docker = shutil.which('docker')
     rows.append((bool(docker), 'docker', docker or 'not on PATH — install Docker Engine + compose plugin'))
@@ -340,7 +474,7 @@ def _check_docker(project_dir: Path, env: Dict[str, str]) -> List[Check]:
             wp if ok else f'{wp or "unset"} — must be an absolute existing dir (compose does not expand ~)',
         )
     )
-    rows.append((container_running(), 'miner container', 'running' if container_running() else 'not running'))
+    rows.append(_container_row(serving))
     return rows
 
 
@@ -353,14 +487,24 @@ def _check_keys(env: Dict[str, str], config: dict) -> List[Check]:
         rows.append((True, 'solana keypair', f'{keys.load_keypair(path).pubkey()}  {path}'))
     except Exception as e:
         rows.append((False, 'solana keypair', f'{path}: {e}'))
+    by_address: Dict[str, List[str]] = {}  # one row per distinct spoke address, however many chains share it
+    unset: List[str] = []
     for fam in se.optional_families():
         key = env.get(fam.key_env)
         if not key:
-            rows.append((None, fam.key_env, 'not set (fine unless you quote ' + '/'.join(fam.assets) + ')'))
+            unset.append(fam.prefix.lower())
             continue
         net = env.get(fam.network_env) or config.get(network_key(fam.network_chain), '') if fam.network_chain else ''
         addr = se.btc_address(key, net or 'mainnet') if fam.kind == 'btc' else se.evm_address(key)
-        rows.append((addr is not None, fam.key_env, f'{addr}  ({net})' if addr else 'unusable key'))
+        if addr is None:
+            rows.append((False, fam.key_env, 'unusable key'))
+            continue
+        by_address.setdefault(addr, []).append(f'{fam.prefix.lower()} ({net})' if net else fam.prefix.lower())
+    for addr, fams in by_address.items():
+        label = 'BTC key' if addr and fams[0].startswith('btc') else 'EVM key'
+        rows.append((True, label, f'{addr}  {", ".join(fams)}'))
+    if unset:
+        rows.append((None, 'spoke keys not set', f'{", ".join(unset)} (fine unless you quote them)'))
     return rows
 
 
@@ -391,7 +535,7 @@ def _check_chain(config: dict, hotkey_ss58: Optional[str]) -> List[Check]:
         assert_cluster_safe(client.rpc, client.program_id, netuid, role='miner')
         rows.append((cfg is not None, 'solana rpc + program', redact_rpc_url(client.rpc.url)))
     except Exception as e:
-        return rows + [(False, 'solana rpc + program', str(e))]
+        return rows + [(False, 'solana rpc + program', _scrub(e))]
     if cfg is None:
         return rows
     floors = floors_from_config(cfg)
@@ -408,11 +552,14 @@ def _check_chain(config: dict, hotkey_ss58: Optional[str]) -> List[Check]:
     )
     ms = client.get_miner_state(pubkey)
     have = client.get_collateral_lamports(pubkey) or 0
+    max_swap = bounds_from_config(cfg).get(BACKING_CHAIN_SOL, (0, 0))[1]
+    full_capacity = f', full capacity at {from_lamports(required_collateral(max_swap)):.4f}' if max_swap > 0 else ''
     rows.append(
         (
             have >= need,
             'SOL collateral',
-            f'{from_lamports(have):.4f} / {from_lamports(need):.4f} SOL' + ('' if ms else '  (no miner state yet)'),
+            f'{from_lamports(have):.4f} SOL posted  (min {from_lamports(need):.4f}{full_capacity})'
+            + ('' if ms else '  · no miner state yet'),
         )
     )
     binding = client.get_binding(pubkey)
@@ -450,7 +597,7 @@ def _check_chain(config: dict, hotkey_ss58: Optional[str]) -> List[Check]:
                     )
                 )
         except Exception as e:
-            rows.append((False, 'subtensor', str(e)))
+            rows.append((False, 'subtensor', _scrub(e)))
     return rows
 
 
@@ -469,7 +616,7 @@ def container_running() -> bool:
         return False
 
 
-def run_doctor(project_dir: Path) -> List[Check]:
+def run_doctor(project_dir: Path, container: bool = True) -> List[Check]:
     config = get_effective_config()
     env = se.read_env(project_dir / '.env')
     rows: List[Check] = [
@@ -482,15 +629,19 @@ def run_doctor(project_dir: Path) -> List[Check]:
     wallet_rows, hot = _check_wallet(config)
     rows += wallet_rows
     rows += _check_keys(env, config)
-    rows += _check_chain(config, hot)
-    rows += _check_docker(project_dir, env)
+    chain_rows = _check_chain(config, hot)
+    rows += chain_rows
+    serving = any(ok for ok, label, _ in chain_rows if label.endswith(' purse'))
+    docker_rows = _check_docker(project_dir, env, serving)
+    # The wizard's preflight runs before go-live starts the container, so it leaves that row to `alw doctor`.
+    rows += docker_rows if container else [r for r in docker_rows if r[1] != 'miner container']
     return rows
 
 
 def step_doctor(project_dir: Path, number: int = 7) -> List[Check]:
     ui.draw_step(console, number, 'Preflight', 'Every check reads live state; re-run any time with `alw doctor`.')
     with console.status('[cyan]Checking...[/cyan]', spinner='dots'):
-        rows = run_doctor(project_dir)
+        rows = run_doctor(project_dir, container=False)
     console.print(ui.check_table(rows))
     return rows
 
@@ -502,7 +653,102 @@ def _resume_hint(cmd: str) -> None:
     console.print(f'\n  [dim]Fix the above, then re-run `alw miner init` (it resumes) or `{cmd}` directly.[/dim]')
 
 
-def _deposit(ctx, s: Setup, client, pubkey, floors) -> bool:
+def _capacity_note(backings: Tuple[str, ...], bounds: Dict[str, Tuple[int, int]]) -> None:
+    """Minimum collateral activates a purse; the crown pays on capacity, which is full only once the purse
+    can back a max-size swap (the contract's 1.10× gate) — so show where that is, per backing."""
+    parts = []
+    for backing in backings:
+        max_swap = bounds.get(backing, (0, 0))[1]
+        if max_swap <= 0:
+            continue
+        fmt = from_lamports if backing == BACKING_CHAIN_SOL else from_rao
+        unit = backing.upper()
+        parts.append(
+            f'{unit}: max swap {fmt(max_swap):.4f} {unit}, full capacity at {fmt(required_collateral(max_swap)):.4f} {unit}'
+        )
+    if not parts:
+        return
+    console.print(
+        '  [yellow]More emissions are received when you maximize collateral up to the max swap size (make sure you'
+        ' can fund swaps at your rates and collateral size!).[/yellow]'
+    )
+    for part in parts:
+        console.print(f'  [yellow]  {part}[/yellow]')
+
+
+def _funding_rows(s: Setup, client, subtensor, config, wallet, pubkey, netuid: int, floors) -> List[Check]:
+    """One row per wallet go-live spends from, with what it needs for the steps still to do."""
+    from allways.vault import BondVaultClient
+
+    rows: List[Check] = []
+    posted = client.get_collateral_lamports(pubkey) or 0
+    sol_need = max(floors[BACKING_CHAIN_SOL] - posted, 0) + SOL_SETUP_HEADROOM_LAMPORTS
+    sol_have = client.rpc.get_account_lamports(pubkey) or 0
+    why = 'collateral floor + ~0.05 rent/fees' if posted < floors[BACKING_CHAIN_SOL] else '~0.05 rent/fees'
+    rows.append(
+        (
+            sol_have >= sol_need,
+            'Solana keypair',
+            f'{pubkey}  has {from_lamports(sol_have):.4f} SOL, needs {from_lamports(sol_need):.4f}  ({why})',
+        )
+    )
+    hot = wallet.hotkey.ss58_address
+    if subtensor.get_uid_for_hotkey_on_subnet(hot, netuid) is None:
+        cold = wallet.coldkeypub.ss58_address
+        need = int(subtensor.recycle(netuid).rao) + MIN_BALANCE_FOR_TX_RAO
+        have = int(subtensor.get_balance(cold).rao)
+        rows.append(
+            (
+                have >= need,
+                'coldkey',
+                f'{cold}  has {from_rao(have):.4f} TAO, needs {from_rao(need):.4f}  (registration + fees)',
+            )
+        )
+    if BACKING_CHAIN_TAO in s.backings:
+        bonded = BondVaultClient.from_config(subtensor, config).get_collateral(hot) or 0
+        if bonded < floors[BACKING_CHAIN_TAO]:
+            need = floors[BACKING_CHAIN_TAO] - bonded + MIN_BALANCE_FOR_TX_RAO
+            have = int(subtensor.get_balance(hot).rao)
+            rows.append(
+                (
+                    have >= need,
+                    'hotkey',
+                    f'{hot}  has {from_rao(have):.4f} TAO, needs {from_rao(need):.4f}  (bond floor + fees; the hotkey signs the bond)',
+                )
+            )
+    return rows
+
+
+def _fund(s: Setup, gather, bounds) -> bool:
+    ui.draw_step(console, 8, 'Fund the miner', 'Go-live spends from these wallets. Send at least the amounts shown.')
+    _capacity_note(s.backings, bounds)
+    console.print(
+        '  [dim]Spoke addresses (EVM, BTC) are inventory for the chains you quote — not needed to go live.[/dim]'
+    )
+    while True:
+        try:
+            rows = gather()
+        except Exception as e:  # one dead RPC reads as unfunded, not a crash: fix it and press Enter
+            rows = [(False, 'balance read', _scrub(e))]
+        console.print(ui.check_table(rows))
+        if all(ok for ok, _, _ in rows):
+            ui.draw_done(console, 'funded')
+            return True
+        if s.yes:
+            console.print('  [red]Underfunded.[/red]')
+            _resume_hint('alw doctor')
+            return False
+        answer = click.prompt(
+            '  Fund the addresses above, then press Enter to re-check (q to stop; `alw miner init` resumes later)',
+            default='',
+            show_default=False,
+        )
+        if answer.strip().lower().startswith('q'):
+            console.print('  [dim]Stopped. Re-run `alw miner init` once funded — every earlier step is kept.[/dim]')
+            return False
+
+
+def _deposit(ctx, s: Setup, client, pubkey, floors, bounds=None) -> bool:
     from allways.cli.swap_commands.collateral import collateral_deposit
 
     need = floors[BACKING_CHAIN_SOL]
@@ -512,11 +758,13 @@ def _deposit(ctx, s: Setup, client, pubkey, floors) -> bool:
         if BACKING_CHAIN_SOL in s.backings
         else 'identity deposit (TAO-only miners still stake the minimum once)'
     )
-    ui.draw_step(console, 8, f'Deposit {what}', 'Binding requires a live stake, so this comes first.')
+    ui.draw_step(console, 9, f'Deposit {what}', 'Binding requires a live stake, so this comes first.')
     if have >= need and client.get_miner_state(pubkey) is not None:
         ui.draw_done(console, f'{from_lamports(have):.4f} SOL already posted (floor {from_lamports(need):.4f})')
         return True
     shortfall = from_lamports(max(need - have, 0))
+    if BACKING_CHAIN_SOL in s.backings and bounds:
+        _capacity_note((BACKING_CHAIN_SOL,), bounds)
     amount = float(_prompt(s, 'Amount to deposit (SOL)', default=f'{shortfall:.4f}' if shortfall else '1.0'))
     try:
         ctx.invoke(collateral_deposit, amount=amount, yes=True)
@@ -532,7 +780,7 @@ def _bind(ctx, s: Setup, client, pubkey, wallet) -> bool:
 
     ui.draw_step(
         console,
-        9,
+        10,
         'Bind hotkey ↔ Solana pubkey',
         'Permanent in both directions. Bind BEFORE registering so nobody can squat your hotkey.',
     )
@@ -588,7 +836,7 @@ def _register(s: Setup, subtensor, wallet, netuid: int) -> bool:
     hot = wallet.hotkey.ss58_address
     ui.draw_step(
         console,
-        10,
+        11,
         f'Register on subnet {netuid}',
         'Burns the registration cost from the coldkey. An encrypted coldkey asks for its password here.',
     )
@@ -625,7 +873,7 @@ def _bond(ctx, s: Setup, subtensor, config, wallet, floors) -> bool:
 
     ui.draw_step(
         console,
-        11,
+        12,
         'Post and lock the TAO bond',
         'The hotkey signs vault calls. Locking is not self-service to undo: exit is deactivate → settle → unlock.',
     )
@@ -662,16 +910,24 @@ def _bond(ctx, s: Setup, subtensor, config, wallet, floors) -> bool:
     return True
 
 
-def _run_container(s: Setup) -> bool:
+def _run_container(s: Setup, serving: bool = False) -> bool:
     ui.draw_step(
         console,
-        12,
+        13,
         'Start the miner',
         'Start BEFORE activating: an active purse that nobody serves gets reserved, times out, and is slashed.',
     )
     if container_running():
         ui.draw_done(console, f'{CONTAINER} is running')
         return True
+    if serving and not _typed_confirm(
+        s,
+        'start',
+        'A purse is already serving but no miner runs here, so this identity is probably mining elsewhere.'
+        ' Two miners on one identity both fulfill the same swaps.',
+    ):
+        console.print('  [yellow]Skipped — stop the other miner first, or run this on its box.[/yellow]')
+        return False
     cmd = ['docker', 'compose', '-f', COMPOSE_FILE, 'up', '-d']
     console.print(f'  $ {" ".join(cmd)}')
     if not s.yes and not click.confirm('  Start it now?', default=True):
@@ -724,7 +980,7 @@ def _activate_with_retry(ctx, s: Setup, backing: str) -> bool:
 
 def _activate(ctx, s: Setup, client, pubkey) -> bool:
     ui.draw_step(
-        console, 13, 'Activate', 'Tells validators each purse is ready; they verify and vote it live on-chain.'
+        console, 14, 'Activate', 'Tells validators each purse is ready; they verify and vote it live on-chain.'
     )
     ms = client.get_miner_state(pubkey)
     states = {st.backing: st for st in purse_states(client, pubkey, ms, client.get_config())}
@@ -746,10 +1002,14 @@ def go_live(ctx, s: Setup) -> bool:
     pubkey = client.keypair.pubkey()
     wallet = _bt_wallet(s.wallet, s.hotkey)
     netuid = int(config.get('netuid', 7))
-    floors = floors_from_config(client.get_config())
+    cfg = client.get_config()
+    floors, bounds = floors_from_config(cfg), bounds_from_config(cfg)
     subtensor = bt.Subtensor(network=config.get('network', 'finney'))
 
-    if not _deposit(ctx, s, client, pubkey, floors):
+    gather = partial(_funding_rows, s, client, subtensor, config, wallet, pubkey, netuid, floors)
+    if not _fund(s, gather, bounds):
+        return False
+    if not _deposit(ctx, s, client, pubkey, floors, bounds):
         return False
     if not _bind(ctx, s, client, pubkey, wallet):
         return False
@@ -757,7 +1017,9 @@ def go_live(ctx, s: Setup) -> bool:
         return False
     if BACKING_CHAIN_TAO in s.backings and not _bond(ctx, s, subtensor, config, wallet, floors):
         return False
-    if not _run_container(s):
+    ms = client.get_miner_state(pubkey)
+    serving = ms is not None and any(st.lit for st in purse_states(client, pubkey, ms, client.get_config()))
+    if not _run_container(s, serving):
         return False
     return _activate(ctx, s, client, pubkey)
 
@@ -791,12 +1053,15 @@ def _take_global_flags(network, wallet, hotkey):
     '--backing', type=click.Choice(['sol', 'tao', 'both']), default=None, help='Which purse(s) back your quotes'
 )
 @click.option(
-    '--chains', default=None, help='Comma-separated spoke families to key: btc,eth,arb,hype,bnb,avax,base,cro,pol'
+    '--chains',
+    default=None,
+    help='Only key these spoke families (default: all): btc,eth,arb,hype,bnb,avax,base,cro,pol',
 )
 @click.option(
     '--solana-keypair', default=None, help='Keypair path (default ./data/solana/id.json; generated if missing)'
 )
-@click.option('--solana-rpc', default=None, help='Solana RPC URL')
+@click.option('--helius-key', default=None, help='Helius API key (free at helius.dev); the wizard builds the URL')
+@click.option('--solana-rpc', default=None, help='Full Solana RPC URL, for a provider other than Helius')
 @click.option('--coldkey-password', default=None, help='Store for headless starts (MINER_BITTENSOR_COLDKEY_PASSWORD)')
 @click.option(
     '--project-dir',
@@ -825,6 +1090,7 @@ def init_command(
     backing,
     chains,
     solana_keypair,
+    helius_key,
     solana_rpc,
     coldkey_password,
     project_dir,
@@ -835,7 +1101,7 @@ def init_command(
     """Set up a miner step by step: network, wallet, keys, .env, preflight, then the go-live sequence.
 
     [dim]Resumable — every step checks disk/chain state and skips what is already done. Each prompt has a flag,
-    so `alw miner init --network testnet --wallet w --hotkey h --backing sol --chains eth -y` runs unattended.[/dim]
+    so `alw miner init --network testnet --wallet w --hotkey h --backing sol --helius-key K -y` runs unattended.[/dim]
 
     [dim]Examples:
         $ alw miner init
@@ -845,7 +1111,9 @@ def init_command(
     network, wallet, hotkey = _take_global_flags(network, wallet, hotkey)
     s = Setup(project_dir=project_dir.resolve(), yes=yes, activate_wait_mins=activate_wait)
     ui.draw_logo(console, 'Welcome to the Allways miner setup!')
-    console.print('[dim]Order matters on-chain: deposit → bind → register → (bond) → run → activate → quote.[/dim]')
+    console.print(
+        '[dim]Order matters on-chain: fund → deposit → bind → register → (bond) → run → activate → quote.[/dim]'
+    )
     if not (s.project_dir / COMPOSE_FILE).is_file():
         ui.draw_warn(
             console,
@@ -854,29 +1122,36 @@ def init_command(
 
     step_network(s, network)
     step_wallet(s, wallet, hotkey)
-    step_chains(s, backing, chains)
+    step_backing(s, backing, chains)
     step_keys(s, solana_keypair)
-    step_rpc(s, solana_rpc)
+    step_rpc(s, solana_rpc, helius_key)
     step_write_env(s, coldkey_password)
     rows = step_doctor(s.project_dir)
 
     if configure_only:
         _finish(s, live=False)
         return
-    failed = [c for ok, c, _ in rows if ok is False]
+    failed = [c for ok, c, _ in rows if ok is False and not _go_live_row(c)]
     if (
         failed
         and not yes
-        and not click.confirm(f'\n{len(failed)} check(s) failed. Continue to go-live anyway?', default=False)
+        and not click.confirm(f'\n{len(failed)} check(s) failed ({", ".join(failed)}). Continue anyway?', default=False)
     ):
         _finish(s, live=False)
         return
+    console.print(
+        '  [dim]Rows marked ✗ for funding, collateral, binding, registration, bond, purses and the container are what go-live does next.[/dim]'
+    )
     if not yes and not click.confirm(
-        '\nContinue to go-live (deposit → bind → register → bond → run → activate)?', default=True
+        '\nContinue to go-live (fund → deposit → bind → register → bond → run → activate)?', default=True
     ):
         _finish(s, live=False)
         return
     _finish(s, live=go_live(ctx, s))
+
+
+def _go_live_row(label: str) -> bool:
+    return label in GO_LIVE_ROWS or label.startswith('registered on SN') or label.endswith(' purse')
 
 
 def _finish(s: Setup, live: bool) -> None:
@@ -901,6 +1176,11 @@ def _finish(s: Setup, live: bool) -> None:
                 ('alw miner init', 'resume the go-live sequence'),
             ],
         )
+    console.print(
+        '[yellow]Stay eligible: your miner must complete a swap on each hub it backs every 12 hours to keep earning'
+        ' emissions. 3 failed swaps anywhere make it permanently ineligible — re-registering does not reset that;'
+        ' a fresh start needs a new hotkey and Solana keypair.[/yellow]'
+    )
     console.print(
         f'[dim]Back up: {se.wallets_root()}/{s.wallet}, {s.solana_keypair}, and {s.env_path} — they ARE the miner.[/dim]\n'
     )
