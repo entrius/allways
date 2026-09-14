@@ -571,7 +571,7 @@ class TestRateQuoteCandidates:
         client = SimpleNamespace(
             get_config=lambda: SimpleNamespace(min_swap_amount=self.MIN, max_swap_amount=self.MAX),
             get_all=lambda kind: [(q.miner, q) for q in quotes],
-            get_miner_state=lambda pk: SimpleNamespace(active=True, collateral=100 * self.SOL),
+            get_miner_state=lambda pk: SimpleNamespace(active=True, failed_swaps=0, collateral=100 * self.SOL),
             get_binding=lambda pk: SimpleNamespace(hotkey=hotkeys[str(pk)]) if str(pk) in hotkeys else None,
         )
         return SimpleNamespace(solana_client=client), [

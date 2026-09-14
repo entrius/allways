@@ -32,6 +32,7 @@ from allways.cli.swap_commands.swap_intake import (
     viable_intakes,
 )
 from allways.constants import NUMERAIRE_CHAIN, hub_leg
+from allways.eligibility import direction_eligible
 from allways.solana.client import contract_reject_reason, swap_key_from_tx_hash
 from allways.solana.pdas import BACKING_BITS
 from allways.utils.rate import max_from_for_to_cap
@@ -67,17 +68,20 @@ def _best_offer(client, miner_pk, miner_state, from_chain: str, to_chain: str, f
     from the same gate set, so a routed rejection reads like a self-represented one."""
     offers = {}
     candidates = []
+    now = int(time.time())
     for q in client.get_quotes_for_direction(miner_pk, from_chain, to_chain) or []:
         if q is None:
             continue
         backing = str(getattr(q, 'collateral_chain', NUMERAIRE_CHAIN) or NUMERAIRE_CHAIN)
+        if not direction_eligible(miner_state, from_chain, to_chain, now, backing):
+            continue  # struck or mid-settle: candidate_miners never lists it, so a route must not land on it
         purse = free_purse(client, miner_pk, miner_state, backing)
         if purse is None:
             continue  # no locked bond behind it — the contract's entry gate would refuse the bid
         offers[backing] = q
         candidates.append(MinerCandidate(miner_pk, rate_display_from_fixed(q.rate), purse, backing))
     if not candidates:
-        return None, f'miner has no quote for {from_chain}->{to_chain}'
+        return None, f'miner has no eligible quote for {from_chain}->{to_chain}'
     hub_min, hub_max = hub_bounds(bounds, from_chain, to_chain)
     best = select_best_miner(candidates, from_chain, to_chain, from_amount, hub_min, hub_max, bounds)
     if best is None:
@@ -181,6 +185,9 @@ def reserve_on_behalf(
             pool, joining, backing = p, True, candidate_backing
             break
     if joining:
+        # A strike or settle can land after the pool opened; a joiner must not ride on it either.
+        if not direction_eligible(miner_state, from_chain, to_chain, now, backing):
+            return ReserveResult(False, f'miner is no longer eligible on the {backing} hub')
         rate_fixed = pool.rate  # pinned at open — joiners must quote against it
         quote = client.get_quote(miner_pk, from_chain, to_chain, backing)
     else:

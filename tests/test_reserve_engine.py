@@ -13,7 +13,7 @@ from types import SimpleNamespace
 import bittensor as bt
 from solders.keypair import Keypair as SolKeypair
 
-from allways.constants import RATE_PRECISION
+from allways.constants import MAX_FAILED_SWAPS, RATE_PRECISION
 from allways.validator.reserve_engine import reserve_on_behalf
 from allways.validator.state_store import ValidatorStateStore
 
@@ -34,6 +34,7 @@ class FakeClient:
     def __init__(self, *, active=True, has_active_swap=False, quote_rate=0.0021, pool=None, collateral=10**12):
         self.miner_state = SimpleNamespace(
             active=active,
+            failed_swaps=0,
             has_active_swap=has_active_swap,
             active_swap_backings=1 if has_active_swap else 0,
             collateral=collateral,
@@ -267,6 +268,24 @@ def test_inactive_miner_rejects():
     assert store.distinct_routed_pools() == []  # nothing queued on rejection
 
 
+def test_struck_miner_rejects():
+    # Same reading as scoring: a miner past the strike cap earns nothing, so routing never lands on it.
+    client = FakeClient()
+    client.miner_state.failed_swaps = MAX_FAILED_SWAPS + 1
+    r, store = _reserve(client)
+    assert not r.ok and 'no eligible quote' in r.reason
+    assert store.distinct_routed_pools() == []
+
+
+def test_struck_miner_cannot_take_joiners_on_its_open_pool():
+    pinned = SimpleNamespace(opened_at=1, closes_at=FUTURE, from_chain='sol', to_chain='btc', rate=_rate_fixed(0.0021))
+    client = FakeClient(pool=pinned)
+    client.miner_state.failed_swaps = MAX_FAILED_SWAPS + 1
+    r, _ = _reserve(client)
+    assert not r.ok and 'no longer eligible' in r.reason
+    assert client.calls == []
+
+
 def test_busy_miner_open_rejects():
     r, _ = _reserve(FakeClient(has_active_swap=True))
     assert not r.ok and 'busy' in r.reason
@@ -323,7 +342,7 @@ def test_no_quote_rejects():
     client = FakeClient()
     client.quote = None
     r, _ = _reserve(client)
-    assert not r.ok and 'no quote' in r.reason.lower()
+    assert not r.ok and 'no eligible quote' in r.reason
 
 
 def test_low_collateral_rejects():

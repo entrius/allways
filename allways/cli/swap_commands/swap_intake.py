@@ -10,6 +10,7 @@ parameter, so the CLI taker path and the validator reserve engine build the same
 the same reads.
 """
 
+import time
 from dataclasses import dataclass
 from decimal import Decimal
 from typing import Dict, List, Optional, Tuple
@@ -22,6 +23,7 @@ from allways.constants import (
     hub_leg,
     required_collateral,
 )
+from allways.eligibility import direction_eligible
 from allways.solana.layouts import hub_reserved_collateral
 from allways.solana.pdas import BACKING_BITS
 from allways.utils.rate import (
@@ -73,19 +75,22 @@ def rate_display_from_fixed(rate_fixed: int) -> str:
 
 
 def candidate_miners(client, from_chain: str, to_chain: str) -> List[MinerCandidate]:
-    """Active miners with a posted quote for this exact direction, purse attached.
-    Shared by the CLI taker path and the validator reserve engine so "who is
+    """Active, emission-eligible miners with a posted quote for this exact direction, purse
+    attached. Shared by the CLI taker path and the validator reserve engine so "who is
     quotable" can never diverge between what a taker sees and what reserves.
 
     Inactive miners are excluded: the contract rejects a reserve against them
     (reserve_on_behalf / finalize_reservation), so a taker must never see one as
-    a candidate. One MinerState read per quoted miner gives both the active gate
-    and the tracked collateral in a single fetch; an off-chain-backed offer needs
-    one more read for the purse the contract will actually check."""
+    a candidate. So are struck or mid-settle offers (``direction_eligible``, the scorer's
+    own on-chain reading): a miner that earns nothing has no reason to deliver, so a cheap
+    quote from one is bait, not a rate. One MinerState read per quoted miner gives the
+    active gate, the strike gate and the tracked collateral in a single fetch; an
+    off-chain-backed offer needs one more read for the purse the contract will actually check."""
     out: List[MinerCandidate] = []
     # One state read per distinct miner: a dual-purse miner can appear twice on a direction now, and
     # its `active` flag and collateral are the same for both offers.
     states: dict = {}
+    now = int(time.time())
     for _pk, q in client.get_all('MinerQuote'):
         if q.from_chain != from_chain or q.to_chain != to_chain:
             continue
@@ -96,6 +101,8 @@ def candidate_miners(client, from_chain: str, to_chain: str) -> List[MinerCandid
         if ms is None or not ms.active:
             continue
         backing = getattr(q, 'collateral_chain', NUMERAIRE_CHAIN) or NUMERAIRE_CHAIN
+        if not direction_eligible(ms, from_chain, to_chain, now, backing):
+            continue
         purse = free_purse(client, q.miner, ms, backing)
         if purse is None:
             continue  # no locked bond behind the offer — the contract would refuse the reserve
