@@ -201,7 +201,7 @@ class TaoHubClient:
             collateral_chain='tao',
             miner_from_addr='minerTAOaddr',
         )
-        self.miner_state = SimpleNamespace(active=True, has_active_swap=False, collateral=0)
+        self.miner_state = SimpleNamespace(active=True, failed_swaps=0, has_active_swap=False, collateral=0)
         self.attestation = SimpleNamespace(locked=True, effective_balance=required_collateral(TAO))
         self.calls = []
 

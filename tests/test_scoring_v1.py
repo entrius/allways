@@ -23,6 +23,7 @@ from allways.constants import (
     SCORING_WINDOW_BLOCKS,
     required_collateral,
 )
+from allways.eligibility import purse_active
 from allways.solana.pdas import BACKING_BITS
 from allways.utils.rate import is_executable_rate, min_executable_hub_leg
 from allways.validator import scoring as scoring_mod
@@ -43,7 +44,6 @@ from allways.validator.scoring import (
     is_eligible,
     lane_volumes_to_directions,
     make_crown_predicates,
-    purse_active,
     qualified_volume_shares,
     recent_fill_hotkeys,
     replay_crown_time_window,

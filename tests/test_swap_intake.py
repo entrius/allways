@@ -182,14 +182,39 @@ def test_candidate_miners_excludes_inactive():
     client = _FakeCandClient(
         quotes=[q('active-m'), q('inactive-m'), q('no-state-m')],
         states={
-            'active-m': SimpleNamespace(active=True, collateral=976_466_670),
-            'inactive-m': SimpleNamespace(active=False, collateral=5 * SOL),
+            'active-m': SimpleNamespace(active=True, failed_swaps=0, collateral=976_466_670),
+            'inactive-m': SimpleNamespace(active=False, failed_swaps=0, collateral=5 * SOL),
             # 'no-state-m' absent → get_miner_state returns None
         },
     )
     out = candidate_miners(client, 'tao', 'sol')
     assert [c.miner for c in out] == ['active-m']
     assert out[0].collateral == 976_466_670  # tracked field, not vault lamports
+
+
+def test_candidate_miners_excludes_struck_and_settling():
+    # The scorer's own gate: at the strike cap still quotes, one past it does not, nor does a
+    # miner whose sol purse is mid-settle — the contract would refuse the reserve anyway. A settle
+    # on the OTHER hub leaves this sol-backed offer routable: the gate reads the offer's backing.
+    from types import SimpleNamespace
+
+    from allways.cli.swap_commands.swap_intake import candidate_miners
+    from allways.constants import MAX_FAILED_SWAPS
+
+    def q(m):
+        return SimpleNamespace(miner=m, from_chain='tao', to_chain='sol', rate=15 * 10**17)
+
+    far = 2**40
+    client = _FakeCandClient(
+        quotes=[q('clean'), q('struck'), q('settling'), q('tao-settling')],
+        states={
+            'clean': SimpleNamespace(active=True, failed_swaps=MAX_FAILED_SWAPS, collateral=SOL),
+            'struck': SimpleNamespace(active=True, failed_swaps=MAX_FAILED_SWAPS + 1, collateral=SOL),
+            'settling': SimpleNamespace(active=True, failed_swaps=0, settling_until=[far, 0], collateral=SOL),
+            'tao-settling': SimpleNamespace(active=True, failed_swaps=0, settling_until=[0, far], collateral=SOL),
+        },
+    )
+    assert [c.miner for c in candidate_miners(client, 'tao', 'sol')] == ['clean', 'tao-settling']
 
 
 def test_unviable_reason_below_min_swap():
@@ -274,7 +299,7 @@ def test_candidate_purse_is_net_of_in_flight_reservations():
     from allways.cli.swap_commands.swap_intake import candidate_miners
 
     q = SimpleNamespace(miner='m', from_chain='tao', to_chain='sol', rate=15 * 10**17)
-    busy = SimpleNamespace(active=True, collateral=3 * SOL, reserved_collateral=[2 * SOL, 7 * SOL])
+    busy = SimpleNamespace(active=True, failed_swaps=0, collateral=3 * SOL, reserved_collateral=[2 * SOL, 7 * SOL])
     out = candidate_miners(_FakeCandClient(quotes=[q], states={'m': busy}), 'tao', 'sol')
     assert out[0].collateral == SOL  # sol hub is slot 0; the tao slot's obligation does not count
 
@@ -285,7 +310,7 @@ def test_candidate_purse_floors_at_zero_and_tolerates_a_pre_v33_state():
     from allways.cli.swap_commands.swap_intake import candidate_miners
 
     q = SimpleNamespace(miner='m', from_chain='tao', to_chain='sol', rate=15 * 10**17)
-    over = SimpleNamespace(active=True, collateral=SOL, reserved_collateral=[2 * SOL])
-    old = SimpleNamespace(active=True, collateral=SOL)
+    over = SimpleNamespace(active=True, failed_swaps=0, collateral=SOL, reserved_collateral=[2 * SOL])
+    old = SimpleNamespace(active=True, failed_swaps=0, collateral=SOL)
     assert candidate_miners(_FakeCandClient([q], {'m': over}), 'tao', 'sol')[0].collateral == 0
     assert candidate_miners(_FakeCandClient([q], {'m': old}), 'tao', 'sol')[0].collateral == SOL
