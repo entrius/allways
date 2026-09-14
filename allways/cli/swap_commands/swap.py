@@ -350,6 +350,13 @@ def _poll_routed_reservation(client, miner, user, timeout_secs: int):
         'auto-estimates from the mempool. Lightweight wallet only.'
     ),
 )
+@click.option(
+    '--min-rate',
+    'min_rate_opt',
+    type=click.FloatRange(min=0, min_open=True),
+    default=None,
+    help='Send only if the reservation pins at least this rate (what you receive per 1 sent); else exit non-zero.',
+)
 def swap_now_command(
     from_chain_opt: Optional[str],
     to_chain_opt: Optional[str],
@@ -363,6 +370,7 @@ def swap_now_command(
     no_router: bool,
     auto_send: Optional[bool],
     btc_fee_rate_opt: Optional[int],
+    min_rate_opt: Optional[float],
 ):
     """Originate a swap: reserve a miner on-chain, then send source funds.
 
@@ -586,6 +594,10 @@ def swap_now_command(
             f'{from_chain.upper()} deposit (needs ~{_SEND_MARGIN_SECS}s to relay it on-chain). '
             'Do NOT send funds; re-run for a fresh reservation.'
         )
+    if min_rate_opt is not None:
+        refusal = _pinned_rate_refusal(client, cand.miner, cand.backing, user, from_chain, to_chain, min_rate_opt)
+        if refusal:
+            fail(f'  {refusal}')
 
     _save_pending(cand.miner, from_chain, to_chain)
 
@@ -604,6 +616,23 @@ def swap_now_command(
     )
     for line in _deadline_lines(int(resv.reserved_until), want_send):
         console.print(line)
+
+
+def _pinned_rate_refusal(client, miner, backing, user, from_chain, to_chain, min_rate: float) -> Optional[str]:
+    """Why the source must not be sent under --min-rate, judged from the reservation re-read on chain; None to send.
+    The quote can move between the preview and the draw, and the reservation pins whatever it was then."""
+    try:
+        resv = client.get_reservation(miner, backing)
+        if resv is None or str(resv.user) != str(user):
+            raise ValueError('no live reservation of ours')
+        pinned = float(directional_rate(from_chain, to_chain, rate_display_from_fixed(int(resv.rate))))
+    except Exception as e:  # noqa: BLE001 - any failed read fails closed: no send
+        return f'Reservation unreadable; not sending: {e}'
+    if not pinned > 0:
+        return f'Reservation unreadable; not sending: pinned rate {pinned}'
+    if pinned < min_rate:
+        return f'Reservation rate {pinned:.8g} below --min-rate {min_rate:.8g}; not sending'
+    return None
 
 
 def _deadline_lines(reserved_until: int, want_send: bool, now: Optional[int] = None) -> List[str]:
