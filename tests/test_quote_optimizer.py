@@ -215,6 +215,9 @@ def build(tmp_path, client, balances=None, lanes=(FORWARD,), prices=None, api=No
     """An optimizer already started and seeded: the feed's cache holds the client's quotes and states (the same
     objects, so a test can move a rival's rate), and SOL balances are pushed lamports."""
     balances = {'sol': 1 * SOL, 'tao': 10 * TAO} if balances is None else balances
+    # LEAD and the tolerance cases are pinned at -3.5% / +1%, not the shipped defaults.
+    cfg.setdefault('max_worse_than_market_pct', 3.5)
+    cfg.setdefault('max_better_than_market_pct', 1.0)
     assets = {'tao': SimpleNamespace(get_balance=lambda _addr: balances['tao'])}
     feed = MarketFeed('ws://test', PROGRAM, ME, lanes, decode=decode, feed=StubFeed())
     feed.config = client.config
@@ -365,6 +368,21 @@ def test_our_own_requote_is_not_free_again_until_its_window_passes(tmp_path):
     assert [c[:3] for c in client.calls] == [('set', FORWARD, fixed(EDGE))]
     opt.run_once(NOW + 700)
     assert [c[:3] for c in client.calls][-1] == ('set', FORWARD, band_edge_fixed(fixed('0.4560'), reverse=False))
+
+
+def test_a_routine_requote_waits_a_random_delay_past_the_free_window_and_wakes_for_it(tmp_path):
+    client = crowned_client(my_rate='0.4500', my_updated_at=NOW - 600)
+    opt = build(tmp_path, client)
+    drawn = []
+    opt.rng = SimpleNamespace(randint=lambda lo, hi: drawn.append((lo, hi)) or 20)
+    opt.last_tick = NOW
+    opt.run_once(NOW)
+    assert client.calls == [] and opt.wake_at == NOW + 20
+    at(opt, NOW + 12)  # neither a regular tick nor due yet
+    assert client.calls == []
+    at(opt, NOW + 24)  # due, well before the next regular tick
+    assert [c[:3] for c in client.calls] == [('set', FORWARD, fixed(EDGE))]
+    assert drawn == [(0, qo.REQUOTE_JITTER_SECS)]  # drawn once per quote, not every tick
 
 
 def test_does_not_follow_a_crown_more_generous_than_tolerance(tmp_path):
@@ -635,7 +653,7 @@ def test_an_unknown_own_updated_at_is_assumed_now_so_it_is_not_free(tmp_path):
     assert mine.updated_at == NOW
     opt.run_once(NOW + 60)
     assert client.calls == []  # wants the edge, but the update is not known to be free yet
-    opt.run_once(NOW + 600)
+    opt.run_once(NOW + 600 + qo.REQUOTE_JITTER_SECS)
     assert [c[:3] for c in client.calls] == [('set', FORWARD, fixed(EDGE))]
 
 
@@ -779,7 +797,7 @@ def test_a_standing_alert_does_not_repost_as_the_market_moves(tmp_path):
 def test_config_defaults_to_disabled_and_validates(tmp_path):
     cfg = OptimizerConfig.load(tmp_path / 'missing.json')
     assert cfg.enabled is False
-    assert (cfg.max_better_than_market_pct, cfg.max_worse_than_market_pct) == (1.0, 3.5)
+    assert (cfg.max_better_than_market_pct, cfg.max_worse_than_market_pct) == (2.0, 1.0)
     assert set(default_lanes()) == {
         Lane('sol', 'tao', 'sol'),
         Lane('sol', 'tao', 'tao'),

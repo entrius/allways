@@ -10,7 +10,8 @@ that edge is within ``[-max_worse, +max_better]`` % of the USD spot rate, measur
 receives. With no leader, or a leader stingier than ``-max_worse``, it leads at ``-max_worse`` — the
 least generous rate the operator tolerates. A leader more generous than ``+max_better`` is not followed.
 
-Costs. Routine repricing waits until a quote is past the contract's churn window, so it is always free;
+Costs. Routine repricing waits until a quote is past the contract's churn window (plus a random
+``REQUOTE_JITTER_SECS``, so a rival can't time a move to land just before it), so it is always free;
 re-creating a pulled quote is free too. A fee is paid only to protect against a loss, on fresh data:
 - market drift made our quote more than ``+max_better`` generous, we are the first quote a taker would
   pick, and what we'd lose on a full-size fill beyond the tolerated edge is at least the fee;
@@ -28,6 +29,7 @@ provider, so a new pair needs its chains in ``OPTIMIZER_CHAINS`` and a price id 
 """
 
 import json
+import random
 import time
 from collections import defaultdict
 from dataclasses import dataclass, field, fields
@@ -68,6 +70,9 @@ OPTIMIZER_TICK_SECONDS = 60
 DEFAULT_OPTIMIZER_CONFIG_PATH = Path.home() / '.allways' / 'miner' / 'optimizer.json'
 # Routine updates wait until a quote's churn fee has decayed to zero.
 QUOTE_UPDATE_FREE_AFTER_SECS = QUOTE_UPDATE_FEE_TIERS[-1][0]
+# A routine requote waits a further random 0..this many seconds past the free window, so rivals can't time a move
+# to land just before it.
+REQUOTE_JITTER_SECS = 30
 # How far inside the crown band's worse edge a follower quotes. At the bare edge a rival's one-tick
 # improvement moves the band past us until our next free update; this makes them give takers 0.1% more
 # every time instead.
@@ -155,8 +160,8 @@ class OptimizerConfig:
     dry_run: bool = False
     webhook_url: str = ''
     lanes: List[Lane] = field(default_factory=default_lanes)
-    max_better_than_market_pct: float = 1.0
-    max_worse_than_market_pct: float = 3.5
+    max_better_than_market_pct: float = 2.0
+    max_worse_than_market_pct: float = 1.0
     repost_buffer_pct: float = 1.0
     sol_fee_reserve: float = 0.05
     pull_on_shutdown: bool = True
@@ -533,6 +538,7 @@ class QuoteOptimizer:
         clock: Callable[[], float] = time.time,
         prices: Optional[MarketPrices] = None,
         notifier: Optional[WebhookNotifier] = None,
+        rng: Optional[random.Random] = None,
     ):
         self.cfg = cfg
         self.client = solana_client
@@ -560,6 +566,11 @@ class QuoteOptimizer:
         self.eligibility_due: Dict[Lane, int] = {}
         # Each lane's mode ('follow' / 'lead' / None), logged when it changes.
         self.modes: Dict[Lane, Optional[str]] = {}
+        self.rng = rng or random.Random()
+        # Each lane's jittered free-update moment, keyed to the quote's updated_at it was drawn for.
+        self.requote_at: Dict[Lane, Tuple[int, int]] = {}
+        # The earliest jittered requote waiting on a pass; ``tick`` runs one then instead of at the next regular tick.
+        self.wake_at: Optional[int] = None
         self.rpc_calls = 0
         self.usage_mark: Optional[Tuple[int, int, int, int]] = None
         self.count_rpc_calls()
@@ -609,9 +620,11 @@ class QuoteOptimizer:
         now = int(self.clock())
         if self.started:
             self.watch_feed(now)
-        if now - self.last_tick < OPTIMIZER_TICK_SECONDS:
+        due = self.wake_at is not None and now >= self.wake_at
+        if now - self.last_tick < OPTIMIZER_TICK_SECONDS and not due:
             return
         self.last_tick = now
+        self.wake_at = None
         try:
             self.step(now)
         except Exception as e:
@@ -992,7 +1005,9 @@ class QuoteOptimizer:
                 f'optimizer: {lane.label} at target ({target.reason})',
             )
             return
-        if fee:
+        free_at = self.requote_free_at(lane, quote)
+        if fee or view.now < free_at:
+            self.wake_at = free_at if self.wake_at is None else min(self.wake_at, free_at)
             log_on_change(
                 f'optimizer.wait.{lane.key}',
                 target.rate_fixed,
@@ -1000,6 +1015,15 @@ class QuoteOptimizer:
             )
             return
         self.send_quote(view, lane, quote, target.rate_fixed, target.reason, 0)
+
+    def requote_free_at(self, lane: Lane, quote) -> int:
+        """When a routine requote may go: the free window plus a random delay, drawn once per quote version."""
+        updated_at = int(quote.updated_at)
+        drawn = self.requote_at.get(lane)
+        if drawn is None or drawn[0] != updated_at:
+            jitter = self.rng.randint(0, REQUOTE_JITTER_SECS)
+            drawn = self.requote_at[lane] = (updated_at, updated_at + QUOTE_UPDATE_FREE_AFTER_SECS + jitter)
+        return drawn[1]
 
     def maybe_repost(self, view: ProgramView, lane: Lane, target: Target, funding: Optional[Funding]) -> None:
         """C1: a lane the optimizer pulled comes back, free, once it has a target, an active idle purse and a

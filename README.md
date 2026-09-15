@@ -157,7 +157,8 @@ priced. No guarantees and not financial advice: you fund it, you own the outcome
   the market spot price, measured as what the taker receives. With no leader, or one stingier than
   `-max_worse`, the lane leads at `-max_worse` (the least generous rate you tolerate). A leader more generous
   than `+max_better` is not followed.
-- **Free by default.** Routine repricing waits until a quote is 10 minutes old, and re-posting a pulled quote
+- **Free by default.** Routine repricing waits until a quote is 10 minutes old (plus a random 0–30 s, so the
+  moment isn't predictable), and re-posting a pulled quote
   is a free creation. A fee is paid only to protect you, on fresh data: market drift made your quote more
   generous than `+max_better`, a taker would pick it first, and a full-size fill would lose more than the fee;
   or your wallet can't cover a full-size fill and a missed one (10% premium) would cost more than the fee, or
@@ -188,8 +189,8 @@ Off unless `~/.allways/miner/optimizer.json` (or `--miner.optimizer_config <path
   "dry_run": false,
   "webhook_url": "https://discord.com/api/webhooks/…",
   "lanes": ["sol:tao:sol", "sol:tao:tao", "tao:sol:sol", "tao:sol:tao"],
-  "max_better_than_market_pct": 1.0,
-  "max_worse_than_market_pct": 3.5,
+  "max_better_than_market_pct": 2.0,
+  "max_worse_than_market_pct": 1.0,
   "repost_buffer_pct": 1.0,
   "sol_fee_reserve": 0.05,
   "pull_on_shutdown": true,
