@@ -184,7 +184,7 @@ priced. No guarantees and not financial advice: you fund it, you own the outcome
 - **Data failures lean your way:** a re-seed the API can't answer holds everything but funding pulls, a missing
   price holds every quote, and a 0 balance reading never pays a fee on its own.
 
-Off unless `~/.allways/miner/optimizer.json` (or `--miner.optimizer_config <path>`) sets `enabled`. Under
+Off unless `~/.allways/miner/optimizer.json` sets `enabled`. Under
 `docker-compose.miner.yml` that file is `./data/allways/miner/optimizer.json`:
 
 ```json
@@ -218,8 +218,14 @@ requotes; a wallet short of a full-size fill (address and amount to send); a pur
 why that lane is not earning emissions. Routine requotes, a lane switching between following, leading and not
 following, holds and deferred actions only go to the miner log, once per change.
 Any webhook taking a JSON body works (Discord `content`, Slack `text`). Extending to another pair means adding
-its chains to `OPTIMIZER_CHAINS` in `allways/miner/quote_optimizer.py` and a price id in
-`allways/miner/market_price.py`.
+its chains to `OPTIMIZER_CHAINS` in `allways/miner/optimizer/quote_optimizer.py` and a price id in
+`allways/miner/optimizer/market_price.py`.
+
+It is a strategy bolted onto the base miner, not part of it: everything lives in `allways/miner/optimizer/`,
+and `neurons/miner.py` makes one call, `attach_optimizer(self)`, which does nothing unless `optimizer.json`
+enables it. It runs on its own thread, so swap fulfillment never waits on it, and it pulls its quotes when
+the miner exits — give `docker stop` time for that (`stop_grace_period: 60s` on the miner service). Copy it,
+change it, or swap in your own strategy behind the same call.
 
 ## Validator Storage Layout
 

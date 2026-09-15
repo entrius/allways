@@ -9,6 +9,7 @@ so a tick makes no RPC read.
 """
 
 import json
+import threading
 import time
 from decimal import Decimal
 from types import SimpleNamespace
@@ -19,10 +20,11 @@ from solders.keypair import Keypair
 from solders.pubkey import Pubkey
 
 from allways.constants import RATE_PRECISION
-from allways.miner import quote_optimizer as qo
-from allways.miner.market_feed import SYSTEM_PROGRAM, MarketFeed
-from allways.miner.market_price import MarketPrices
-from allways.miner.quote_optimizer import (
+from allways.miner.optimizer import attach_optimizer
+from allways.miner.optimizer import quote_optimizer as qo
+from allways.miner.optimizer.market_feed import SYSTEM_PROGRAM, MarketFeed
+from allways.miner.optimizer.market_price import MarketPrices
+from allways.miner.optimizer.quote_optimizer import (
     DEAD_MAN_SECS,
     OPTIMIZER_TICK_SECONDS,
     Lane,
@@ -38,9 +40,9 @@ from allways.miner.quote_optimizer import (
     payout_for_leg,
     pending_payouts,
 )
+from allways.miner.optimizer.subscription_feed import SubscriptionFeed
 from allways.solana import pdas
 from allways.solana.client import AllwaysSolanaClient
-from allways.solana.program_feed import SubscriptionFeed
 from allways.utils.rate import quantize_rate_fixed
 
 SOL = 10**9
@@ -151,6 +153,10 @@ class FakeClient:
         self.reads.append(('get_config',))
         return self.config
 
+    def get_miner_state(self, miner):
+        self.reads.append(('get_miner_state', str(miner)))
+        return next((s for s in self.states if str(s.miner) == str(miner)), None)
+
     def set_quote(self, from_chain, to_chain, from_addr, to_addr, rate, liquidity, backing='sol'):
         self.calls.append(('set', Lane(from_chain, to_chain, backing), rate, from_addr, to_addr))
 
@@ -245,7 +251,6 @@ def build(tmp_path, client, balances=None, lanes=(FORWARD,), prices=None, api=No
         state_path=tmp_path / 'state.json',
         pending_payouts_fn=lambda chain: 0,
         feed=feed,
-        own_state=lambda: feed.states.get(str(ME)),
         api=api or FakeApi(),
         clock=lambda: NOW,
         prices=prices or MarketPrices(pins=PRICES),
@@ -874,6 +879,43 @@ def test_config_defaults_to_disabled_and_validates(tmp_path):
         path.write_text(json.dumps(bad))
         with pytest.raises(ValueError):
             OptimizerConfig.load(path)
+
+
+def test_churn_fee_tiers_mirror_the_cli_copy():
+    from allways.cli.swap_commands.helpers import QUOTE_UPDATE_FEE_TIERS, quote_update_fee_lamports
+
+    assert qo.QUOTE_UPDATE_FEE_TIERS == QUOTE_UPDATE_FEE_TIERS
+    elapsed = (0, 299, 300, 599, 600, 3600)
+    assert [qo.quote_update_fee_lamports(s) for s in elapsed] == [quote_update_fee_lamports(s) for s in elapsed]
+
+
+# ─── attaching to the base miner ───
+
+
+def test_attach_does_nothing_unless_enabled_and_every_chain_has_a_provider(tmp_path):
+    assert attach_optimizer(SimpleNamespace(assets={'sol': object(), 'tao': object()}), tmp_path / 'none.json') is None
+    path = tmp_path / 'optimizer.json'
+    path.write_text(json.dumps({'enabled': False}))
+    assert attach_optimizer(SimpleNamespace(assets={}), path) is None
+    path.write_text(json.dumps({'enabled': True}))
+    assert attach_optimizer(SimpleNamespace(assets={'sol': object()}), path) is None  # no tao provider: not started
+
+
+def test_runs_on_its_own_thread_and_shutdown_stops_it_before_pulling(tmp_path, monkeypatch):
+    monkeypatch.setattr(qo, 'OPTIMIZER_LOOP_SECS', 0.01)
+    client = crowned_client(my_rate='0.4530')
+    opt = build(tmp_path, client)
+    threads = []
+    opt.tick = lambda: threads.append(threading.current_thread().name)
+    opt.start_thread()
+    deadline = time.monotonic() + 2
+    while len(threads) < 2 and time.monotonic() < deadline:
+        time.sleep(0.01)
+    opt.shutdown('test')
+    assert set(threads) == {'quote-optimizer'} and len(threads) >= 2
+    assert not opt.thread.is_alive()
+    assert client.calls == [('remove', FORWARD)]
+    assert opt.feed.feed.stops == 1
 
 
 def test_pending_payouts_skip_sent_swaps_and_other_chains():

@@ -14,9 +14,6 @@ PROGRAM_ID = '6JVBEj5w27J2SVjERmv2c7wXgFee9nSSBKUJevHehyBD'
 MINER_POLL_INTERVAL_SECONDS = 12
 # The miner resubscribes its program feed this often, then catches up from chain (one MinerState read idle).
 MINER_FEED_RESUBSCRIBE_SECONDS = 300
-# The quote optimizer's feed renews less often: its renewal is make-before-break (no catch-up read), and each one is a
-# Helius connection credit.
-OPTIMIZER_FEED_RESUBSCRIBE_SECONDS = 900
 VALIDATOR_POLL_INTERVAL_SECONDS = 12
 # Consecutive polls of zero block progress before we force a substrate reconnect.
 STALE_BLOCK_POLL_THRESHOLD = 30
@@ -253,21 +250,6 @@ COLLATERAL_REQUIREMENT_BPS = 11_000
 def required_collateral(collateral_amount: int) -> int:
     """Lamports a miner must hold to back ``collateral_amount`` (1.10×). Mirrors the contract."""
     return collateral_amount * COLLATERAL_REQUIREMENT_BPS // 10_000
-
-
-# ─── Quote churn fee ─────────────────────────────────────
-# Mirror smart-contracts/…/constants.rs quote_update_fee(). remove_quote charges the same fee, keyed on
-# how long the quote stood, so remove + re-create can't dodge it; creation is free.
-QUOTE_UPDATE_FEE_TIERS = ((300, 10_000_000), (600, 1_000_000))  # (elapsed < secs, lamports); else free
-
-
-def quote_update_fee_lamports(elapsed_secs: int) -> int:
-    """Churn fee (lamports) to re-quote or remove a quote ``elapsed_secs`` after its last update: 0.01 SOL
-    under 5 min, 0.001 SOL at 5–10 min, free after 10 min. Mirrors the contract."""
-    for below, fee in QUOTE_UPDATE_FEE_TIERS:
-        if elapsed_secs < below:
-            return fee
-    return 0
 
 
 # ─── Emission Recycling ────────────────────────────────────

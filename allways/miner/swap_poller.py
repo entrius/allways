@@ -28,8 +28,6 @@ class SwapPoller:
         self.miner_pubkey = _as_pubkey(miner_pubkey)
         self.known: Set[str] = set()  # swap_key hexes of this miner's live swaps, followed by point read
         self.last_poll_ok: bool = True
-        # The latest MinerState this poller read — the quote optimizer seeds from it instead of reading again.
-        self.miner_state = None
         self._counters = None  # (successful_swaps, failed_swaps) baseline for naming terminal outcomes
         self.feed = feed
         self.wake = wake
@@ -96,8 +94,6 @@ class SwapPoller:
         except Exception as e:
             bt.logging.debug(f'SwapPoller: MinerState read failed ({e}); taking the snapshot')
             ms = None
-        if ms is not None:
-            self.miner_state = ms
         if ms is not None and not ms.has_active_swap and not self.known and not self._pending():
             active, fulfilled = [], []
         else:
@@ -178,7 +174,6 @@ class SwapPoller:
 
     def _read_counters(self):
         ms = self.client.get_miner_state(self.miner_pubkey)
-        self.miner_state = ms
         return (int(ms.successful_swaps), int(ms.failed_swaps))
 
     def _log_terminal(self, gone: Set[str]) -> None:

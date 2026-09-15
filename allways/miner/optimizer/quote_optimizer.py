@@ -32,6 +32,7 @@ provider, so a new pair needs its chains in ``OPTIMIZER_CHAINS`` and a price id 
 
 import json
 import random
+import threading
 import time
 from collections import defaultdict
 from dataclasses import dataclass, field, fields
@@ -50,16 +51,14 @@ from allways.constants import (
     ELIGIBILITY_FILL_WINDOW_SECS,
     FEE_DIVISOR,
     MAX_FAILED_SWAPS,
-    QUOTE_UPDATE_FEE_TIERS,
     RATE_PRECISION,
     RATE_SIG_FIGS,
     declarable_backings,
-    quote_update_fee_lamports,
     required_collateral,
 )
-from allways.miner.market_feed import fixed_rate, make_quote, market_from_das
-from allways.miner.market_price import MarketPrices
-from allways.miner.miner_api import AllwaysApi
+from allways.miner.optimizer.market_feed import fixed_rate, make_quote, market_from_das
+from allways.miner.optimizer.market_price import MarketPrices
+from allways.miner.optimizer.miner_api import AllwaysApi
 from allways.solana.client import benign_marker
 from allways.solana.layouts import hub_busy_until, hub_swap_on
 from allways.solana.pdas import BACKING_BITS
@@ -69,9 +68,26 @@ from allways.utils.rate import apply_fee_deduction, calculate_to_amount, is_exec
 # Chains the optimizer manages: the two hubs, whose RPCs every miner already runs.
 OPTIMIZER_CHAINS = ('sol', 'tao')
 OPTIMIZER_TICK_SECONDS = 60
+# The optimizer's thread wakes this often: the dead-man switch and jittered requotes need finer steps than a tick.
+OPTIMIZER_LOOP_SECS = 5
+# On shutdown, how long to let a tick that is mid-transaction finish before pulling the quotes.
+SHUTDOWN_JOIN_SECS = 30
 DEFAULT_OPTIMIZER_CONFIG_PATH = Path.home() / '.allways' / 'miner' / 'optimizer.json'
+# Quote churn fee — mirrors smart-contracts/…/constants.rs quote_update_fee() and the CLI's copy in
+# allways/cli/swap_commands/helpers.py (a test holds them equal): (elapsed < secs, lamports), else free. set_quote
+# and remove_quote both charge it, keyed on how long the quote stood; creation is free.
+QUOTE_UPDATE_FEE_TIERS = ((300, 10_000_000), (600, 1_000_000))
 # Routine updates wait until a quote's churn fee has decayed to zero.
 QUOTE_UPDATE_FREE_AFTER_SECS = QUOTE_UPDATE_FEE_TIERS[-1][0]
+
+
+def quote_update_fee_lamports(elapsed_secs: int) -> int:
+    for below, fee in QUOTE_UPDATE_FEE_TIERS:
+        if elapsed_secs < below:
+            return fee
+    return 0
+
+
 # A routine requote waits a further random 0..this many seconds past the free window, so rivals can't time a move
 # to land just before it.
 REQUOTE_JITTER_SECS = 30
@@ -526,8 +542,9 @@ class Funding:
 
 
 class QuoteOptimizer:
-    """Runs from the miner's forward loop. ``tick`` watches the feed on every call (the dead-man switch) and
-    decides once per ``OPTIMIZER_TICK_SECONDS``."""
+    """Runs on its own thread (``start_thread``), attached by ``attach.attach_optimizer``. ``tick`` watches the feed
+    every ``OPTIMIZER_LOOP_SECS`` (the dead-man switch) and decides once per ``OPTIMIZER_TICK_SECONDS``, or sooner
+    when a jittered requote falls due."""
 
     def __init__(
         self,
@@ -538,7 +555,6 @@ class QuoteOptimizer:
         state_path: Path,
         pending_payouts_fn: Callable[[str], int],
         feed,
-        own_state: Callable[[], object],
         on_quote_posted: Optional[Callable[[Lane, str, str], None]] = None,
         is_registered: Callable[[], bool] = lambda: True,
         api: Optional[AllwaysApi] = None,
@@ -555,7 +571,8 @@ class QuoteOptimizer:
         self.state = OptimizerState(state_path)
         self.pending_payouts = pending_payouts_fn
         self.feed = feed
-        self.own_state = own_state
+        self.stopping = threading.Event()
+        self.thread: Optional[threading.Thread] = None
         self.on_quote_posted = on_quote_posted or (lambda _lane, _from_addr, _to_addr: None)
         self.is_registered = is_registered
         self.api = api
@@ -658,15 +675,30 @@ class QuoteOptimizer:
         self.run_once(now)
         self.maybe_idle(now)
 
+    def start_thread(self) -> None:
+        """Run on a thread of its own, so a slow API call or transaction never holds up the miner's swap loop."""
+        self.thread = threading.Thread(target=self.run, name='quote-optimizer', daemon=True)
+        self.thread.start()
+
+    def run(self) -> None:
+        self.start()
+        while not self.stopping.wait(OPTIMIZER_LOOP_SECS):
+            self.tick()
+
     def shutdown(self, reason: str) -> None:
-        """Pull every managed quote (a stopped miner still quoting is a strike waiting to happen) and say so.
-        The pulls are marked, so the next start re-posts them."""
+        """Stop the thread (letting a tick that is mid-transaction finish), then pull every managed quote — a stopped
+        miner still quoting is a strike waiting to happen — and say so. The pulls are marked, so the next start
+        re-posts them."""
+        self.stopping.set()
+        if self.thread is not None and self.thread is not threading.current_thread():
+            self.thread.join(timeout=SHUTDOWN_JOIN_SECS)
         pulled = []
         if self.cfg.pull_on_shutdown and not self.cfg.dry_run:
             now = int(self.clock())
             for lane in self.managed_live_lanes():
                 if self.pull(lane, f'shutdown: {reason}', now):
                     pulled.append(lane.label)
+        self.feed.stop()
         tail = f'; pulled {", ".join(pulled)} (re-posted on restart)' if pulled else ''
         self.notifier.event(f'quote optimizer stopped ({reason}){tail}')
 
@@ -798,12 +830,16 @@ class QuoteOptimizer:
 
     def seed(self, now: int) -> bool:
         """A starting picture after the feed (re)connects: other miners from ``GET /miners``, our own quotes'
-        last change from the rate history, our MinerState from the miner's own read; Config and SOL balances
-        are the only RPC reads. False (hold) when the API or our state can't answer yet."""
+        last change from the rate history; our MinerState (strikes and settling locks, which the API lacks), Config
+        and SOL balances are the only RPC reads. False (hold) when the API or our state can't answer yet."""
         generation = self.feed.generation
         rows = self.api.miners() if self.api is not None else None
         history = self.api.rate_history(self.hotkey) if rows is not None else None
-        own_state = self.own_state()
+        own_state = (
+            self.rpc_read("this miner's MinerState", lambda: self.client.get_miner_state(self.client.keypair.pubkey()))
+            if history is not None
+            else None
+        )
         if rows is None or history is None or own_state is None:
             missing = "this miner's MinerState" if rows is not None and history is not None else 'the allways API'
             log_on_change(

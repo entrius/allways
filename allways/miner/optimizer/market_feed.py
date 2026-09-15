@@ -30,11 +30,14 @@ import bittensor as bt
 from borsh_construct import String
 from solders.pubkey import Pubkey
 
-from allways.constants import OPTIMIZER_FEED_RESUBSCRIBE_SECONDS, RATE_PRECISION
+from allways.constants import RATE_PRECISION
+from allways.miner.optimizer.subscription_feed import Subscription, SubscriptionFeed
 from allways.solana import layouts, pdas
-from allways.solana.program_feed import Subscription, SubscriptionFeed
 
 MINER_QUOTE_DIRECTION_OFFSET = len(layouts.DISCRIMINATORS['MinerQuote']) + 32
+# The feed renews this often, opening the new connection before closing the old (no catch-up read); each renewal is a
+# Helius connection credit. The swap feed keeps its own, shorter schedule.
+OPTIMIZER_FEED_RESUBSCRIBE_SECONDS = 900
 SYSTEM_PROGRAM = '11111111111111111111111111111111'
 # A competitor quote pushed this recently stays even when the API doesn't list it: the API polls the chain, so a
 # quote created a moment ago may not be in its rows yet.

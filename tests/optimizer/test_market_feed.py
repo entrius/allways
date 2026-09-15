@@ -9,7 +9,7 @@ from solders.keypair import Keypair
 from solders.pubkey import Pubkey
 
 from allways.constants import RATE_PRECISION
-from allways.miner.market_feed import (
+from allways.miner.optimizer.market_feed import (
     MINER_QUOTE_DIRECTION_OFFSET,
     RECONCILE_GRACE_SECS,
     SYSTEM_PROGRAM,
@@ -19,9 +19,9 @@ from allways.miner.market_feed import (
     make_quote,
     market_from_das,
 )
+from allways.miner.optimizer.subscription_feed import SubscriptionFeed
 from allways.solana import layouts, pdas
 from allways.solana.client import AllwaysSolanaClient
-from allways.solana.program_feed import SubscriptionFeed
 
 PROGRAM = Pubkey.from_bytes(bytes([7]) * 32)
 ME = Keypair().pubkey()

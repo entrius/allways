@@ -73,16 +73,6 @@ def add_miner_args(cls, parser):
         default=MINER_POLL_INTERVAL_SECONDS,
     )
 
-    parser.add_argument(
-        '--miner.optimizer_config',
-        type=str,
-        help=(
-            'Path to the quote optimizer JSON config (default ~/.allways/miner/optimizer.json). '
-            'The optimizer stays off unless that file sets "enabled": true.'
-        ),
-        default=None,
-    )
-
 
 def add_validator_args(cls, parser):
     """Add validator specific arguments to the parser."""
