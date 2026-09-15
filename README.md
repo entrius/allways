@@ -146,6 +146,65 @@ there. Either way the user is made whole out of the bond that backed the quote.
 (`alw miner deactivate --backing tao`), let in-flight swaps and their timeout windows drain, and
 validators unlock the bond once nothing is owed on it — then `alw vault withdraw` succeeds.
 
+### Quote Optimizer (opt-in)
+
+Fund the purse and the wallets, post each SOL↔TAO quote once by hand, then let the miner keep them
+priced. No guarantees and not financial advice: you fund it, you own the outcome.
+
+- **Follow.** Each lane quotes 0.4% under the best other qualifying quote — inside the validators' 0.5% crown
+  band, with a 0.1% cushion so a one-tick undercut can't push it out.
+- **Tolerance.** The leader is followed only while that rate is between `-max_worse` and `+max_better` % of
+  the market spot price, measured as what the taker receives. With no leader, or one stingier than
+  `-max_worse`, the lane leads at `-max_worse` (the least generous rate you tolerate). A leader more generous
+  than `+max_better` is not followed.
+- **Free by default.** Routine repricing waits until a quote is 10 minutes old, and re-posting a pulled quote
+  is a free creation. A fee is paid only to protect you, on fresh data: market drift made your quote more
+  generous than `+max_better`, a taker would pick it first, and a full-size fill would lose more than the fee;
+  or your wallet can't cover a full-size fill and a missed one (10% premium) would cost more than the fee, or
+  you already carry the last strike your hotkey is allowed.
+- **Funding.** A taker may fill up to what your collateral backs, so each delivery wallet must cover that
+  largest fill on every live lane paying out of it, plus in-flight payouts and the SOL fee reserve. Lanes that
+  don't fit are pulled, in reverse `lanes` order, and re-posted once the wallet covers them again.
+- **Busy purses** can't be taken until their swap resolves: their rate still updates (free), nothing is paid,
+  and they claim no second full-size fill.
+- **Data failures lean your way:** a failed read skips the tick, a missing price holds every quote, and a 0
+  balance reading never pays a fee on its own.
+
+Off unless `~/.allways/miner/optimizer.json` (or `--miner.optimizer_config <path>`) sets `enabled`. Under
+`docker-compose.miner.yml` that file is `./data/allways/miner/optimizer.json`:
+
+```json
+{
+  "enabled": true,
+  "dry_run": false,
+  "webhook_url": "https://discord.com/api/webhooks/…",
+  "lanes": ["sol:tao:sol", "sol:tao:tao", "tao:sol:sol", "tao:sol:tao"],
+  "max_better_than_market_pct": 1.0,
+  "max_worse_than_market_pct": 3.5,
+  "repost_buffer_pct": 1.0,
+  "sol_fee_reserve": 0.05,
+  "pull_on_shutdown": true,
+  "price_usd": {}
+}
+```
+
+- `lanes` — `from:to:backing`, in priority order; only lanes you have already quoted are managed (their
+  addresses come from that quote), and a quote you remove yourself stays removed.
+- `max_better_than_market_pct` / `max_worse_than_market_pct` — the market tolerance above.
+- `repost_buffer_pct` — headroom above a full-size fill before a pulled quote comes back, so it doesn't flap.
+- `sol_fee_reserve` — SOL kept aside for transaction fees; below it every lane is pulled.
+- `pull_on_shutdown` — a stopped miner still quoting takes strikes; shutdown pulls and the next start re-posts.
+- `price_usd` — pin a USD price per chain instead of the CoinGecko → Coinbase → MEXC feeds.
+- `dry_run` — decide and report everything, send no transactions.
+
+Webhook messages: start and stop; every pull and post; paid requotes (routine requotes and a lane switching
+between following, leading and not following only go to the miner log); a wallet short of a full-size fill
+(address and amount to send); a purse under its eligibility floor (with the deposit command); a new timeout
+strike; a dead price feed; failed transactions; and, after a post, why that lane is not earning emissions.
+Any webhook taking a JSON body works (Discord `content`, Slack `text`). Extending to another pair means adding
+its chains to `OPTIMIZER_CHAINS` in `allways/miner/quote_optimizer.py` and a price id in
+`allways/miner/market_price.py`.
+
 ## Validator Storage Layout
 
 Validator state lives in `~/.allways/validator/state.db` (SQLite, WAL mode).

@@ -252,6 +252,21 @@ def required_collateral(collateral_amount: int) -> int:
     return collateral_amount * COLLATERAL_REQUIREMENT_BPS // 10_000
 
 
+# ─── Quote churn fee ─────────────────────────────────────
+# Mirror smart-contracts/…/constants.rs quote_update_fee(). remove_quote charges the same fee, keyed on
+# how long the quote stood, so remove + re-create can't dodge it; creation is free.
+QUOTE_UPDATE_FEE_TIERS = ((300, 10_000_000), (600, 1_000_000))  # (elapsed < secs, lamports); else free
+
+
+def quote_update_fee_lamports(elapsed_secs: int) -> int:
+    """Churn fee (lamports) to re-quote or remove a quote ``elapsed_secs`` after its last update: 0.01 SOL
+    under 5 min, 0.001 SOL at 5–10 min, free after 10 min. Mirrors the contract."""
+    for below, fee in QUOTE_UPDATE_FEE_TIERS:
+        if elapsed_secs < below:
+            return fee
+    return 0
+
+
 # ─── Emission Recycling ────────────────────────────────────
 RECYCLE_UID = 53  # Subnet owner UID
 

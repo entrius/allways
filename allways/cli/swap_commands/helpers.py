@@ -19,7 +19,13 @@ from rich.text import Text
 from allways.chains import SUPPORTED_CHAINS, ChainDefinition
 from allways.classes import SwapStatus
 from allways.cli.swap_commands.swap_intake import backing_purse, floors_from_config
-from allways.constants import NETUID_FINNEY, TAO_TO_RAO, declarable_backings
+from allways.constants import (  # noqa: F401 — the fee pair is re-exported for existing CLI imports
+    NETUID_FINNEY,
+    QUOTE_UPDATE_FEE_TIERS,
+    TAO_TO_RAO,
+    declarable_backings,
+    quote_update_fee_lamports,
+)
 from allways.solana import pdas
 from allways.solana.client import PROGRAM_ERRORS, SolanaClientError, program_error_code
 from allways.solana.layouts import hub_busy_until, hub_swap_on, lock_max
@@ -131,19 +137,6 @@ def apply_chain_network_env(config: dict) -> None:
         env_var = f'{chain.env_prefix}_NETWORK'
         if not os.environ.get(env_var) and config.get(network_key(chain)):
             os.environ[env_var] = config[network_key(chain)]
-
-
-# Quote-update churn fee tiers — mirror smart-contracts/…/constants.rs quote_update_fee().
-QUOTE_UPDATE_FEE_TIERS = ((300, 10_000_000), (600, 1_000_000))  # (elapsed < secs, lamports); else free
-
-
-def quote_update_fee_lamports(elapsed_secs: int) -> int:
-    """Churn fee (lamports) to re-quote a direction ``elapsed_secs`` after its last update: 0.01 SOL
-    under 5 min, 0.001 SOL at 5–10 min, free after 10 min. Creation is free. Mirrors the contract."""
-    for below, fee in QUOTE_UPDATE_FEE_TIERS:
-        if elapsed_secs < below:
-            return fee
-    return 0
 
 
 def votes_needed(cfg) -> int:

@@ -4,6 +4,8 @@ services:
     container_name: aw-miner
     restart: unless-stopped
     entrypoint: /app/scripts/miner-entrypoint.sh
+    # Time for the quote optimizer to pull its quotes on `docker stop` (each pull waits for confirmation).
+    stop_grace_period: 60s
     env_file:
       - .env
     ports:
