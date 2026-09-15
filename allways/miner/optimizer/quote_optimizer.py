@@ -430,10 +430,13 @@ class WebhookNotifier:
         bt.logging.info(f'optimizer: {message}')
         self.send(message)
 
-    def alert(self, key: str, message: str) -> None:
-        if self.active.get(key) == message:
+    def alert(self, key: str, message: str, fingerprint=None) -> None:
+        """``fingerprint`` is what must change for the alert to post again; the message by default. Messages that
+        carry a live figure (a wallet balance moving by a fee) pass a coarser one, or they would post every tick."""
+        signature = message if fingerprint is None else repr(fingerprint)
+        if self.active.get(key) == signature:
             return
-        self.active[key] = message
+        self.active[key] = signature
         bt.logging.warning(f'optimizer: {message}')
         self.send(message)
 
@@ -636,11 +639,13 @@ class QuoteOptimizer:
         self.started = True
         self.idle, self.idle_checked_at = True, None  # the first step opens the feed if there is anything to manage
         mode = ' in DRY RUN (no transactions)' if self.cfg.dry_run else ''
-        self.notifier.event(
-            f'quote optimizer started{mode} — lanes {", ".join(lane.label for lane in self.cfg.lanes)}; '
+        message = (
+            f'quote optimizer running{mode} — lanes {", ".join(lane.label for lane in self.cfg.lanes)}; '
             f'follows the crown from -{self.cfg.max_worse_than_market_pct:g}% to '
             f'+{self.cfg.max_better_than_market_pct:g}% of market'
         )
+        bt.logging.success(f'Miner {message}')
+        self.notifier.send(message)
         return True
 
     def tick(self) -> None:
@@ -1058,7 +1063,9 @@ class QuoteOptimizer:
             self.notifier.resolve(f'funds:{lane.key}', f'{lane.label}: wallet covers a full-size fill again')
         else:
             self.short_ticks[lane] += 1
-            self.notifier.alert(f'funds:{lane.key}', f'{lane.label}: {self.funding_reason(funding)}')
+            self.notifier.alert(
+                f'funds:{lane.key}', f'{lane.label}: {self.funding_reason(funding)}', self.funding_fingerprint(funding)
+            )
 
         # Market drift: our quote became more generous than the tolerance allows.
         market = None if hold else self.market_rate(lane, view.now)
@@ -1155,7 +1162,9 @@ class QuoteOptimizer:
             return
         if funding is None or not funding.fits_with_buffer:
             self.notifier.alert(
-                f'funds:{lane.key}', f'{lane.label} stays pulled: {self.funding_reason(funding, buffered=True)}'
+                f'funds:{lane.key}',
+                f'{lane.label} stays pulled: {self.funding_reason(funding, buffered=True)}',
+                self.funding_fingerprint(funding, buffered=True),
             )
             return
         self.notifier.resolve(f'funds:{lane.key}')
@@ -1216,7 +1225,7 @@ class QuoteOptimizer:
     def remove(self, view: ProgramView, lane: Lane, quote, reason: str, fee: int) -> None:
         fee_note = f' (paid {fee / 1e9:g} SOL churn fee)' if fee else ''
         if self.cfg.dry_run:
-            self.notifier.alert(f'dry:{lane.key}', f'[dry run] would pull {lane.label}: {reason}{fee_note}')
+            self.notifier.alert(f'dry:{lane.key}', f'[dry run] would pull {lane.label}: {reason}{fee_note}', 'pull')
             return
         if self.pull(lane, reason, view.now):
             self.notifier.event(f'pulled {lane.label}: {reason}{fee_note}')
@@ -1246,7 +1255,9 @@ class QuoteOptimizer:
             if routine:
                 log_on_change(f'optimizer.dry.{lane.key}', rate_fixed, f'optimizer: [dry run] would have {message}')
             else:
-                self.notifier.alert(f'dry:{lane.key}', f'[dry run] would have {message}')
+                self.notifier.alert(
+                    f'dry:{lane.key}', f'[dry run] would have {message}', 'repost' if repost else 'requote'
+                )
             return False
         try:
             self.client.set_quote(
@@ -1325,6 +1336,15 @@ class QuoteOptimizer:
             f'a full-size fill plus what it already owes needs {format_amount(need, funding.chain)} — '
             f'send at least {format_amount(short, funding.chain)}'
         )
+
+    def funding_fingerprint(self, funding: Optional[Funding], buffered: bool = False):
+        """What must change for a funding alert to post again: the wallet and its shortfall to 0.1 of the asset —
+        not a balance moving by a transaction fee, which would re-post it every tick."""
+        if funding is None or funding.fee_payer_short or funding.balance is None:
+            return self.funding_reason(funding)
+        need = int(funding.need * (1 + self.cfg.repost_buffer_pct / 100)) if buffered else funding.need
+        short = max(0, need - funding.balance) / 10 ** get_chain_def(funding.chain).decimals
+        return (funding.chain, funding.address, round(short, 1))
 
     def watch_strikes(self, failed: int) -> None:
         if self.failed_swaps is not None and failed > self.failed_swaps:

@@ -638,11 +638,11 @@ def test_api_down_at_start_keeps_the_optimizer_off_and_retries_each_tick(tmp_pat
     at(opt, NOW + 90)
     assert (opt.started, opt.feed.feed.started, api.health_calls) == (False, False, 2)
     assert len(sent_with(opt, 'waiting for the allways API')) == 1
-    assert not sent_with(opt, 'quote optimizer started')
+    assert not sent_with(opt, 'quote optimizer running')
     api.healthy = True
     at(opt, NOW + 150)
     assert opt.started and opt.feed.feed.started
-    assert sent_with(opt, 'quote optimizer started')
+    assert sent_with(opt, 'quote optimizer running')
 
 
 def test_seed_reads_own_updated_at_from_the_rate_history(tmp_path):
@@ -854,6 +854,25 @@ def test_a_standing_alert_does_not_repost_as_the_market_moves(tmp_path):
     prices.pins['sol'] = 100.4
     opt.run_once(NOW + 60)
     assert len(sent_with(opt, '[dry run] would have requoted')) == 1
+
+
+def test_a_funding_alert_posts_again_only_when_the_shortfall_really_changes(tmp_path):
+    balances = {'sol': SOL, 'tao': TAO // 2}
+    client = crowned_client(my_rate='0.4530', my_updated_at=NOW - 100)
+    opt = build(tmp_path, client, balances=balances, dry_run=True)
+
+    def funds_alerts():
+        return [m for m in opt.notifier.sent if m.startswith('SOL->TAO [sol]: TAO wallet')]
+
+    opt.run_once(NOW)
+    for minute, fees in enumerate((1_000_000, 2_000_000, 3_000_000), start=1):
+        balances['tao'] = TAO // 2 - fees  # the wallet drifting by transaction fees
+        opt.run_once(NOW + 60 * minute)
+    assert len(funds_alerts()) == 1
+    assert len(sent_with(opt, '[dry run] would pull')) == 1  # the dry-run pull says so once, not every tick
+    balances['tao'] = TAO // 10  # a real change in what is owed
+    opt.run_once(NOW + 300)
+    assert len(funds_alerts()) == 2
 
 
 # ─── config and helpers ───
