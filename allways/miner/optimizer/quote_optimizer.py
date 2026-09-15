@@ -1275,7 +1275,8 @@ class QuoteOptimizer:
         return True
 
     def remove(self, view: ProgramView, lane: Lane, quote, reason: str, fee: int) -> None:
-        details = f'**Why:** {reason}' + (f'\n**Churn fee:** {fee / 1e9:g} SOL' if fee else '')
+        paid = 'would pay' if self.cfg.dry_run else 'paid'
+        details = f'**Why:** {reason}' + (f'\n**Churn fee:** {paid} {fee / 1e9:g} SOL' if fee else '')
         if self.cfg.dry_run:
             self.notifier.alert(f'dry:{lane.key}', f'Would pull {lane.label} (dry run)\n{details}', 'pull', kind='dry')
             return
@@ -1295,7 +1296,8 @@ class QuoteOptimizer:
         from_addr, to_addr, liquidity = str(quote.miner_from_addr), str(quote.miner_to_addr), int(quote.liquidity)
         new, old = rate_fixed / RATE_PRECISION, int(quote.rate) / RATE_PRECISION
         what = f'post {lane.label} at {new:g}' if repost else f'requote {lane.label}: {old:g} → {new:g}'
-        details = f'**Why:** {reason}' + (f'\n**Churn fee:** paid {fee / 1e9:g} SOL' if fee else '')
+        paid = 'would pay' if self.cfg.dry_run else 'paid'
+        details = f'**Why:** {reason}' + (f'\n**Churn fee:** {paid} {fee / 1e9:g} SOL' if fee else '')
         # A free requote is routine and only logged; posts and paid requotes are worth a ping.
         routine = not repost and not fee
         if self.cfg.dry_run:
