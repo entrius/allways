@@ -1424,7 +1424,12 @@ class QuoteOptimizer:
         provider = self.assets.get(chain)
         if provider is None:
             return None
-        return int(provider.get_balance(address))
+        try:
+            balance = provider.get_balance(address)
+        except Exception as e:
+            bt.logging.warning(f'optimizer: {chain} balance read failed: {e}')
+            return None
+        return None if balance is None else int(balance)  # unknown, never a guessed 0
 
     def to_lamports(self, amount: int, chain: str) -> Optional[int]:
         if chain == 'sol':

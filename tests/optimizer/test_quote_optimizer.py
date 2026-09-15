@@ -953,6 +953,14 @@ def test_churn_fee_tiers_mirror_the_cli_copy():
     assert [qo.quote_update_fee_lamports(s) for s in elapsed] == [quote_update_fee_lamports(s) for s in elapsed]
 
 
+def test_an_unreadable_balance_is_unknown_not_zero(tmp_path):
+    opt = build(tmp_path, crowned_client())
+    opt.assets['tao'] = SimpleNamespace(get_balance=lambda _addr: (_ for _ in ()).throw(RuntimeError('recv collision')))
+    assert opt.balance(opt.read_view(NOW), 'tao', 'tao-wallet') is None
+    opt.assets['tao'] = SimpleNamespace(get_balance=lambda _addr: None)
+    assert opt.balance(opt.read_view(NOW), 'tao', 'tao-wallet') is None
+
+
 # ─── attaching to the base miner ───
 
 

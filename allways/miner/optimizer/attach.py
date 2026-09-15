@@ -14,6 +14,7 @@ from typing import Optional
 
 import bittensor as bt
 
+from allways.miner.optimizer.balances import TaoBalanceReader
 from allways.miner.optimizer.market_feed import MarketFeed
 from allways.miner.optimizer.miner_api import AllwaysApi, resolve_api_url
 from allways.miner.optimizer.quote_optimizer import (
@@ -38,6 +39,11 @@ def attach_optimizer(miner, config_path: Path = DEFAULT_OPTIMIZER_CONFIG_PATH) -
     if missing:
         bt.logging.error(f'Quote optimizer not started: this miner has no {", ".join(missing)} chain provider')
         return None
+    # TAO balances on the optimizer's own Subtensor connection: the miner's websocket is not safe to share across
+    # threads, and a read colliding with the swap loop comes back from the miner's TAO provider as a 0 balance.
+    assets = dict(miner.assets)
+    if 'tao' in assets:
+        assets['tao'] = TaoBalanceReader(lambda: bt.Subtensor(config=miner.config))
     hotkey = miner.wallet.hotkey.ss58_address
     rpc_url = miner.solana_client.rpc.url
     # Its own client (same RPC, same signer), so the hourly usage line counts the optimizer's calls alone.
@@ -45,7 +51,7 @@ def attach_optimizer(miner, config_path: Path = DEFAULT_OPTIMIZER_CONFIG_PATH) -
     optimizer = QuoteOptimizer(
         cfg=cfg,
         solana_client=client,
-        assets=miner.assets,
+        assets=assets,
         hotkey=hotkey,
         # A dry run paper-trades into its own state file, so a later live run never mistakes a paper pull for a real one.
         state_path=Path.home()
