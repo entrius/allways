@@ -35,4 +35,4 @@ def test_a_failed_read_holds_the_last_good_balance_then_reads_unknown_not_zero()
     assert reader.get_balance('5FTuWM9k') == 834_000_000  # held through a failed read
     now[0] += HOLD_SECS + 1
     assert reader.get_balance('5FTuWM9k') is None  # nothing fresh left: unknown, never 0
-    assert len(connects) == 3  # each failure drops the connection; the next read opens a new one
+    assert connects == [1000.0, 1361.0]  # the failed read dropped the connection; the next read opened a new one
