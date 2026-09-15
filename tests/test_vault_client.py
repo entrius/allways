@@ -10,7 +10,7 @@ from types import SimpleNamespace
 import pytest
 
 from allways.vault import BondVaultClient, VaultConfigError, codec
-from allways.vault.client import resolve_metadata_path, resolve_vault_address
+from allways.vault.client import BOND_OP_GAS, DEFAULT_GAS, resolve_metadata_path, resolve_vault_address
 
 METADATA = (
     Path(__file__).resolve().parents[1]
@@ -295,6 +295,39 @@ def test_the_config_file_is_honoured_when_the_env_is_silent(monkeypatch):
     monkeypatch.delenv('ALLWAYS_VAULT_METADATA', raising=False)
     assert resolve_vault_address({'vault-address': BOB}) == BOB
     assert resolve_metadata_path({'vault-metadata': '/tmp/x.json'}) == '/tmp/x.json'
+
+
+# --- gas ----------------------------------------------------------------------------------------
+
+
+class _WriteSub:
+    """Substrate stand-in that records the gas limit each composed contract call carries."""
+
+    def __init__(self):
+        self.substrate = self
+        self.gas_limits = []
+
+    def compose_call(self, call_module, call_function, call_params):
+        self.gas_limits.append(call_params['gas_limit'])
+        return call_params
+
+    def create_signed_extrinsic(self, call, keypair):
+        return call
+
+    def submit_extrinsic(self, _extrinsic, wait_for_inclusion=True):
+        return _receipt([('System', 'ExtrinsicSuccess')])
+
+
+def test_a_miners_withdraw_and_lock_carry_a_measured_gas_limit_not_the_relayer_default():
+    # The node reserves the fee for the whole gas limit up front: DEFAULT_GAS held ~0.15 TAO, more than a small
+    # hotkey owns, while a withdraw measured ~1.1e9 ref_time / ~1.0e5 proof_size on finney.
+    sub = _WriteSub()
+    vault = BondVaultClient(sub, ALICE, keypair=object())
+    vault.withdraw_collateral(10**9)
+    vault.lock_bond()
+    vault.vote_unlock(BOB, 3)
+    assert sub.gas_limits == [BOND_OP_GAS, BOND_OP_GAS, DEFAULT_GAS]
+    assert BOND_OP_GAS['ref_time'] >= 2 * 1_105_831_291 and BOND_OP_GAS['proof_size'] >= 2 * 104_234
 
 
 def _u128(n: int) -> bytes:
