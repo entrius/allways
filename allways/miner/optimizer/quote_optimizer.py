@@ -32,10 +32,12 @@ provider, so a new pair needs its chains in ``OPTIMIZER_CHAINS`` and a price id 
 
 import json
 import random
+import re
 import threading
 import time
 from collections import defaultdict
 from dataclasses import dataclass, field, fields
+from datetime import datetime, timezone
 from decimal import Decimal
 from fractions import Fraction
 from pathlib import Path
@@ -416,42 +418,77 @@ def collateral_command(backing: str, amount: int) -> str:
 # ─── Operator alerts and persisted lane memory ───────────────────────────────
 
 
+# Discord embed colors by notice kind — no emoji: the title and the color carry the tone.
+NOTICE_COLORS = {
+    'info': 0x3B82F6,
+    'success': 0x22C55E,
+    'warning': 0xF59E0B,
+    'error': 0xEF4444,
+    'dry': 0x8B5CF6,
+    'stopped': 0x6B7280,
+}
+_DISCORD_WEBHOOK = re.compile(r'^https://(?:[a-z]+\.)?discord(?:app)?\.com/api/webhooks/')
+
+
+def plain(message: str) -> str:
+    """A notice as one log line: its title and detail lines joined, markdown dropped."""
+    lines = [line.strip() for line in message.splitlines() if line.strip()]
+    return ' — '.join(lines).replace('**', '').replace('`', '')
+
+
 class WebhookNotifier:
-    """Operator alerts to any webhook taking a JSON body (Discord reads ``content``, Slack ``text``; both
-    are sent). An ``alert`` posts once when its condition starts or its message changes, and ``resolve``
-    once when it clears; an ``event`` always posts. Everything is logged whether or not a URL is set."""
+    """Operator notices on a webhook. A message's first line is its title, the rest its details (Discord markdown).
+    A Discord webhook gets an embed colored by ``kind``; any other URL gets the same as markdown text in ``content``
+    and ``text`` (Slack). An ``alert`` posts once when its condition starts or its fingerprint changes, ``resolve``
+    once when it clears, an ``event`` always. Everything is logged as one line, whether or not a URL is set."""
 
     def __init__(self, url: str, label: str):
         self.url = (url or '').strip()
         self.label = label
         self.active: Dict[str, str] = {}
 
-    def event(self, message: str) -> None:
-        bt.logging.info(f'optimizer: {message}')
-        self.send(message)
+    def event(self, message: str, kind: str = 'info') -> None:
+        bt.logging.info(f'optimizer: {plain(message)}')
+        self.send(message, kind)
 
-    def alert(self, key: str, message: str, fingerprint=None) -> None:
+    def alert(self, key: str, message: str, fingerprint=None, kind: str = 'warning') -> None:
         """``fingerprint`` is what must change for the alert to post again; the message by default. Messages that
         carry a live figure (a wallet balance moving by a fee) pass a coarser one, or they would post every tick."""
         signature = message if fingerprint is None else repr(fingerprint)
         if self.active.get(key) == signature:
             return
         self.active[key] = signature
-        bt.logging.warning(f'optimizer: {message}')
-        self.send(message)
+        bt.logging.warning(f'optimizer: {plain(message)}')
+        self.send(message, kind)
 
     def resolve(self, key: str, message: Optional[str] = None) -> None:
         if self.active.pop(key, None) is not None and message:
-            self.event(message)
+            self.event(message, 'success')
 
-    def send(self, message: str) -> None:
+    def send(self, message: str, kind: str = 'info') -> None:
         if not self.url:
             return
-        text = f'[{self.label}] {message}'[:WEBHOOK_MAX_CHARS]
+        title, _, details = message.partition('\n')
         try:
-            requests.post(self.url, json={'content': text, 'text': text}, timeout=WEBHOOK_TIMEOUT_SECS)
+            requests.post(
+                self.url, json=self.payload(title.strip(), details.strip(), kind), timeout=WEBHOOK_TIMEOUT_SECS
+            )
         except Exception as e:
             bt.logging.debug(f'optimizer: webhook post failed: {e}')
+
+    def payload(self, title: str, details: str, kind: str) -> dict:
+        if _DISCORD_WEBHOOK.match(self.url):
+            embed = {
+                'title': title[:256],
+                'color': NOTICE_COLORS.get(kind, NOTICE_COLORS['info']),
+                'footer': {'text': self.label},
+                'timestamp': datetime.now(timezone.utc).isoformat(),
+            }
+            if details:
+                embed['description'] = details[:4000]
+            return {'embeds': [embed], 'allowed_mentions': {'parse': []}}
+        text = '\n'.join(part for part in (f'**{title}**', details, f'_{self.label}_') if part)[:WEBHOOK_MAX_CHARS]
+        return {'content': text, 'text': text}
 
 
 class OptimizerState:
@@ -581,7 +618,8 @@ class QuoteOptimizer:
         self.api = api
         self.clock = clock
         self.prices = prices or MarketPrices(pins=cfg.price_usd)
-        self.notifier = notifier or WebhookNotifier(cfg.webhook_url, f'allways miner {hotkey[:8]}')
+        label = f'allways miner {hotkey[:8]}' + (' · dry run' if cfg.dry_run else '')
+        self.notifier = notifier or WebhookNotifier(cfg.webhook_url, label)
         self.reserve_lamports = int(round(cfg.sol_fee_reserve * 10 ** get_chain_def('sol').decimals))
         self.last_tick = 0
         self.started = False
@@ -632,20 +670,25 @@ class QuoteOptimizer:
         if self.api is None or not self.api.health():
             self.notifier.alert(
                 'api_down',
-                'quote optimizer waiting for the allways API (das) — not started yet; the miner still fulfils swaps',
+                'Quote optimizer waiting for the allways API\n'
+                'Not started yet — retrying every minute. The miner still fulfils swaps.',
             )
             return False
         self.notifier.resolve('api_down')
         self.started = True
         self.idle, self.idle_checked_at = True, None  # the first step opens the feed if there is anything to manage
-        mode = ' in DRY RUN (no transactions)' if self.cfg.dry_run else ''
-        message = (
-            f'quote optimizer running{mode} — lanes {", ".join(lane.label for lane in self.cfg.lanes)}; '
-            f'follows the crown from -{self.cfg.max_worse_than_market_pct:g}% to '
-            f'+{self.cfg.max_better_than_market_pct:g}% of market'
+        worse, better = self.cfg.max_worse_than_market_pct, self.cfg.max_better_than_market_pct
+        dry = self.cfg.dry_run
+        message = '\n'.join(
+            [
+                f'Miner quote optimizer running{" in dry run" if dry else ""}',
+                f'**Mode:** {"dry run — decides and reports, sends no transactions" if dry else "live"}',
+                f'**Lanes:** {" · ".join(f"`{lane.label}`" for lane in self.cfg.lanes)}',
+                f'**Tolerance:** follows the crown from -{worse:g}% to +{better:g}% of market',
+            ]
         )
-        bt.logging.success(f'Miner {message}')
-        self.notifier.send(message)
+        bt.logging.success(plain(message))
+        self.notifier.send(message, 'success')
         return True
 
     def tick(self) -> None:
@@ -660,9 +703,11 @@ class QuoteOptimizer:
         try:
             self.step(now)
         except Exception as e:
-            self.notifier.alert('tick_error', f'optimizer tick failed: {type(e).__name__}: {e}')
+            self.notifier.alert(
+                'tick_error', f'Optimizer tick failed\n`{type(e).__name__}: {str(e)[:500]}`', kind='error'
+            )
         else:
-            self.notifier.resolve('tick_error', 'optimizer ticks recovered')
+            self.notifier.resolve('tick_error', 'Optimizer ticks recovered')
 
     def step(self, now: int) -> None:
         if not self.started and not self.try_start(now):
@@ -704,8 +749,10 @@ class QuoteOptimizer:
                 if self.pull(lane, f'shutdown: {reason}', now):
                     pulled.append(lane.label)
         self.feed.stop()
-        tail = f'; pulled {", ".join(pulled)} (re-posted on restart)' if pulled else ''
-        self.notifier.event(f'quote optimizer stopped ({reason}){tail}')
+        details = [f'**Reason:** {reason}']
+        if pulled:
+            details.append(f'**Pulled:** {", ".join(pulled)} — re-posted on restart')
+        self.notifier.event('\n'.join(['Quote optimizer stopped', *details]), 'stopped')
 
     # ─── feed health ───
 
@@ -723,7 +770,7 @@ class QuoteOptimizer:
             if self.dead_man_at is not None:
                 self.dead_man_at = None
                 self.notifier.resolve(
-                    'dead_man', 'optimizer feed recovered — re-seeding, then re-posting what the dead-man switch pulled'
+                    'dead_man', 'Optimizer feed recovered\nRe-seeding, then re-posting what the dead-man switch pulled.'
                 )
             return
         if self.not_live_since is None:
@@ -736,13 +783,13 @@ class QuoteOptimizer:
         lanes = self.managed_live_lanes()
         if self.cfg.dry_run:
             done = [lane.label for lane in lanes]
-            verb = '[dry run] would pull'
+            verb = '**Would pull (dry run):**'
         else:
             done = [lane.label for lane in lanes if self.pull(lane, 'dead-man switch: optimizer feed down', now)]
-            verb = 'pulled'
-        what = f'{verb} {", ".join(done)}; re-posted once it recovers' if done else 'no live quotes to pull'
+            verb = '**Pulled:**'
+        what = f'{verb} {", ".join(done)} — re-posted once it recovers' if done else 'No live quotes to pull.'
         self.notifier.alert(
-            'dead_man', f'optimizer feed down for over {DEAD_MAN_SECS // 60} min (dead-man switch) — {what}'
+            'dead_man', f'Dead-man switch: optimizer feed down for over {DEAD_MAN_SECS // 60} min\n{what}', kind='error'
         )
 
     def managed_live_lanes(self) -> List[Lane]:
@@ -931,7 +978,9 @@ class QuoteOptimizer:
             return
         ms = view.states.get(self.me)
         if ms is None:
-            self.notifier.alert('no_miner_state', 'no MinerState for this miner yet — post collateral first')
+            self.notifier.alert(
+                'no_miner_state', 'No MinerState for this miner yet\nPost collateral first: `alw collateral deposit`.'
+            )
             return
         self.notifier.resolve('no_miner_state')
         strikes = int(ms.failed_swaps)
@@ -950,9 +999,7 @@ class QuoteOptimizer:
             if not hold and lane not in mine and self.state.live(lane):
                 self.state.forget(lane)
                 self.eligibility_due.pop(lane, None)
-                self.notifier.event(
-                    f'{lane.label} was removed outside the optimizer — unmanaged until you post it again'
-                )
+                self.notifier.event(f'{lane.label} removed outside the optimizer\nUnmanaged until you post it again.')
 
         targets = {lane: self.target_for(view, lane, now) for lane in self.cfg.lanes}
         self.watch_modes(targets)
@@ -1060,11 +1107,15 @@ class QuoteOptimizer:
         better = self.cfg.max_better_than_market_pct
         if funded:
             self.short_ticks.pop(lane, None)
-            self.notifier.resolve(f'funds:{lane.key}', f'{lane.label}: wallet covers a full-size fill again')
+            self.notifier.resolve(
+                f'funds:{lane.key}', f'Wallet funded for {lane.label}\nIt covers a full-size fill again.'
+            )
         else:
             self.short_ticks[lane] += 1
             self.notifier.alert(
-                f'funds:{lane.key}', f'{lane.label}: {self.funding_reason(funding)}', self.funding_fingerprint(funding)
+                f'funds:{lane.key}',
+                f'Wallet short for {lane.label}\n{self.funding_details(funding)}',
+                self.funding_fingerprint(funding),
             )
 
         # Market drift: our quote became more generous than the tolerance allows.
@@ -1151,7 +1202,8 @@ class QuoteOptimizer:
         ms = view.states.get(self.me)
         if not int(ms.active_backings) & BACKING_BITS[lane.backing]:
             self.notifier.alert(
-                f'inactive:{lane.backing}', f'your {lane.backing} purse is not active — cannot re-post {lane.label}'
+                f'inactive:{lane.backing}',
+                f'{lane.backing.upper()} purse not active\nCannot re-post {lane.label}: `alw miner activate --backing {lane.backing}`',
             )
             return
         self.notifier.resolve(f'inactive:{lane.backing}')
@@ -1163,7 +1215,7 @@ class QuoteOptimizer:
         if funding is None or not funding.fits_with_buffer:
             self.notifier.alert(
                 f'funds:{lane.key}',
-                f'{lane.label} stays pulled: {self.funding_reason(funding, buffered=True)}',
+                f'{lane.label} stays pulled: wallet short\n{self.funding_details(funding, buffered=True)}',
                 self.funding_fingerprint(funding, buffered=True),
             )
             return
@@ -1214,7 +1266,7 @@ class QuoteOptimizer:
                 self.feed.drop_quote(self.me, lane)
                 bt.logging.info(f'optimizer: {lane.label} was already gone; unmanaged until you post it again')
                 return False
-            self.notifier.alert(f'tx_failed:{lane.key}', f'failed to pull {lane.label}: {e}')
+            self.notifier.alert(f'tx_failed:{lane.key}', f'Failed to pull {lane.label}\n`{str(e)[:500]}`', kind='error')
             return False
         self.notifier.resolve(f'tx_failed:{lane.key}')
         self.feed.drop_quote(self.me, lane)
@@ -1223,12 +1275,12 @@ class QuoteOptimizer:
         return True
 
     def remove(self, view: ProgramView, lane: Lane, quote, reason: str, fee: int) -> None:
-        fee_note = f' (paid {fee / 1e9:g} SOL churn fee)' if fee else ''
+        details = f'**Why:** {reason}' + (f'\n**Churn fee:** {fee / 1e9:g} SOL' if fee else '')
         if self.cfg.dry_run:
-            self.notifier.alert(f'dry:{lane.key}', f'[dry run] would pull {lane.label}: {reason}{fee_note}', 'pull')
+            self.notifier.alert(f'dry:{lane.key}', f'Would pull {lane.label} (dry run)\n{details}', 'pull', kind='dry')
             return
         if self.pull(lane, reason, view.now):
-            self.notifier.event(f'pulled {lane.label}: {reason}{fee_note}')
+            self.notifier.event(f'Pulled {lane.label}\n{details}', 'warning')
 
     def send_quote(
         self,
@@ -1241,22 +1293,20 @@ class QuoteOptimizer:
         repost: bool = False,
     ) -> bool:
         from_addr, to_addr, liquidity = str(quote.miner_from_addr), str(quote.miner_to_addr), int(quote.liquidity)
-        fee_note = f', paid {fee / 1e9:g} SOL churn fee' if fee else ''
-        if repost:
-            message = f'posted {lane.label} at {rate_fixed / RATE_PRECISION:g} ({reason})'
-        else:
-            message = (
-                f'requoted {lane.label}: {int(quote.rate) / RATE_PRECISION:g} -> '
-                f'{rate_fixed / RATE_PRECISION:g} ({reason}{fee_note})'
-            )
+        new, old = rate_fixed / RATE_PRECISION, int(quote.rate) / RATE_PRECISION
+        what = f'post {lane.label} at {new:g}' if repost else f'requote {lane.label}: {old:g} → {new:g}'
+        details = f'**Why:** {reason}' + (f'\n**Churn fee:** paid {fee / 1e9:g} SOL' if fee else '')
         # A free requote is routine and only logged; posts and paid requotes are worth a ping.
         routine = not repost and not fee
         if self.cfg.dry_run:
             if routine:
-                log_on_change(f'optimizer.dry.{lane.key}', rate_fixed, f'optimizer: [dry run] would have {message}')
+                log_on_change(f'optimizer.dry.{lane.key}', rate_fixed, f'optimizer: [dry run] would {what} ({reason})')
             else:
                 self.notifier.alert(
-                    f'dry:{lane.key}', f'[dry run] would have {message}', 'repost' if repost else 'requote'
+                    f'dry:{lane.key}',
+                    f'Would {what} (dry run)\n{details}',
+                    'repost' if repost else 'requote',
+                    kind='dry',
                 )
             return False
         try:
@@ -1264,16 +1314,17 @@ class QuoteOptimizer:
                 lane.from_chain, lane.to_chain, from_addr, to_addr, rate_fixed, liquidity, backing=lane.backing
             )
         except Exception as e:
-            self.notifier.alert(f'tx_failed:{lane.key}', f'failed to post {lane.label}: {e}')
+            self.notifier.alert(f'tx_failed:{lane.key}', f'Failed to post {lane.label}\n`{str(e)[:500]}`', kind='error')
             return False
         self.notifier.resolve(f'tx_failed:{lane.key}')
         self.feed.note_quote(
             make_quote(self.me, lane, from_addr, to_addr, rate_fixed, liquidity, view.now + TX_LANDING_MARGIN_SECS)
         )
+        done = ('Posted' if repost else 'Requoted') + what[what.index(' ') :]
         if routine:
-            bt.logging.info(f'optimizer: {message}')
+            bt.logging.info(f'optimizer: {done} ({reason})')
         else:
-            self.notifier.event(message)
+            self.notifier.event(f'{done}\n{details}', 'success' if repost else 'info')
         if repost:
             self.on_quote_posted(lane, from_addr, to_addr)
         self.eligibility_due[lane] = view.now + ELIGIBILITY_CHECK_DELAY_SECS
@@ -1337,6 +1388,20 @@ class QuoteOptimizer:
             f'send at least {format_amount(short, funding.chain)}'
         )
 
+    def funding_details(self, funding: Optional[Funding], buffered: bool = False) -> str:
+        """``funding_reason`` as notice lines: the wallet, what it holds and needs, and what to send."""
+        if funding is None or funding.fee_payer_short or funding.balance is None:
+            return self.funding_reason(funding, buffered)
+        need = int(funding.need * (1 + self.cfg.repost_buffer_pct / 100)) if buffered else funding.need
+        return '\n'.join(
+            [
+                f'**Wallet:** `{funding.address}` ({funding.chain.upper()})',
+                f'**Holds:** {format_amount(funding.balance, funding.chain)}',
+                f'**Needs:** {format_amount(need, funding.chain)} (a full-size fill plus what it already owes)',
+                f'**Send at least:** {format_amount(max(0, need - funding.balance), funding.chain)}',
+            ]
+        )
+
     def funding_fingerprint(self, funding: Optional[Funding], buffered: bool = False):
         """What must change for a funding alert to post again: the wallet and its shortfall to 0.1 of the asset —
         not a balance moving by a transaction fee, which would re-post it every tick."""
@@ -1355,15 +1420,17 @@ class QuoteOptimizer:
                 tail = "the next one ends this hotkey's emissions"
             else:
                 tail = f'{left} more allowed'
-            self.notifier.event(f'timeout strike recorded — {failed} lifetime ({tail})')
+            self.notifier.event(f'Timeout strike recorded\n**Lifetime strikes:** {failed} — {tail}', 'error')
         self.failed_swaps = failed
 
     def watch_prices(self, now: int) -> None:
         missing = [c for c in sorted(self.cfg.chains()) if self.prices.usd(c, now) is None]
         if missing:
-            self.notifier.alert('prices', f'no fresh market price for {", ".join(missing)} — holding every quote')
+            self.notifier.alert(
+                'prices', f'No fresh market price\nMissing {", ".join(missing)} — holding every quote until it returns.'
+            )
         else:
-            self.notifier.resolve('prices', 'market prices recovered')
+            self.notifier.resolve('prices', 'Market prices recovered')
 
     def watch_collateral(self, view: ProgramView) -> None:
         """A purse under its eligibility floor earns nothing (the contract refuses fills it can't back, so it
@@ -1374,13 +1441,14 @@ class QuoteOptimizer:
             if purse < floor:
                 self.notifier.alert(
                     f'collateral:{backing}',
-                    f'your {backing} purse holds {format_amount(purse, backing, 2)}, under the '
-                    f'{format_amount(floor, backing, 2)} needed to stay eligible — add '
-                    f'{format_amount(floor - purse, backing, 2)}: {collateral_command(backing, floor - purse)}',
+                    f'{backing.upper()} purse under its eligibility floor\n'
+                    f'**Holds:** {format_amount(purse, backing, 2)}\n'
+                    f'**Needs:** {format_amount(floor, backing, 2)} to stay eligible\n'
+                    f'**Add:** {format_amount(floor - purse, backing, 2)} with {collateral_command(backing, floor - purse)}',
                 )
             else:
                 self.notifier.resolve(
-                    f'collateral:{backing}', f'your {backing} purse is back above its eligibility floor'
+                    f'collateral:{backing}', f'{backing.upper()} purse back above its eligibility floor'
                 )
 
     def watch_eligibility(self, view: ProgramView, mine: Dict[Lane, object]) -> None:
@@ -1395,7 +1463,9 @@ class QuoteOptimizer:
             reasons = self.ineligibility_reasons(view, lane, mine[lane])
             key = f'ineligible:{lane.key}'
             if reasons:
-                self.notifier.alert(key, f'{lane.label} is live but not earning emissions: {"; ".join(reasons)}')
+                self.notifier.alert(
+                    key, '\n'.join([f'{lane.label} is live but not earning emissions', *(f'- {r}' for r in reasons)])
+                )
                 self.eligibility_due[lane] = view.now + ELIGIBILITY_RECHECK_SECS
             else:
                 self.notifier.resolve(key, f'{lane.label} is eligible for emissions again')

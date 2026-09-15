@@ -168,9 +168,11 @@ class RecordingNotifier(WebhookNotifier):
     def __init__(self):
         super().__init__('', 'test')
         self.sent = []
+        self.kinds = []
 
-    def send(self, message):
+    def send(self, message, kind='info'):
         self.sent.append(message)
+        self.kinds.append(kind)
 
 
 class FakeApi:
@@ -278,7 +280,8 @@ def crowned_client(my_rate='0.4500', other_rate='0.4540', my_updated_at=NOW - 36
 
 
 def sent_with(opt, text):
-    return [m for m in opt.notifier.sent if text in m]
+    """Posted notices containing ``text``, each as one plain line (title and details, markdown dropped)."""
+    return [qo.plain(m) for m in opt.notifier.sent if text.lower() in qo.plain(m).lower()]
 
 
 def quote_pda(miner, lane):
@@ -348,7 +351,7 @@ def test_routine_requotes_and_mode_changes_are_logged_not_posted(tmp_path):
         next(q for q in client.quotes if str(q.miner) == str(OTHER)).rate = fixed('0.4700')
         opt.run_once(NOW + 60)
     lines = [c.args[0] for c in info.call_args_list]
-    assert any(f'requoted SOL->TAO [sol]: 0.45 -> {EDGE}' in line for line in lines)
+    assert any(f'Requoted SOL->TAO [sol]: 0.45 → {EDGE}' in line for line in lines)
     assert any('SOL->TAO [sol] is now not following' in line for line in lines)
     assert opt.modes[FORWARD] is None
     assert not sent_with(opt, 'requoted') and not sent_with(opt, 'is now')
@@ -450,7 +453,7 @@ def test_drift_pays_to_requote_when_we_are_first_in_line(tmp_path):
     opt = build(tmp_path, client)
     opt.run_once(NOW)
     assert [c[:3] for c in client.calls] == [('set', FORWARD, fixed(EDGE))]
-    assert sent_with(opt, 'paid 0.01 SOL churn fee')
+    assert sent_with(opt, 'Churn fee: paid 0.01 SOL')
 
 
 def test_drift_waits_while_a_takeable_quote_is_better(tmp_path):
@@ -497,7 +500,7 @@ def test_underfunded_lane_is_pulled_after_consecutive_short_readings(tmp_path):
     opt = build(tmp_path, client, balances={'sol': SOL, 'tao': TAO // 2})
     opt.run_once(NOW)
     assert client.calls == []
-    assert sent_with(opt, f'TAO wallet tao-{str(ME)[:6]} holds 0.5000 TAO')
+    assert sent_with(opt, f'Wallet: tao-{str(ME)[:6]} (TAO) — Holds: 0.5000 TAO')
     opt.run_once(NOW + 60)
     assert client.calls == [('remove', FORWARD)]
 
@@ -607,14 +610,14 @@ def test_dry_run_sends_no_transactions_but_says_what_it_would_do(tmp_path):
     opt = build(tmp_path, client, dry_run=True)
     opt.run_once(NOW)
     assert client.calls == []
-    assert sent_with(opt, '[dry run] would have requoted SOL->TAO [sol]: 0.47')
+    assert sent_with(opt, 'would requote SOL->TAO [sol]: 0.47')
 
     client = crowned_client(my_rate='0.4500')
     opt = build(tmp_path, client, dry_run=True)
     opt.run_once(NOW)
     opt.run_once(NOW + 60)
     assert client.calls == []
-    assert not sent_with(opt, 'would have')  # a routine dry-run requote is logged, not posted
+    assert not sent_with(opt, 'would requote')  # a routine dry-run requote is logged, not posted
 
 
 def test_shutdown_pulls_managed_quotes_and_marks_them_for_restart(tmp_path):
@@ -623,7 +626,7 @@ def test_shutdown_pulls_managed_quotes_and_marks_them_for_restart(tmp_path):
     opt.shutdown('test')
     assert client.calls == [('remove', FORWARD)]
     assert opt.state.pulled(FORWARD) is not None
-    assert sent_with(opt, 'quote optimizer stopped (test); pulled SOL->TAO [sol]')
+    assert sent_with(opt, 'Quote optimizer stopped — Reason: test — Pulled: SOL->TAO [sol]')
 
 
 # ─── seeding and the feed ───
@@ -712,7 +715,7 @@ def test_dead_man_pulls_every_managed_quote_once_then_reseeds_and_reposts(tmp_pa
     at(opt, NOW + DEAD_MAN_SECS + 1)
     assert client.calls == [('remove', FORWARD), ('remove', REVERSE)]
     [alert] = sent_with(opt, 'dead-man switch')
-    assert 'pulled SOL->TAO [sol], TAO->SOL [sol]' in alert
+    assert 'Pulled: SOL->TAO [sol], TAO->SOL [sol]' in alert
     at(opt, NOW + 200)
     at(opt, NOW + 260)
     assert len(client.calls) == 2 and len(sent_with(opt, 'dead-man switch')) == 1
@@ -830,8 +833,8 @@ def test_collateral_alert_only_under_the_eligibility_floor_with_the_command(tmp_
     client.config = program_config(min_collateral=SOL)
     opt = build(tmp_path, client)
     opt.run_once(NOW)
-    [alert] = sent_with(opt, 'needed to stay eligible')
-    assert 'under the 1.00 SOL' in alert and '`alw collateral deposit --amount 0.50`' in alert
+    [alert] = sent_with(opt, 'eligibility floor')
+    assert 'Needs: 1.00 SOL' in alert and 'alw collateral deposit --amount 0.50' in alert
 
 
 def test_webhook_posts_a_condition_once_and_its_recovery_once():
@@ -843,7 +846,22 @@ def test_webhook_posts_a_condition_once_and_its_recovery_once():
         notifier.resolve('funds', 'wallet ok')
         notifier.event('started')
     assert post.call_count == 3
-    assert post.call_args_list[0].kwargs['json']['content'] == '[miner] wallet short'
+    assert post.call_args_list[0].kwargs['json']['content'] == '**wallet short**\n_miner_'
+
+
+def test_discord_webhooks_get_a_colored_embed():
+    notifier = WebhookNotifier('https://discord.com/api/webhooks/1/abc', 'allways miner 5EvkLKgQ · dry run')
+    with patch.object(qo.requests, 'post') as post:
+        notifier.alert('funds', 'Wallet short for SOL->TAO [sol]\n**Holds:** 0.5000 TAO')
+        notifier.event('Quote optimizer stopped\n**Reason:** test', 'stopped')
+    first, second = (call.kwargs['json'] for call in post.call_args_list)
+    [embed] = first['embeds']
+    assert (embed['title'], embed['description']) == ('Wallet short for SOL->TAO [sol]', '**Holds:** 0.5000 TAO')
+    assert embed['color'] == qo.NOTICE_COLORS['warning'] and embed['footer'] == {
+        'text': 'allways miner 5EvkLKgQ · dry run'
+    }
+    assert first['allowed_mentions'] == {'parse': []} and 'content' not in first
+    assert second['embeds'][0]['color'] == qo.NOTICE_COLORS['stopped']
 
 
 def test_a_standing_alert_does_not_repost_as_the_market_moves(tmp_path):
@@ -853,7 +871,7 @@ def test_a_standing_alert_does_not_repost_as_the_market_moves(tmp_path):
     opt.run_once(NOW)
     prices.pins['sol'] = 100.4
     opt.run_once(NOW + 60)
-    assert len(sent_with(opt, '[dry run] would have requoted')) == 1
+    assert len(sent_with(opt, 'would requote')) == 1
 
 
 def test_a_funding_alert_posts_again_only_when_the_shortfall_really_changes(tmp_path):
@@ -862,14 +880,14 @@ def test_a_funding_alert_posts_again_only_when_the_shortfall_really_changes(tmp_
     opt = build(tmp_path, client, balances=balances, dry_run=True)
 
     def funds_alerts():
-        return [m for m in opt.notifier.sent if m.startswith('SOL->TAO [sol]: TAO wallet')]
+        return [m for m in opt.notifier.sent if m.startswith('Wallet short for SOL->TAO [sol]')]
 
     opt.run_once(NOW)
     for minute, fees in enumerate((1_000_000, 2_000_000, 3_000_000), start=1):
         balances['tao'] = TAO // 2 - fees  # the wallet drifting by transaction fees
         opt.run_once(NOW + 60 * minute)
     assert len(funds_alerts()) == 1
-    assert len(sent_with(opt, '[dry run] would pull')) == 1  # the dry-run pull says so once, not every tick
+    assert len(sent_with(opt, 'would pull SOL->TAO [sol]')) == 1  # the dry-run pull says so once, not every tick
     balances['tao'] = TAO // 10  # a real change in what is owed
     opt.run_once(NOW + 300)
     assert len(funds_alerts()) == 2
