@@ -257,6 +257,7 @@ def build(tmp_path, client, balances=None, lanes=(FORWARD,), prices=None, api=No
         clock=lambda: NOW,
         prices=prices or MarketPrices(pins=PRICES),
         notifier=RecordingNotifier(),
+        paper_addresses={'sol': f'sol-{str(ME)[:6]}', 'tao': f'tao-{str(ME)[:6]}'},
     )
     opt.started, opt.seeded_generation, opt.reconciled_at = True, feed.generation, NOW
     return opt
@@ -620,6 +621,21 @@ def test_dry_run_sends_no_transactions_but_says_what_it_would_do(tmp_path):
     assert not sent_with(opt, 'would requote')  # a routine dry-run requote is logged, not posted
 
 
+def test_a_dry_run_paper_trades_a_lane_from_nothing(tmp_path):
+    client = FakeClient(quotes=[make_quote(OTHER, FORWARD, '0.4540')], states=[miner_state(ME), miner_state(OTHER)])
+    opt = build(tmp_path, client, dry_run=True)
+    opt.run_once(NOW)
+    assert client.calls == []
+    assert sent_with(opt, f'would post SOL->TAO [sol] at {EDGE}')
+    assert opt.paper[FORWARD].rate == fixed(EDGE) and opt.state.pulled(FORWARD) is None
+    next(q for q in client.quotes if str(q.miner) == str(OTHER)).rate = fixed('0.4560')
+    opt.run_once(NOW + 60)
+    assert opt.paper[FORWARD].rate == fixed(EDGE)  # a fresh paper quote waits for its free window, like a real one
+    opt.run_once(NOW + 600 + qo.REQUOTE_JITTER_SECS)
+    assert opt.paper[FORWARD].rate == band_edge_fixed(fixed('0.4560'), reverse=False)
+    assert client.calls == []
+
+
 def test_shutdown_pulls_managed_quotes_and_marks_them_for_restart(tmp_path):
     client = crowned_client(my_rate='0.4530')
     opt = build(tmp_path, client)
@@ -658,6 +674,16 @@ def test_seed_reads_own_updated_at_from_the_rate_history(tmp_path):
     assert (mine.rate, mine.updated_at, mine.miner_from_addr) == (fixed('0.45'), NOW - 3600, f'sol-{str(ME)[:6]}')
     opt.run_once(NOW)
     assert [c[:3] for c in client.calls] == [('set', FORWARD, fixed(EDGE))]
+
+
+def test_seed_reads_our_own_bond_which_the_api_drops_with_our_last_quote(tmp_path):
+    client = FakeClient(states=[miner_state(ME)])
+    client.get_bond_attestation = lambda miner, chain='tao': SimpleNamespace(
+        miner=ME, chain=chain, effective_balance=11 * TAO // 10, locked=True
+    )
+    opt = build(tmp_path, client, lanes=(Lane('sol', 'tao', 'tao'),), api=FakeApi(rows=[], history=[]))
+    assert opt.seed(NOW)
+    assert opt.read_view(NOW).purse(str(ME), 'tao') == 11 * TAO // 10
 
 
 def test_an_unknown_own_updated_at_is_assumed_now_so_it_is_not_free(tmp_path):
@@ -886,11 +912,12 @@ def test_a_funding_alert_posts_again_only_when_the_shortfall_really_changes(tmp_
     for minute, fees in enumerate((1_000_000, 2_000_000, 3_000_000), start=1):
         balances['tao'] = TAO // 2 - fees  # the wallet drifting by transaction fees
         opt.run_once(NOW + 60 * minute)
-    assert len(funds_alerts()) == 1
+    assert len(funds_alerts()) == 1  # the standing quote's shortfall, once
+    assert len(sent_with(opt, 'stays pulled: wallet short')) == 1  # then the paper-pulled lane's, once
     assert len(sent_with(opt, 'would pull SOL->TAO [sol]')) == 1  # the dry-run pull says so once, not every tick
     balances['tao'] = TAO // 10  # a real change in what is owed
     opt.run_once(NOW + 300)
-    assert len(funds_alerts()) == 2
+    assert len(sent_with(opt, 'stays pulled: wallet short')) == 2
 
 
 # ─── config and helpers ───

@@ -602,6 +602,7 @@ class QuoteOptimizer:
         prices: Optional[MarketPrices] = None,
         notifier: Optional[WebhookNotifier] = None,
         rng: Optional[random.Random] = None,
+        paper_addresses: Optional[Dict[str, str]] = None,
     ):
         self.cfg = cfg
         self.client = solana_client
@@ -643,6 +644,12 @@ class QuoteOptimizer:
         self.rpc_calls = 0
         self.usage_mark: Optional[Tuple[int, int, int, int]] = None
         self.count_rpc_calls()
+        # A dry run paper-trades: our quotes on the managed lanes live in this book (None = pulled on paper), started
+        # from any real quote and advanced by every decision as if its transaction had landed.
+        self.paper_addresses = dict(paper_addresses or {})
+        self.paper: Dict[Lane, Optional[object]] = {}
+        if cfg.dry_run:
+            self.open_paper_lanes()
 
     def count_rpc_calls(self) -> None:
         """Count every RPC call this optimizer's client makes — it has its own client, so the hourly line is the
@@ -682,7 +689,7 @@ class QuoteOptimizer:
         message = '\n'.join(
             [
                 f'Miner quote optimizer running{" in dry run" if dry else ""}',
-                f'**Mode:** {"dry run — decides and reports, sends no transactions" if dry else "live"}',
+                f'**Mode:** {"dry run — paper-trades every lane, sends no transactions" if dry else "live"}',
                 f'**Lanes:** {" · ".join(f"`{lane.label}`" for lane in self.cfg.lanes)}',
                 f'**Tolerance:** follows the crown from -{worse:g}% to +{better:g}% of market',
             ]
@@ -780,11 +787,15 @@ class QuoteOptimizer:
 
     def dead_man_pull(self, now: int) -> None:
         self.dead_man_at = now
-        lanes = self.managed_live_lanes()
         if self.cfg.dry_run:
+            lanes = [lane for lane, quote in self.paper.items() if quote is not None]
+            for lane in lanes:
+                self.paper[lane] = None
+                self.state.mark_pulled(lane, 'dead-man switch: optimizer feed down', now)
             done = [lane.label for lane in lanes]
             verb = '**Would pull (dry run):**'
         else:
+            lanes = self.managed_live_lanes()
             done = [lane.label for lane in lanes if self.pull(lane, 'dead-man switch: optimizer feed down', now)]
             verb = '**Pulled:**'
         what = f'{verb} {", ".join(done)} — re-posted once it recovers' if done else 'No live quotes to pull.'
@@ -825,6 +836,8 @@ class QuoteOptimizer:
 
     def has_lane_work(self) -> bool:
         """A managed quote the optimizer knows is standing, or one it pulled and owes a re-post."""
+        if self.cfg.dry_run:
+            return True  # paper-trading every managed lane
         return any(self.state.live(lane) or self.state.pulled(lane) is not None for lane in self.cfg.lanes)
 
     def log_idle(self, idle: bool) -> None:
@@ -882,8 +895,9 @@ class QuoteOptimizer:
 
     def seed(self, now: int) -> bool:
         """A starting picture after the feed (re)connects: other miners from ``GET /miners``, our own quotes'
-        last change from the rate history; our MinerState (strikes and settling locks, which the API lacks), Config
-        and SOL balances are the only RPC reads. False (hold) when the API or our state can't answer yet."""
+        last change from the rate history; our MinerState (strikes and settling locks, which the API lacks), our bond
+        attestations (the API drops a miner with no quotes, bond and all), Config and SOL balances are the only RPC
+        reads. False (hold) when the API or our state can't answer yet."""
         generation = self.feed.generation
         rows = self.api.miners() if self.api is not None else None
         history = self.api.rate_history(self.hotkey) if rows is not None else None
@@ -906,6 +920,13 @@ class QuoteOptimizer:
         quotes, states, bonds = market_from_das(rows, self.cfg.lanes, now)
         quotes = self.own_quotes(quotes, history, now)
         states[self.me] = own_state
+        me = self.client.keypair.pubkey()
+        for backing in sorted({lane.backing for lane in self.cfg.lanes} - {'sol'}):
+            bond = self.rpc_read(
+                f"this miner's {backing} bond", lambda b=backing: self.client.get_bond_attestation(me, b)
+            )
+            if bond is not None:
+                bonds[(self.me, backing)] = bond
         wallets = {self.me} | {str(q.miner_to_addr) for q in quotes if str(q.miner) == self.me and q.to_chain == 'sol'}
         wallets |= {r['to_addr'] for key, r in self.state.lanes.items() if key.split(':')[1] == 'sol'}
         lamports = {}
@@ -959,10 +980,45 @@ class QuoteOptimizer:
             bt.logging.warning(f'optimizer: {what} read failed: {e}')
             return None
 
+    # ─── paper trading (dry run) ───
+
+    def open_paper_lanes(self) -> None:
+        """A dry run starts every managed lane pulled on paper — with an earlier record's addresses, else the miner's
+        own — so each is posted on paper as soon as its target, purse and wallet allow. Its state file is apart from a
+        live run's, so none of this is ever mistaken for a real pull."""
+        for lane in self.cfg.lanes:
+            record = self.state.lanes.get(lane.key) or {}
+            from_addr = record.get('from_addr') or self.paper_addresses.get(lane.from_chain)
+            to_addr = record.get('to_addr') or self.paper_addresses.get(lane.to_chain)
+            if from_addr and to_addr:
+                self.state.lanes[lane.key] = {
+                    'from_addr': from_addr,
+                    'to_addr': to_addr,
+                    'liquidity': int(record.get('liquidity', 0)),
+                    'pulled': True,
+                    'reason': 'dry run: not posted on paper yet',
+                }
+        self.state.save()
+
+    def paper_overlay(self, quotes: List[object]) -> List[object]:
+        """Our quotes on the managed lanes as the paper book holds them; a real quote seeds its lane's book once."""
+        others = []
+        for q in quotes:
+            lane = Lane(q.from_chain, q.to_chain, q.collateral_chain)
+            if str(q.miner) == self.me and lane in self.cfg.lanes:
+                self.paper.setdefault(lane, q)
+            else:
+                others.append(q)
+        for lane in self.cfg.lanes:
+            self.paper.setdefault(lane, None)
+        return others + [q for q in self.paper.values() if q is not None]
+
     # ─── one pass ───
 
     def read_view(self, now: int) -> ProgramView:
         config, quotes, states, bonds, lamports = self.feed.snapshot()
+        if self.cfg.dry_run:
+            quotes = self.paper_overlay(quotes)
         return ProgramView(now=now, config=config, quotes=quotes, states=states, bonds=bonds, lamports=lamports)
 
     def run_once(self, now: int, hold: bool = False) -> None:
@@ -1203,10 +1259,13 @@ class QuoteOptimizer:
         if not int(ms.active_backings) & BACKING_BITS[lane.backing]:
             self.notifier.alert(
                 f'inactive:{lane.backing}',
-                f'{lane.backing.upper()} purse not active\nCannot re-post {lane.label}: `alw miner activate --backing {lane.backing}`',
+                f'{lane.backing.upper()} purse not active\n'
+                f'Its lanes cannot be posted until it is: `alw miner activate --backing {lane.backing}`',
             )
-            return
-        self.notifier.resolve(f'inactive:{lane.backing}')
+            if not self.cfg.dry_run:
+                return  # a dry run carries on, so the paper book shows what an active purse would do
+        else:
+            self.notifier.resolve(f'inactive:{lane.backing}')
         if view.busy(self.me, lane.backing):
             log_on_change(
                 f'optimizer.repost.{lane.key}', 'busy', f'optimizer: {lane.label} stays pulled while its purse is busy'
@@ -1278,7 +1337,11 @@ class QuoteOptimizer:
         paid = 'would pay' if self.cfg.dry_run else 'paid'
         details = f'**Why:** {reason}' + (f'\n**Churn fee:** {paid} {fee / 1e9:g} SOL' if fee else '')
         if self.cfg.dry_run:
-            self.notifier.alert(f'dry:{lane.key}', f'Would pull {lane.label} (dry run)\n{details}', 'pull', kind='dry')
+            self.notifier.event(f'Would pull {lane.label} (dry run)\n{details}', 'dry')
+            self.state.mark_pulled(lane, reason, view.now)
+            self.paper[lane] = None
+            self.short_ticks.pop(lane, None)
+            self.eligibility_due.pop(lane, None)
             return
         if self.pull(lane, reason, view.now):
             self.notifier.event(f'Pulled {lane.label}\n{details}', 'warning')
@@ -1302,15 +1365,12 @@ class QuoteOptimizer:
         routine = not repost and not fee
         if self.cfg.dry_run:
             if routine:
-                log_on_change(f'optimizer.dry.{lane.key}', rate_fixed, f'optimizer: [dry run] would {what} ({reason})')
+                bt.logging.info(f'optimizer: [dry run] would {what} ({reason})')
             else:
-                self.notifier.alert(
-                    f'dry:{lane.key}',
-                    f'Would {what} (dry run)\n{details}',
-                    'repost' if repost else 'requote',
-                    kind='dry',
-                )
-            return False
+                self.notifier.event(f'Would {what} (dry run)\n{details}', 'dry')
+            self.paper[lane] = make_quote(self.me, lane, from_addr, to_addr, rate_fixed, liquidity, view.now)
+            self.eligibility_due[lane] = view.now + ELIGIBILITY_CHECK_DELAY_SECS
+            return True
         try:
             self.client.set_quote(
                 lane.from_chain, lane.to_chain, from_addr, to_addr, rate_fixed, liquidity, backing=lane.backing

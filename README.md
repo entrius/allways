@@ -209,7 +209,9 @@ Off unless `~/.allways/miner/optimizer.json` sets `enabled`. Under
 - `sol_fee_reserve` — SOL kept aside for transaction fees; below it every lane is pulled.
 - `pull_on_shutdown` — a stopped miner still quoting takes strikes; shutdown pulls and the next start re-posts.
 - `price_usd` — pin a USD price per chain instead of the CoinGecko → Coinbase → MEXC feeds.
-- `dry_run` — decide and report everything, send no transactions.
+- `dry_run` — paper-trade: every managed lane is posted, requoted and pulled on paper against the live market (as
+  if each transaction landed) and reported the same way, and nothing is sent — no quotes need to be posted. Its
+  state lives in `optimizer_state_<hotkey>.dry_run.json`, apart from a live run's.
 
 Webhook messages (each condition once when it starts and once when it clears): start and stop (with what
 shutdown pulled); the API unreachable at startup; a dead-man pull and its recovery; every pull and post; paid

@@ -47,7 +47,11 @@ def attach_optimizer(miner, config_path: Path = DEFAULT_OPTIMIZER_CONFIG_PATH) -
         solana_client=client,
         assets=miner.assets,
         hotkey=hotkey,
-        state_path=Path.home() / '.allways' / 'miner' / f'optimizer_state_{hotkey[:12]}.json',
+        # A dry run paper-trades into its own state file, so a later live run never mistakes a paper pull for a real one.
+        state_path=Path.home()
+        / '.allways'
+        / 'miner'
+        / f'optimizer_state_{hotkey[:12]}{".dry_run" if cfg.dry_run else ""}.json',
         pending_payouts_fn=lambda chain: pending_payouts(
             miner.swap_fulfiller.active_obligations, miner.swap_fulfiller.sent, chain
         ),
@@ -58,6 +62,12 @@ def attach_optimizer(miner, config_path: Path = DEFAULT_OPTIMIZER_CONFIG_PATH) -
         on_quote_posted=lambda lane, from_addr, to_addr: miner.my_addresses.update(
             {lane.from_chain: from_addr, lane.to_chain: to_addr}
         ),
+        # What a dry run paper-posts with on a lane that has no quote: the Solana key and the TAO coldkey.
+        paper_addresses={
+            **miner.my_addresses,
+            'sol': str(client.keypair.pubkey()),
+            'tao': miner.wallet.coldkeypub.ss58_address,
+        },
         is_registered=lambda: hotkey in miner.metagraph.hotkeys,
         api=AllwaysApi(resolve_api_url(miner.config.netuid)),
     )
