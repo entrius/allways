@@ -21,7 +21,9 @@ re-creating a pulled quote is free too. A fee is paid only to protect against a 
 
 Data. Program state comes from websocket pushes (``market_feed.MarketFeed``) seeded from the allways API, so an
 opted-in miner makes no RPC reads in steady state: Helius is used to send ``set_quote`` / ``remove_quote``, plus
-a Config and SOL-balance read each time the feed has to be re-seeded. Every data gap leans the miner's way: no
+a Config and SOL-balance read each time the feed has to be re-seeded. Competitor quotes are lined up with the API
+every ``RECONCILE_SECS`` (a closure pushes nothing), and with no managed quote standing and none to re-post the
+feed is closed and the API asked every ``IDLE_CHECK_SECS`` instead. Every data gap leans the miner's way: no
 API at start keeps the optimizer off, a re-seed the API can't answer holds everything but funding pulls, an
 unreadable price holds every quote, an empty quote list reads as "no leader" (lead at the least generous rate),
 and a balance read as 0 never pays a fee on its own. Every rule reads the lane's canonical pair, backing and chain
@@ -91,6 +93,11 @@ DEAD_MAN_SECS = 120
 # much newer than the send, so a free-update check never runs early.
 TX_LANDING_MARGIN_SECS = 30
 USAGE_LOG_SECS = 3600
+# While idle (nothing standing, nothing to re-post) the feed is closed; the API is asked this often whether one of our
+# quotes has appeared.
+IDLE_CHECK_SECS = 300
+# How often competitor quotes are lined up with the API: a quote's closure pushes nothing on a program subscription.
+RECONCILE_SECS = 300
 # Helius websocket metering: 2 credits per 0.1 MB streamed, 1 per connection opened.
 WS_CREDIT_BYTES = 50_000
 NO_PRICE_REASON = 'no fresh market price'
@@ -558,6 +565,10 @@ class QuoteOptimizer:
         self.reserve_lamports = int(round(cfg.sol_fee_reserve * 10 ** get_chain_def('sol').decimals))
         self.last_tick = 0
         self.started = False
+        # Idle: nothing standing and nothing to re-post, so the feed is closed; checked against the API meanwhile.
+        self.idle = False
+        self.idle_checked_at: Optional[int] = None
+        self.reconciled_at = 0
         self.seeded_generation: Optional[int] = None
         self.not_live_since: Optional[int] = None
         self.dead_man_at: Optional[int] = None
@@ -606,8 +617,7 @@ class QuoteOptimizer:
             return False
         self.notifier.resolve('api_down')
         self.started = True
-        self.not_live_since = now
-        self.feed.start()
+        self.idle, self.idle_checked_at = True, None  # the first step opens the feed if there is anything to manage
         mode = ' in DRY RUN (no transactions)' if self.cfg.dry_run else ''
         self.notifier.event(
             f'quote optimizer started{mode} — lanes {", ".join(lane.label for lane in self.cfg.lanes)}; '
@@ -618,7 +628,7 @@ class QuoteOptimizer:
 
     def tick(self) -> None:
         now = int(self.clock())
-        if self.started:
+        if self.started and not self.idle:
             self.watch_feed(now)
         due = self.wake_at is not None and now >= self.wake_at
         if now - self.last_tick < OPTIMIZER_TICK_SECONDS and not due:
@@ -636,13 +646,17 @@ class QuoteOptimizer:
         if not self.started and not self.try_start(now):
             return
         self.log_usage(now)
+        if self.idle and not self.wake_if_work(now):
+            return
         if not self.feed.live:
             return
         if self.seeded_generation != self.feed.generation and not self.seed(now):
             if self.seeded_generation is not None:
                 self.run_once(now, hold=True)  # a stale picture still justifies a funding pull, nothing else
             return
+        self.reconcile(now)
         self.run_once(now)
+        self.maybe_idle(now)
 
     def shutdown(self, reason: str) -> None:
         """Pull every managed quote (a stopped miner still quoting is a strike waiting to happen) and say so.
@@ -723,6 +737,63 @@ class QuoteOptimizer:
         )
         self.usage_mark = mark
 
+    # ─── idle ───
+
+    def has_lane_work(self) -> bool:
+        """A managed quote the optimizer knows is standing, or one it pulled and owes a re-post."""
+        return any(self.state.live(lane) or self.state.pulled(lane) is not None for lane in self.cfg.lanes)
+
+    def log_idle(self, idle: bool) -> None:
+        message = (
+            f'optimizer: idle — no managed quote standing; feed closed, asking the API every {IDLE_CHECK_SECS // 60} min'
+            if idle
+            else 'optimizer: a managed quote is standing — opening the feed'
+        )
+        log_on_change('optimizer.idle', idle, message)
+
+    def wake_if_work(self, now: int) -> bool:
+        """While idle the feed is closed, so the optimizer spends no Helius credits. Every ``IDLE_CHECK_SECS`` it
+        checks whether it has work — a lane the state file owes, or one of our quotes the API now lists on a managed
+        lane — and opens the feed if so (the new connection re-seeds before anything is decided)."""
+        if self.idle_checked_at is not None and now - self.idle_checked_at < IDLE_CHECK_SECS:
+            return False
+        self.idle_checked_at = now
+        if not self.has_lane_work():
+            rows = self.api.miners() if self.api is not None else None
+            if not any(str(q.miner) == self.me for q in market_from_das(rows or [], self.cfg.lanes, now)[0]):
+                self.log_idle(True)
+                return False
+        self.idle, self.not_live_since = False, now
+        self.feed.start()
+        self.log_idle(False)
+        return True
+
+    def maybe_idle(self, now: int) -> None:
+        """Nothing standing and nothing to re-post: close the feed until there is."""
+        quotes = self.feed.snapshot()[1]
+        if self.has_lane_work() or any(
+            str(q.miner) == self.me and Lane(q.from_chain, q.to_chain, q.collateral_chain) in self.cfg.lanes
+            for q in quotes
+        ):
+            return
+        self.feed.stop()
+        self.idle, self.idle_checked_at, self.not_live_since = True, now, None
+        self.eligibility_due.clear()
+        self.log_idle(True)
+
+    def reconcile(self, now: int) -> None:
+        """Every ``RECONCILE_SECS``, line competitor quotes up with the API: a closed quote pushes nothing on a
+        program subscription, so without this a removed leader would be followed until the next re-seed."""
+        if now - self.reconciled_at < RECONCILE_SECS:
+            return
+        self.reconciled_at = now
+        rows = self.api.miners() if self.api is not None else None
+        if rows is None:
+            return
+        dropped = self.feed.reconcile(market_from_das(rows, self.cfg.lanes, now)[0])
+        if dropped:
+            bt.logging.debug(f'optimizer: dropped {dropped} competitor quote(s) the API no longer lists')
+
     # ─── seeding ───
 
     def seed(self, now: int) -> bool:
@@ -756,7 +827,7 @@ class QuoteOptimizer:
                 f'SOL balance of {address}', lambda a=address: self.client.rpc.get_balance(a)
             )
         self.feed.seed(quotes, states, bonds, config=config, lamports=lamports)
-        self.seeded_generation = generation
+        self.seeded_generation, self.reconciled_at = generation, now  # the seed is as fresh as a reconcile
         log_on_change('optimizer.seed', None, 'optimizer: seeded from the allways API; following the feed')
         return True
 

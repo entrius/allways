@@ -9,6 +9,7 @@ so a tick makes no RPC read.
 """
 
 import json
+import time
 from decimal import Decimal
 from types import SimpleNamespace
 from unittest.mock import patch
@@ -197,6 +198,7 @@ class StubFeed(SubscriptionFeed):
         super().__init__('ws://test', lambda key, result: None)
         self.is_live = True
         self.started = False
+        self.stops = 0
 
     @property
     def live(self):
@@ -204,7 +206,13 @@ class StubFeed(SubscriptionFeed):
 
     def start(self):
         self.started = True
+        self.generation += 1  # a fresh connection: whatever was pushed meanwhile was missed, so it re-seeds
         return self
+
+    def stop(self):
+        self.started = False
+        self.stops += 1
+        self.down_since = time.time()  # like the real feed: pushes before a stop don't outrank the next seed
 
 
 def decode(name, raw):
@@ -243,7 +251,7 @@ def build(tmp_path, client, balances=None, lanes=(FORWARD,), prices=None, api=No
         prices=prices or MarketPrices(pins=PRICES),
         notifier=RecordingNotifier(),
     )
-    opt.started, opt.seeded_generation = True, feed.generation
+    opt.started, opt.seeded_generation, opt.reconciled_at = True, feed.generation, NOW
     return opt
 
 
@@ -617,7 +625,7 @@ def test_shutdown_pulls_managed_quotes_and_marks_them_for_restart(tmp_path):
 
 
 def test_api_down_at_start_keeps_the_optimizer_off_and_retries_each_tick(tmp_path):
-    api = FakeApi(healthy=False)
+    api = FakeApi(healthy=False, rows=[das_row(ME, rate='0.4530'), das_row(OTHER, rate='0.4540')])
     opt = build(tmp_path, crowned_client(), api=api)
     opt.started = False
     opt.start()
@@ -713,6 +721,58 @@ def test_dead_man_pulls_every_managed_quote_once_then_reseeds_and_reposts(tmp_pa
     assert api.miners_calls == 1
     assert [c[:3] for c in client.calls[2:]] == [('set', FORWARD, fixed(EDGE)), ('set', REVERSE, fixed('0.47104'))]
     assert sent_with(opt, 'optimizer feed recovered')
+
+
+def test_goes_idle_when_nothing_is_managed_and_wakes_when_the_api_shows_our_quote(tmp_path):
+    client = crowned_client(my_rate='0.4530')
+    api = FakeApi(rows=[das_row(OTHER, rate='0.4540')])
+    opt = build(tmp_path, client, api=api)
+    stub = opt.feed.feed
+    at(opt, NOW)
+    assert opt.state.live(FORWARD) and not opt.idle
+    opt.feed.on_push(
+        f'account:{quote_pda(ME, FORWARD)}', {'context': {'slot': 9}, 'value': {'lamports': 0, 'owner': SYSTEM_PROGRAM}}
+    )
+    at(opt, NOW + 60)  # the operator removed it: nothing standing, nothing to re-post
+    assert opt.idle and stub.stops == 1
+    calls = api.miners_calls
+    at(opt, NOW + 120)
+    assert api.miners_calls == calls  # idle checks wait IDLE_CHECK_SECS
+    at(opt, NOW + 60 + qo.IDLE_CHECK_SECS)
+    assert opt.idle and api.miners_calls == calls + 1  # still nothing of ours on the API
+    api.rows.append(das_row(ME, rate='0.4530'))
+    at(opt, NOW + 60 + 2 * qo.IDLE_CHECK_SECS)
+    assert not opt.idle and stub.started
+    assert [q for q in opt.feed.snapshot()[1] if str(q.miner) == str(ME)]  # re-seeded with the new quote
+    assert client.calls == []
+
+
+def test_stays_awake_while_a_pulled_quote_waits_for_funding(tmp_path):
+    client = crowned_client(my_rate='0.4530')
+    opt = build(tmp_path, client, balances={'sol': SOL, 'tao': TAO // 2})
+    at(opt, NOW)
+    at(opt, NOW + 60)
+    assert client.calls == [('remove', FORWARD)]
+    at(opt, NOW + 120)
+    assert not opt.idle and opt.feed.feed.stops == 0
+
+
+def test_the_dead_man_switch_sleeps_while_idle(tmp_path):
+    client = crowned_client(my_rate='0.4530')
+    opt = build(tmp_path, client)
+    opt.idle, opt.idle_checked_at = True, NOW
+    opt.feed.feed.is_live = False
+    for t in (NOW, NOW + DEAD_MAN_SECS + 1, NOW + 2 * DEAD_MAN_SECS):
+        at(opt, t)
+    assert client.calls == [] and not sent_with(opt, 'dead-man switch')
+
+
+def test_a_competitor_quote_the_api_no_longer_lists_stops_being_followed(tmp_path):
+    client = crowned_client(my_rate='0.4500', other_rate='0.4540')
+    opt = build(tmp_path, client, api=FakeApi(rows=[]))
+    opt.reconciled_at = NOW - qo.RECONCILE_SECS
+    at(opt, NOW)
+    assert [c[:3] for c in client.calls] == [('set', FORWARD, fixed(LEAD))]  # its leader closed: lead instead
 
 
 def test_usage_line_is_logged_hourly_with_bytes_connections_and_rpc_calls(tmp_path):

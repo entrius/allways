@@ -4,6 +4,7 @@ import contextlib
 import json
 import os
 import sys
+import time
 import types
 
 import pytest
@@ -232,3 +233,31 @@ def test_scheduled_resubscribe_is_make_before_break():
     assert live[live.index(True) :] == [True] * (len(live) - live.index(True))  # never down across the swap
     assert feed.generation == 1 and feed.bytes_received > 0
     assert {key for key, _ in pushes} == {'a', 'b'}
+
+
+def _wait_until(condition, timeout=2.0):
+    deadline = time.monotonic() + timeout
+    while not condition() and time.monotonic() < deadline:
+        time.sleep(0.01)
+    return condition()
+
+
+def test_stop_closes_the_connection_and_start_opens_a_new_generation():
+    log, sockets = [], []
+
+    async def connect(url, **kwargs):
+        sock = ScriptedSocket(f'ws{len(sockets) + 1}', log)
+        sockets.append(sock)
+        return sock
+
+    feed = SubscriptionFeed('ws://x', lambda key, result: None, connect=connect)
+    feed.add(SUB_A)
+    feed.start()
+    assert _wait_until(lambda: feed.live)
+    feed.stop()
+    assert not feed.live and ('ws1', 'close') in log
+    assert feed._thread is None and feed.generation == 1
+    feed.start()
+    assert _wait_until(lambda: feed.live)
+    assert feed.generation == 2 and len(sockets) == 2
+    feed.stop()

@@ -168,13 +168,17 @@ priced. No guarantees and not financial advice: you fund it, you own the outcome
   don't fit are pulled, in reverse `lanes` order, and re-posted once the wallet covers them again.
 - **Busy purses** can't be taken until their swap resolves: their rate still updates (free), nothing else is
   done to them, and they claim no second full-size fill.
-- **Data.** Market and wallet state arrive by websocket push on a second connection (every SOL↔TAO quote, each
-  quoting miner's state and bond, the program config, your SOL wallets), seeded from the allways API
-  (`api.all-ways.io`, or `test-api` on testnet; `ALLWAYS_API_URL` overrides). Solana RPC is used to send
-  `set_quote` / `remove_quote`, plus a config and SOL-balance read whenever the feed has to re-seed — so it
-  fits the Helius free tier (an hourly `optimizer:` log line shows the websocket bytes, connections and RPC
-  calls behind it). If the API doesn't answer at startup the optimizer stays off (the miner still fulfils
-  swaps) and retries every minute.
+- **Data.** Market and wallet state arrive by websocket push on a second connection, seeded from the allways API
+  (`api.all-ways.io`, or `test-api` on testnet; `ALLWAYS_API_URL` overrides). It holds a fixed handful of
+  subscriptions whatever the market does: SOL↔TAO quotes (one per direction), every miner's state, bonds, the
+  program config, your own quotes and your SOL wallets. It renews every 15 minutes, opening the new connection
+  before closing the old. A competitor's removed quote pushes nothing, so the API is checked every 5 minutes to
+  drop it. Solana RPC is used to send `set_quote` / `remove_quote`, plus a config and SOL-balance read whenever
+  the feed has to re-seed — so it fits the Helius free tier (an hourly `optimizer:` log line shows the
+  websocket bytes, connections and RPC calls behind it). If the API doesn't answer at startup the optimizer
+  stays off (the miner still fulfils swaps) and retries every minute.
+- **Idle.** With no managed quote standing and none pulled for a re-post, the connection is closed and the
+  optimizer only asks the API every 5 minutes whether you've posted one.
 - **Dead-man switch.** If the feed is down for more than 2 minutes, every managed quote is pulled (paying the
   churn fee if one is due) and re-posted once the feed is back and re-seeded.
 - **Data failures lean your way:** a re-seed the API can't answer holds everything but funding pulls, a missing

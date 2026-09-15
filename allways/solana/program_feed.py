@@ -259,6 +259,7 @@ class SubscriptionFeed:
         self._current: Optional[FeedSession] = None
         self._loop: Optional[asyncio.AbstractEventLoop] = None
         self._thread: Optional[threading.Thread] = None
+        self._task: Optional[asyncio.Task] = None
         self.bytes_received = 0
         self.connections_opened = 0
         self.generation = 0
@@ -291,11 +292,23 @@ class SubscriptionFeed:
             self._thread.start()
         return self
 
+    def stop(self) -> None:
+        """Close the connection and stop reconnecting. ``start`` opens a fresh one, which counts as a new
+        generation — whatever was pushed meanwhile was missed."""
+        thread, loop, task = self._thread, self._loop, self._task
+        if loop is not None and task is not None:
+            loop.call_soon_threadsafe(task.cancel)
+        if thread is not None:
+            thread.join(timeout=5)
+        self._thread = self._loop = self._task = None
+
     # ── transport ───────────────────────────────────────────────────────────
 
     def _run(self) -> None:
         try:
             asyncio.run(self._supervise())
+        except asyncio.CancelledError:
+            pass  # stop()
         except Exception as e:  # the supervisor loops forever; a crash here leaves the consumer's dead-man to act
             bt.logging.error(f'{self.name}: stopped on {type(e).__name__}: {e}')
 
@@ -371,30 +384,38 @@ class SubscriptionFeed:
 
     async def _supervise(self) -> None:
         self._loop = asyncio.get_running_loop()
+        self._task = asyncio.current_task()
         backoff = Backoff()
-        while True:
-            try:
-                session = await self._open()
-            except Exception as e:
-                current = self._current
-                if current is None or current.dead:
+        try:
+            while True:
+                try:
+                    session = await self._open()
+                except Exception as e:
+                    current = self._current
+                    if current is None or current.dead:
+                        self._went_down()
+                    await asyncio.sleep(backoff.failed(self.name, e))
+                    continue
+                backoff.reset()
+                old, self._current = self._current, session
+                if old is None or old.dead:
+                    self.generation += 1
+                    self.live_since = time.time()
+                    bt.logging.info(
+                        f'{self.name}: live with {len(session.acked)} subscriptions @ {_mask(self.ws_url)} '
+                        f'(generation {self.generation})'
+                    )
+                await self._sync(session)  # anything added while the session was opening
+                if old is not None:
+                    await old.close()
+                await asyncio.wait({session.reader}, timeout=self.max_session_secs)
+                if session.dead:
+                    self._current = None
                     self._went_down()
-                await asyncio.sleep(backoff.failed(self.name, e))
-                continue
-            backoff.reset()
-            old, self._current = self._current, session
-            if old is None or old.dead:
-                self.generation += 1
-                self.live_since = time.time()
-                bt.logging.info(
-                    f'{self.name}: live with {len(session.acked)} subscriptions @ {_mask(self.ws_url)} '
-                    f'(generation {self.generation})'
-                )
-            await self._sync(session)  # anything added while the session was opening
-            if old is not None:
-                await old.close()
-            await asyncio.wait({session.reader}, timeout=self.max_session_secs)
-            if session.dead:
-                self._current = None
-                self._went_down()
-                await asyncio.sleep(RECONNECT_MIN_SECS * random.uniform(0.8, 1.2))
+                    await asyncio.sleep(RECONNECT_MIN_SECS * random.uniform(0.8, 1.2))
+        finally:  # stop(): close the connection on the way out, quietly — it was asked for
+            current, self._current = self._current, None
+            if current is not None:
+                await current.close()
+            if self.live_since is not None:
+                self.live_since, self.down_since = None, time.time()

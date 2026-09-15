@@ -1,15 +1,17 @@
 """The quote optimizer's picture of the program, kept by websocket push and seeded from the allways API.
 
-Subscriptions (one ``SubscriptionFeed`` connection, separate from the swap feed):
+Subscriptions (one ``SubscriptionFeed`` connection, separate from the swap feed) — a fixed set, whatever the market does:
 - ``programSubscribe`` per managed direction: every MinerQuote whose body starts with that ``from_chain`` /
   ``to_chain`` pair (memcmp at offset 40 — discriminator 8 + miner 32 — over the two borsh strings);
-- ``accountSubscribe`` on the Config PDA, this miner's MinerState and bond attestations, each delivery wallet on
-  Solana, and — added as they appear on a managed lane — every quote PDA and its miner's MinerState and bonds.
+- ``programSubscribe`` on every MinerState, and on every BondAttestation when a managed lane is bond-backed — one
+  subscription each rather than one per miner (mainnet 2026-09-15: 109 states and 15 bonds, a few KB of pushes a day);
+- ``accountSubscribe`` on the Config PDA, this miner's own quote PDAs and its delivery wallets on Solana.
 
 Closures: ``remove_quote`` closes the PDA (lamports 0, owner back to the system program). ``programSubscribe`` sends
 nothing for that — it filters on the program as owner, and a closed account no longer has it — while
-``accountSubscribe`` does push the zeroed account (verified on devnet, see the build report). So each known quote
-PDA is also watched by account, and a push with no lamports or a foreign owner drops the entry.
+``accountSubscribe`` does push the zeroed account (verified on devnet, see the build report). Our own quote PDAs are
+watched by account, so a removal shows at once; a competitor's is caught by ``reconcile`` against the API, which
+rebuilds its miner rows from the chain, a few minutes late at worst.
 
 A subscription only reports changes, so the cache starts from a seed: other miners' quotes and purse facts from
 ``GET /miners``, this miner's state from its own reads. Pushes win over the seed: a seed never overwrites an
@@ -28,20 +30,27 @@ import bittensor as bt
 from borsh_construct import String
 from solders.pubkey import Pubkey
 
-from allways.constants import MINER_FEED_RESUBSCRIBE_SECONDS, RATE_PRECISION
+from allways.constants import OPTIMIZER_FEED_RESUBSCRIBE_SECONDS, RATE_PRECISION
 from allways.solana import layouts, pdas
 from allways.solana.program_feed import Subscription, SubscriptionFeed
 
 MINER_QUOTE_DIRECTION_OFFSET = len(layouts.DISCRIMINATORS['MinerQuote']) + 32
 SYSTEM_PROGRAM = '11111111111111111111111111111111'
+# A competitor quote pushed this recently stays even when the API doesn't list it: the API polls the chain, so a
+# quote created a moment ago may not be in its rows yet.
+RECONCILE_GRACE_SECS = 180
+
+
+def account_filter(name: str) -> List[dict]:
+    """``programSubscribe`` filter matching one account type by its discriminator."""
+    return [{'memcmp': {'offset': 0, 'bytes': base58.b58encode(layouts.DISCRIMINATORS[name]).decode()}}]
 
 
 def direction_filter(from_chain: str, to_chain: str) -> List[dict]:
     """``programSubscribe`` filters matching one direction's quotes: the MinerQuote discriminator, then its borsh
     ``from_chain`` and ``to_chain`` (u32 LE length + UTF-8 each) right after the miner pubkey."""
     direction = String.build(from_chain) + String.build(to_chain)
-    return [
-        {'memcmp': {'offset': 0, 'bytes': base58.b58encode(layouts.DISCRIMINATORS['MinerQuote']).decode()}},
+    return account_filter('MinerQuote') + [
         {'memcmp': {'offset': MINER_QUOTE_DIRECTION_OFFSET, 'bytes': base58.b58encode(direction).decode()}},
     ]
 
@@ -135,6 +144,10 @@ def market_from_das(rows: Iterable[dict], lanes, now: int) -> Tuple[List[object]
     return quotes, states, bonds
 
 
+# Program-wide subscriptions other than the per-direction quote ones, by key → the account kind they carry.
+_PROGRAM_KINDS = {'states': 'state', 'bonds': 'bond'}
+
+
 class MarketFeed:
     """Cache of the accounts the optimizer decides on, keyed by account pubkey and ordered by slot."""
 
@@ -152,7 +165,7 @@ class MarketFeed:
         self.lanes = [tuple(lane) for lane in lanes]
         self.decode = decode
         self.feed = feed or SubscriptionFeed(
-            ws_url, self.on_push, max_session_secs=MINER_FEED_RESUBSCRIBE_SECONDS, name='optimizer feed'
+            ws_url, self.on_push, max_session_secs=OPTIMIZER_FEED_RESUBSCRIBE_SECONDS, name='optimizer feed'
         )
         self.lock = threading.Lock()
         self.config = None
@@ -163,24 +176,14 @@ class MarketFeed:
         self.kinds: Dict[str, str] = {}
         self.slots: Dict[str, int] = {}
         self.pushed_at: Dict[str, float] = {}
-        self.watched_miners = set()
         for from_chain, to_chain in sorted({lane[:2] for lane in self.lanes}):
-            self.feed.add(
-                Subscription(
-                    f'quotes:{from_chain}:{to_chain}',
-                    'programSubscribe',
-                    [
-                        str(self.program_id),
-                        {
-                            'encoding': 'base64',
-                            'commitment': 'confirmed',
-                            'filters': direction_filter(from_chain, to_chain),
-                        },
-                    ],
-                )
-            )
+            self.subscribe_program(f'quotes:{from_chain}:{to_chain}', direction_filter(from_chain, to_chain))
+        self.subscribe_program('states', account_filter('MinerState'))
+        if any(lane[2] != 'sol' for lane in self.lanes):
+            self.subscribe_program('bonds', account_filter('BondAttestation'))
         self.watch(pdas.config_pda(self.program_id), 'config')
-        self.watch_miner(self.me)
+        for lane in self.lanes:
+            self.watch(self.quote_pda(self.me, lane), 'quote')
 
     # ── feed passthrough ──
 
@@ -207,7 +210,14 @@ class MarketFeed:
     def start(self) -> None:
         self.feed.start()
 
+    def stop(self) -> None:
+        self.feed.stop()
+
     # ── subscriptions ──
+
+    def subscribe_program(self, key: str, filters: List[dict]) -> None:
+        params = {'encoding': 'base64', 'commitment': 'confirmed', 'filters': filters}
+        self.feed.add(Subscription(key, 'programSubscribe', [str(self.program_id), params]))
 
     def watch(self, pubkey, kind: str) -> bool:
         pubkey = str(pubkey)
@@ -219,33 +229,22 @@ class MarketFeed:
             )
         )
 
-    def watch_miner(self, miner: str) -> None:
-        """A miner's MinerState and, for each non-sol backing a managed lane uses, its bond attestation."""
-        if miner in self.watched_miners:
-            return
-        self.watched_miners.add(miner)
-        key = Pubkey.from_string(miner)
-        self.watch(pdas.miner_state_pda(key, self.program_id), 'state')
-        for backing in sorted({lane[2] for lane in self.lanes} - {'sol'}):
-            self.watch(pdas.bond_attestation_pda(key, backing, self.program_id), 'bond')
-
-    def watch_quote(self, pda: str, quote) -> None:
-        if (quote.from_chain, quote.to_chain, quote.collateral_chain) not in self.lanes:
-            return
-        self.watch(pda, 'quote')
-        self.watch_miner(str(quote.miner))
-
     def watch_wallet(self, address: str) -> bool:
         """Watch a delivery wallet's lamports. True when newly watched — its balance is unknown until seeded."""
         return self.watch(address, 'wallet')
+
+    def quote_pda(self, miner, lane) -> str:
+        key = miner if isinstance(miner, Pubkey) else Pubkey.from_string(str(miner))
+        return str(pdas.quote_pda(key, lane[0], lane[1], lane[2], self.program_id))
 
     # ── pushes ──
 
     def on_push(self, key: str, result: dict) -> None:
         slot = int(((result or {}).get('context') or {}).get('slot') or 0)
         value = (result or {}).get('value') or {}
-        if key.startswith('quotes:'):
-            pubkey, account, kind = str(value.get('pubkey') or ''), value.get('account') or {}, 'quote'
+        if key.startswith('quotes:') or key in _PROGRAM_KINDS:
+            pubkey, account = str(value.get('pubkey') or ''), value.get('account') or {}
+            kind = 'quote' if key.startswith('quotes:') else _PROGRAM_KINDS[key]
         else:
             pubkey = key.split(':', 1)[1]
             account, kind = value, self.kinds.get(pubkey)
@@ -273,8 +272,6 @@ class MarketFeed:
                 return
         with self.lock:
             self._store(kind, pubkey, decoded)
-        if kind == 'quote' and decoded is not None:
-            self.watch_quote(pubkey, decoded)
 
     def _store(self, kind: str, pubkey: str, decoded) -> None:
         if kind == 'config':
@@ -315,7 +312,7 @@ class MarketFeed:
                 return key
         return None
 
-    # ── seeding and local writes ──
+    # ── seeding, reconciling and local writes ──
 
     def seed(
         self,
@@ -328,10 +325,7 @@ class MarketFeed:
         """Replace the picture with a seed, except accounts pushed since the feed last went down — those are
         at least as fresh as anything the API can say."""
         since = self.feed.down_since
-        by_pda = {
-            str(pdas.quote_pda(q.miner, q.from_chain, q.to_chain, q.collateral_chain, self.program_id)): q
-            for q in quotes
-        }
+        by_pda = {self.quote_pda(q.miner, (q.from_chain, q.to_chain, q.collateral_chain)): q for q in quotes}
         with self.lock:
             fresh = {pubkey for pubkey, at in self.pushed_at.items() if at >= since}
             self.quotes = {pda: q for pda, q in self.quotes.items() if pda in fresh} | {
@@ -351,8 +345,34 @@ class MarketFeed:
             for address, balance in (lamports or {}).items():
                 if address not in fresh and balance is not None:
                     self.lamports[address] = int(balance)
-        for pda, quote in by_pda.items():
-            self.watch_quote(pda, quote)
+
+    def reconcile(self, quotes: Iterable[object]) -> int:
+        """Line competitor quotes on the managed lanes up with the API's current list (``quotes``, from
+        ``market_from_das``). One the API no longer lists is dropped — its closure pushed nothing — unless it was
+        pushed in the last ``RECONCILE_GRACE_SECS``; one never pushed is taken from the API, which covers a change
+        between the seed's snapshot and the subscription. Our own quotes are left to their account subscriptions.
+        Returns how many quotes were dropped."""
+        listed = {
+            self.quote_pda(q.miner, (q.from_chain, q.to_chain, q.collateral_chain)): q
+            for q in quotes
+            if str(q.miner) != self.me
+        }
+        now = time.time()
+        with self.lock:
+            gone = [
+                pda
+                for pda, q in self.quotes.items()
+                if str(q.miner) != self.me
+                and (q.from_chain, q.to_chain, q.collateral_chain) in self.lanes
+                and pda not in listed
+                and now - self.pushed_at.get(pda, 0) > RECONCILE_GRACE_SECS
+            ]
+            for pda in gone:
+                del self.quotes[pda]
+            for pda, quote in listed.items():
+                if pda not in self.pushed_at:
+                    self.quotes[pda] = quote
+        return len(gone)
 
     def _pda_of_state(self, miner: str) -> str:
         return str(pdas.miner_state_pda(Pubkey.from_string(miner), self.program_id))
@@ -367,16 +387,13 @@ class MarketFeed:
 
     def note_quote(self, quote) -> str:
         """Record a quote our own transaction just wrote; the push that follows replaces it with chain truth."""
-        pda = str(
-            pdas.quote_pda(quote.miner, quote.from_chain, quote.to_chain, quote.collateral_chain, self.program_id)
-        )
+        pda = self.quote_pda(quote.miner, (quote.from_chain, quote.to_chain, quote.collateral_chain))
         with self.lock:
             self.quotes[pda] = quote
-        self.watch_quote(pda, quote)
         return pda
 
     def drop_quote(self, miner, lane) -> None:
-        pda = str(pdas.quote_pda(miner, lane[0], lane[1], lane[2], self.program_id))
+        pda = self.quote_pda(miner, lane)
         with self.lock:
             self.quotes.pop(pda, None)
 
