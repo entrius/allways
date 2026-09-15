@@ -1,13 +1,15 @@
-"""Read-only calls to the allways API for the quote optimizer's emissions-eligibility alerts.
+"""Read-only calls to the allways API for the quote optimizer: its starting picture and its eligibility alerts.
 
-Validators keep two gates off chain: a completed fill per purse inside ``ELIGIBILITY_FILL_WINDOW_SECS``,
-and whether a lane's pair is live (a qualified fill in the pool window, so its pool is above 0). The
-optimizer reads them here. Every call returns None when the API is unreachable or answers with
-something unexpected, and the caller skips those reasons rather than guess.
+The optimizer seeds its websocket cache from here instead of reading the program over RPC: every miner's quotes
+and purse facts (``/miners``) and when this miner's own quotes last changed (``/miners/{hotkey}/rate-history``).
+Validators also keep two gates off chain: a completed fill per purse inside ``ELIGIBILITY_FILL_WINDOW_SECS``,
+and whether a lane's pair is live (a qualified fill in the pool window, so its pool is above 0). Every call
+returns None when the API is unreachable or answers with something unexpected, and the caller holds or skips
+those reasons rather than guess.
 """
 
 import os
-from typing import Dict, Optional, Tuple
+from typing import Dict, List, Optional, Tuple
 
 import bittensor as bt
 import requests
@@ -18,6 +20,8 @@ from allways.constants import NETUID_FINNEY
 MAINNET_API_URL = 'https://api.all-ways.io'
 TESTNET_API_URL = 'https://test-api.all-ways.io'
 API_TIMEOUT_SECS = 10
+# The longest window ``/rate-history`` serves (das RATE_MAX_SECS); a quote unchanged for longer reads as unknown.
+RATE_HISTORY_MAX_SECS = 345_600
 
 
 def resolve_api_url(netuid: int) -> str:
@@ -42,6 +46,21 @@ class AllwaysApi:
         except (requests.RequestException, ValueError) as e:
             bt.logging.debug(f'allways API {path} unavailable: {e}')
             return None
+
+    def health(self) -> bool:
+        data = self.get('/health')
+        return isinstance(data, dict) and data.get('status') == 'ok'
+
+    def miners(self) -> Optional[List[dict]]:
+        """Every quoting miner's rows, inactive ones included so a purse that activates later is already known."""
+        data = self.get('/miners', params={'includeInactive': 'true'})
+        return data if isinstance(data, list) else None
+
+    def rate_history(self, hotkey: str) -> Optional[List[dict]]:
+        """This miner's quote changes (``t`` = the QuoteSet/QuoteRemoved block time, rate 0 = removed), oldest
+        first, over the longest window the API serves."""
+        data = self.get(f'/miners/{hotkey}/rate-history', params={'seconds': RATE_HISTORY_MAX_SECS})
+        return data if isinstance(data, list) else None
 
     def last_fill_times(self, hotkey: str) -> Optional[Dict[str, int]]:
         """``{backing: unix seconds of the miner's latest completed swap on that purse}``."""

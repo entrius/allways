@@ -30,6 +30,7 @@ from allways.constants import (  # noqa: E402
     NUMERAIRE_CHAIN,
 )
 from allways.miner.fulfillment import SwapFulfiller  # noqa: E402
+from allways.miner.market_feed import MarketFeed  # noqa: E402
 from allways.miner.miner_api import AllwaysApi, resolve_api_url  # noqa: E402
 from allways.miner.quote_optimizer import (  # noqa: E402
     DEFAULT_OPTIMIZER_CONFIG_PATH,
@@ -43,6 +44,8 @@ from allways.solana.client import AllwaysSolanaClient  # noqa: E402
 from allways.solana.program_feed import ProgramEventFeed  # noqa: E402
 from allways.solana.rpc import assert_cluster_safe, resolve_rpc_url, resolve_ws_url  # noqa: E402
 from neurons.base.miner import BaseMinerNeuron  # noqa: E402
+
+HEARTBEAT_LOG_SECONDS = 600
 
 
 class Miner(BaseMinerNeuron):
@@ -138,16 +141,27 @@ class Miner(BaseMinerNeuron):
 
         self.quote_optimizer: Optional[QuoteOptimizer] = None
         if self.optimizer_config.enabled:
+            # Its own client (same RPC, same signer) so its hourly RPC count is the optimizer's alone, and its own
+            # websocket connection so the swap feed never shares a session with it.
+            optimizer_client = AllwaysSolanaClient(solana_rpc_url, keypair=self.solana_client.keypair)
             self.quote_optimizer = QuoteOptimizer(
                 cfg=self.optimizer_config,
-                solana_client=self.solana_client,
+                solana_client=optimizer_client,
                 assets=self.assets,
                 hotkey=hotkey,
                 state_path=Path.home() / '.allways' / 'miner' / f'optimizer_state_{hotkey[:12]}.json',
                 pending_payouts_fn=lambda chain: pending_payouts(
                     self.swap_fulfiller.active_obligations, self.swap_fulfiller.sent, chain
                 ),
-                on_quotes_posted=self.merge_my_addresses,
+                feed=MarketFeed(
+                    resolve_ws_url(solana_rpc_url),
+                    optimizer_client.program_id,
+                    self.solana_pubkey,
+                    self.optimizer_config.lanes,
+                    decode=optimizer_client._decode,
+                ),
+                own_state=lambda: self.swap_poller.miner_state,
+                on_quote_posted=self.merge_quote_addresses,
                 is_registered=lambda: hotkey in self.metagraph.hotkeys,
                 api=AllwaysApi(resolve_api_url(self.config.netuid)),
             )
@@ -262,12 +276,10 @@ class Miner(BaseMinerNeuron):
         except Exception as e:
             bt.logging.debug(f'Quote-posted flag check failed: {e}')
 
-    def merge_my_addresses(self) -> None:
-        """After the optimizer posts, add the posted quote's addresses to the cache. Merge, never replace:
-        a lane it pulled may still owe a payout from the address only that quote carried."""
-        fresh = self.load_my_addresses()
-        if fresh:
-            self.my_addresses.update(fresh)
+    def merge_quote_addresses(self, lane, from_addr: str, to_addr: str) -> None:
+        """After the optimizer re-posts a quote, add its addresses to the cache without reading the chain. Merge,
+        never replace: a lane it pulled may still owe a payout from the address only that quote carried."""
+        self.my_addresses.update({lane.from_chain: from_addr, lane.to_chain: to_addr})
 
     def reconnect_and_propagate(self):
         """Reconnect subtensor and propagate the new connection to its dependents.
@@ -336,6 +348,7 @@ if __name__ == '__main__':
     # `docker stop` sends SIGTERM; raising SystemExit runs Miner.__exit__, so the optimizer pulls its quotes.
     signal.signal(signal.SIGTERM, lambda _signum, _frame: sys.exit(0))
     with Miner() as miner:
+        last_heartbeat = 0.0
         while True:
             forward_age = time.time() - miner.last_forward_time
             if not miner.thread.is_alive():
@@ -347,5 +360,7 @@ if __name__ == '__main__':
                     f'(>{FORWARD_STALL_THRESHOLD_SECONDS}s) — exiting for restart'
                 )
                 sys.exit(1)
-            bt.logging.info(f'Miner running... step={miner.step} (last forward {forward_age:.0f}s ago)')
+            if time.time() - last_heartbeat >= HEARTBEAT_LOG_SECONDS:
+                last_heartbeat = time.time()
+                bt.logging.info(f'Miner running... step={miner.step} (last forward {forward_age:.0f}s ago)')
             time.sleep(60)

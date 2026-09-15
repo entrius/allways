@@ -165,10 +165,19 @@ priced. No guarantees and not financial advice: you fund it, you own the outcome
 - **Funding.** A taker may fill up to what your collateral backs, so each delivery wallet must cover that
   largest fill on every live lane paying out of it, plus in-flight payouts and the SOL fee reserve. Lanes that
   don't fit are pulled, in reverse `lanes` order, and re-posted once the wallet covers them again.
-- **Busy purses** can't be taken until their swap resolves: their rate still updates (free), nothing is paid,
-  and they claim no second full-size fill.
-- **Data failures lean your way:** a failed read skips the tick, a missing price holds every quote, and a 0
-  balance reading never pays a fee on its own.
+- **Busy purses** can't be taken until their swap resolves: their rate still updates (free), nothing else is
+  done to them, and they claim no second full-size fill.
+- **Data.** Market and wallet state arrive by websocket push on a second connection (every SOL↔TAO quote, each
+  quoting miner's state and bond, the program config, your SOL wallets), seeded from the allways API
+  (`api.all-ways.io`, or `test-api` on testnet; `ALLWAYS_API_URL` overrides). Solana RPC is used to send
+  `set_quote` / `remove_quote`, plus a config and SOL-balance read whenever the feed has to re-seed — so it
+  fits the Helius free tier (an hourly `optimizer:` log line shows the websocket bytes, connections and RPC
+  calls behind it). If the API doesn't answer at startup the optimizer stays off (the miner still fulfils
+  swaps) and retries every minute.
+- **Dead-man switch.** If the feed is down for more than 2 minutes, every managed quote is pulled (paying the
+  churn fee if one is due) and re-posted once the feed is back and re-seeded.
+- **Data failures lean your way:** a re-seed the API can't answer holds everything but funding pulls, a missing
+  price holds every quote, and a 0 balance reading never pays a fee on its own.
 
 Off unless `~/.allways/miner/optimizer.json` (or `--miner.optimizer_config <path>`) sets `enabled`. Under
 `docker-compose.miner.yml` that file is `./data/allways/miner/optimizer.json`:
@@ -197,10 +206,12 @@ Off unless `~/.allways/miner/optimizer.json` (or `--miner.optimizer_config <path
 - `price_usd` — pin a USD price per chain instead of the CoinGecko → Coinbase → MEXC feeds.
 - `dry_run` — decide and report everything, send no transactions.
 
-Webhook messages: start and stop; every pull and post; paid requotes (routine requotes and a lane switching
-between following, leading and not following only go to the miner log); a wallet short of a full-size fill
-(address and amount to send); a purse under its eligibility floor (with the deposit command); a new timeout
-strike; a dead price feed; failed transactions; and, after a post, why that lane is not earning emissions.
+Webhook messages (each condition once when it starts and once when it clears): start and stop (with what
+shutdown pulled); the API unreachable at startup; a dead-man pull and its recovery; every pull and post; paid
+requotes; a wallet short of a full-size fill (address and amount to send); a purse under its eligibility floor
+(with the deposit command); a new timeout strike; a dead price feed; failed transactions; and, after a post,
+why that lane is not earning emissions. Routine requotes, a lane switching between following, leading and not
+following, holds and deferred actions only go to the miner log, once per change.
 Any webhook taking a JSON body works (Discord `content`, Slack `text`). Extending to another pair means adding
 its chains to `OPTIMIZER_CHAINS` in `allways/miner/quote_optimizer.py` and a price id in
 `allways/miner/market_price.py`.

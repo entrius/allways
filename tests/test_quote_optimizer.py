@@ -4,7 +4,8 @@ Pins the rules the optimizer is trusted with: it quotes an inset inside the crow
 OTHER qualifying quote (never itself, never an ineligible miner, still a busy one), leads at the least
 generous tolerated rate when there is no crown worth following, never spends SOL on routine repricing,
 pays a fee only when fresh data say it protects more than it costs, re-posts only what it pulled, and
-tells the operator on the webhook.
+tells the operator on the webhook. Its picture is the feed's cache — seeded from the API, then pushed —
+so a tick makes no RPC read.
 """
 
 import json
@@ -14,11 +15,14 @@ from unittest.mock import patch
 
 import pytest
 from solders.keypair import Keypair
+from solders.pubkey import Pubkey
 
 from allways.constants import RATE_PRECISION
 from allways.miner import quote_optimizer as qo
+from allways.miner.market_feed import SYSTEM_PROGRAM, MarketFeed
 from allways.miner.market_price import MarketPrices
 from allways.miner.quote_optimizer import (
+    DEAD_MAN_SECS,
     OPTIMIZER_TICK_SECONDS,
     Lane,
     OptimizerConfig,
@@ -33,11 +37,15 @@ from allways.miner.quote_optimizer import (
     payout_for_leg,
     pending_payouts,
 )
+from allways.solana import pdas
+from allways.solana.client import AllwaysSolanaClient
+from allways.solana.program_feed import SubscriptionFeed
 from allways.utils.rate import quantize_rate_fixed
 
 SOL = 10**9
 TAO = 10**9
 NOW = 1_000_000
+PROGRAM = Pubkey.from_bytes(bytes([7]) * 32)
 ME = Keypair().pubkey()
 OTHER = Keypair().pubkey()
 FORWARD = Lane('sol', 'tao', 'sol')  # higher TAO-per-SOL wins
@@ -79,6 +87,26 @@ def make_quote(miner, lane, rate: str, updated_at=NOW - 3600, liquidity=0):
     )
 
 
+def das_row(miner, rate=None, counter=None, backing='sol', collateral=5 * SOL, active=True):
+    """One ``GET /miners`` row: the hub (sol) is the source, ``rate`` sol->tao, ``counterRate`` tao->sol."""
+    return {
+        'hotkey': f'hk-{str(miner)[:6]}',
+        'solanaPubkey': str(miner),
+        'sourceChain': 'sol',
+        'destChain': 'tao',
+        'backing': backing,
+        'sourceAddress': f'sol-{str(miner)[:6]}',
+        'destAddress': f'tao-{str(miner)[:6]}',
+        'rate': rate,
+        'counterRate': counter,
+        'collateral': str(collateral),
+        'isActive': active,
+        'isReserved': False,
+        'reservedUntil': None,
+        'hasActiveSwap': False,
+    }
+
+
 def program_config(min_swap=SOL // 10, max_swap=0, min_collateral=0):
     return SimpleNamespace(
         min_swap_amount=min_swap,
@@ -91,42 +119,42 @@ def program_config(min_swap=SOL // 10, max_swap=0, min_collateral=0):
     )
 
 
+class FakeRpc:
+    def __init__(self, reads, balance):
+        self.reads, self.balance = reads, balance
+
+    def get_balance(self, address):
+        self.reads.append(('get_balance', address))
+        return self.balance
+
+
 class FakeClient:
+    """Records transactions in ``calls`` and every read in ``reads`` — any ``get_*`` it doesn't define counts."""
+
     def __init__(self, quotes=(), states=(), config=None):
         self.keypair = SimpleNamespace(pubkey=lambda: ME)
+        self.program_id = PROGRAM
         self.quotes = list(quotes)
         self.states = list(states)
         self.config = config or program_config()
         self.calls = []
+        self.reads = []
+        self.rpc = FakeRpc(self.reads, SOL)
 
-    def get_all(self, name):
-        rows = {'MinerQuote': self.quotes, 'MinerState': self.states, 'BondAttestation': []}[name]
-        return [('pda', row) for row in rows]
+    def __getattr__(self, name):
+        if name.startswith('get_'):
+            return lambda *args, **kwargs: self.reads.append((name, args))
+        raise AttributeError(name)
 
     def get_config(self):
+        self.reads.append(('get_config',))
         return self.config
 
-    def get_quote(self, miner, from_chain, to_chain, backing='sol'):
-        lane = Lane(from_chain, to_chain, backing)
-        return next((q for q in self.quotes if str(q.miner) == str(miner) and self._lane(q) == lane), None)
-
     def set_quote(self, from_chain, to_chain, from_addr, to_addr, rate, liquidity, backing='sol'):
-        lane = Lane(from_chain, to_chain, backing)
-        self.calls.append(('set', lane, rate, from_addr, to_addr))
-        existing = self.get_quote(ME, from_chain, to_chain, backing)
-        if existing is None:
-            existing = make_quote(ME, lane, '1')
-            self.quotes.append(existing)
-        existing.rate, existing.updated_at = rate, NOW
+        self.calls.append(('set', Lane(from_chain, to_chain, backing), rate, from_addr, to_addr))
 
     def remove_quote(self, from_chain, to_chain, backing='sol'):
-        lane = Lane(from_chain, to_chain, backing)
-        self.calls.append(('remove', lane))
-        self.quotes = [q for q in self.quotes if not (str(q.miner) == str(ME) and self._lane(q) == lane)]
-
-    @staticmethod
-    def _lane(q):
-        return Lane(q.from_chain, q.to_chain, q.collateral_chain)
+        self.calls.append(('remove', Lane(from_chain, to_chain, backing)))
 
 
 class RecordingNotifier(WebhookNotifier):
@@ -139,8 +167,21 @@ class RecordingNotifier(WebhookNotifier):
 
 
 class FakeApi:
-    def __init__(self, fills=None, live=None):
-        self.fills, self.live = fills, live
+    def __init__(self, fills=None, live=None, healthy=True, rows=(), history=()):
+        self.fills, self.live, self.healthy = fills, live, healthy
+        self.rows, self.history = list(rows), list(history)
+        self.health_calls = self.miners_calls = 0
+
+    def health(self):
+        self.health_calls += 1
+        return self.healthy
+
+    def miners(self):
+        self.miners_calls += 1
+        return list(self.rows) if self.healthy else None
+
+    def rate_history(self, hotkey):
+        return list(self.history) if self.healthy else None
 
     def last_fill_times(self, hotkey):
         return self.fills
@@ -149,23 +190,63 @@ class FakeApi:
         return self.live
 
 
+class StubFeed(SubscriptionFeed):
+    """The subscription transport without a socket: ``live`` is whatever the test says."""
+
+    def __init__(self):
+        super().__init__('ws://test', lambda key, result: None)
+        self.is_live = True
+        self.started = False
+
+    @property
+    def live(self):
+        return self.is_live
+
+    def start(self):
+        self.started = True
+        return self
+
+
+def decode(name, raw):
+    return AllwaysSolanaClient._decode(None, name, raw)
+
+
 def build(tmp_path, client, balances=None, lanes=(FORWARD,), prices=None, api=None, **cfg):
+    """An optimizer already started and seeded: the feed's cache holds the client's quotes and states (the same
+    objects, so a test can move a rival's rate), and SOL balances are pushed lamports."""
     balances = {'sol': 1 * SOL, 'tao': 10 * TAO} if balances is None else balances
-    assets = {
-        chain: SimpleNamespace(get_balance=lambda _addr, chain=chain: balances[chain]) for chain in ('sol', 'tao')
-    }
-    return QuoteOptimizer(
+    assets = {'tao': SimpleNamespace(get_balance=lambda _addr: balances['tao'])}
+    feed = MarketFeed('ws://test', PROGRAM, ME, lanes, decode=decode, feed=StubFeed())
+    feed.config = client.config
+    for state in client.states:
+        feed.states[str(state.miner)] = state
+    for quote in client.quotes:
+        feed.note_quote(quote)
+    client.rpc.balance = balances['sol']
+    for address in (str(ME), f'sol-{str(ME)[:6]}'):
+        feed.watch_wallet(address)
+        feed.lamports[address] = balances['sol']
+    opt = QuoteOptimizer(
         OptimizerConfig(enabled=True, lanes=list(lanes), **cfg),
         client,
         assets,
         hotkey='5HotkeyForTests',
         state_path=tmp_path / 'state.json',
         pending_payouts_fn=lambda chain: 0,
-        api=api,
+        feed=feed,
+        own_state=lambda: feed.states.get(str(ME)),
+        api=api or FakeApi(),
         clock=lambda: NOW,
         prices=prices or MarketPrices(pins=PRICES),
         notifier=RecordingNotifier(),
     )
+    opt.started, opt.seeded_generation = True, feed.generation
+    return opt
+
+
+def at(opt, now):
+    opt.clock = lambda: now
+    opt.tick()
 
 
 def crowned_client(my_rate='0.4500', other_rate='0.4540', my_updated_at=NOW - 3600, others=(), **my_state):
@@ -182,6 +263,10 @@ def crowned_client(my_rate='0.4500', other_rate='0.4540', my_updated_at=NOW - 36
 
 def sent_with(opt, text):
     return [m for m in opt.notifier.sent if text in m]
+
+
+def quote_pda(miner, lane):
+    return str(pdas.quote_pda(miner, lane.from_chain, lane.to_chain, lane.backing, PROGRAM))
 
 
 # ─── rates ───
@@ -238,15 +323,19 @@ def test_follows_the_leader_once_the_update_is_free(tmp_path):
     assert not sent_with(opt, 'requoted')  # routine requotes go to the miner log, not the webhook
 
 
-def test_mode_changes_are_tracked_but_stay_off_the_webhook(tmp_path):
-    client = crowned_client(my_rate='0.4530')
+def test_routine_requotes_and_mode_changes_are_logged_not_posted(tmp_path):
+    client = crowned_client(my_rate='0.4500')
     opt = build(tmp_path, client)
-    opt.run_once(NOW)
-    assert opt.modes[FORWARD] == 'follow'
-    next(q for q in client.quotes if str(q.miner) == str(OTHER)).rate = fixed('0.4700')
-    opt.run_once(NOW + 60)
+    with patch.object(qo.bt.logging, 'info') as info:
+        opt.run_once(NOW)
+        assert opt.modes[FORWARD] == 'follow'
+        next(q for q in client.quotes if str(q.miner) == str(OTHER)).rate = fixed('0.4700')
+        opt.run_once(NOW + 60)
+    lines = [c.args[0] for c in info.call_args_list]
+    assert any(f'requoted SOL->TAO [sol]: 0.45 -> {EDGE}' in line for line in lines)
+    assert any('SOL->TAO [sol] is now not following' in line for line in lines)
     assert opt.modes[FORWARD] is None
-    assert not sent_with(opt, 'is now')
+    assert not sent_with(opt, 'requoted') and not sent_with(opt, 'is now')
 
 
 def test_a_leading_quote_steps_back_to_the_edge(tmp_path):
@@ -265,6 +354,17 @@ def test_never_pays_to_reprice(tmp_path):
     client = crowned_client(my_rate='0.4500', my_updated_at=NOW - 100)
     build(tmp_path, client).run_once(NOW)
     assert client.calls == []
+
+
+def test_our_own_requote_is_not_free_again_until_its_window_passes(tmp_path):
+    client = crowned_client(my_rate='0.4500')
+    opt = build(tmp_path, client)
+    opt.run_once(NOW)
+    next(q for q in client.quotes if str(q.miner) == str(OTHER)).rate = fixed('0.4560')
+    opt.run_once(NOW + 60)
+    assert [c[:3] for c in client.calls] == [('set', FORWARD, fixed(EDGE))]
+    opt.run_once(NOW + 700)
+    assert [c[:3] for c in client.calls][-1] == ('set', FORWARD, band_edge_fixed(fixed('0.4560'), reverse=False))
 
 
 def test_does_not_follow_a_crown_more_generous_than_tolerance(tmp_path):
@@ -292,12 +392,23 @@ def test_holds_every_quote_without_a_fresh_market_price(tmp_path):
 
 def test_ticks_at_most_once_per_interval(tmp_path):
     opt = build(tmp_path, crowned_client())
-    with patch.object(opt, 'run_once') as run_once:
+    with patch.object(opt, 'step') as step:
         opt.tick()
         opt.tick()
         opt.last_tick = NOW - OPTIMIZER_TICK_SECONDS
         opt.tick()
-    assert run_once.call_count == 2
+    assert step.call_count == 2
+
+
+def test_no_rpc_reads_per_tick_while_the_feed_is_live(tmp_path):
+    client = crowned_client(my_rate='0.4500', others=[(Keypair().pubkey(), '0.4400', {})])
+    opt = build(tmp_path, client, balances={'sol': 20 * SOL, 'tao': 10 * TAO}, lanes=(FORWARD, REVERSE))
+    for minute in range(15):
+        if minute == 12:
+            next(q for q in client.quotes if str(q.miner) == str(OTHER)).rate = fixed('0.4560')
+        at(opt, NOW + 60 * minute)
+    assert client.reads == []
+    assert client.calls and {c[0] for c in client.calls} <= {'set', 'remove'}
 
 
 # ─── market drift (may pay) ───
@@ -338,6 +449,13 @@ def test_drift_never_pays_on_a_busy_purse(tmp_path):
     client = crowned_client(my_rate='0.4700', my_updated_at=NOW - 10, busy=True)
     build(tmp_path, client).run_once(NOW)
     assert client.calls == []
+
+
+def test_a_drifted_quote_is_pulled_free_when_unfunded(tmp_path):
+    client = crowned_client(my_rate='0.4700')
+    opt = build(tmp_path, client, balances={'sol': SOL, 'tao': TAO // 2})
+    opt.run_once(NOW)
+    assert client.calls == [('remove', FORWARD)]  # P2 needs no second short reading
 
 
 # ─── funding ───
@@ -444,7 +562,9 @@ def test_a_quote_the_operator_removed_is_not_reposted(tmp_path):
     client = crowned_client(my_rate='0.4530')
     opt = build(tmp_path, client)
     opt.run_once(NOW)
-    client.quotes = [q for q in client.quotes if str(q.miner) != str(ME)]
+    opt.feed.on_push(
+        f'account:{quote_pda(ME, FORWARD)}', {'context': {'slot': 9}, 'value': {'lamports': 0, 'owner': SYSTEM_PROGRAM}}
+    )
     opt.run_once(NOW + 60)
     opt.run_once(NOW + 120)
     assert client.calls == []
@@ -473,6 +593,120 @@ def test_shutdown_pulls_managed_quotes_and_marks_them_for_restart(tmp_path):
     assert client.calls == [('remove', FORWARD)]
     assert opt.state.pulled(FORWARD) is not None
     assert sent_with(opt, 'quote optimizer stopped (test); pulled SOL->TAO [sol]')
+
+
+# ─── seeding and the feed ───
+
+
+def test_api_down_at_start_keeps_the_optimizer_off_and_retries_each_tick(tmp_path):
+    api = FakeApi(healthy=False)
+    opt = build(tmp_path, crowned_client(), api=api)
+    opt.started = False
+    opt.start()
+    at(opt, NOW + 30)
+    at(opt, NOW + 90)
+    assert (opt.started, opt.feed.feed.started, api.health_calls) == (False, False, 2)
+    assert len(sent_with(opt, 'waiting for the allways API')) == 1
+    assert not sent_with(opt, 'quote optimizer started')
+    api.healthy = True
+    at(opt, NOW + 150)
+    assert opt.started and opt.feed.feed.started
+    assert sent_with(opt, 'quote optimizer started')
+
+
+def test_seed_reads_own_updated_at_from_the_rate_history(tmp_path):
+    rows = [das_row(ME, rate='0.4500'), das_row(OTHER, rate='0.4540')]
+    history = [{'t': NOW - 3600, 'rate': 0.45, 'fromChain': 'sol', 'toChain': 'tao', 'backing': 'sol'}]
+    client = FakeClient(states=[miner_state(ME)])
+    opt = build(tmp_path, client, api=FakeApi(rows=rows, history=history))
+    assert opt.seed(NOW)
+    [mine] = [q for q in opt.feed.snapshot()[1] if str(q.miner) == str(ME)]
+    assert (mine.rate, mine.updated_at, mine.miner_from_addr) == (fixed('0.45'), NOW - 3600, f'sol-{str(ME)[:6]}')
+    opt.run_once(NOW)
+    assert [c[:3] for c in client.calls] == [('set', FORWARD, fixed(EDGE))]
+
+
+def test_an_unknown_own_updated_at_is_assumed_now_so_it_is_not_free(tmp_path):
+    rows = [das_row(ME, rate='0.4500'), das_row(OTHER, rate='0.4540')]
+    client = FakeClient(states=[miner_state(ME)])
+    opt = build(tmp_path, client, api=FakeApi(rows=rows, history=[]))
+    assert opt.seed(NOW)
+    [mine] = [q for q in opt.feed.snapshot()[1] if str(q.miner) == str(ME)]
+    assert mine.updated_at == NOW
+    opt.run_once(NOW + 60)
+    assert client.calls == []  # wants the edge, but the update is not known to be free yet
+    opt.run_once(NOW + 600)
+    assert [c[:3] for c in client.calls] == [('set', FORWARD, fixed(EDGE))]
+
+
+def test_a_removal_in_the_rate_history_beats_a_lagging_miners_row(tmp_path):
+    rows = [das_row(ME, rate='0.4500'), das_row(OTHER, rate='0.4540')]
+    history = [
+        {'t': NOW - 3600, 'rate': 0.45, 'fromChain': 'sol', 'toChain': 'tao', 'backing': 'sol'},
+        {'t': NOW - 60, 'rate': 0, 'fromChain': 'sol', 'toChain': 'tao', 'backing': 'sol'},
+    ]
+    opt = build(tmp_path, FakeClient(states=[miner_state(ME)]), api=FakeApi(rows=rows, history=history))
+    assert opt.seed(NOW)
+    assert not [q for q in opt.feed.snapshot()[1] if str(q.miner) == str(ME)]
+
+
+def test_a_reconnect_the_api_cannot_seed_holds_all_but_funding_pulls(tmp_path):
+    client = crowned_client(my_rate='0.4500')
+    api = FakeApi(healthy=False)
+    opt = build(tmp_path, client, balances={'sol': SOL, 'tao': TAO // 2}, api=api)
+    opt.feed.feed.generation += 1  # the feed reconnected
+    at(opt, NOW)
+    assert client.calls == []  # no routine requote on a picture the API couldn't refresh
+    at(opt, NOW + 60)
+    assert client.calls == [('remove', FORWARD)]  # the second short reading still pulls
+    assert api.miners_calls == 2
+
+
+def test_dead_man_pulls_every_managed_quote_once_then_reseeds_and_reposts(tmp_path):
+    client = FakeClient(
+        quotes=[
+            make_quote(ME, FORWARD, '0.4530'),
+            make_quote(ME, REVERSE, '0.4700'),
+            make_quote(OTHER, FORWARD, '0.4540'),
+        ],
+        states=[miner_state(ME), miner_state(OTHER)],
+    )
+    api = FakeApi(rows=[das_row(OTHER, rate='0.4540')])
+    opt = build(tmp_path, client, balances={'sol': 20 * SOL, 'tao': 10 * TAO}, lanes=(FORWARD, REVERSE), api=api)
+    stub = opt.feed.feed
+    stub.is_live = False
+    at(opt, NOW)
+    at(opt, NOW + DEAD_MAN_SECS)
+    assert client.calls == []
+    at(opt, NOW + DEAD_MAN_SECS + 1)
+    assert client.calls == [('remove', FORWARD), ('remove', REVERSE)]
+    [alert] = sent_with(opt, 'dead-man switch')
+    assert 'pulled SOL->TAO [sol], TAO->SOL [sol]' in alert
+    at(opt, NOW + 200)
+    at(opt, NOW + 260)
+    assert len(client.calls) == 2 and len(sent_with(opt, 'dead-man switch')) == 1
+
+    stub.is_live, stub.generation = True, stub.generation + 1
+    api.history = [
+        {'t': NOW + 121, 'rate': 0, 'fromChain': lane.from_chain, 'toChain': lane.to_chain, 'backing': 'sol'}
+        for lane in (FORWARD, REVERSE)
+    ]
+    at(opt, NOW + 330)
+    assert api.miners_calls == 1
+    assert [c[:3] for c in client.calls[2:]] == [('set', FORWARD, fixed(EDGE)), ('set', REVERSE, fixed('0.47104'))]
+    assert sent_with(opt, 'optimizer feed recovered')
+
+
+def test_usage_line_is_logged_hourly_with_bytes_connections_and_rpc_calls(tmp_path):
+    opt = build(tmp_path, crowned_client(my_rate='0.4530'))
+    stub = opt.feed.feed
+    with patch.object(qo.bt.logging, 'info') as info:
+        opt.log_usage(NOW)
+        stub.bytes_received, stub.connections_opened, opt.rpc_calls = 120_000, 12, 2
+        opt.log_usage(NOW + 1800)
+        opt.log_usage(NOW + 3600)
+    [line] = [c.args[0] for c in info.call_args_list]
+    assert '0.120 MB websocket received, 12 connection(s) opened, 2 RPC call(s) — about 17 Helius credits' in line
 
 
 # ─── operator alerts ───
@@ -527,6 +761,16 @@ def test_webhook_posts_a_condition_once_and_its_recovery_once():
         notifier.event('started')
     assert post.call_count == 3
     assert post.call_args_list[0].kwargs['json']['content'] == '[miner] wallet short'
+
+
+def test_a_standing_alert_does_not_repost_as_the_market_moves(tmp_path):
+    prices = MarketPrices(pins=dict(PRICES))
+    client = crowned_client(my_rate='0.4700', my_updated_at=NOW - 10)
+    opt = build(tmp_path, client, prices=prices, dry_run=True)
+    opt.run_once(NOW)
+    prices.pins['sol'] = 100.4
+    opt.run_once(NOW + 60)
+    assert len(sent_with(opt, '[dry run] would have requoted')) == 1
 
 
 # ─── config and helpers ───
