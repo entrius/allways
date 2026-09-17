@@ -759,7 +759,7 @@ def test_a_push_lost_with_the_connection_is_read_from_the_chain_on_the_reseed(tm
     assert [c[:3] for c in client.calls] == [('set', FORWARD, band_edge_fixed(fixed('0.4560'), False))]
 
 
-def test_a_failed_chain_read_on_the_reseed_is_retried_by_the_next_reconcile(tmp_path):
+def test_a_failed_chain_read_on_the_reseed_is_retried_by_a_reconcile_past_the_limit(tmp_path):
     history = [{'t': NOW - 3600, 'rate': float(EDGE), 'fromChain': 'sol', 'toChain': 'tao', 'backing': 'sol'}]
     api = FakeApi(rows=[das_row(ME, rate=EDGE), das_row(OTHER, rate='0.4540')], history=history)
     client = crowned_client(my_rate=EDGE)
@@ -769,7 +769,29 @@ def test_a_failed_chain_read_on_the_reseed_is_retried_by_the_next_reconcile(tmp_
     assert client.calls == [] and opt.resync_due  # the seed still stands on the API
     client.rpc.chain = [make_quote(OTHER, FORWARD, '0.4560')]
     at(opt, NOW + qo.RECONCILE_SECS)
+    assert client.calls == []  # a failed attempt counts toward the limit
+    at(opt, NOW + 2 * qo.RECONCILE_SECS)
     assert [c[:3] for c in client.calls] == [('set', FORWARD, band_edge_fixed(fixed('0.4560'), False))]
+
+
+def test_a_feed_that_drops_every_minute_reads_the_chain_once_per_limit(tmp_path):
+    history = [{'t': NOW - 3600, 'rate': float(EDGE), 'fromChain': 'sol', 'toChain': 'tao', 'backing': 'sol'}]
+    api = FakeApi(rows=[das_row(ME, rate=EDGE), das_row(OTHER, rate='0.4540')], history=history)
+    client = crowned_client(my_rate=EDGE)
+    opt = build(tmp_path, client, api=api)
+    client.rpc.chain = [make_quote(OTHER, FORWARD, '0.4540')]
+    for minute in range(16):
+        opt.feed.feed.generation += 1  # a reconnect, and so a re-seed, every tick
+        at(opt, NOW + 60 * minute)
+    assert [r[0] for r in client.reads].count('get_program_accounts') == 2  # at 0 and 10 minutes
+
+    opt.cfg.chain_read_min_secs = 300
+    opt.chain_read_at = None
+    client.reads.clear()
+    for minute in range(16, 32):
+        opt.feed.feed.generation += 1
+        at(opt, NOW + 60 * minute)
+    assert [r[0] for r in client.reads].count('get_program_accounts') == 4  # every 5 minutes as configured
 
 
 def test_an_api_rate_that_disagrees_with_an_old_push_is_read_from_the_chain(tmp_path):
@@ -1005,11 +1027,19 @@ def test_config_defaults_to_disabled_and_validates(tmp_path):
     }
 
     path = tmp_path / 'optimizer.json'
-    path.write_text(json.dumps({'enabled': True, 'lanes': ['tao:sol:tao'], 'webhook_url': 'https://x'}))
+    assert cfg.chain_read_min_secs == 600
+    path.write_text(
+        json.dumps({'enabled': True, 'lanes': ['tao:sol:tao'], 'webhook_url': 'https://x', 'chain_read_min_secs': 1800})
+    )
     cfg = OptimizerConfig.load(path)
-    assert cfg.enabled and cfg.lanes == [Lane('tao', 'sol', 'tao')]
+    assert cfg.enabled and cfg.lanes == [Lane('tao', 'sol', 'tao')] and cfg.chain_read_min_secs == 1800
 
-    for bad in ({'enabled': True, 'crown_band': 0.01}, {'lanes': ['sol:btc:sol']}, {'lanes': ['sol:tao:btc']}):
+    for bad in (
+        {'enabled': True, 'crown_band': 0.01},
+        {'lanes': ['sol:btc:sol']},
+        {'lanes': ['sol:tao:btc']},
+        {'chain_read_min_secs': -1},
+    ):
         path.write_text(json.dumps(bad))
         with pytest.raises(ValueError):
             OptimizerConfig.load(path)
