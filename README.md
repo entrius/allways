@@ -146,6 +146,89 @@ there. Either way the user is made whole out of the bond that backed the quote.
 (`alw miner deactivate --backing tao`), let in-flight swaps and their timeout windows drain, and
 validators unlock the bond once nothing is owed on it — then `alw vault withdraw` succeeds.
 
+### Quote Optimizer (opt-in)
+
+Fund the purse and the wallets, post each SOL↔TAO quote once by hand, then let the miner keep them
+priced. No guarantees and not financial advice: you fund it, you own the outcome.
+
+- **Follow.** Each lane quotes 0.4% under the best other qualifying quote — inside the validators' 0.5% crown
+  band, with a 0.1% cushion so a one-tick undercut can't push it out.
+- **Tolerance.** The leader is followed only while that rate is between `-max_worse` and `+max_better` % of
+  the market spot price, measured as what the taker receives. With no leader, or one stingier than
+  `-max_worse`, the lane leads at `-max_worse` (the least generous rate you tolerate). A leader more generous
+  than `+max_better` is not followed.
+- **Free by default.** Routine repricing waits until a quote is 10 minutes old (plus a random 0–30 s, so the
+  moment isn't predictable), and re-posting a pulled quote
+  is a free creation. A fee is paid only to protect you, on fresh data: market drift made your quote more
+  generous than `+max_better`, a taker would pick it first, and a full-size fill would lose more than the fee;
+  or your wallet can't cover a full-size fill and a missed one (10% premium) would cost more than the fee, or
+  you already carry the last strike your hotkey is allowed.
+- **Funding.** A taker may fill up to what your collateral backs, so each delivery wallet must cover that
+  largest fill on every live lane paying out of it, plus in-flight payouts and the SOL fee reserve. Lanes that
+  don't fit are pulled, in reverse `lanes` order, and re-posted once the wallet covers them again.
+- **Busy purses** can't be taken until their swap resolves: their rate still updates (free), nothing else is
+  done to them, and they claim no second full-size fill.
+- **Data.** Market and wallet state arrive by websocket push on a second connection, seeded from the allways API
+  (`api.all-ways.io`, or `test-api` on testnet; `ALLWAYS_API_URL` overrides). It holds a fixed handful of
+  subscriptions whatever the market does: SOL↔TAO quotes (one per direction), every miner's state, bonds, the
+  program config, your own quotes and your SOL wallets. It renews every 15 minutes, opening the new connection
+  before closing the old. A competitor's removed quote pushes nothing, so the API is checked every 5 minutes to
+  drop it. Solana RPC is used to send `set_quote` / `remove_quote`, plus a config and SOL-balance read whenever
+  the feed has to re-seed — so it fits the Helius free tier (an hourly `optimizer:` log line shows the
+  websocket bytes, connections and RPC calls behind it). If the API doesn't answer at startup the optimizer
+  stays off (the miner still fulfils swaps) and retries every minute.
+- **Idle.** With no managed quote standing and none pulled for a re-post, the connection is closed and the
+  optimizer only asks the API every 5 minutes whether you've posted one.
+- **Dead-man switch.** If the feed is down for more than 2 minutes, every managed quote is pulled (paying the
+  churn fee if one is due) and re-posted once the feed is back and re-seeded.
+- **Data failures lean your way:** a re-seed the API can't answer holds everything but funding pulls, a missing
+  price holds every quote, and a 0 balance reading never pays a fee on its own.
+
+Off unless `~/.allways/miner/optimizer.json` sets `enabled`. Under
+`docker-compose.miner.yml` that file is `./data/allways/miner/optimizer.json`:
+
+```json
+{
+  "enabled": true,
+  "dry_run": false,
+  "webhook_url": "https://discord.com/api/webhooks/…",
+  "lanes": ["sol:tao:sol", "sol:tao:tao", "tao:sol:sol", "tao:sol:tao"],
+  "max_better_than_market_pct": 2.0,
+  "max_worse_than_market_pct": 1.0,
+  "repost_buffer_pct": 1.0,
+  "sol_fee_reserve": 0.05,
+  "pull_on_shutdown": true,
+  "price_usd": {}
+}
+```
+
+- `lanes` — `from:to:backing`, in priority order; only lanes you have already quoted are managed (their
+  addresses come from that quote), and a quote you remove yourself stays removed.
+- `max_better_than_market_pct` / `max_worse_than_market_pct` — the market tolerance above.
+- `repost_buffer_pct` — headroom above a full-size fill before a pulled quote comes back, so it doesn't flap.
+- `sol_fee_reserve` — SOL kept aside for transaction fees; below it every lane is pulled.
+- `pull_on_shutdown` — a stopped miner still quoting takes strikes; shutdown pulls and the next start re-posts.
+- `price_usd` — pin a USD price per chain instead of the CoinGecko → Coinbase → MEXC feeds.
+- `dry_run` — paper-trade: every managed lane is posted, requoted and pulled on paper against the live market (as
+  if each transaction landed) and reported the same way, and nothing is sent — no quotes need to be posted. Its
+  state lives in `optimizer_state_<hotkey>.dry_run.json`, apart from a live run's.
+
+Webhook messages (each condition once when it starts and once when it clears): start and stop (with what
+shutdown pulled); the API unreachable at startup; a dead-man pull and its recovery; every pull and post; paid
+requotes; a wallet short of a full-size fill (address and amount to send); a purse under its eligibility floor
+(with the deposit command); a new timeout strike; a dead price feed; failed transactions; and, after a post,
+why that lane is not earning emissions. Routine requotes, a lane switching between following, leading and not
+following, holds and deferred actions only go to the miner log, once per change.
+Any webhook taking a JSON body works (Discord `content`, Slack `text`). Extending to another pair means adding
+its chains to `OPTIMIZER_CHAINS` in `allways/miner/optimizer/quote_optimizer.py` and a price id in
+`allways/miner/optimizer/market_price.py`.
+
+It is a strategy bolted onto the base miner, not part of it: everything lives in `allways/miner/optimizer/`,
+and `neurons/miner.py` makes one call, `attach_optimizer(self)`, which does nothing unless `optimizer.json`
+enables it. It runs on its own thread, so swap fulfillment never waits on it, and it pulls its quotes when
+the miner exits — give `docker stop` time for that (`stop_grace_period: 60s` on the miner service). Copy it,
+change it, or swap in your own strategy behind the same call.
+
 ## Validator Storage Layout
 
 Validator state lives in `~/.allways/validator/state.db` (SQLite, WAL mode).

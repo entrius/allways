@@ -47,6 +47,11 @@ class Miner(BaseMinerNeuron):
 
     def __init__(self, config=None):
         super().__init__(config=config)
+        bt.logging.warning(
+            'The base miner is reference software. Review the code thoroughly and build it out with your own safety '
+            'and optimization measures before running it. Running the base miner, the optimizer, strategies or '
+            'anything else you build on top of it is at your own risk.'
+        )
 
         # A testnet neuron must not silently run mainnet spokes: unset {PREFIX}_NETWORK defaults to
         # mainnet in the providers, so a miner with real keys could broadcast a mainnet payout for a
@@ -122,6 +127,11 @@ class Miner(BaseMinerNeuron):
         )
 
         self.consecutive_poll_failures = 0
+
+        # Opt-in strategy gear (allways/miner/optimizer/), on its own thread; nothing unless optimizer.json enables it.
+        from allways.miner.optimizer import attach_optimizer
+
+        self.quote_optimizer = attach_optimizer(self)
 
         bt.logging.info(
             f'Miner initialized: hotkey={hotkey} | pubkey={self.solana_pubkey} | addresses={self.my_addresses}'

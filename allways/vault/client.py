@@ -37,6 +37,11 @@ DEFAULT_METADATA = _REPO_METADATA if _REPO_METADATA.exists() else _PACKAGED_META
 
 # Dry-runs use a generous fixed budget; the actual charge is by weight used.
 DEFAULT_GAS = {'ref_time': 300_000_000_000, 'proof_size': 2_000_000}
+# A miner's own bond ops (withdraw, lock) sign with its hotkey, and the node reserves the fee for the whole gas
+# limit up front: at DEFAULT_GAS that hold is ~0.15 TAO, more than a small hotkey owns. Both messages do constant
+# work; a withdraw measured ref_time 1_105_831_291 / proof_size 104_234 on finney (2026-09-15) and a lock costs no
+# more, so ~2.7x that is headroom without the hold (~0.002 TAO).
+BOND_OP_GAS = {'ref_time': 3_000_000_000, 'proof_size': 300_000}
 
 
 class VaultConfigError(Exception):
@@ -109,6 +114,7 @@ class BondVaultClient:
         self.keypair = keypair
         self.metadata = metadata or codec.VaultMetadata.from_path(metadata_path or str(DEFAULT_METADATA))
         self.gas = gas or DEFAULT_GAS
+        self.bond_gas = gas or BOND_OP_GAS
 
     @classmethod
     def from_config(cls, subtensor, config=None, keypair=None, **kwargs) -> 'BondVaultClient':
@@ -123,7 +129,7 @@ class BondVaultClient:
 
     # ─── transport ───────────────────────────────────────────────────────────
 
-    def submit(self, data: bytes, value: int = 0, keypair=None) -> VaultCallResult:
+    def submit(self, data: bytes, value: int = 0, keypair=None, gas: Optional[dict] = None) -> VaultCallResult:
         signer = keypair or self.keypair
         if signer is None:
             raise VaultConfigError('No signer configured for vault writes')
@@ -133,7 +139,7 @@ class BondVaultClient:
             call_params={
                 'dest': self.address,
                 'value': value,
-                'gas_limit': self.gas,
+                'gas_limit': gas or self.gas,
                 'storage_deposit_limit': None,
                 'data': '0x' + data.hex(),
             },
@@ -354,10 +360,12 @@ class BondVaultClient:
         return self.submit(self.metadata.call('post_collateral'), value=rao, keypair=keypair)
 
     def lock_bond(self, keypair=None) -> VaultCallResult:
-        return self.submit(self.metadata.call('lock_bond'), keypair=keypair)
+        return self.submit(self.metadata.call('lock_bond'), keypair=keypair, gas=self.bond_gas)
 
     def withdraw_collateral(self, rao: int, keypair=None) -> VaultCallResult:
-        return self.submit(self.metadata.call('withdraw_collateral', codec.u64(rao)), keypair=keypair)
+        return self.submit(
+            self.metadata.call('withdraw_collateral', codec.u64(rao)), keypair=keypair, gas=self.bond_gas
+        )
 
     def claim_slash(self, swap_ref, keypair=None) -> VaultCallResult:
         return self.submit(self.metadata.call('claim_slash', codec.hash32(swap_ref)), keypair=keypair)
