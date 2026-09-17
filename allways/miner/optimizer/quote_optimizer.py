@@ -21,8 +21,10 @@ re-creating a pulled quote is free too. A fee is paid only to protect against a 
 
 Data. Program state comes from websocket pushes (``market_feed.MarketFeed``) seeded from the allways API, so an
 opted-in miner makes no RPC reads in steady state: Helius is used to send ``set_quote`` / ``remove_quote``, plus
-a Config and SOL-balance read each time the feed has to be re-seeded. Competitor quotes are lined up with the API
-every ``RECONCILE_SECS`` (a closure pushes nothing), and with no managed quote standing and none to re-post the
+a Config and SOL-balance read and a chain read of competitor quotes each time the feed has to be re-seeded (a
+dying connection loses its last pushes, and the API lags the chain). Competitor quotes are lined up with the API
+every ``RECONCILE_SECS`` (a closure pushes nothing) — read from the chain again when the API lists a pushed one at
+another rate — and with no managed quote standing and none to re-post the
 feed is closed and the API asked every ``IDLE_CHECK_SECS`` instead. Every data gap leans the miner's way: no
 API at start keeps the optimizer off, a re-seed the API can't answer holds everything but funding pulls, an
 unreadable price holds every quote, an empty quote list reads as "no leader" (lead at the least generous rate),
@@ -58,7 +60,7 @@ from allways.constants import (
     declarable_backings,
     required_collateral,
 )
-from allways.miner.optimizer.market_feed import fixed_rate, make_quote, market_from_das
+from allways.miner.optimizer.market_feed import direction_filter, fixed_rate, make_quote, market_from_das
 from allways.miner.optimizer.market_price import MarketPrices
 from allways.miner.optimizer.miner_api import AllwaysApi
 from allways.solana.client import benign_marker
@@ -116,6 +118,12 @@ USAGE_LOG_SECS = 3600
 IDLE_CHECK_SECS = 300
 # How often competitor quotes are lined up with the API: a quote's closure pushes nothing on a program subscription.
 RECONCILE_SECS = 300
+# Competitor quotes are read from the chain (one getProgramAccounts per managed direction) after every seed, and when
+# the API disagrees with a pushed rate — the latter at most this often, so an API that stays behind can't turn it into
+# polling.
+CHAIN_RESYNC_MIN_SECS = 600
+# Helius bills a getProgramAccounts call 10 credits, every other RPC call 1.
+GPA_CREDITS = 10
 # Helius websocket metering: 2 credits per 0.1 MB streamed, 1 per connection opened.
 WS_CREDIT_BYTES = 50_000
 NO_PRICE_REASON = 'no fresh market price'
@@ -642,6 +650,9 @@ class QuoteOptimizer:
         # The earliest jittered requote waiting on a pass; ``tick`` runs one then instead of at the next regular tick.
         self.wake_at: Optional[int] = None
         self.rpc_calls = 0
+        self.gpa_calls = 0
+        self.resynced_at = 0
+        self.resync_due = False
         self.usage_mark: Optional[Tuple[int, int, int, int]] = None
         self.count_rpc_calls()
         # A dry run paper-trades: our quotes on the managed lanes live in this book (None = pulled on paper), started
@@ -818,14 +829,14 @@ class QuoteOptimizer:
 
     def log_usage(self, now: int) -> None:
         """Hourly: what the optimizer cost on the Helius meter (websocket bytes, connections, RPC calls)."""
-        mark = (now, int(self.feed.bytes_received), int(self.feed.connections_opened), self.rpc_calls)
+        mark = (now, int(self.feed.bytes_received), int(self.feed.connections_opened), self.rpc_calls, self.gpa_calls)
         if self.usage_mark is None:
             self.usage_mark = mark
             return
         if now - self.usage_mark[0] < USAGE_LOG_SECS:
             return
-        received, opened, calls = (mark[i] - self.usage_mark[i] for i in (1, 2, 3))
-        credits = opened + -(-received // WS_CREDIT_BYTES) + calls
+        received, opened, calls, gpa = (mark[i] - self.usage_mark[i] for i in (1, 2, 3, 4))
+        credits = opened + -(-received // WS_CREDIT_BYTES) + calls + gpa * (GPA_CREDITS - 1)
         bt.logging.info(
             f'optimizer: last hour {received / 1e6:.3f} MB websocket received, {opened} connection(s) opened, '
             f'{calls} RPC call(s) — about {credits} Helius credits'
@@ -885,11 +896,51 @@ class QuoteOptimizer:
             return
         self.reconciled_at = now
         rows = self.api.miners() if self.api is not None else None
-        if rows is None:
-            return
-        dropped = self.feed.reconcile(market_from_das(rows, self.cfg.lanes, now)[0])
-        if dropped:
-            bt.logging.debug(f'optimizer: dropped {dropped} competitor quote(s) the API no longer lists')
+        stale = 0
+        if rows is not None:
+            quotes = market_from_das(rows, self.cfg.lanes, now)[0]
+            stale = self.feed.disagreements(quotes)
+            dropped = self.feed.reconcile(quotes)
+            if dropped:
+                bt.logging.debug(f'optimizer: dropped {dropped} competitor quote(s) the API no longer lists')
+        if self.resync_due or (stale and now - self.resynced_at >= CHAIN_RESYNC_MIN_SECS):
+            if stale:
+                bt.logging.info(
+                    f'optimizer: the API lists {stale} competitor quote(s) at another rate than the feed pushed; '
+                    'reading them from the chain'
+                )
+            self.resync_quotes(now)
+
+    def resync_quotes(self, now: int) -> bool:
+        """Competitor quotes on the managed directions straight from the chain (``MarketFeed.resync_quotes``): a
+        push lost with a dying connection is otherwise followed until that competitor next moves. A failed read
+        leaves the picture as it was, and the next reconcile tries again."""
+        rpc = self.client.rpc
+        slot = self.rpc_read('slot', rpc.get_slot)
+        read_at = time.time()
+        accounts = []
+        for from_chain, to_chain in self.feed.directions if slot is not None else ():
+            self.gpa_calls += 1
+            got = self.rpc_read(
+                f'{from_chain}->{to_chain} quotes',
+                lambda f=from_chain, t=to_chain: rpc.get_program_accounts(
+                    self.client.program_id, extra_filters=direction_filter(f, t)
+                ),
+            )
+            if got is None:
+                slot = None
+                break
+            accounts.extend(got)
+        if slot is None:
+            self.resync_due = True
+            return False
+        changed, dropped = self.feed.resync_quotes(accounts, int(slot), read_at)
+        self.resync_due, self.resynced_at = False, now
+        if changed or dropped:
+            bt.logging.info(
+                f'optimizer: chain read corrected {changed} competitor quote(s) and dropped {dropped} closed one(s)'
+            )
+        return True
 
     # ─── seeding ───
 
@@ -936,6 +987,7 @@ class QuoteOptimizer:
                 f'SOL balance of {address}', lambda a=address: self.client.rpc.get_balance(a)
             )
         self.feed.seed(quotes, states, bonds, config=config, lamports=lamports)
+        self.resync_quotes(now)  # the API lags the chain: a change just before the reconnect is still old there
         self.seeded_generation, self.reconciled_at = generation, now  # the seed is as fresh as a reconcile
         log_on_change('optimizer.seed', None, 'optimizer: seeded from the allways API; following the feed')
         return True

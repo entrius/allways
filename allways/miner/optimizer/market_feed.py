@@ -13,6 +13,12 @@ nothing for that — it filters on the program as owner, and a closed account no
 watched by account, so a removal shows at once; a competitor's is caught by ``reconcile`` against the API, which
 rebuilds its miner rows from the chain, a few minutes late at worst.
 
+Lost pushes: a connection that dies takes its last pushes with it, and a subscription never replays them. The API seed
+can't be trusted to fill the gap — it lags the chain, so a change made seconds before the drop is still old there — and
+``reconcile`` never overrides a quote that was pushed. ``resync_quotes`` puts a chain read (``getProgramAccounts`` per
+managed direction) over competitor quotes instead: after every seed, and whenever ``disagreements`` finds the API
+listing a pushed competitor at another rate.
+
 A subscription only reports changes, so the cache starts from a seed: other miners' quotes and purse facts from
 ``GET /miners``, this miner's state from its own reads. Pushes win over the seed: a seed never overwrites an
 account pushed since the feed last went down.
@@ -179,7 +185,7 @@ class MarketFeed:
         self.kinds: Dict[str, str] = {}
         self.slots: Dict[str, int] = {}
         self.pushed_at: Dict[str, float] = {}
-        for from_chain, to_chain in sorted({lane[:2] for lane in self.lanes}):
+        for from_chain, to_chain in self.directions:
             self.subscribe_program(f'quotes:{from_chain}:{to_chain}', direction_filter(from_chain, to_chain))
         self.subscribe_program('states', account_filter('MinerState'))
         if any(lane[2] != 'sol' for lane in self.lanes):
@@ -187,6 +193,11 @@ class MarketFeed:
         self.watch(pdas.config_pda(self.program_id), 'config')
         for lane in self.lanes:
             self.watch(self.quote_pda(self.me, lane), 'quote')
+
+    @property
+    def directions(self) -> List[Tuple[str, str]]:
+        """The managed (from_chain, to_chain) pairs, each one quote subscription and one chain read."""
+        return sorted({lane[:2] for lane in self.lanes})
 
     # ── feed passthrough ──
 
@@ -376,6 +387,66 @@ class MarketFeed:
                 if pda not in self.pushed_at:
                     self.quotes[pda] = quote
         return len(gone)
+
+    def disagreements(self, quotes: Iterable[object]) -> int:
+        """Competitor quotes the API (``quotes``, from ``market_from_das``) lists at another rate than the one pushed
+        to us, the push older than ``RECONCILE_GRACE_SECS`` so the API has had time to index it. A push lost with a
+        dying connection looks exactly like this. The API isn't taken as the fix (it lags the chain); the caller
+        reads the chain."""
+        listed = [
+            (self.quote_pda(q.miner, (q.from_chain, q.to_chain, q.collateral_chain)), q)
+            for q in quotes
+            if str(q.miner) != self.me
+        ]
+        now = time.time()
+        with self.lock:
+            return sum(
+                1
+                for pda, q in listed
+                if pda in self.quotes
+                and pda in self.pushed_at
+                and now - self.pushed_at[pda] > RECONCILE_GRACE_SECS
+                and int(self.quotes[pda].rate) != int(q.rate)
+            )
+
+    def resync_quotes(self, accounts: Iterable[Tuple[str, bytes]], slot: int, read_at: float) -> Tuple[int, int]:
+        """Put a chain read over the competitor quotes on the managed directions: ``accounts`` from
+        ``getProgramAccounts`` per direction, ``slot`` read just before it and ``read_at`` its wall-clock start. A
+        quote pushed at a later slot stands; a cached one the read doesn't return, and that wasn't pushed since, is
+        closed. Our own quotes are left to their account subscriptions. Returns (quotes that appeared or changed rate,
+        quotes dropped)."""
+        directions = set(self.directions)
+        returned, changed = set(), 0
+        for pubkey, raw in accounts:
+            returned.add(pubkey)
+            try:
+                decoded = self.decode('MinerQuote', raw)
+            except Exception as e:
+                bt.logging.debug(f'optimizer feed: undecodable quote {pubkey} in a chain read: {e}')
+                continue
+            if str(decoded.miner) == self.me:
+                continue
+            with self.lock:
+                if slot < self.slots.get(pubkey, 0):
+                    continue
+                cached = self.quotes.get(pubkey)
+                if cached is None or int(cached.rate) != int(decoded.rate):
+                    changed += 1
+                self.quotes[pubkey] = decoded
+                self.slots[pubkey] = slot
+                self.pushed_at[pubkey] = max(read_at, self.pushed_at.get(pubkey, 0))
+        with self.lock:
+            gone = [
+                pda
+                for pda, q in self.quotes.items()
+                if str(q.miner) != self.me
+                and (q.from_chain, q.to_chain) in directions
+                and pda not in returned
+                and self.pushed_at.get(pda, 0) < read_at
+            ]
+            for pda in gone:
+                del self.quotes[pda]
+        return changed, len(gone)
 
     def _pda_of_state(self, miner: str) -> str:
         return str(pdas.miner_state_pda(Pubkey.from_string(miner), self.program_id))

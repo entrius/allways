@@ -22,7 +22,7 @@ from solders.pubkey import Pubkey
 from allways.constants import RATE_PRECISION
 from allways.miner.optimizer import attach_optimizer
 from allways.miner.optimizer import quote_optimizer as qo
-from allways.miner.optimizer.market_feed import SYSTEM_PROGRAM, MarketFeed
+from allways.miner.optimizer.market_feed import SYSTEM_PROGRAM, MarketFeed, direction_filter
 from allways.miner.optimizer.market_price import MarketPrices
 from allways.miner.optimizer.quote_optimizer import (
     DEAD_MAN_SECS,
@@ -41,7 +41,7 @@ from allways.miner.optimizer.quote_optimizer import (
     pending_payouts,
 )
 from allways.miner.optimizer.subscription_feed import SubscriptionFeed
-from allways.solana import pdas
+from allways.solana import layouts, pdas
 from allways.solana.client import AllwaysSolanaClient
 from allways.utils.rate import quantize_rate_fixed
 
@@ -123,12 +123,29 @@ def program_config(min_swap=SOL // 10, max_swap=0, min_collateral=0):
 
 
 class FakeRpc:
+    """``chain`` is the quotes a ``getProgramAccounts`` read returns; None (the default) fails the read."""
+
     def __init__(self, reads, balance):
         self.reads, self.balance = reads, balance
+        self.chain = None
 
     def get_balance(self, address):
         self.reads.append(('get_balance', address))
         return self.balance
+
+    def get_slot(self):
+        self.reads.append(('get_slot',))
+        return 1_000
+
+    def get_program_accounts(self, program_id, disc8=None, extra_filters=None):
+        self.reads.append(('get_program_accounts', extra_filters))
+        if self.chain is None:
+            raise ConnectionError('no chain read in this test')
+        return [
+            (quote_pda(q.miner, Lane(q.from_chain, q.to_chain, q.collateral_chain)), quote_account(q))
+            for q in self.chain
+            if extra_filters == direction_filter(q.from_chain, q.to_chain)
+        ]
 
 
 class FakeClient:
@@ -287,6 +304,13 @@ def sent_with(opt, text):
 
 def quote_pda(miner, lane):
     return str(pdas.quote_pda(miner, lane.from_chain, lane.to_chain, lane.backing, PROGRAM))
+
+
+def quote_account(q) -> bytes:
+    fields = ('from_chain', 'to_chain', 'collateral_chain', 'miner_from_addr', 'miner_to_addr', 'rate', 'liquidity')
+    body = {name: getattr(q, name) for name in fields}
+    body.update(miner=bytes(q.miner), updated_at=q.updated_at, bump=255)
+    return layouts.DISCRIMINATORS['MinerQuote'] + layouts.MinerQuote.build(body)
 
 
 # ─── rates ───
@@ -720,6 +744,52 @@ def test_a_reconnect_the_api_cannot_seed_holds_all_but_funding_pulls(tmp_path):
     at(opt, NOW + 60)
     assert client.calls == [('remove', FORWARD)]  # the second short reading still pulls
     assert api.miners_calls == 2
+
+
+def test_a_push_lost_with_the_connection_is_read_from_the_chain_on_the_reseed(tmp_path):
+    # Mainnet uid 189, 2026-09-17: the leader moved at 05:18:53, the feed died at 05:19:08 with that push, and the
+    # API seed still had the old rate — so the optimizer sat just outside the crown band for nine hours.
+    history = [{'t': NOW - 3600, 'rate': float(EDGE), 'fromChain': 'sol', 'toChain': 'tao', 'backing': 'sol'}]
+    api = FakeApi(rows=[das_row(ME, rate=EDGE), das_row(OTHER, rate='0.4540')], history=history)
+    client = crowned_client(my_rate=EDGE)
+    opt = build(tmp_path, client, api=api)
+    client.rpc.chain = [make_quote(OTHER, FORWARD, '0.4560')]
+    opt.feed.feed.generation += 1  # the feed reconnected
+    at(opt, NOW)
+    assert [c[:3] for c in client.calls] == [('set', FORWARD, band_edge_fixed(fixed('0.4560'), False))]
+
+
+def test_a_failed_chain_read_on_the_reseed_is_retried_by_the_next_reconcile(tmp_path):
+    history = [{'t': NOW - 3600, 'rate': float(EDGE), 'fromChain': 'sol', 'toChain': 'tao', 'backing': 'sol'}]
+    api = FakeApi(rows=[das_row(ME, rate=EDGE), das_row(OTHER, rate='0.4540')], history=history)
+    client = crowned_client(my_rate=EDGE)
+    opt = build(tmp_path, client, api=api)
+    opt.feed.feed.generation += 1
+    at(opt, NOW)
+    assert client.calls == [] and opt.resync_due  # the seed still stands on the API
+    client.rpc.chain = [make_quote(OTHER, FORWARD, '0.4560')]
+    at(opt, NOW + qo.RECONCILE_SECS)
+    assert [c[:3] for c in client.calls] == [('set', FORWARD, band_edge_fixed(fixed('0.4560'), False))]
+
+
+def test_an_api_rate_that_disagrees_with_an_old_push_is_read_from_the_chain(tmp_path):
+    client = crowned_client(my_rate=EDGE)
+    opt = build(tmp_path, client, api=FakeApi(rows=[das_row(OTHER, rate='0.4560')]))
+    opt.feed.pushed_at[quote_pda(OTHER, FORWARD)] = time.time() - 3600  # pushed long ago; its move since was lost
+    client.rpc.chain = [make_quote(OTHER, FORWARD, '0.4560')]
+    at(opt, NOW + qo.RECONCILE_SECS)
+    assert [c[:3] for c in client.calls] == [('set', FORWARD, band_edge_fixed(fixed('0.4560'), False))]
+
+
+def test_an_api_that_stays_behind_the_chain_is_not_polled_through(tmp_path):
+    client = crowned_client(my_rate=EDGE)
+    opt = build(tmp_path, client, api=FakeApi(rows=[das_row(OTHER, rate='0.4560')]))
+    client.rpc.chain = [make_quote(OTHER, FORWARD, '0.4540')]
+    for minutes in (5, 10, 15):
+        opt.feed.pushed_at[quote_pda(OTHER, FORWARD)] = time.time() - 3600
+        at(opt, NOW + 60 * minutes)
+    assert [r[0] for r in client.reads].count('get_program_accounts') == 2  # at 5 and 15 minutes, not 10
+    assert client.calls == []
 
 
 def test_dead_man_pulls_every_managed_quote_once_then_reseeds_and_reposts(tmp_path):

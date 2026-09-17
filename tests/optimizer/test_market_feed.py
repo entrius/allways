@@ -3,6 +3,7 @@ quote closures arrive by account, competitor closures by reconciling with the AP
 the chain's orientation and never overwrites a push."""
 
 import base64
+import time
 
 import base58
 from solders.keypair import Keypair
@@ -245,3 +246,48 @@ def test_a_seed_never_overwrites_a_pushed_account_but_replaces_the_rest():
     feed.seed([make_quote(RIVAL, lane, 'a', 'b', fixed_rate('0.44'))], states={}, bonds={})
     quotes = feed.snapshot()[1]
     assert [q.rate for q in quotes] == [fixed_rate('0.46')]  # the push stands; the quote gone from the API is dropped
+
+
+def test_a_chain_read_corrects_a_lost_push_and_drops_a_closed_quote():
+    feed = market()
+    lane = ('sol', 'tao', 'tao')
+    closed = Keypair().pubkey()
+    pda = push_quote(feed, RIVAL, lane, '0.43671', slot=5)
+    closed_pda = push_quote(feed, closed, lane, '0.43', slot=5)
+    mine = push_quote(feed, ME, lane, '0.43497', slot=5)
+    read_at = time.time()
+    for pushed in (pda, closed_pda, mine):
+        feed.pushed_at[pushed] = read_at - 60  # the rival's next push died with the connection
+    chain = [(pda, quote_bytes(RIVAL, lane, '0.43718')), (mine, quote_bytes(ME, lane, '0.40'))]
+    assert feed.resync_quotes(chain, slot=9, read_at=read_at) == (1, 1)
+    assert feed.quotes[pda].rate == fixed_rate('0.43718')
+    assert closed_pda not in feed.quotes
+    assert feed.quotes[mine].rate == fixed_rate('0.43497')  # ours is left to its account subscription
+
+
+def test_a_push_newer_than_the_chain_read_stands():
+    feed = market()
+    lane = ('sol', 'tao', 'sol')
+    read_at = time.time()
+    pda = push_quote(feed, RIVAL, lane, '0.46', slot=12)
+    created = push_quote(feed, Keypair().pubkey(), lane, '0.45', slot=13)  # created while the read ran
+    assert feed.resync_quotes([(pda, quote_bytes(RIVAL, lane, '0.45'))], slot=10, read_at=read_at) == (0, 0)
+    assert feed.quotes[pda].rate == fixed_rate('0.46')
+    assert created in feed.quotes
+
+
+def test_disagreements_count_only_pushes_the_api_has_had_time_to_index():
+    feed = market()
+    lane = ('sol', 'tao', 'sol')
+    old, fresh, same = (Keypair().pubkey() for _ in range(3))
+    for miner in (old, fresh, same):
+        pda = push_quote(feed, miner, lane, '0.45', slot=3)
+        if miner != fresh:
+            feed.pushed_at[pda] -= RECONCILE_GRACE_SECS + 1
+    listed = [
+        make_quote(old, lane, 'a', 'b', fixed_rate('0.46')),
+        make_quote(fresh, lane, 'a', 'b', fixed_rate('0.46')),
+        make_quote(same, lane, 'a', 'b', fixed_rate('0.45')),
+        make_quote(ME, lane, 'a', 'b', fixed_rate('0.40')),
+    ]
+    assert feed.disagreements(listed) == 1
