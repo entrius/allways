@@ -118,10 +118,6 @@ USAGE_LOG_SECS = 3600
 IDLE_CHECK_SECS = 300
 # How often competitor quotes are lined up with the API: a quote's closure pushes nothing on a program subscription.
 RECONCILE_SECS = 300
-# Competitor quotes are read from the chain (one getProgramAccounts per managed direction) after every seed, and when
-# the API disagrees with a pushed rate — the latter at most this often, so an API that stays behind can't turn it into
-# polling.
-CHAIN_RESYNC_MIN_SECS = 600
 # Helius bills a getProgramAccounts call 10 credits, every other RPC call 1.
 GPA_CREDITS = 10
 # Helius websocket metering: 2 credits per 0.1 MB streamed, 1 per connection opened.
@@ -199,6 +195,10 @@ class OptimizerConfig:
     sol_fee_reserve: float = 0.05
     pull_on_shutdown: bool = True
     price_usd: Dict[str, float] = field(default_factory=dict)
+    # The least time between two chain reads of competitor quotes (getProgramAccounts per managed direction, 10 Helius
+    # credits each). One is wanted after every re-seed and whenever the API disagrees with a pushed rate; one wanted
+    # sooner waits for the first reconcile past this, so a feed that drops every minute can't spend the key's budget.
+    chain_read_min_secs: int = 600
 
     @classmethod
     def load(cls, path: Path) -> 'OptimizerConfig':
@@ -222,7 +222,13 @@ class OptimizerConfig:
             raise ValueError('optimizer config: lanes is empty')
         if len({lane.key for lane in self.lanes}) != len(self.lanes):
             raise ValueError('optimizer config: a lane is listed twice')
-        for name in ('max_better_than_market_pct', 'max_worse_than_market_pct', 'repost_buffer_pct', 'sol_fee_reserve'):
+        for name in (
+            'max_better_than_market_pct',
+            'max_worse_than_market_pct',
+            'repost_buffer_pct',
+            'sol_fee_reserve',
+            'chain_read_min_secs',
+        ):
             if float(getattr(self, name)) < 0:
                 raise ValueError(f'optimizer config: {name} must be >= 0')
         if self.max_worse_than_market_pct >= 100:
@@ -651,7 +657,7 @@ class QuoteOptimizer:
         self.wake_at: Optional[int] = None
         self.rpc_calls = 0
         self.gpa_calls = 0
-        self.resynced_at = 0
+        self.chain_read_at: Optional[int] = None
         self.resync_due = False
         self.usage_mark: Optional[Tuple[int, int, int, int]] = None
         self.count_rpc_calls()
@@ -903,18 +909,26 @@ class QuoteOptimizer:
             dropped = self.feed.reconcile(quotes)
             if dropped:
                 bt.logging.debug(f'optimizer: dropped {dropped} competitor quote(s) the API no longer lists')
-        if self.resync_due or (stale and now - self.resynced_at >= CHAIN_RESYNC_MIN_SECS):
-            if stale:
-                bt.logging.info(
-                    f'optimizer: the API lists {stale} competitor quote(s) at another rate than the feed pushed; '
-                    'reading them from the chain'
-                )
-            self.resync_quotes(now)
+        if stale:
+            bt.logging.debug(
+                f'optimizer: the API lists {stale} competitor quote(s) at another rate than the feed pushed'
+            )
+        if self.resync_due or stale:
+            self.read_chain_quotes(now)
+
+    def read_chain_quotes(self, now: int) -> None:
+        """A chain read of competitor quotes, at most once per ``chain_read_min_secs`` (attempts count, so a failing
+        read is limited too); one wanted sooner is marked due and taken by the first reconcile past the limit."""
+        if self.chain_read_at is not None and now - self.chain_read_at < self.cfg.chain_read_min_secs:
+            self.resync_due = True
+            return
+        self.resync_quotes(now)
 
     def resync_quotes(self, now: int) -> bool:
         """Competitor quotes on the managed directions straight from the chain (``MarketFeed.resync_quotes``): a
         push lost with a dying connection is otherwise followed until that competitor next moves. A failed read
-        leaves the picture as it was, and the next reconcile tries again."""
+        leaves the picture as it was, and a later reconcile tries again."""
+        self.chain_read_at = now
         rpc = self.client.rpc
         slot = self.rpc_read('slot', rpc.get_slot)
         read_at = time.time()
@@ -935,7 +949,7 @@ class QuoteOptimizer:
             self.resync_due = True
             return False
         changed, dropped = self.feed.resync_quotes(accounts, int(slot), read_at)
-        self.resync_due, self.resynced_at = False, now
+        self.resync_due = False
         if changed or dropped:
             bt.logging.info(
                 f'optimizer: chain read corrected {changed} competitor quote(s) and dropped {dropped} closed one(s)'
@@ -987,7 +1001,7 @@ class QuoteOptimizer:
                 f'SOL balance of {address}', lambda a=address: self.client.rpc.get_balance(a)
             )
         self.feed.seed(quotes, states, bonds, config=config, lamports=lamports)
-        self.resync_quotes(now)  # the API lags the chain: a change just before the reconnect is still old there
+        self.read_chain_quotes(now)  # the API lags the chain: a change just before the reconnect is still old there
         self.seeded_generation, self.reconciled_at = generation, now  # the seed is as fresh as a reconcile
         log_on_change('optimizer.seed', None, 'optimizer: seeded from the allways API; following the feed')
         return True
