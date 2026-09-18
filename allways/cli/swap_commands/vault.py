@@ -126,15 +126,19 @@ def vault_group():
 
 @vault_group.command('recycle', show_disclaimer=True)
 @click.option('--force', is_flag=True, help='Submit even if the pot reads as empty/unreadable.')
-def vault_recycle(force):
+@click.option('--hotkey', 'use_hotkey', is_flag=True, help='Sign with the wallet hotkey (no password — for cron).')
+def vault_recycle(force, use_hotkey):
     """Drain the pot into the SN7 pool (permissionless, caller pays ~0.003 τ).
+
+    [dim]Anyone may call it, so the signer only pays the postage: the wallet COLDKEY by default
+    (that's where the TAO is), --hotkey for unattended runs, ALLWAYS_VAULT_SURI overrides both.[/dim]
 
     [dim]The pot is settled fees PLUS any TAO sent straight to the vault address — donated
     TAO is swept automatically, nobody can move it anywhere else. Fees only fill at true-up
     boundaries / exits / slash surpluses; cron this at a fixed offset AFTER the true-up
     cadence, more often is wasted postage.[/dim]
     """
-    vault = _client()
+    vault = _client(use_coldkey=not use_hotkey)
 
     pot = vault.get_recyclable_pot()
     if pot is not None:

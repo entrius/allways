@@ -42,6 +42,10 @@ DEFAULT_GAS = {'ref_time': 300_000_000_000, 'proof_size': 2_000_000}
 # work; a withdraw measured ref_time 1_105_831_291 / proof_size 104_234 on finney (2026-09-15) and a lock costs no
 # more, so ~2.7x that is headroom without the hold (~0.002 TAO).
 BOND_OP_GAS = {'ref_time': 3_000_000_000, 'proof_size': 300_000}
+# recycle_fees is permissionless and meant for cron, so the same hold must not price out a small signer. It costs
+# more than a bond op (the add_stake_recycle chain extension): a dry-run measured gas_required ref_time
+# 5_307_979_122 / proof_size 85_572 on finney (2026-09-18), so ~3x that.
+RECYCLE_GAS = {'ref_time': 16_000_000_000, 'proof_size': 300_000}
 
 
 class VaultConfigError(Exception):
@@ -115,6 +119,7 @@ class BondVaultClient:
         self.metadata = metadata or codec.VaultMetadata.from_path(metadata_path or str(DEFAULT_METADATA))
         self.gas = gas or DEFAULT_GAS
         self.bond_gas = gas or BOND_OP_GAS
+        self.recycle_gas = gas or RECYCLE_GAS
 
     @classmethod
     def from_config(cls, subtensor, config=None, keypair=None, **kwargs) -> 'BondVaultClient':
@@ -371,7 +376,7 @@ class BondVaultClient:
         return self.submit(self.metadata.call('claim_slash', codec.hash32(swap_ref)), keypair=keypair)
 
     def recycle_fees(self, keypair=None) -> VaultCallResult:
-        return self.submit(self.metadata.call('recycle_fees'), keypair=keypair)
+        return self.submit(self.metadata.call('recycle_fees'), keypair=keypair, gas=self.recycle_gas)
 
     def vote_set_recycle_target(self, hotkey: str, netuid: int, keypair=None) -> VaultCallResult:
         """Move the ``add_stake_recycle`` destination. UNANIMOUS: every current validator must
