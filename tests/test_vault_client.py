@@ -10,7 +10,7 @@ from types import SimpleNamespace
 import pytest
 
 from allways.vault import BondVaultClient, VaultConfigError, codec
-from allways.vault.client import BOND_OP_GAS, DEFAULT_GAS, resolve_metadata_path, resolve_vault_address
+from allways.vault.client import BOND_OP_GAS, DEFAULT_GAS, RECYCLE_GAS, resolve_metadata_path, resolve_vault_address
 
 METADATA = (
     Path(__file__).resolve().parents[1]
@@ -328,6 +328,16 @@ def test_a_miners_withdraw_and_lock_carry_a_measured_gas_limit_not_the_relayer_d
     vault.vote_unlock(BOB, 3)
     assert sub.gas_limits == [BOND_OP_GAS, BOND_OP_GAS, DEFAULT_GAS]
     assert BOND_OP_GAS['ref_time'] >= 2 * 1_105_831_291 and BOND_OP_GAS['proof_size'] >= 2 * 104_234
+
+
+def test_recycle_carries_its_own_measured_gas_limit():
+    # Permissionless and cron-driven, so the DEFAULT_GAS hold must not price out a small signer — but it costs more
+    # than a bond op (the staking chain extension): gas_required ~5.3e9 ref_time / ~8.6e4 proof_size on finney.
+    sub = _WriteSub()
+    BondVaultClient(sub, ALICE, keypair=object()).recycle_fees()
+    assert sub.gas_limits == [RECYCLE_GAS]
+    assert RECYCLE_GAS['ref_time'] >= 2 * 5_307_979_122 and RECYCLE_GAS['proof_size'] >= 2 * 85_572
+    assert RECYCLE_GAS['ref_time'] < DEFAULT_GAS['ref_time'] // 10
 
 
 def _u128(n: int) -> bytes:

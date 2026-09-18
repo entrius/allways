@@ -13,6 +13,7 @@ HOTKEY = '5GrwvaEF5zXb26Fz9rcQpDWS57CtERHpNehXCPcNoHGKutQY'
 
 def _client(monkeypatch, **over):
     client = MagicMock()
+    client.signed_with_coldkey = []
     client.keypair.ss58_address = '5Signer'
     client.get_validators.return_value = VALIDATORS
     client.get_min_collateral.return_value = 250_000_000
@@ -24,7 +25,12 @@ def _client(monkeypatch, **over):
     client.admin_call.return_value = VaultCallResult(ok=True, extrinsic_hash='0xabc')
     for key, value in over.items():
         getattr(client, key).return_value = value
-    monkeypatch.setattr(vault_cli, '_client', lambda use_coldkey=False: client)
+
+    def build(use_coldkey=False):
+        client.signed_with_coldkey.append(use_coldkey)
+        return client
+
+    monkeypatch.setattr(vault_cli, '_client', build)
     return client
 
 
@@ -172,3 +178,25 @@ def test_vault_deposit_takes_amount_flag_and_keeps_post_collateral_alias(monkeyp
         res = CliRunner().invoke(vault_cli.vault_group, [cmd, '--amount', '1.5'])
         assert res.exit_code == 0, res.output
         assert client.post_collateral.call_args.args == (1_500_000_000,)
+
+
+def _recycle(args):
+    return CliRunner().invoke(vault_cli.vault_recycle, args)
+
+
+def test_recycle_signs_with_the_coldkey_by_default(monkeypatch):
+    """Permissionless, so the signer only pays postage — and the TAO lives on the coldkey."""
+    client = _client(monkeypatch, get_recyclable_pot=10**8, get_accumulated_fees=10**8)
+    client.recycle_fees.return_value = VaultCallResult(ok=True, extrinsic_hash='0xabc')
+    result = _recycle([])
+    assert result.exit_code == 0
+    assert client.signed_with_coldkey == [True]
+    client.recycle_fees.assert_called_once()
+
+
+def test_recycle_hotkey_flag_keeps_the_passwordless_signer_for_cron(monkeypatch):
+    client = _client(monkeypatch, get_recyclable_pot=10**8, get_accumulated_fees=10**8)
+    client.recycle_fees.return_value = VaultCallResult(ok=True, extrinsic_hash='0xabc')
+    result = _recycle(['--hotkey'])
+    assert result.exit_code == 0
+    assert client.signed_with_coldkey == [False]
