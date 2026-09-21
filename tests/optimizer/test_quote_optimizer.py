@@ -22,7 +22,7 @@ from solders.pubkey import Pubkey
 from allways.constants import RATE_PRECISION
 from allways.miner.optimizer import attach_optimizer
 from allways.miner.optimizer import quote_optimizer as qo
-from allways.miner.optimizer.market_feed import SYSTEM_PROGRAM, MarketFeed, direction_filter
+from allways.miner.optimizer.market_feed import SYSTEM_PROGRAM, MarketFeed, direction_filter, market_from_das
 from allways.miner.optimizer.market_price import MarketPrices
 from allways.miner.optimizer.quote_optimizer import (
     DEAD_MAN_SECS,
@@ -1036,9 +1036,15 @@ def test_config_defaults_to_disabled_and_validates(tmp_path):
 
     for bad in (
         {'enabled': True, 'crown_band': 0.01},
-        {'lanes': ['sol:btc:sol']},
-        {'lanes': ['sol:tao:btc']},
+        {'lanes': ['sol:eth:sol']},  # not an optimizer chain
+        {'lanes': ['sol:tao:btc']},  # btc can't back a quote
+        {'lanes': ['tao:btc:sol']},  # nor can a hub that isn't on the pair
         {'chain_read_min_secs': -1},
+        {'btc_fee_reserve': -0.1},
+        {'lanes': ['tao:btc:tao'], 'lane_tolerance': {'btc:tao:tao': {'max_worse_than_market_pct': 2}}},  # not managed
+        {'lanes': ['btc:tao:tao'], 'lane_tolerance': {'btc:tao:tao': {'crown_band': 1}}},
+        {'lanes': ['btc:tao:tao'], 'lane_tolerance': {'btc:tao:tao': {'max_better_than_market_pct': -1}}},
+        {'lanes': ['btc:tao:tao'], 'lane_tolerance': ['btc:tao:tao']},
     ):
         path.write_text(json.dumps(bad))
         with pytest.raises(ValueError):
@@ -1102,3 +1108,110 @@ def test_pending_payouts_skip_sent_swaps_and_other_chains():
 def test_payout_reads_the_backing_leg():
     assert payout_for_leg(FORWARD, fixed('0.45'), SOL) == 445_500_000  # SOL leg -> TAO payout, less 1%
     assert payout_for_leg(REVERSE, fixed('0.45'), SOL) == 990_000_000  # the SOL leg IS the payout
+    assert payout_for_leg(TAO_BTC, fixed('0.0022'), TAO) == 217_800  # 1 TAO -> 0.0022 BTC in sats, less 1%
+    assert payout_for_leg(BTC_TAO, fixed('0.0022'), TAO) == 990_000_000  # the TAO leg IS the payout
+
+
+# ─── BTC lanes (a spoke, backed by the TAO purse) ───
+
+
+BTC = 10**8
+TAO_BTC = Lane('tao', 'btc', 'tao')  # higher BTC-per-TAO wins
+BTC_TAO = Lane('btc', 'tao', 'tao')  # lower BTC-per-TAO wins
+BTC_PRICES = {**PRICES, 'btc': 100_000.0}  # 0.0022 BTC per TAO
+FULL_BOND = 2_200_000_000  # backs a 2 TAO fill at the 1.10× reserve
+
+
+def btc_optimizer(tmp_path, lanes=(TAO_BTC,), my_rate='0.0021912', other_rate='0.0022', btc_balance=BTC, **cfg):
+    """Our quote on the first lane plus a rival's, both TAO purses holding a full bond."""
+    quotes = [make_quote(ME, lanes[0], my_rate)]
+    if other_rate is not None:
+        quotes.append(make_quote(OTHER, lanes[0], other_rate))
+    client = FakeClient(quotes=quotes, states=[miner_state(ME), miner_state(OTHER)])
+    balances = {'sol': 1 * SOL, 'tao': 10 * TAO}
+    opt = build(tmp_path, client, balances, lanes=lanes, prices=MarketPrices(pins=BTC_PRICES), **cfg)
+    opt.assets['btc'] = SimpleNamespace(get_balance=lambda _addr: btc_balance)
+    for miner in (ME, OTHER):
+        opt.feed.bonds[(str(miner), 'tao')] = SimpleNamespace(
+            miner=miner, chain='tao', effective_balance=FULL_BOND, locked=True
+        )
+    return opt, client
+
+
+def test_btc_is_opt_in_so_the_default_lanes_stay_on_the_hubs(tmp_path):
+    path = tmp_path / 'optimizer.json'
+    path.write_text(json.dumps({'enabled': True, 'lanes': ['sol:tao:tao', 'tao:btc:tao', 'btc:tao:tao']}))
+    cfg = OptimizerConfig.load(path)
+    assert cfg.lanes == [Lane('sol', 'tao', 'tao'), TAO_BTC, BTC_TAO]
+    assert cfg.chains() == {'sol', 'tao', 'btc'}
+    assert 'btc' not in OptimizerConfig().chains()  # a miner without a BTC provider still starts on the defaults
+
+
+def test_a_btc_lane_follows_the_crown_like_any_other(tmp_path):
+    opt, client = btc_optimizer(tmp_path, my_rate='0.0021')
+    opt.run_once(NOW)
+    edge = band_edge_fixed(fixed('0.0022'), reverse=False)
+    assert edge == fixed('0.0021912')
+    assert client.calls == [('set', TAO_BTC, edge, f'tao-{str(ME)[:6]}', f'btc-{str(ME)[:6]}')]
+
+
+def test_a_btc_wallet_keeps_back_the_payouts_network_fee(tmp_path):
+    payout = payout_for_leg(TAO_BTC, fixed('0.0021912'), 2 * TAO)  # a full 2 TAO fill
+    reserve = 20_000  # the 0.0002 BTC default
+    opt, client = btc_optimizer(tmp_path, btc_balance=payout + reserve)
+    for minute in range(3):
+        opt.run_once(NOW + 60 * minute)
+    assert client.calls == []  # covers the payout and its fee: nothing to do
+
+    opt, client = btc_optimizer(tmp_path, btc_balance=payout + reserve - 1)
+    for minute in range(qo.FUNDING_SHORT_CONFIRM_TICKS):
+        opt.run_once(NOW + 60 * minute)
+    assert client.calls == [('remove', TAO_BTC)]
+    (alert,) = sent_with(opt, 'Wallet short for TAO->BTC [tao]')
+    assert f'Needs: {qo.format_amount(payout + reserve, "btc")}' in alert
+
+
+def test_a_btc_lane_shares_the_tao_wallet_with_the_sol_lanes_in_lanes_order(tmp_path):
+    sol_tao = Lane('sol', 'tao', 'tao')
+    opt, _client = btc_optimizer(tmp_path, lanes=(sol_tao, BTC_TAO), my_rate='0.4500', other_rate=None)
+    opt.feed.note_quote(make_quote(ME, BTC_TAO, '0.0022088'))
+    opt.assets['tao'] = SimpleNamespace(get_balance=lambda _addr: 3 * TAO)  # one full 1.98 TAO payout, not two
+    view = opt.read_view(NOW)
+    mine = {Lane(q.from_chain, q.to_chain, q.collateral_chain): q for q in view.quotes if str(q.miner) == str(ME)}
+    targets = {lane: opt.target_for(view, lane, NOW) for lane in opt.cfg.lanes}
+    funding = opt.plan_funding(view, mine, targets)
+    assert funding[sol_tao].fits and not funding[BTC_TAO].fits  # the earlier lane keeps the wallet
+    assert funding[BTC_TAO].need == 2 * payout_for_leg(BTC_TAO, fixed('0.0022088'), 2 * TAO)
+
+
+def test_lane_tolerance_overrides_the_band_on_one_lane_only(tmp_path):
+    opt, _client = btc_optimizer(
+        tmp_path,
+        lanes=(BTC_TAO, TAO_BTC),
+        other_rate=None,
+        lane_tolerance={'btc:tao:tao': {'max_worse_than_market_pct': 5.0}},
+    )
+    assert opt.cfg.tolerance(BTC_TAO) == (5.0, 1.0)  # better falls back to the global
+    assert opt.cfg.tolerance(TAO_BTC) == (3.5, 1.0)
+    view = opt.read_view(NOW)
+    btc_tao, tao_btc = opt.target_for(view, BTC_TAO, NOW), opt.target_for(view, TAO_BTC, NOW)
+    assert (btc_tao.mode, btc_tao.rate_fixed) == ('lead', lead_rate_fixed(0.0022, reverse=True, max_worse_pct=5.0))
+    assert (tao_btc.mode, tao_btc.rate_fixed) == ('lead', lead_rate_fixed(0.0022, reverse=False, max_worse_pct=3.5))
+    assert 'leading at -5%' in btc_tao.reason
+
+
+def test_api_rows_for_a_btc_pair_read_the_tao_hub_as_the_source():
+    row = {
+        **das_row(OTHER, rate='0.0022', counter='0.00225', backing='tao', collateral=FULL_BOND),
+        'sourceChain': 'tao',
+        'destChain': 'btc',
+        'sourceAddress': 'tao-addr',
+        'destAddress': 'btc-addr',
+    }
+    quotes, states, bonds = market_from_das([row], [TAO_BTC, BTC_TAO], NOW)
+    got = {Lane(q.from_chain, q.to_chain, q.collateral_chain): q for q in quotes}
+    assert got[TAO_BTC].rate == fixed('0.0022') and got[BTC_TAO].rate == fixed('0.00225')
+    assert (got[TAO_BTC].miner_from_addr, got[TAO_BTC].miner_to_addr) == ('tao-addr', 'btc-addr')
+    assert (got[BTC_TAO].miner_from_addr, got[BTC_TAO].miner_to_addr) == ('btc-addr', 'tao-addr')
+    assert bonds[(str(OTHER), 'tao')].effective_balance == FULL_BOND
+    assert states[str(OTHER)].active_backings & pdas.BACKING_BITS['tao']

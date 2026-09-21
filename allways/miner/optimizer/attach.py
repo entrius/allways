@@ -14,7 +14,7 @@ from typing import Optional
 
 import bittensor as bt
 
-from allways.miner.optimizer.balances import TaoBalanceReader
+from allways.miner.optimizer.balances import BtcBalanceReader, TaoBalanceReader
 from allways.miner.optimizer.market_feed import MarketFeed
 from allways.miner.optimizer.miner_api import AllwaysApi, resolve_api_url
 from allways.miner.optimizer.quote_optimizer import (
@@ -44,6 +44,9 @@ def attach_optimizer(miner, config_path: Path = DEFAULT_OPTIMIZER_CONFIG_PATH) -
     assets = dict(miner.assets)
     if 'tao' in assets:
         assets['tao'] = TaoBalanceReader(lambda: bt.Subtensor(config=miner.config))
+    # BTC balances through the provider's Esplora endpoints, but a failed read is unknown — the provider itself says 0.
+    if 'btc' in assets:
+        assets['btc'] = BtcBalanceReader(miner.assets['btc'])
     hotkey = miner.wallet.hotkey.ss58_address
     rpc_url = miner.solana_client.rpc.url
     # Its own client (same RPC, same signer), so the hourly usage line counts the optimizer's calls alone.
