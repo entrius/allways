@@ -148,8 +148,8 @@ validators unlock the bond once nothing is owed on it — then `alw vault withdr
 
 ### Quote Optimizer (opt-in)
 
-Fund the purse and the wallets, post each SOL↔TAO quote once by hand, then let the miner keep them
-priced. No guarantees and not financial advice: you fund it, you own the outcome.
+Fund the purse and the wallets, post each quote once by hand, then let the miner keep them priced —
+SOL↔TAO by default, BTC lanes when you list them (see below). No guarantees and not financial advice: you fund it, you own the outcome.
 
 - **Follow.** Each lane quotes 0.4% under the best other qualifying quote — inside the validators' 0.5% crown
   band, with a 0.1% cushion so a one-tick undercut can't push it out.
@@ -164,13 +164,14 @@ priced. No guarantees and not financial advice: you fund it, you own the outcome
   or your wallet can't cover a full-size fill and a missed one (10% premium) would cost more than the fee, or
   you already carry the last strike your hotkey is allowed.
 - **Funding.** A taker may fill up to what your collateral backs, so each delivery wallet must cover that
-  largest fill on every live lane paying out of it, plus in-flight payouts and the SOL fee reserve. Lanes that
+  largest fill on every live lane paying out of it, plus in-flight payouts and the SOL fee reserve (a BTC wallet also keeps
+  `btc_fee_reserve` back for the payout's own network fee, which leaves the same wallet). Lanes that
   don't fit are pulled, in reverse `lanes` order, and re-posted once the wallet covers them again.
 - **Busy purses** can't be taken until their swap resolves: their rate still updates (free), nothing else is
   done to them, and they claim no second full-size fill.
 - **Data.** Market and wallet state arrive by websocket push on a second connection, seeded from the allways API
   (`api.all-ways.io`, or `test-api` on testnet; `ALLWAYS_API_URL` overrides). It holds a fixed handful of
-  subscriptions whatever the market does: SOL↔TAO quotes (one per direction), every miner's state, bonds, the
+  subscriptions whatever the market does: the managed directions' quotes (one per direction), every miner's state, bonds, the
   program config, your own quotes and your SOL wallets. It renews every 15 minutes, opening the new connection
   before closing the old. A competitor's removed quote pushes nothing, so the API is checked every 5 minutes to
   drop it. Solana RPC is used to send `set_quote` / `remove_quote`, plus a config and SOL-balance read whenever
@@ -197,6 +198,8 @@ Off unless `~/.allways/miner/optimizer.json` sets `enabled`. Under
   "max_worse_than_market_pct": 1.0,
   "repost_buffer_pct": 1.0,
   "sol_fee_reserve": 0.05,
+  "btc_fee_reserve": 0.0002,
+  "lane_tolerance": {},
   "pull_on_shutdown": true,
   "price_usd": {}
 }
@@ -207,6 +210,10 @@ Off unless `~/.allways/miner/optimizer.json` sets `enabled`. Under
 - `max_better_than_market_pct` / `max_worse_than_market_pct` — the market tolerance above.
 - `repost_buffer_pct` — headroom above a full-size fill before a pulled quote comes back, so it doesn't flap.
 - `sol_fee_reserve` — SOL kept aside for transaction fees; below it every lane is pulled.
+- `btc_fee_reserve` — BTC kept aside in a BTC delivery wallet for each payout's network fee.
+- `lane_tolerance` — per-lane overrides of the two tolerances, keyed `from:to:backing`, e.g.
+  `{"btc:tao:tao": {"max_worse_than_market_pct": 3.0}}`: a wider miner-side edge on a lane whose taker leg
+  takes a while to confirm while your rate stays locked. Unset keys fall back to the global pair.
 - `pull_on_shutdown` — a stopped miner still quoting takes strikes; shutdown pulls and the next start re-posts.
 - `price_usd` — pin a USD price per chain instead of the CoinGecko → Coinbase → MEXC feeds.
 - `dry_run` — paper-trade: every managed lane is posted, requoted and pulled on paper against the live market (as
@@ -219,9 +226,18 @@ requotes; a wallet short of a full-size fill (address and amount to send); a pur
 (with the deposit command); a new timeout strike; a dead price feed; failed transactions; and, after a post,
 why that lane is not earning emissions. Routine requotes, a lane switching between following, leading and not
 following, holds and deferred actions only go to the miner log, once per change.
-Any webhook taking a JSON body works (Discord `content`, Slack `text`). Extending to another pair means adding
-its chains to `OPTIMIZER_CHAINS` in `allways/miner/optimizer/quote_optimizer.py` and a price id in
-`allways/miner/optimizer/market_price.py`.
+Any webhook taking a JSON body works (Discord `content`, Slack `text`).
+
+**BTC lanes** are opt-in: list them in `lanes` (`"tao:btc:tao"`, `"btc:tao:tao"`, and `sol:btc:sol` /
+`btc:sol:sol` for the SOL purse) and the default SOL↔TAO lanes are only managed if you list those too. They need the
+miner's BTC provider (`BTC_PRIVATE_KEY`), and like any lane each is posted once by hand first. The BTC wallet's
+balance is read from the same Esplora endpoints the provider sends through, counting mempool coins (a payout may
+spend unconfirmed change); a failed read is unknown, never 0. On a `*->btc` lane you deliver BTC, so the swap waits
+on your payout's confirmations — its fee is the provider's own estimate.
+
+Extending to another pair means adding its chains to `OPTIMIZER_CHAINS` in
+`allways/miner/optimizer/quote_optimizer.py` and a price id in `allways/miner/optimizer/market_price.py`; a chain
+whose provider reports a failed balance read as 0 wants a reader in `allways/miner/optimizer/balances.py`.
 
 It is a strategy bolted onto the base miner, not part of it: everything lives in `allways/miner/optimizer/`,
 and `neurons/miner.py` makes one call, `attach_optimizer(self)`, which does nothing unless `optimizer.json`

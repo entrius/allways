@@ -54,6 +54,7 @@ from allways.constants import (
     CROWN_RATE_BAND,
     ELIGIBILITY_FILL_WINDOW_SECS,
     FEE_DIVISOR,
+    HUB_CHAINS,
     MAX_FAILED_SWAPS,
     RATE_PRECISION,
     RATE_SIG_FIGS,
@@ -69,8 +70,9 @@ from allways.solana.pdas import BACKING_BITS
 from allways.utils.logging import log_on_change
 from allways.utils.rate import apply_fee_deduction, calculate_to_amount, is_executable_rate, quantize_rate_fixed
 
-# Chains the optimizer manages: the two hubs, whose RPCs every miner already runs.
-OPTIMIZER_CHAINS = ('sol', 'tao')
+# Chains the optimizer can manage. The default lanes stay on the hubs (``HUB_CHAINS``), whose RPCs every miner already
+# runs; a spoke lane is managed only when ``lanes`` lists it, and needs that chain's provider on the miner.
+OPTIMIZER_CHAINS = ('sol', 'tao', 'btc')
 OPTIMIZER_TICK_SECONDS = 60
 # The optimizer's thread wakes this often: the dead-man switch and jittered requotes need finer steps than a tick.
 OPTIMIZER_LOOP_SECS = 5
@@ -169,14 +171,13 @@ def parse_lane(spec: str) -> Lane:
 
 
 def default_lanes() -> List[Lane]:
-    """Every lane among the optimizer chains: both directions, each declarable backing."""
+    """Every hub↔hub lane: both directions, each declarable backing. Spoke lanes are opt-in by listing them."""
     return [
-        Lane(a, b, backing)
-        for a in OPTIMIZER_CHAINS
-        for b in OPTIMIZER_CHAINS
-        if a != b
-        for backing in declarable_backings(a, b)
+        Lane(a, b, backing) for a in HUB_CHAINS for b in HUB_CHAINS if a != b for backing in declarable_backings(a, b)
     ]
+
+
+TOLERANCE_KEYS = ('max_better_than_market_pct', 'max_worse_than_market_pct')
 
 
 @dataclass
@@ -193,6 +194,11 @@ class OptimizerConfig:
     max_worse_than_market_pct: float = 1.0
     repost_buffer_pct: float = 1.0
     sol_fee_reserve: float = 0.05
+    # BTC kept aside in a BTC delivery wallet for the payout's own network fee, which comes out of the same wallet.
+    btc_fee_reserve: float = 0.0002
+    # Per-lane overrides of the market tolerance, keyed "from:to:backing" — e.g. a wider miner-side edge on a lane whose
+    # taker leg takes long to confirm while the quoted rate stays locked.
+    lane_tolerance: Dict[str, Dict[str, float]] = field(default_factory=dict)
     pull_on_shutdown: bool = True
     price_usd: Dict[str, float] = field(default_factory=dict)
     # The least time between two chain reads of competitor quotes (getProgramAccounts per managed direction, 10 Helius
@@ -213,6 +219,10 @@ class OptimizerConfig:
             raise ValueError(f'{path}: unknown keys {unknown} (known: {sorted(known)})')
         if 'lanes' in raw:
             raw = {**raw, 'lanes': [parse_lane(spec) for spec in raw['lanes']]}
+        if 'lane_tolerance' in raw:
+            if not isinstance(raw['lane_tolerance'], dict):
+                raise ValueError(f'{path}: lane_tolerance must be an object keyed "from:to:backing"')
+            raw = {**raw, 'lane_tolerance': {parse_lane(k).key: v for k, v in raw['lane_tolerance'].items()}}
         cfg = cls(**raw)
         cfg.validate()
         return cfg
@@ -227,12 +237,31 @@ class OptimizerConfig:
             'max_worse_than_market_pct',
             'repost_buffer_pct',
             'sol_fee_reserve',
+            'btc_fee_reserve',
             'chain_read_min_secs',
         ):
             if float(getattr(self, name)) < 0:
                 raise ValueError(f'optimizer config: {name} must be >= 0')
         if self.max_worse_than_market_pct >= 100:
             raise ValueError('optimizer config: max_worse_than_market_pct must be < 100')
+        managed = {lane.key for lane in self.lanes}
+        for key, override in self.lane_tolerance.items():
+            if key not in managed:
+                raise ValueError(f'optimizer config: lane_tolerance names {key}, which is not in lanes')
+            if not isinstance(override, dict) or set(override) - set(TOLERANCE_KEYS):
+                raise ValueError(f'optimizer config: lane_tolerance[{key}] may only set {", ".join(TOLERANCE_KEYS)}')
+            if any(float(value) < 0 for value in override.values()):
+                raise ValueError(f'optimizer config: lane_tolerance[{key}] values must be >= 0')
+            if float(override.get('max_worse_than_market_pct', 0)) >= 100:
+                raise ValueError(f'optimizer config: lane_tolerance[{key}] max_worse_than_market_pct must be < 100')
+
+    def tolerance(self, lane: Lane) -> Tuple[float, float]:
+        """(max_worse, max_better) % of market for ``lane``: its ``lane_tolerance`` override, else the global pair."""
+        override = self.lane_tolerance.get(lane.key, {})
+        return (
+            float(override.get('max_worse_than_market_pct', self.max_worse_than_market_pct)),
+            float(override.get('max_better_than_market_pct', self.max_better_than_market_pct)),
+        )
 
     def chains(self) -> set:
         return {chain for lane in self.lanes for chain in (lane.from_chain, lane.to_chain)} | {'sol'}
@@ -636,6 +665,13 @@ class QuoteOptimizer:
         label = f'allways miner {hotkey[:8]}' + (' · dry run' if cfg.dry_run else '')
         self.notifier = notifier or WebhookNotifier(cfg.webhook_url, label)
         self.reserve_lamports = int(round(cfg.sol_fee_reserve * 10 ** get_chain_def('sol').decimals))
+        # What each delivery wallet keeps back from payouts: SOL for every transaction the miner sends, BTC for the
+        # payout's own network fee (it leaves the same wallet). A chain not listed keeps none (a TAO transfer costs
+        # about 0.0001 TAO).
+        self.fee_reserves = {
+            'sol': self.reserve_lamports,
+            'btc': int(round(cfg.btc_fee_reserve * 10 ** get_chain_def('btc').decimals)),
+        }
         self.last_tick = 0
         self.started = False
         # Idle: nothing standing and nothing to re-post, so the feed is closed; checked against the API meanwhile.
@@ -703,12 +739,18 @@ class QuoteOptimizer:
         self.idle, self.idle_checked_at = True, None  # the first step opens the feed if there is anything to manage
         worse, better = self.cfg.max_worse_than_market_pct, self.cfg.max_better_than_market_pct
         dry = self.cfg.dry_run
+        overrides = [
+            f'`{lane.label}` -{self.cfg.tolerance(lane)[0]:g}% to +{self.cfg.tolerance(lane)[1]:g}%'
+            for lane in self.cfg.lanes
+            if lane.key in self.cfg.lane_tolerance
+        ]
         message = '\n'.join(
             [
                 f'Miner quote optimizer running{" in dry run" if dry else ""}',
                 f'**Mode:** {"dry run — paper-trades every lane, sends no transactions" if dry else "live"}',
                 f'**Lanes:** {" · ".join(f"`{lane.label}`" for lane in self.cfg.lanes)}',
                 f'**Tolerance:** follows the crown from -{worse:g}% to +{better:g}% of market',
+                *([f'**Lane tolerance:** {" · ".join(overrides)}'] if overrides else []),
             ]
         )
         bt.logging.success(plain(message))
@@ -1145,7 +1187,7 @@ class QuoteOptimizer:
         market = self.market_rate(lane, now)
         if market is None:
             return Target(None, None, None, NO_PRICE_REASON)
-        worse, better = self.cfg.max_worse_than_market_pct, self.cfg.max_better_than_market_pct
+        worse, better = self.cfg.tolerance(lane)
         anchor = best_other_rate(view, lane, self.me)
         if anchor is not None:
             edge = band_edge_fixed(anchor, lane.reverse)
@@ -1172,7 +1214,8 @@ class QuoteOptimizer:
         config order, each at its largest fundable fill; pulled lanes are re-postable only into what is
         left, with the buffer on top. A busy purse can't be taken again until its swap resolves, so its
         lanes claim nothing past the payout already in flight. The SOL wallet also keeps the fee reserve —
-        without it no ``mark_fulfilled`` lands, so a short fee payer fails every lane."""
+        without it no ``mark_fulfilled`` lands, so a short fee payer fails every lane — and a BTC wallet keeps
+        its own, since a BTC payout's network fee is spent from the wallet that sends it."""
         groups: Dict[Tuple[str, str], List[Tuple[Lane, int, bool]]] = defaultdict(list)
         for lane in self.cfg.lanes:
             quote = mine.get(lane)
@@ -1189,7 +1232,7 @@ class QuoteOptimizer:
         out: Dict[Lane, Funding] = {}
         for (chain, address), entries in groups.items():
             balance = self.balance(view, chain, address)
-            committed = self.pending_payouts(chain) + (self.reserve_lamports if chain == 'sol' else 0)
+            committed = self.pending_payouts(chain) + self.fee_reserves.get(chain, 0)
             for lane, rate, live in sorted(entries, key=lambda e: not e[2]):
                 leg = 0 if view.busy(self.me, lane.backing) else max_fill_leg(view, self.me, lane.backing)
                 total = committed + payout_for_leg(lane, rate, leg)
@@ -1226,7 +1269,7 @@ class QuoteOptimizer:
         fee = quote_update_fee_lamports(view.now - int(quote.updated_at))
         busy = view.busy(self.me, lane.backing)
         funded = funding is not None and funding.fits
-        better = self.cfg.max_better_than_market_pct
+        better = self.cfg.tolerance(lane)[1]
         if funded:
             self.short_ticks.pop(lane, None)
             self.notifier.resolve(
@@ -1368,7 +1411,7 @@ class QuoteOptimizer:
             if not view.busy(str(q.miner), lane.backing) and better_for_taker(int(q.rate), rate, lane.reverse):
                 return False
         value = self.to_lamports(max_fill_leg(view, self.me, lane.backing), lane.backing)
-        return value is not None and value * (drift - self.cfg.max_better_than_market_pct) / 100 >= fee
+        return value is not None and value * (drift - self.cfg.tolerance(lane)[1]) / 100 >= fee
 
     def defer(self, lane: Lane, quote, why: str) -> None:
         free_at = time.strftime('%H:%M UTC', time.gmtime(int(quote.updated_at) + QUOTE_UPDATE_FREE_AFTER_SECS))
@@ -1458,11 +1501,11 @@ class QuoteOptimizer:
         self.eligibility_due[lane] = view.now + ELIGIBILITY_CHECK_DELAY_SECS
         return True
 
-    def describe_mode(self, mode: Optional[str]) -> str:
+    def describe_mode(self, lane: Lane, mode: Optional[str]) -> str:
         if mode == 'follow':
             return 'following the crown'
         if mode == 'lead':
-            return f'leading at -{self.cfg.max_worse_than_market_pct:g}%'
+            return f'leading at -{self.cfg.tolerance(lane)[0]:g}%'
         return 'not following'
 
     def watch_modes(self, targets: Dict[Lane, Target]) -> None:
@@ -1472,7 +1515,9 @@ class QuoteOptimizer:
             if target.reason == NO_PRICE_REASON:
                 continue
             if lane in self.modes and self.modes[lane] != target.mode:
-                bt.logging.info(f'optimizer: {lane.label} is now {self.describe_mode(target.mode)}: {target.reason}')
+                bt.logging.info(
+                    f'optimizer: {lane.label} is now {self.describe_mode(lane, target.mode)}: {target.reason}'
+                )
             self.modes[lane] = target.mode
 
     # ─── helpers ───
