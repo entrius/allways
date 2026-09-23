@@ -3,6 +3,7 @@ import os
 from dataclasses import dataclass
 
 from allways.constants import (
+    ALPHA_NETUIDS,
     EXTENSION_BUCKET_SECONDS,
     EXTENSION_PADDING_SECONDS,
     hub_leg,
@@ -524,7 +525,6 @@ CHAIN_PAXG = ChainDefinition(
 # hand-written row per subnet would be 128 copies of one paragraph. Registered != launched —
 # LAUNCH_ALPHAS decides which of these actually get pairs.
 # Root (netuid 0) is TAO itself, not an alpha, so the range starts at 1.
-ALPHA_NETUIDS = range(1, 129)  # SubnetLimit on finney; a netuid outside it cannot exist
 
 
 def alpha_chain_def(netuid: int) -> ChainDefinition:

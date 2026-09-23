@@ -131,6 +131,10 @@ def declarable_backings(from_chain: str, to_chain: str) -> list[str]:
     return [hub for hub in HUB_CHAINS if hub in {family(from_chain), family(to_chain)}]
 
 
+SUBNET_LIMIT = 128  # SubtensorModule::SubnetLimit — no netuid above this can exist
+# Netuid 0 is root (TAO itself, not an alpha), so alphas start at 1 and run through SUBNET_LIMIT.
+ALPHA_NETUIDS = range(1, SUBNET_LIMIT + 1)
+
 # Chains paired against each hub; add a chain here to launch its pairs.
 LAUNCH_SPOKES = (
     'btc',
@@ -152,10 +156,9 @@ LAUNCH_SPOKES = (
     'solusdc',
 )
 # Alpha tokens paired against each hub; add a subnet here to launch its pairs.
-LAUNCH_ALPHAS = (
-    'sn7',
-    'sn74',
-)
+# Every registered subnet alpha launches. A subnet whose transfers are off is the MINER's problem —
+# it should not quote one — not a list we curate here and re-curate on every registration.
+LAUNCH_ALPHAS: tuple[str, ...] = tuple(f'sn{n}' for n in ALPHA_NETUIDS)
 # Every launch pair in canonical order: each hub against every spoke and alpha (sol↔tao lands once,
 # under SOL, because sol never appears in LAUNCH_SPOKES). Alpha↔spoke pairs are gated on the
 # emissions redesign and deliberately absent.
