@@ -519,34 +519,37 @@ CHAIN_PAXG = ChainDefinition(
     fee_check='getFeeFor(uint256)',
 )
 
-CHAIN_SN7 = ChainDefinition(
-    id='sn7',
-    name='Subnet 7 Alpha',
-    native_unit='rao',
-    decimals=9,
-    # Bittensor's prefix, shared with CHAIN_TAO: one TAO_* config serves every subtensor asset.
-    env_prefix='TAO',
-    # CHAIN_TAO's clock and reorg depth, deliberately identical — three assets on one chain must
-    # not disagree about either.
-    seconds_per_block=12,
-    min_confirmations=6,
-    # 1.0 alpha: a rate-sanity floor that can only over-restrict, never slash.
-    min_onchain_amount=1_000_000_000,
-    netuid=7,
-    backing_family='tao',
-)
-CHAIN_SN74 = ChainDefinition(
-    id='sn74',
-    name='Subnet 74 Alpha',
-    native_unit='rao',
-    decimals=9,
-    env_prefix='TAO',
-    seconds_per_block=12,
-    min_confirmations=6,
-    min_onchain_amount=1_000_000_000,
-    netuid=74,
-    backing_family='tao',
-)
+# ─── Subnet alpha ────────────────────────────────────────
+# One row per netuid, generated: every alpha is the same asset with a different netuid, so a
+# hand-written row per subnet would be 128 copies of one paragraph. Registered != launched —
+# LAUNCH_ALPHAS decides which of these actually get pairs.
+# Root (netuid 0) is TAO itself, not an alpha, so the range starts at 1.
+ALPHA_NETUIDS = range(1, 129)  # SubnetLimit on finney; a netuid outside it cannot exist
+
+
+def alpha_chain_def(netuid: int) -> ChainDefinition:
+    """The ChainDefinition for one subnet's alpha. Every field a subtensor fact, so they are
+    identical across netuids — three assets on one chain must not disagree about its clock."""
+    return ChainDefinition(
+        id=f'sn{netuid}',
+        name=f'Subnet {netuid} Alpha',
+        native_unit='rao',
+        decimals=9,
+        # Bittensor's prefix, shared with CHAIN_TAO: one TAO_* config serves every subtensor asset.
+        env_prefix='TAO',
+        # CHAIN_TAO's clock and reorg depth, deliberately identical.
+        seconds_per_block=12,
+        min_confirmations=6,
+        # 1.0 alpha: a rate-sanity floor that can only over-restrict, never slash.
+        min_onchain_amount=1_000_000_000,
+        netuid=netuid,
+        backing_family='tao',
+    )
+
+
+ALPHA_CHAINS: dict[str, ChainDefinition] = {f'sn{n}': alpha_chain_def(n) for n in ALPHA_NETUIDS}
+CHAIN_SN7 = ALPHA_CHAINS['sn7']
+CHAIN_SN74 = ALPHA_CHAINS['sn74']
 
 SUPPORTED_CHAINS = {
     'btc': CHAIN_BTC,
@@ -567,8 +570,7 @@ SUPPORTED_CHAINS = {
     'polusdc': CHAIN_POLUSDC,
     'paxg': CHAIN_PAXG,
     'solusdc': CHAIN_SOLUSDC,
-    'sn7': CHAIN_SN7,
-    'sn74': CHAIN_SN74,
+    **ALPHA_CHAINS,
 }
 
 

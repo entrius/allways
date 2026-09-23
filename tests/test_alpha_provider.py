@@ -4,11 +4,11 @@ from types import SimpleNamespace
 
 import pytest
 
-from allways.assets import ASSET_REGISTRY, Sn7, Sn74
+from allways.assets import ASSET_REGISTRY
 from allways.assets.alpha import Alpha
 from allways.assets.asset import ProviderUnreachableError
 from allways.assets.tao import Tao
-from allways.chains import CHAIN_SN7
+from allways.chains import ALPHA_NETUIDS, CHAIN_SN7, CHAIN_SN74
 from allways.constants import CANCEL_REASON_ALPHA_TRANSFER_DISABLED
 
 MINER = 'minerCold'
@@ -72,7 +72,7 @@ def _settled_events(idx=0, tao_amount=123):
 
 
 def _provider(*, exts=None, events=None, block_time=1_700_000_000, wallet=None):
-    p = Sn7(SimpleNamespace(get_current_block=lambda: HEAD), wallet)
+    p = Alpha(CHAIN_SN7, SimpleNamespace(get_current_block=lambda: HEAD), wallet)
     block = {'extrinsics': [_ext()] if exts is None else exts}
     p.chain.get_block = lambda n: block if n == BLOCK else {'extrinsics': []}
     p.chain.get_block_hash = lambda n: f'0xblock{n}'
@@ -90,11 +90,14 @@ def _verify(p, amount=5_000):
 
 def test_alphas_are_registered_and_bind_the_tao_chain():
     ids = {spec.chain_id: spec for spec in ASSET_REGISTRY}
-    assert ids['sn7'].cls is Sn7 and ids['sn74'].cls is Sn74
+    # Every netuid is registered, each bound to its own ChainDefinition and nothing else.
+    assert {f'sn{n}' for n in ALPHA_NETUIDS} <= set(ids)
+    assert ids['sn7'].cls.func is Alpha and ids['sn7'].cls.args == (CHAIN_SN7,)
+    assert ids['sn74'].cls.args == (CHAIN_SN74,)
     assert ids['sn7'].kwarg_names == ids['tao'].kwarg_names
-    p = Sn7(SimpleNamespace())
+    p = Alpha(CHAIN_SN7, SimpleNamespace())
     assert isinstance(p, Alpha) and isinstance(p.chain, Tao) and p.netuid == 7
-    assert Sn74(SimpleNamespace()).netuid == 74
+    assert Alpha(CHAIN_SN74, SimpleNamespace()).netuid == 74
 
 
 # ─── verification ───────────────────────────────────────────────────────────
@@ -102,7 +105,7 @@ def test_alphas_are_registered_and_bind_the_tao_chain():
 
 def test_real_extrinsic_shape_decodes_with_its_hash():
     """substrate.get_block yields GenericExtrinsic objects: the hash lives on the object, not in .value."""
-    assert Sn7(SimpleNamespace()).decode_transfer_stake(_ext(), False) == (TXID, MINER, 5_000, USER)
+    assert Alpha(CHAIN_SN7, SimpleNamespace()).decode_transfer_stake(_ext(), False) == (TXID, MINER, 5_000, USER)
 
 
 def test_amount_comes_from_the_call_not_the_event():
@@ -181,11 +184,11 @@ def _stake(hotkey, rao, netuid=NETUID):
 
 def test_get_balance_sums_this_netuid_across_hotkeys():
     stakes = [_stake('hk1', 100), _stake('hk2', 250), _stake('hk3', 999, netuid=NETUID + 1)]
-    assert Sn7(SimpleNamespace(get_stake_info_for_coldkey=lambda ck: stakes)).get_balance(MINER) == 350
+    assert Alpha(CHAIN_SN7, SimpleNamespace(get_stake_info_for_coldkey=lambda ck: stakes)).get_balance(MINER) == 350
 
 
 def test_value_rao_floors_and_raises_on_failure():
-    p = Sn7(SimpleNamespace(get_subnet_price=lambda netuid: SimpleNamespace(rao=333_333_333)))
+    p = Alpha(CHAIN_SN7, SimpleNamespace(get_subnet_price=lambda netuid: SimpleNamespace(rao=333_333_333)))
     assert p.value_rao(3) == 0
     assert p.value_rao(3_000_000_000) == 999_999_999
 
@@ -193,30 +196,38 @@ def test_value_rao_floors_and_raises_on_failure():
         raise RuntimeError('rpc down')
 
     with pytest.raises(ProviderUnreachableError):
-        Sn7(SimpleNamespace(get_subnet_price=boom)).value_rao(1)
+        Alpha(CHAIN_SN7, SimpleNamespace(get_subnet_price=boom)).value_rao(1)
 
 
 # ─── delivery gates ─────────────────────────────────────────────────────────
 
 
-def _toggles(transfer=True, subtoken=True):
-    flags = {'TransferToggle': transfer, 'SubtokenEnabled': subtoken}
+def _toggles(transfer=True, subtoken=True, exists=True):
+    flags = {'TransferToggle': transfer, 'SubtokenEnabled': subtoken, 'NetworksAdded': exists}
     return SimpleNamespace(substrate=SimpleNamespace(query=lambda m, name, params: flags[name]))
 
 
 def test_cancel_evidence_on_transfer_toggle_off():
-    assert Sn7(_toggles(transfer=False)).cancel_evidence(MINER, 1) == CANCEL_REASON_ALPHA_TRANSFER_DISABLED
-    assert Sn7(_toggles(subtoken=False)).cancel_evidence(MINER, 1) == CANCEL_REASON_ALPHA_TRANSFER_DISABLED
-    assert Sn7(_toggles()).cancel_evidence(MINER, 1) is None
-    assert Sn7(_toggles(transfer=False)).can_deliver_to(MINER, 1) is False
-    assert Sn7(_toggles(transfer=False)).delivery_refused(MINER, 0) is True
+    assert Alpha(CHAIN_SN7, _toggles(transfer=False)).cancel_evidence(MINER, 1) == CANCEL_REASON_ALPHA_TRANSFER_DISABLED
+    assert Alpha(CHAIN_SN7, _toggles(subtoken=False)).cancel_evidence(MINER, 1) == CANCEL_REASON_ALPHA_TRANSFER_DISABLED
+    assert Alpha(CHAIN_SN7, _toggles()).cancel_evidence(MINER, 1) is None
+    assert Alpha(CHAIN_SN7, _toggles(transfer=False)).can_deliver_to(MINER, 1) is False
+    assert Alpha(CHAIN_SN7, _toggles(transfer=False)).delivery_refused(MINER, 0) is True
+
+
+def test_a_pruned_subnet_is_not_deliverable():
+    """SubnetLimit is full, so a registration dissolves the lowest-priced subnet and its alpha is
+    force-liquidated to coldkey TAO — the miner cannot deliver, and that is not its fault."""
+    gone = _toggles(exists=False)
+    assert Alpha(CHAIN_SN7, gone).can_deliver_to(MINER, 1) is False
+    assert Alpha(CHAIN_SN7, gone).cancel_evidence(MINER, 1) == CANCEL_REASON_ALPHA_TRANSFER_DISABLED
 
 
 def test_unreadable_toggle_is_not_evidence():
     def boom(*a, **k):
         raise RuntimeError('rpc down')
 
-    p = Sn7(SimpleNamespace(substrate=SimpleNamespace(query=boom)))
+    p = Alpha(CHAIN_SN7, SimpleNamespace(substrate=SimpleNamespace(query=boom)))
     assert p.can_deliver_to(MINER, 1) is True
     assert p.delivery_refused(MINER, 0) is False
     assert p.cancel_evidence(MINER, 1) is None
@@ -244,7 +255,7 @@ def _sender(stakes, *, response=None, calls=None):
         transfer_stake=transfer_stake,
         substrate=SimpleNamespace(get_block_number=lambda h: BLOCK),
     )
-    p = Sn7(subtensor, _Wallet())
+    p = Alpha(CHAIN_SN7, subtensor, _Wallet())
     p.chain.get_block = lambda n: {'extrinsics': []}
     p.chain.get_block_hash = lambda n: f'0xblock{n}'
     return p, calls

@@ -1,4 +1,5 @@
-from typing import Dict, NamedTuple, Optional, Set, Tuple, Type
+from functools import partial
+from typing import Callable, Dict, NamedTuple, Optional, Set, Tuple, Type
 
 import bittensor as bt
 
@@ -21,13 +22,12 @@ from allways.assets.paxg import Paxg
 from allways.assets.pol import Pol
 from allways.assets.polusdc import PolUsdc
 from allways.assets.qnt import Qnt
-from allways.assets.sn7 import Sn7
-from allways.assets.sn74 import Sn74
 from allways.assets.sol import Sol, SolanaChain
 from allways.assets.solusdc import SolUsdc
 from allways.assets.spl_token import SplToken
 from allways.assets.tao import Tao
 from allways.assets.uni import Uni
+from allways.chains import ALPHA_CHAINS
 
 __all__ = [
     'Asset',
@@ -58,8 +58,6 @@ __all__ = [
     'SplToken',
     'SolUsdc',
     'Alpha',
-    'Sn7',
-    'Sn74',
     'create_assets',
 ]
 
@@ -69,8 +67,13 @@ class AssetSpec(NamedTuple):
     in code it resolves to an Asset built as ``cls(**forwarded create_assets kwargs)``."""
 
     chain_id: str
-    cls: Type[Asset]
+    cls: Callable[..., Asset]  # a class, or a partial binding one to its ChainDefinition
     kwarg_names: Tuple[str, ...]  # create_assets kwargs this asset's constructor takes
+
+    @property
+    def asset_cls(self) -> Type[Asset]:
+        """The class behind ``cls`` — itself, or the one a partial binds. For family checks."""
+        return getattr(self.cls, 'func', self.cls)
 
 
 ASSET_REGISTRY: Tuple[AssetSpec, ...] = (
@@ -92,8 +95,12 @@ ASSET_REGISTRY: Tuple[AssetSpec, ...] = (
     AssetSpec('polusdc', PolUsdc, ()),
     AssetSpec('paxg', Paxg, ()),
     AssetSpec('solusdc', SolUsdc, ('solana_rpc_url', 'solana_keypair')),
-    AssetSpec('sn7', Sn7, ('subtensor', 'wallet')),
-    AssetSpec('sn74', Sn74, ('subtensor', 'wallet')),
+    # One row per subnet alpha, bound to its ChainDefinition. `partial` is the binding a
+    # per-netuid subclass used to be: same class, different netuid, no file each.
+    *(
+        AssetSpec(chain_id, partial(Alpha, chain_def), ('subtensor', 'wallet'))
+        for chain_id, chain_def in ALPHA_CHAINS.items()
+    ),
 )
 
 

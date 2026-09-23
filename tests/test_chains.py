@@ -145,7 +145,7 @@ class TestGetChain:
         only None is undeclared, and a token row must never be None."""
         for spec in ASSET_REGISTRY:
             declared = get_chain_def(spec.chain_id).refusal_checks is not None
-            assert declared is issubclass(spec.cls, Erc20), spec.chain_id
+            assert declared is issubclass(spec.asset_cls, Erc20), spec.chain_id
 
     def test_only_self_hosted_assets_lack_a_host_chain(self):
         """btc/tao/sol ARE their own network; every hosted row names the network it rides — an
@@ -175,7 +175,7 @@ class TestGetChain:
 
         from allways.assets.spl_token import SplToken
 
-        rows = [get_chain_def(spec.chain_id) for spec in ASSET_REGISTRY if issubclass(spec.cls, SplToken)]
+        rows = [get_chain_def(spec.chain_id) for spec in ASSET_REGISTRY if issubclass(spec.asset_cls, SplToken)]
         assert CHAIN_SOLUSDC in rows
         for chain in rows:
             assert chain.host_chain == 'solana', chain.id

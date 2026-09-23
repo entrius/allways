@@ -165,10 +165,17 @@ class Alpha(Asset):
             return 0
 
     def transfers_enabled(self) -> bool:
-        """TransferToggle ∧ SubtokenEnabled for this netuid; raises on a read failure."""
+        """Whether this alpha can move at all: the subnet exists, its token was started, and
+        transfers are on. Raises on a read failure.
+
+        NetworksAdded covers the prune case — SubnetLimit is full, so registering a subnet
+        dissolves the lowest-priced one, and its alpha is force-liquidated to coldkey TAO.
+        SubtokenEnabled is false until the owner calls start_call, and never returns to false.
+        TransferToggle is flippable by the owner (or root) at any block, so it is re-read here
+        rather than cached — it is the only one of the three that can turn off mid-swap."""
         flags = (
             self.subtensor.substrate.query('SubtensorModule', name, [self.netuid])
-            for name in ('TransferToggle', 'SubtokenEnabled')
+            for name in ('NetworksAdded', 'SubtokenEnabled', 'TransferToggle')
         )
         return all(bool(getattr(flag, 'value', flag)) for flag in flags)
 
