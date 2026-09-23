@@ -206,6 +206,20 @@ def covers_leg(collateral_amount: int, cover: int) -> bool:
     return int(collateral_amount) * 10_000 >= int(cover) * (10_000 - ALPHA_COVER_TOLERANCE_BPS)
 
 
+def transfers_off_reason(from_chain: str, to_chain: str, providers: Dict) -> Optional[str]:
+    """Why the pair cannot settle because a leg's asset has transfers switched off chain-wide, else None.
+    An unreadable switch fails open: the settlement deferral, not reserve, is the boundary."""
+    for chain in (from_chain, to_chain):
+        provider = providers.get(chain)
+        try:
+            if provider is None or provider.transfers_enabled():
+                continue
+        except ProviderUnreachableError:
+            continue
+        return f'{chain.upper()} transfers are switched off on-chain; {from_chain.upper()}→{to_chain.upper()} cannot settle'
+    return None
+
+
 def compute_intake_amounts(
     from_chain: str,
     to_chain: str,
