@@ -28,6 +28,7 @@ from allways.cli.swap_commands.swap_intake import (
     rate_display_from_fixed,
     select_best_miner,
     swap_viable,
+    transfers_off_reason,
     unviable_reason,
     viable_intakes,
 )
@@ -225,6 +226,9 @@ def reserve_on_behalf(
         )
         if missing:
             return ReserveResult(False, f'this validator cannot verify {missing} right now')
+    off = transfers_off_reason(from_chain, to_chain, providers)
+    if off:
+        return ReserveResult(False, f'{off} — reservation refused, no funds moved')
     if provider is not None:
         # Validity only: NOT a deliverability prediction. Reserve-time deliverability isn't a security
         # boundary (a dest can pass here then revert later via 7702/conditional code); the sound check is

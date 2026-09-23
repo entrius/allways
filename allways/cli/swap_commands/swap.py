@@ -52,6 +52,7 @@ from allways.cli.swap_commands.swap_intake import (
     rate_display_from_fixed,
     select_best_miner,
     to_smallest_units,
+    transfers_off_reason,
     unviable_reason,
     viable_intakes,
 )
@@ -706,13 +707,16 @@ def _screen_deliverability(
     courtesy warning only — a frozen source just means the deposit fails and the reservation
     lapses unclaimed. A leg whose provider can't be built read-only fails open, as before."""
     dest_provider = gate_provider(to_chain, client, subtensor)
+    src_provider = gate_provider(from_chain, client, subtensor)
+    off = transfers_off_reason(from_chain, to_chain, {from_chain: src_provider, to_chain: dest_provider})
+    if off:
+        fail(f'  {off}. Reservation refused. No funds moved.')
     quote = client.get_quote(cand.miner, from_chain, to_chain, cand.backing)
     if dest_provider is not None:
         # Validity only — deliverability is NOT predicted at reserve time (not a boundary; the sound
         # check is the delivery-time reverted-tx proof). A malformed address can never be delivered to.
         if not dest_provider.chain.is_valid_address(receive_addr):
             fail(f'  {receive_addr!r} is not a valid {to_chain.upper()} address. No funds moved.')
-    src_provider = gate_provider(from_chain, client, subtensor)
     if src_provider is None:
         return
     miner_addr = getattr(quote, 'miner_from_addr', '') if quote else ''

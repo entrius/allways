@@ -481,12 +481,16 @@ def test_deadline_notice_never_shows_negative_runway():
 
 
 class _Gate:
-    def __init__(self, reject=(), malformed=()):
+    def __init__(self, reject=(), malformed=(), enabled=True):
+        self.enabled = enabled
         self.reject = set(reject)
         self.checked = []
         self.chain = types.SimpleNamespace(
             is_valid_address=lambda addr: addr not in set(malformed), normalize_address=lambda addr: addr
         )
+
+    def transfers_enabled(self):
+        return self.enabled
 
     def can_deliver_to(self, addr, amount, from_address=None):
         self.checked.append(addr)
@@ -510,6 +514,13 @@ def test_screen_does_not_probe_or_block_undeliverable_receive_address():
     # fat-finger UX moved to the client app. Validity is still screened (test below).
     gate = _screen(_Gate(reject={'recvaddr'}), 'sol', 'arbusdc')
     assert 'recvaddr' not in gate.checked
+
+
+def test_screen_refuses_a_pair_whose_transfers_are_switched_off():
+    import pytest
+
+    with pytest.raises(SystemExit):
+        _screen(_Gate(enabled=False), 'sol', 'sn12')
 
 
 def test_screen_blocks_rejecting_miner_receive_address():
