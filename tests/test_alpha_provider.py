@@ -271,7 +271,7 @@ class _Wallet:
     coldkeypub = SimpleNamespace(ss58_address=MINER)
 
 
-def _sender(stakes, *, response=None, calls=None, recipient_hotkeys=()):
+def _sender(stakes, *, response=None, calls=None, recipient_hotkeys=(), locked=0):
     calls = [] if calls is None else calls
     receipt = SimpleNamespace(extrinsic_hash=TXID, block_hash='0xincl')
     landed = SimpleNamespace(success=True, message='', extrinsic=_ext(), extrinsic_receipt=receipt)
@@ -293,6 +293,7 @@ def _sender(stakes, *, response=None, calls=None, recipient_hotkeys=()):
         substrate=SimpleNamespace(
             get_block_number=lambda h: BLOCK,
             query=lambda m, name, params: list(recipient_hotkeys) if name == 'StakingHotkeys' else True,
+            query_map=lambda m, name, params: [('hk', {'locked_mass': locked})] if locked else [],
         ),
     )
     p = Alpha(CHAIN_SN7, subtensor, _Wallet())
@@ -416,3 +417,17 @@ def test_an_unreadable_stake_does_not_block_the_swap():
         raise ConnectionError('rpc down')
 
     assert Alpha(CHAIN_SN7, SimpleNamespace(get_stake_info_for_coldkey=boom)).send_blocker(USER, MINER, 1) is None
+
+
+def test_locked_alpha_is_never_delivered_or_swapped():
+    """Past the unlocked balance a transfer drags the conviction lock to the recipient: refused by default,
+    illiquid for months where accepted. Both the miner's send and the taker's reserve refuse it."""
+    p, calls = _sender([_stake('big', 9 * 10**9)], locked=5 * 10**9)
+    assert p.unlocked(MINER) == 4 * 10**9
+    assert p.send_amount(USER, 5 * 10**9, dedup_key='swap-1') is None
+    assert calls == []
+    assert p.send_blocker(USER, MINER, 5 * 10**9) == (
+        'only 4 of your SN7 is unlocked and 5 is needed; locked alpha cannot be swapped'
+    )
+    assert p.send_blocker(USER, MINER, 4 * 10**9) is None
+    assert p.send_amount(USER, 4 * 10**9, dedup_key='swap-2') == (TXID, BLOCK)
