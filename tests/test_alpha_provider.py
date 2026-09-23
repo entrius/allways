@@ -71,8 +71,16 @@ def _settled_events(idx=0, tao_amount=123):
     ]
 
 
-def _provider(*, exts=None, events=None, block_time=1_700_000_000, wallet=None):
-    p = Alpha(CHAIN_SN7, SimpleNamespace(get_current_block=lambda: HEAD), wallet)
+def _availability(available):
+    """StakeInfoRuntimeApi.get_stake_availability_for_coldkeys, answering for whichever coldkey is asked."""
+    return lambda api, method, params, block_hash=None: {params[0][0]: {NETUID: {'available': available}}}
+
+
+def _provider(*, exts=None, events=None, block_time=1_700_000_000, wallet=None, available=10**18):
+    subtensor = SimpleNamespace(
+        get_current_block=lambda: HEAD, substrate=SimpleNamespace(runtime_call=_availability(available))
+    )
+    p = Alpha(CHAIN_SN7, subtensor, wallet)
     block = {'extrinsics': [_ext()] if exts is None else exts}
     p.chain.get_block = lambda n: block if n == BLOCK else {'extrinsics': []}
     p.chain.get_block_hash = lambda n: f'0xblock{n}'
@@ -293,7 +301,7 @@ def _sender(stakes, *, response=None, calls=None, recipient_hotkeys=(), locked=0
         substrate=SimpleNamespace(
             get_block_number=lambda h: BLOCK,
             query=lambda m, name, params: list(recipient_hotkeys) if name == 'StakingHotkeys' else True,
-            query_map=lambda m, name, params: [('hk', {'locked_mass': locked})] if locked else [],
+            runtime_call=_availability(sum(int(s.stake.rao) for s in stakes if int(s.netuid) == NETUID) - locked),
         ),
     )
     p = Alpha(CHAIN_SN7, subtensor, _Wallet())
@@ -359,7 +367,7 @@ def test_whole_position_sentinel_is_not_an_amount():
     p = Alpha(CHAIN_SN7, SimpleNamespace())
     assert p.decode_transfer_stake(_ext(alpha=2**64 - 1), False) is None
     assert _verify(_provider(exts=[_ext(alpha=2**64 - 1)]), amount=1) is None
-    assert _verify(_provider(exts=[_ext(alpha=2**64 - 2)]), amount=1).amount == 2**64 - 2
+    assert _verify(_provider(exts=[_ext(alpha=2**64 - 2)], available=2**64), amount=1).amount == 2**64 - 2
 
 
 FULL = [f'hk{i}' for i in range(128)]  # a recipient at subtensor's StakingHotkeys cap
@@ -431,3 +439,10 @@ def test_locked_alpha_is_never_delivered_or_swapped():
     )
     assert p.send_blocker(USER, MINER, 4 * 10**9) is None
     assert p.send_amount(USER, 4 * 10**9, dedup_key='swap-2') == (TXID, BLOCK)
+
+
+def test_a_delivery_that_carried_a_conviction_lock_is_not_a_payment():
+    """The validator's rule, not the miner's: a transfer past the sender's unlocked alpha (read the block
+    before, so the recipient cannot frame the sender) drags the lock to the recipient — never credited."""
+    assert _verify(_provider(available=5_000), amount=5_000) is not None
+    assert _verify(_provider(available=4_999), amount=5_000) is None
