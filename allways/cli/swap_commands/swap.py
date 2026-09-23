@@ -46,6 +46,7 @@ from allways.cli.swap_commands.swap_intake import (
     bounds_from_config,
     candidate_miners,
     compute_intake_amounts,
+    covers_leg,
     hub_bounds,
     leg_value,
     rate_display_from_fixed,
@@ -686,7 +687,7 @@ def _refuse_uncovered(client, resv, from_chain, to_chain, subtensor=None) -> Non
         cover = leg_value(backing, from_chain, int(resv.from_amount), to_chain, int(resv.to_amount), providers)
     except (ValueError, ProviderUnreachableError) as e:
         fail(f'  Cannot price your {leg.upper()} leg ({e}). Do NOT send funds; re-run when the price is readable.')
-    if int(resv.collateral_amount) < cover:
+    if not covers_leg(int(resv.collateral_amount), cover):
         fail(
             f'  The seat pins {int(resv.collateral_amount)} rao of collateral, under your {leg.upper()} leg at '
             f'spot ({cover} rao). Do NOT send funds; re-run for a fresh reservation.'

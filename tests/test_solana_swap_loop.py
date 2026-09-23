@@ -411,7 +411,14 @@ def test_pending_attestation_covered_alpha_leg_attests():
 
 
 def test_pending_attestation_short_alpha_cover_rejected():
-    loop, providers, swap = _alpha_loop(lambda amount: 10**9 + 1)  # one rao short — binary, no band
+    """Spot moved after the fill and the taker has already sent: a collateral inside the 10% band
+    still attests (a binary compare rejected every uptick, and a miner could force one with a small
+    buy); one below the band is refused before any source fetch."""
+    loop, providers, swap = _alpha_loop(lambda amount: 10**9 + 1)  # one rao short: inside the band
+    assert loop.decide(swap, now=1500).decision == SwapDecision.ATTEST
+    loop, providers, swap = _alpha_loop(lambda amount: 10**9 * 10_000 // 9_000)  # exactly at the band's edge
+    assert loop.decide(swap, now=1500).decision == SwapDecision.ATTEST
+    loop, providers, swap = _alpha_loop(lambda amount: 10**9 * 10_000 // 9_000 + 1)  # one rao past it
     action = loop.decide(swap, now=1500)
     assert action.decision == SwapDecision.REJECT and 'cover' in action.reason
     assert providers['sol'].calls == []  # refused before any source fetch

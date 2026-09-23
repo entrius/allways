@@ -266,6 +266,12 @@ SWAP_OUTCOME_RETENTION_SECS = 7 * 86400
 # Collateral a miner must post to back a swap = collateral_amount × this/10_000. Mirrors the contract's
 # COLLATERAL_REQUIREMENT_BPS (constants.rs) — keep in sync. 11_000 = 1.10×.
 COLLATERAL_REQUIREMENT_BPS = 11_000
+# How far below the alpha leg's CURRENT spot value a declared collateral may sit and still attest. The
+# router priced the leg at fill; the validators re-price at attest, minutes later, each at its own read,
+# and an alpha AMM price walks freely in between. A binary check rejected every honest swap whose alpha
+# ticked up after the taker had already sent — and let a miner reject one on purpose with a small buy.
+# Sized to the 1.10x over-collateralization: within the band the penalty still covers the leg at spot.
+ALPHA_COVER_TOLERANCE_BPS = 1_000
 
 
 def required_collateral(collateral_amount: int) -> int:

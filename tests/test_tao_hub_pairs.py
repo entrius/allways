@@ -22,6 +22,7 @@ from allways.cli.swap_commands.swap_intake import (
     bounds_from_config,
     candidate_miners,
     compute_intake_amounts,
+    covers_leg,
     hub_bounds,
     leg_value,
     max_intake_from_amount,
@@ -337,3 +338,12 @@ class TestTaoEthAcceptance:
         result = reserve_on_behalf(validator, HOTKEY, 'tao', 'eth', USER_PK, 'userTAOaddr', 'userETHaddr', 3 * TAO)
         assert not result.ok
         assert 'max swap' in result.reason
+
+
+def test_covers_leg_allows_the_tolerance_band_and_no_more():
+    """The attest gate and the taker's pre-send screen share this; a binary compare rejected honest
+    swaps on any uptick after the fill and let a miner force one with a small buy."""
+    assert covers_leg(10_000, 10_000)
+    assert covers_leg(9_000, 10_000)
+    assert not covers_leg(8_999, 10_000)
+    assert covers_leg(0, 0)
