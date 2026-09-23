@@ -21,7 +21,7 @@ from allways.solana.pdas import BACKING_BIT_SOL, BACKING_BIT_TAO
 
 
 def _state(mask):
-    return SimpleNamespace(active_backings=mask, active=mask != 0)
+    return SimpleNamespace(active_backings=mask, active=mask != 0, failed_swaps=0)
 
 
 def _resolve(mask, f, t, explicit=None):
@@ -255,7 +255,7 @@ class _TwoQuoteClient:
 
     def get_miner_state(self, miner):
         self.state_reads += 1
-        return SimpleNamespace(active=True, collateral=10**11)
+        return SimpleNamespace(active=True, failed_swaps=0, collateral=10**11)
 
     def get_bond_attestation(self, miner, chain='tao'):
         # The quorum's assertion about the TAO purse — locked, and deep enough to back the offer.
@@ -339,7 +339,7 @@ class _RoutingClient:
         return self.quotes.get(backing)
 
     def get_miner_state(self, miner):
-        return SimpleNamespace(active=True, has_active_swap=False, collateral=10**11)
+        return SimpleNamespace(active=True, failed_swaps=0, has_active_swap=False, collateral=10**11)
 
     def get_bond_attestation(self, miner, chain='tao'):
         return SimpleNamespace(effective_balance=self.tao_purse, locked=self.tao_locked, epoch=1)
