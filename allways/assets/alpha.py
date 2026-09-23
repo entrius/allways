@@ -141,19 +141,9 @@ class Alpha(Asset):
         return EXTRINSIC_SUCCESS in names and bool(names & STAKE_TRANSFER_EVENTS)
 
     def settled_transfer_stake(self, block_num: int, ext_idx: int, transfer: Transfer) -> Optional[Tuple[str, int]]:
-        """(sender, alpha) from the CALL once settled — the event's amount is the TAO-equivalent. Never a
-        payment when it carried a conviction lock: past the sender's unlocked alpha (read the block before,
-        sender-side, so the recipient cannot frame it) the lock follows the stake, and no event says so."""
+        """(sender, alpha) from the CALL once settled — the event's amount is the TAO-equivalent."""
         _, _, alpha, sender = transfer
-        if not self.stake_moved(block_num, ext_idx):
-            return None
-        parent = self.chain.get_block_hash(block_num - 1)
-        if not parent:
-            raise ProviderUnreachableError(f'{self.chain_def.id} block hash unavailable for {block_num - 1}')
-        if alpha > self.unlocked(sender, parent):
-            bt.logging.warning(f'{LOG_ALPHA} {transfer[0]} moved conviction-locked alpha — not a payment')
-            return None
-        return sender, alpha
+        return (sender, alpha) if self.stake_moved(block_num, ext_idx) else None
 
     @property
     def ledger(self) -> Tuple[Decoder, Settler]:
@@ -210,23 +200,17 @@ class Alpha(Asset):
             return origin, origin
         return origin, recipient[0]
 
-    def unlocked(self, coldkey: str, block_hash: Optional[str] = None) -> int:
-        """Alpha ``coldkey`` can move on this netuid without carrying a conviction lock, at ``block_hash``
-        (head when None): subtensor's own availability — stake minus the decayed lock and registration
-        collateral. A transfer spends this first and drags the lock along only past it. Raises when unreadable."""
+    def unlocked(self, coldkey: str) -> int:
+        """Alpha ``coldkey`` can move on this netuid without carrying a conviction lock; raises when unreadable.
+
+        A transfer spends unlocked alpha first and drags the lock along only past it. The stored
+        locked_mass predates its decay, so this never overstates what is free."""
         try:
-            value = self.subtensor.substrate.runtime_call(
-                'StakeInfoRuntimeApi',
-                'get_stake_availability_for_coldkeys',
-                [[coldkey], [self.netuid]],
-                block_hash=block_hash,
-            )
-            by_netuid = getattr(value, 'value', value).get(coldkey, {})
-            return int(by_netuid[self.netuid]['available']) if self.netuid in by_netuid else 0
+            locks = self.subtensor.substrate.query_map('SubtensorModule', 'Lock', [coldkey, self.netuid])
+            locked = sum(int(getattr(lock, 'value', lock)['locked_mass']) for _, lock in locks)
         except Exception as e:
-            raise ProviderUnreachableError(
-                f'{self.chain_def.id} stake availability unavailable for {coldkey}: {e}'
-            ) from e
+            raise ProviderUnreachableError(f'{self.chain_def.id} Lock unavailable for {coldkey}: {e}') from e
+        return max(0, self.get_balance(coldkey) - locked)
 
     def send_blocker(self, from_address: str, to_address: str, amount: int) -> Optional[str]:
         """A transfer_stake debits ONE hotkey position and must not carry a conviction lock."""
