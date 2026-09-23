@@ -638,16 +638,16 @@ def swap_now_command(
 
 
 def _alpha_send_lines(from_chain: str) -> List[str]:
-    """How a subnet-alpha deposit must be sent to be seen at all. The validator credits only a top-level
-    `SubtensorModule.transfer_stake` naming an exact amount: a MEV-shielded send (btcli's default) executes
-    inside the block's on_initialize, and a batched/proxied one inside a wrapper — neither is a top-level
-    transfer_stake, so the deposit is invisible and the funds are stranded with the miner."""
+    """How a subnet-alpha deposit must be sent to be credited: a top-level `SubtensorModule.transfer_stake`
+    for the exact amount. A batched/proxied send runs inside a wrapper and a "transfer all" names no amount,
+    so neither is credited. A MEV-shielded send (btcli's default, `submit_encrypted`) IS credited: the block
+    author decrypts it and includes the signed transfer_stake itself, 1-2 blocks later, under its own hash."""
     if get_chain_def(from_chain).netuid is None:
         return []
     return [
-        f'  [yellow]Send it as a plain transfer_stake for the exact amount[/yellow] — with btcli add '
-        f'[bold]--no-mev-protection[/bold]; a shielded, batched or proxied transfer, or a "transfer all", '
-        f'cannot be verified and those {from_chain.upper()} are lost to the miner.'
+        f'  [yellow]Send it as a plain transfer_stake for the exact amount[/yellow]; a batched or proxied '
+        f'transfer, or a "transfer all", cannot be verified and those {from_chain.upper()} are lost to the '
+        "miner. A MEV-shielded send lands 1-2 blocks later: post the inner transfer_stake's hash, not the shield's."
     ]
 
 
