@@ -826,6 +826,26 @@ class SwapStatus:
     detail: dict = field(default_factory=dict)
 
 
+def _attach_leg_confs(validator, swap_key: bytes, detail: dict) -> None:
+    """Attach the swap loop's last-observed confirmation counts, if it has any for this swap.
+
+    READ-ONLY on purpose: the counts come from leg verifications the loop already performed on
+    its own cadence. Recomputing them here would cost one spoke-chain read per /status poll, per
+    swap, per open tab — the seam's cache protects Solana reads, not the spoke ladders, and a
+    chatty consumer must not be able to price the validator out of its provider budget.
+
+    Each leg carries its observation stamp so a consumer ages the number rather than presenting
+    a stale count as current. Absent when the loop has not yet reached this swap.
+    """
+    loop = getattr(validator, 'solana_swap_loop', None)
+    confs = getattr(loop, 'leg_confs', None)
+    if not confs:
+        return
+    entry = confs.get(swap_key.hex())
+    if entry:
+        detail['leg_confs'] = entry
+
+
 def swap_status(
     validator, miner_hotkey: str, swap_key_hex: str = '', from_chain: str = '', to_chain: str = ''
 ) -> SwapStatus:
@@ -863,6 +883,7 @@ def swap_status(
     if swap is not None:
         detail['from_tx_hash'] = swap.from_tx_hash
         detail['to_tx_hash'] = swap.to_tx_hash
+    _attach_leg_confs(validator, swap_key, detail)
     stage = _swap_stage(validator, swap, swap_key)
     _add_reject_reason(validator, swap, stage, detail)
     return SwapStatus(stage, reservation.reserved_until, str(reservation.user), swap_key.hex(), detail)
@@ -907,6 +928,7 @@ def _swap_status_by_key(validator, swap_key_hex: str) -> SwapStatus:
         'to_tx_hash': swap.to_tx_hash,
     }
     _add_reject_reason(validator, swap, stage, detail)
+    _attach_leg_confs(validator, swap_key, detail)
     return SwapStatus(stage, 0, str(swap.user), swap_key_hex, detail)
 
 

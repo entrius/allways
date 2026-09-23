@@ -1178,3 +1178,48 @@ def test_reserve_schedules_a_crank_at_the_pool_close():
     result = reserve_on_behalf(validator, HOTKEY, 'sol', 'btc', USER_PK, str(USER_PK), 'userBTCaddr', 1_000_000_000)
     assert result.ok
     assert validator.crank_scheduler.scheduled == [(MINER_PK, closes)]
+
+
+# ── Seam serves published leg confirmations, never recomputes them ───────────────────────────
+def test_attach_leg_confs_serves_the_loops_cache():
+    from allways.validator.reserve_engine import _attach_leg_confs
+
+    key = bytes(range(32))
+    published = {'source': {'have': 1, 'need': 2, 'at': 1_700_000_000}}
+    validator = SimpleNamespace(
+        solana_swap_loop=SimpleNamespace(leg_confs={key.hex(): published})
+    )
+    detail = {}
+    _attach_leg_confs(validator, key, detail)
+    assert detail['leg_confs'] == published
+
+
+def test_attach_leg_confs_is_silent_when_the_loop_has_nothing_yet():
+    from allways.validator.reserve_engine import _attach_leg_confs
+
+    key = bytes(range(32))
+    for loop in (SimpleNamespace(leg_confs={}), SimpleNamespace(), None):
+        detail = {}
+        _attach_leg_confs(SimpleNamespace(solana_swap_loop=loop), key, detail)
+        # Absent, never a fabricated zero — a consumer must be able to tell "not observed yet"
+        # apart from "observed zero confirmations".
+        assert 'leg_confs' not in detail
+
+
+def test_attach_leg_confs_does_no_chain_work():
+    # The whole point: /status is polled per swap per tab, so this path must stay pure lookup.
+    from allways.validator.reserve_engine import _attach_leg_confs
+
+    key = bytes(range(32))
+
+    class Exploding:
+        def __getattr__(self, name):
+            raise AssertionError(f'seam touched the chain client ({name}) while attaching confs')
+
+    validator = SimpleNamespace(
+        solana_swap_loop=SimpleNamespace(leg_confs={key.hex(): {'source': {'have': 0, 'need': 2, 'at': 1}}}),
+        solana_client=Exploding(),
+    )
+    detail = {}
+    _attach_leg_confs(validator, key, detail)
+    assert detail['leg_confs']['source']['need'] == 2
