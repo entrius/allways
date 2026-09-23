@@ -14,6 +14,8 @@ PROGRAM_ID = '6JVBEj5w27J2SVjERmv2c7wXgFee9nSSBKUJevHehyBD'
 # ─── Polling ──────────────────────────────────────────────
 # Bittensor base-neuron heartbeat, not the scoring/forward cadence.
 MINER_POLL_INTERVAL_SECONDS = 12
+# The miner resubscribes its program feed this often, then catches up from chain (one MinerState read idle).
+MINER_FEED_RESUBSCRIBE_SECONDS = 300
 VALIDATOR_POLL_INTERVAL_SECONDS = 12
 # Consecutive polls of zero block progress before we force a substrate reconnect.
 STALE_BLOCK_POLL_THRESHOLD = 30
@@ -59,11 +61,13 @@ CANCEL_REASON_SOL_RESERVED = 3
 # honest delivery on the token would false-slash — a hub-wide, no-fault condition (V-M2/PAXG).
 CANCEL_REASON_ERC20_FEE_ENABLED = 4
 # The issuer froze the destination's SPL token account (USDC's mint carries a freeze authority):
-# undeliverable through no fault of the miner. Python-side first; mirror into constants.rs next release.
+# undeliverable through no fault of the miner.
 CANCEL_REASON_SPL_FROZEN = 5
+# The destination fails the chain's offline format check: unpayable by construction, never the miner's fault.
+CANCEL_REASON_INVALID_DEST = 6
 # The subnet owner/root disabled alpha transfers (TransferToggle / SubtokenEnabled): strands every
 # miner on that subnet at once — no-fault. Mirrored in constants.rs.
-CANCEL_REASON_ALPHA_TRANSFER_DISABLED = 6
+CANCEL_REASON_ALPHA_TRANSFER_DISABLED = 7
 CANCEL_REASON_OTHER = 255
 
 BTC_MIN_FEE_RATE = 5
@@ -84,6 +88,10 @@ SCORING_WINDOW_BLOCKS = 300  # ~1 hour at 12s/block — scoring cadence and wind
 # seconds. The scoring *cadence* (due_for_scoring) stays subtensor-block-gated.
 SCORING_WINDOW_SECS = 3600  # ~1 hour — crown replay window width
 MAX_SCORING_BACKFILL_SECS = 2 * SCORING_WINDOW_SECS  # ~2 hours — backfill cap after a stall
+# Retention of the crown event tables (rate/active/activity/collateral). Must cover the backfill
+# cap AND the longest swap life: a completed fill is judged against the crown as it stood at its
+# reservation (fill_held_crown), up to base timeout + 140 min extensions + settlement grace earlier.
+EVENT_RETENTION_SECS = 4 * 3600
 # Crown reward-state policy (D4): the only place that decides which MinerActivity
 # states earn crown. "All busy forfeits" = only AVAILABLE; add MinerActivity.FULFILLING
 # here to reward in-flight miners, with no other logic change.
@@ -156,22 +164,30 @@ LAUNCH_PAIRS: tuple[tuple[str, str], ...] = tuple(
 ) + tuple((hub, alpha) for hub in HUB_CHAINS for alpha in LAUNCH_ALPHAS)
 # Fixed burn: pools sum to MINER_POOL_SHARE instead of 1.0, so at least
 # BURN_RATE of every round recycles to RECYCLE_UID before any shortfall.
-BURN_RATE = 0.90
+BURN_RATE = 0.0
 MINER_POOL_SHARE = 1.0 - BURN_RATE
 # Direction registry and the equal-split fallback: one entry per hub↔spoke direction
-# (both ways). The per-round pool values are volume-weighted at pair level
-# (scoring.compute_direction_pools); these constants are what zero volume falls back to.
+# (both ways). The per-round pool values are volume-weighted at pair level over LIVE pairs
+# (scoring.compute_direction_pools); these constants are what a silent network falls back to.
 DIRECTION_POOLS: dict[tuple[str, str], float] = {
     pair: MINER_POOL_SHARE / (2 * len(LAUNCH_PAIRS))
     for hub, spoke in LAUNCH_PAIRS
     for pair in ((hub, spoke), (spoke, hub))
 }
-# Volume-weighted pools: each pair's emission share follows the SOL notional it cleared
-# over the trailing window, blended with the equal split so a quiet pair never starves
-# and a busy one is capped at α + (1−α)/pairs. Weighting sits at PAIR level and splits
-# evenly between the two legs — one leg can't be inflated without inflating the pair.
+# Volume-weighted pools: each pair's emission share follows the QUALIFIED hub-leg notional it
+# cleared over the trailing window (fills reserved on a crown-holding miner — clearing_rates
+# .qualified), blended with an equal split over the family's LIVE pairs (≥1 qualified fill in
+# the window) so a small live pair never starves and a busy one is capped at α + (1−α)/live.
+# A pair with no qualified fill this window is dead: no pool, and it dilutes nobody — the floor
+# scales with activity, not registry size. Weighting sits at PAIR level and splits evenly
+# between the two legs — one leg can't be inflated without inflating the pair.
 POOL_VOLUME_WINDOW_SECS = 24 * 3600  # flat trailing window the pool volumes sum over
 POOL_VOLUME_ALPHA = 0.66  # blend dial: 0 = frozen equal split, 1 = pure volume share
+# Quality-volume slice: each lane pool pays (1−β) on crown time and β on qualified volume share
+# (a miner's qualified hub-leg notional over the lane's, same trailing window). A fill qualifies
+# iff the miner held the lane's crown at reservation, judged at the fill's own size. A lane with
+# no qualified volume recycles its β slice — standing on a dead pair earns (1−β) of it.
+QUALITY_VOLUME_BETA = 0.25
 # clearing_rates rows must outlive the pool volume window (plus stall headroom) — the
 # crown tables only need SCORING_WINDOW_SECS, but pools read a full day back.
 CLEARING_RETENTION_SECS = POOL_VOLUME_WINDOW_SECS + MAX_SCORING_BACKFILL_SECS
@@ -180,12 +196,15 @@ CLEARING_RETENTION_SECS = POOL_VOLUME_WINDOW_SECS + MAX_SCORING_BACKFILL_SECS
 # earns a smaller slice than the ratio alone), pushing miners to deepen. Still capped at 1.0 — depth
 # past required earns nothing extra, so it never becomes pay-to-win.
 CAPACITY_CURVE_EXPONENT: float = 2.0
-# Flat eligibility gate (B3.3): read off the on-chain MinerState counters,
-# replacing the success_rate³ × credibility ramp. A miner is crown-eligible iff
-# it has at least MIN_SUCCESSFUL_SWAPS successes and at most MAX_FAILED_SWAPS
-# failures — a binary 0/1 multiplier, no ramp.
-MIN_SUCCESSFUL_SWAPS: int = 2
+# Binary eligibility gate: at most MAX_FAILED_SWAPS lifetime timeouts (the on-chain MinerState
+# counter, never resets) AND at least one completed swap inside the trailing
+# ELIGIBILITY_FILL_WINDOW_SECS (the validator's clearing ledger), judged PER PURSE: a lane is live
+# only while its backing hub delivered a fill in the window, so a miner with a dead SOL watcher and
+# a live TAO purse earns on tao lanes alone. No warm-up count: a purse is eligible from its first
+# completed fill, real or self, qualified or not. The window must fit inside CLEARING_RETENTION_SECS.
 MAX_FAILED_SWAPS: int = 2
+ELIGIBILITY_FILL_WINDOW_SECS: int = 12 * 3600
+assert ELIGIBILITY_FILL_WINDOW_SECS <= CLEARING_RETENTION_SECS, 'the fill window must be inside clearing retention'
 # Live-state reconcile (scoring-round backstop for lost events): a miner's event-derived
 # active/collateral state is only corrected against the live chain read after its event
 # stream has been quiet this long, so a stale RPC read never fights an in-flight event.

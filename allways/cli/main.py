@@ -38,7 +38,6 @@ if os.environ.get('_ALW_COMPLETE'):
             _sys.modules[_pkg + _suffix] = _mock
 
 import json  # noqa: E402
-import re  # noqa: E402
 from pathlib import Path  # noqa: E402
 
 import click  # noqa: E402
@@ -136,6 +135,7 @@ def _effective_settings(config: dict) -> list:
     from allways.solana.program import CONFIG_KEYS as PROGRAM_CONFIG_KEYS
     from allways.solana.program import ENV_VAR as PROGRAM_ID_ENV
     from allways.solana.program import resolve_program_id
+    from allways.solana.rpc import redact_rpc_url
 
     def row(key, default=None):
         if key in config:
@@ -149,7 +149,7 @@ def _effective_settings(config: dict) -> list:
             return 'config'
         return derived or 'default'
 
-    rpc_url = re.sub(r'(api-key=)[^&]+', r'\1***', resolve_solana_rpc(config))
+    rpc_url = redact_rpc_url(resolve_solana_rpc(config))
     rpc_src = source(
         'SOLANA_RPC_URL', bool(config.get('solana-rpc')), 'solana-network' if config.get('solana-network') else ''
     )
@@ -175,6 +175,11 @@ def _effective_settings(config: dict) -> list:
         ('solana-keypair', resolve_solana_keypair_path(config), keypair_src),
         *(chain_row(c) for c in NAME_SELECTED_CHAINS),
         row('router'),
+        (
+            'vault-address',
+            os.environ.get('ALLWAYS_VAULT_ADDRESS') or config.get('vault-address') or '(not set)',
+            source('ALLWAYS_VAULT_ADDRESS', bool(config.get('vault-address')), '—'),
+        ),
         ('program-id', program_id, program_src),
     ]
 
@@ -228,6 +233,7 @@ CONFIG_SET_HELP = """Set a configuration value.
         solana-keypair      Path to the Solana keypair that signs miner/admin ops (SOLANA_KEYPAIR_PATH env wins)
 {chain_keys}
         router              Validator hotkey (ss58) to route reservations through; "" = self-represent
+        vault-address       TAO bond vault contract (ss58); `env` sets the of-record one (ALLWAYS_VAULT_ADDRESS env wins)
         program-id          Solana program ID (miner/admin commands)[/dim]
 
     [dim]Networks per chain:

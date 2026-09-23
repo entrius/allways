@@ -60,9 +60,17 @@ class SolanaEventIndex:
     ``reservation_ttl_fn`` (the solana config cache getter) supplies the TTL used to synthesize each
     reservation's RESERVE_EXPIRE, since ``reserved_until`` isn't carried on the ``PoolResolved`` event."""
 
-    def __init__(self, state_store: ValidatorStateStore, reservation_ttl_fn: Optional[Callable[[], int]] = None):
+    def __init__(
+        self,
+        state_store: ValidatorStateStore,
+        reservation_ttl_fn: Optional[Callable[[], int]] = None,
+        fill_qualifier: Optional[Callable[[str, str, str, str, int, int], bool]] = None,
+    ):
         self.state_store = state_store
         self._reservation_ttl_fn = reservation_ttl_fn
+        # (hotkey, from_chain, to_chain, backing, collateral_amount, reserved_at) → held crown at
+        # reservation? Bound to scoring.fill_held_crown by the validator; None = every fill unqualified.
+        self._fill_qualifier = fill_qualifier
 
     # ─── write path ─────────────────────────────────────────────────────
 
@@ -96,7 +104,7 @@ class SolanaEventIndex:
         return written
 
     def _record_unattributed_outcome(self, rec: EventRecord, block_time: int) -> bool:
-        """Persist only the swap_key-keyed terminal facts (delivery hash + terminal/stale outcome)
+        """Persist only the swap_key-keyed terminal facts (delivery hash, refund facts, and terminal/stale outcome)
         for an event whose miner pubkey is unbound at ingest. These rows credit no UID — they are
         the seam's post-close truth read by /status — so they must land even when every
         crown-relevant effect is dropped. Idempotent upserts, so a later re-bind + re-ingest is a
@@ -109,7 +117,7 @@ class SolanaEventIndex:
         outcome = _OUTCOME_BY_EVENT.get(rec.name)
         if outcome is not None:
             swap_key = bytes(rec.fields['swap_key']).hex()
-            self.state_store.record_swap_outcome(swap_key, outcome, block_time)
+            self.state_store.record_swap_outcome(swap_key, outcome, block_time, refund=self._refund_facts(rec))
             dev_signal.emit('swap_outcome', swap_key=swap_key, outcome=outcome)
             return True
         return False
@@ -143,7 +151,9 @@ class SolanaEventIndex:
             )
             outcome = _OUTCOME_BY_EVENT.get(name)
             if outcome is not None:
-                self.state_store.record_swap_outcome(bytes(rec.fields['swap_key']).hex(), outcome, block_time)
+                self.state_store.record_swap_outcome(
+                    bytes(rec.fields['swap_key']).hex(), outcome, block_time, refund=self._refund_facts(rec)
+                )
                 dev_signal.emit('swap_outcome', swap_key=bytes(rec.fields['swap_key']).hex(), outcome=outcome)
             # SwapCompleted is the only swap event carrying realized legs — persist
             # them as a clearing-rate sample for the windowed volume read, in
@@ -151,14 +161,20 @@ class SolanaEventIndex:
             # deliberately ignored: the attest gate already refused any swap whose
             # legs disagree with the pinned rate, and the legs are the realized truth.
             if name == 'SwapCompleted':
+                from_chain, to_chain = self._chain(rec, 'from_chain'), self._chain(rec, 'to_chain')
+                backing = self._backing(rec, 'collateral_chain')
                 self.state_store.insert_clearing_rate(
                     block_time,
                     hotkey,
-                    self._chain(rec, 'from_chain'),
-                    self._chain(rec, 'to_chain'),
+                    from_chain,
+                    to_chain,
                     int(rec.fields['from_amount']),
                     int(rec.fields['to_amount']),
                     bytes(rec.fields['swap_key']).hex(),
+                    backing=backing,
+                    qualified=self._fill_qualified(
+                        hotkey, from_chain, to_chain, backing, int(rec.fields.get('collateral_amount', 0)), block_time
+                    ),
                 )
             return True
         if name == 'StaleClaimClosed':
@@ -361,6 +377,23 @@ class SolanaEventIndex:
             bt.logging.debug(f'SolanaEventIndex: {rec.name} missing miner field: {e}')
             return None
 
+    def _fill_qualified(
+        self, hotkey: str, from_chain: str, to_chain: str, backing: str, collateral_amount: int, completed_at: int
+    ) -> bool:
+        """Quality-volume flag for a completed fill: was the miner in the lane's crown when the
+        swap was reserved (its last RESERVE_START on that hub before completion)? Fail-closed —
+        no qualifier, no reservation edge on record, or a failed evaluation all read unqualified."""
+        if self._fill_qualifier is None:
+            return False
+        reserved_at = self.state_store.get_last_reserve_start(hotkey, backing, completed_at)
+        if reserved_at is None:
+            return False
+        try:
+            return bool(self._fill_qualifier(hotkey, from_chain, to_chain, backing, collateral_amount, reserved_at))
+        except Exception as e:
+            bt.logging.warning(f'fill qualification failed for {hotkey[:8]}.. {from_chain}→{to_chain}: {e}')
+            return False
+
     @staticmethod
     def _chain(rec: EventRecord, key: str) -> str:
         return str(rec.fields[key]).lower()
@@ -370,6 +403,14 @@ class SolanaEventIndex:
         """A backing/collateral-chain field, defaulting to the SOL numéraire when absent — pre-split
         events carried no backing and were all sol-backed by construction (F4)."""
         return str(rec.fields.get(key, 'sol')).lower()
+
+    @staticmethod
+    def _refund_facts(rec: EventRecord) -> Optional[Tuple[str, Optional[int], Optional[str]]]:
+        if rec.name != 'SwapTimedOut':
+            return None
+        chain = SolanaEventIndex._backing(rec, 'collateral_chain')
+        # Off-chain backings settle on Bittensor — no Solana signature proves that payout.
+        return (chain, rec.fields.get('reimbursement'), rec.signature if chain == 'sol' else None)
 
     # ─── read interface (consumed by scoring's crown replay) ────────────
 

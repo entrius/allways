@@ -8,6 +8,7 @@ invariants before it signs — the caller (offering or CLI) is never trusted.
 import threading
 import time
 from dataclasses import dataclass, field
+from itertools import islice
 from typing import Optional
 
 import bittensor as bt
@@ -15,24 +16,27 @@ from bittensor import Keypair
 from solders.pubkey import Pubkey
 
 from allways.assets.asset import ProviderUnreachableError
-from allways.chains import SUPPORTED_CHAINS, canonical_pair
+from allways.chains import SUPPORTED_CHAINS, canonical_pair, get_chain_def
 from allways.cli.swap_commands.swap_intake import (
     MinerCandidate,
-    backing_purse,
     bounds_from_config,
     candidate_miners,
     compute_intake_amounts,
+    free_purse,
     hub_bounds,
     max_intake_from_amount,
     rate_display_from_fixed,
     select_best_miner,
     swap_viable,
     unviable_reason,
+    viable_intakes,
 )
-from allways.constants import NUMERAIRE_CHAIN
+from allways.constants import NUMERAIRE_CHAIN, hub_leg
 from allways.solana.client import contract_reject_reason, swap_key_from_tx_hash
 from allways.solana.pdas import BACKING_BITS
+from allways.utils.rate import max_from_for_to_cap
 from allways.validator.binding import hotkey_ss58, verify_binding
+from allways.validator.solana_swap_loop import attest_reject_reason
 
 EMPTY_SWAP_KEY = b'\x00' * 32
 
@@ -67,7 +71,7 @@ def _best_offer(client, miner_pk, miner_state, from_chain, to_chain, from_amount
         if q is None:
             continue
         backing = str(getattr(q, 'collateral_chain', NUMERAIRE_CHAIN) or NUMERAIRE_CHAIN)
-        purse = backing_purse(client, miner_pk, miner_state, backing)
+        purse = free_purse(client, miner_pk, miner_state, backing)
         if purse is None:
             continue  # no locked bond behind it — the contract's entry gate would refuse the bid
         offers[backing] = q
@@ -80,6 +84,37 @@ def _best_offer(client, miner_pk, miner_state, from_chain, to_chain, from_amount
         why = unviable_reason(candidates, from_chain, to_chain, from_amount, hub_min, hub_max, bounds, providers)
         return None, why
     return (offers[best[0].backing], best[0].backing), ''
+
+
+@dataclass
+class RoutedRejection:
+    """A finalize the contract refused. The whole queue on that pool lost the round with it."""
+
+    reason: str
+    users: list
+
+
+# Keyed per (miner pubkey, from_chain, to_chain); the next request on that pool clears it. Memory-only:
+# after a restart the offering falls back to its own backstop. The epoch counts every change so the
+# seam's /status memo (keyed on it) can never serve a verdict from across one.
+_routed_rejections: dict = {}
+_verdict_epoch = 0
+
+
+def verdict_epoch() -> int:
+    return _verdict_epoch
+
+
+def _publish_verdict(key: tuple, verdict: RoutedRejection) -> None:
+    global _verdict_epoch
+    _routed_rejections[key] = verdict
+    _verdict_epoch += 1
+
+
+def _clear_verdict(key: tuple) -> None:
+    global _verdict_epoch
+    if _routed_rejections.pop(key, None) is not None:
+        _verdict_epoch += 1
 
 
 @dataclass
@@ -170,7 +205,7 @@ def reserve_on_behalf(
     if amts.to_amount <= 0:
         return ReserveResult(False, 'non-positive dest amount for that source amount')
 
-    purse = backing_purse(client, miner_pk, miner_state, backing)
+    purse = free_purse(client, miner_pk, miner_state, backing)
     if purse is None:
         return ReserveResult(False, f'no locked {backing} bond backs that offer')
     min_swap, max_swap = bounds.get(backing, (0, 0))
@@ -234,6 +269,7 @@ def reserve_on_behalf(
     validator.state_store.upsert_routed_request(
         str(miner_pk), from_chain, to_chain, backing, str(user_pk), user_from_addr, user_to_addr, from_amount, now
     )
+    _clear_verdict((str(miner_pk), from_chain, to_chain))
     pool = client.get_pool(miner_pk, backing)
     closes_at = int(getattr(pool, 'closes_at', 0) or 0) if pool else 0
     if closes_at:
@@ -433,6 +469,11 @@ def finalize_won_seats(validator, now: int) -> list:
                 bt.logging.warning(f'routed sweep {miner[:8]}: finalize transport fault, retrying next step: {e}')
                 continue
             bt.logging.warning(f'routed sweep {miner[:8]}: finalize rejected ({reason}), dropping queue')
+            # Every queued user lost this round; /status carries the verdict so the offering can
+            # refund at once instead of waiting out its "reservation never landed" backstop. Published
+            # BEFORE the delete: a request landing in between clears it and is then dropped with the
+            # queue — the slow backstop, never a fast fail on a seat that could still land.
+            _publish_verdict((miner, from_chain, to_chain), RoutedRejection(reason, [q['user_pubkey'] for q in queue]))
             store.delete_routed_requests(miner, from_chain, to_chain, backing)
             continue
         bt.logging.info(f'routed sweep {miner[:8]}: finalized seat for {req["user_pubkey"][:8]} (FIFO of queue)')
@@ -486,13 +527,18 @@ def _live_unclaimed_slots(client, miner_pk, now):
     return slots, 'No reservation for this miner'
 
 
-def _freshest_reservation(client, miner_pk):
+def _freshest_reservation(client, miner_pk, from_chain: str = '', to_chain: str = ''):
     """The miner's most-alive reservation across per-hub slots (v3.1) — ranked by max(reserved_until,
-    finalize_by) — so a tao-hub seat is seen by status, not just the SOL slot."""
+    finalize_by) — so a tao-hub seat is seen by status, not just the SOL slot. With a pair, only
+    the slot carrying that pair counts: a consumer tracking its own seat must not be answered with
+    the miner's OTHER hub (a fresher stranger there read as "our seat was lost", and a same-pubkey
+    stranger there was adopted as ours)."""
     best, best_at = None, -1
     for backing in BACKING_BITS:
         resv = client.get_reservation(miner_pk, backing)
         if resv is None:
+            continue
+        if from_chain and (resv.from_chain != from_chain or resv.to_chain != to_chain):
             continue
         at = max(int(getattr(resv, 'reserved_until', 0) or 0), int(getattr(resv, 'finalize_by', 0) or 0))
         if at > best_at:
@@ -655,22 +701,25 @@ class RateQuote:
     reason: str  # why quote is None ('' on a hit)
     levels: list  # top rate rungs [{rate_display, max_from_amount}], best first
     max_from_amount: int  # largest executable source amount across ALL quotes, not just shown rungs
+    min_from_amount: int  # the pair's hub minimum in source units; 0 = unset or unpriceable
+    candidates: list  # top bound intakes for the asked size, selector order — a tolerance band in one scan
 
 
 def rate_quote(validator, from_chain: str, to_chain: str, from_amount: int) -> RateQuote:
     """Everything ``/rate`` serves, from ONE candidate scan: the best executable quote for
     ``from_amount`` (source smallest-units; mirrors ``select_best_miner`` so the displayed rate ==
-    the reservable rate) plus the depth behind it. Rung order matches the selector's ranking (most
-    dest per source); same-rate quotes collapse to the deepest. Capacities are per-rung maxima,
-    never cumulative — a swap fills against a single miner."""
+    the reservable rate), the runners-up for that size, and the depth behind them. Rung order
+    matches the selector's ranking (most dest per source); same-rate quotes collapse to the deepest.
+    Capacities are per-rung maxima, never cumulative — a swap fills against a single miner."""
     client = validator.solana_client
     cfg = client.get_config()
     bounds = bounds_from_config(cfg)
     min_swap, max_swap = hub_bounds(bounds, from_chain, to_chain)
     cands = candidate_miners(client, from_chain, to_chain)
     providers = getattr(validator, 'axon_assets', None) or {}
-    best = select_best_miner(cands, from_chain, to_chain, from_amount, min_swap, max_swap, bounds, providers)
-    bq = _best_quote_result(validator, best) if best else None
+    ranked = _ranked_intakes(cands, from_chain, to_chain, from_amount, min_swap, max_swap, bounds, providers)
+    bound = list(islice(_bound_intakes(validator, ranked), RATE_LEVELS_LIMIT))
+    bq = _best_quote(*bound[0]) if bound else None
     reason = (
         '' if bq else unviable_reason(cands, from_chain, to_chain, from_amount, min_swap, max_swap, bounds, providers)
     )
@@ -684,14 +733,55 @@ def rate_quote(validator, from_chain: str, to_chain: str, from_amount: int) -> R
     from_is_canon = from_chain == canonical_pair(from_chain, to_chain)[0]
     best_first = sorted(depth.items(), key=lambda kv: float(kv[0]), reverse=from_is_canon)
     levels = [{'rate_display': r, 'max_from_amount': m} for r, m in best_first[:RATE_LEVELS_LIMIT]]
-    return RateQuote(bq, reason, levels, max(depth.values(), default=0))
+    candidates = [
+        {
+            'miner_hotkey': hotkey,
+            'rate_display': cand.rate_display,
+            'to_amount': amts.to_amount,
+            'max_from_amount': max_intake_from_amount(cand, from_chain, to_chain, min_swap, max_swap, bounds),
+        }
+        for cand, amts, hotkey in bound
+    ]
+    min_from = _min_from_amount(min_swap, best_first[0][0] if best_first else None, from_chain, to_chain)
+    return RateQuote(bq, reason, levels, max(depth.values(), default=0), min_from, candidates)
 
 
-def _best_quote_result(validator, best) -> Optional[BestQuote]:
-    cand, amts = best
-    hotkey = _miner_hotkey_for(validator, cand.miner)
-    if hotkey is None:
-        return None
+def _ranked_intakes(
+    cands, from_chain: str, to_chain: str, from_amount: int, min_swap: int, max_swap: int, bounds, providers=None
+):
+    """``viable_intakes`` in selection order (most dest, tie → "sol", then input order).
+    ``providers`` prices a declared alpha leg; an exact leg reads nothing."""
+    viable = viable_intakes(cands, from_chain, to_chain, from_amount, min_swap, max_swap, bounds, providers)
+    return sorted(viable, key=lambda p: (p[1].to_amount, p[0].backing == NUMERAIRE_CHAIN), reverse=True)
+
+
+def _bound_intakes(validator, ranked):
+    """``ranked`` with each miner's hotkey; an unbound miner cannot be reserved through the seam, so it is skipped."""
+    for cand, amts in ranked:
+        hotkey = _miner_hotkey_for(validator, cand.miner)
+        if hotkey:
+            yield cand, amts, hotkey
+
+
+def _min_from_amount(min_swap: int, best_rate: Optional[str], from_chain: str, to_chain: str) -> int:
+    """The hub minimum in source units: as-is on the hub leg, else inverted at the best level rate (0 if no depth)."""
+    if min_swap <= 0 or from_chain == hub_leg(from_chain, to_chain):
+        return min_swap
+    if best_rate is None:
+        return 0
+    canon_from, canon_to = canonical_pair(from_chain, to_chain)
+    # One past the largest source whose hub leg still falls short of the minimum.
+    under = max_from_for_to_cap(
+        min_swap - 1,
+        best_rate,
+        from_chain != canon_from,
+        get_chain_def(canon_to).decimals,
+        get_chain_def(canon_from).decimals,
+    )
+    return under + 1
+
+
+def _best_quote(cand: MinerCandidate, amts, hotkey: str) -> BestQuote:
     return BestQuote(
         hotkey,
         str(cand.miner),
@@ -732,35 +822,42 @@ class SwapStatus:
     swap directly — required for post-attestation stages, because ``vote_initiate`` consumes
     the reservation at attestation quorum, so the reservation stops referencing the swap the
     moment it goes ``active``. Without ``swap_key``, resolution walks the miner's reservation
-    and only the pre-attestation stages (``none``/``reserved``/``claimed``) are reliably visible."""
+    and only the pre-attestation stages (``none``/``reserved``/``claimed``) are reliably visible.
 
-    stage: str  # none | reserved | claimed | active | fulfilled | completed | timed_out | cancelled | expired
+    ``rejected`` replaces ``none`` while the pool's last draw was refused by the contract: ``detail``
+    carries the ``reason`` and the ``users`` who lost the round, so the offering fails them at once."""
+
+    # none | rejected | reserved | claimed | active | fulfilled | completed | timed_out | cancelled | expired
+    stage: str
     reserved_until: int = 0
     user: str = ''
     swap_key: str = ''
     detail: dict = field(default_factory=dict)
 
 
-def swap_status(validator, miner_hotkey: str, swap_key_hex: str = '') -> SwapStatus:
+def swap_status(
+    validator, miner_hotkey: str, swap_key_hex: str = '', from_chain: str = '', to_chain: str = ''
+) -> SwapStatus:
     """Current lifecycle stage for a reservation/swap — the offering polls this.
 
     With ``swap_key_hex`` the swap resolves by key (survives the reservation being consumed at
-    attestation quorum); without it, via the miner's live reservation (pre-attestation stages)."""
+    attestation quorum); without it, via the miner's live reservation (pre-attestation stages) —
+    the slot carrying ``from_chain``/``to_chain`` when given, else the freshest slot."""
     if swap_key_hex:
         return _swap_status_by_key(validator, swap_key_hex)
     client = validator.solana_client
     miner_pk = resolve_miner_pubkey(validator, miner_hotkey)
     if miner_pk is None:
         return SwapStatus('none')
-    reservation = _freshest_reservation(client, miner_pk)
+    reservation = _freshest_reservation(client, miner_pk, from_chain, to_chain)
     if reservation is None or reservation.reserved_until == 0:
-        return SwapStatus('none')
+        return _idle_status(miner_pk, from_chain, to_chain)
     swap_key = bytes(reservation.claimed_swap_key)
     # An expired UNCLAIMED reservation is dead — the pool can be re-entered over it. Reporting it as
     # 'reserved' with its stale user makes the offering's win-detection read "another validator's user
     # holds this miner" and mark won draws lost. A claimed one still speaks through its swap's stage.
     if swap_key == EMPTY_SWAP_KEY and int(reservation.reserved_until) < time.time():
-        return SwapStatus('none')
+        return _idle_status(miner_pk, from_chain, to_chain)
     # detail carries what the offering needs to instruct the user (where + how much to send).
     detail = {
         'from_chain': reservation.from_chain,
@@ -776,7 +873,16 @@ def swap_status(validator, miner_hotkey: str, swap_key_hex: str = '') -> SwapSta
         detail['from_tx_hash'] = swap.from_tx_hash
         detail['to_tx_hash'] = swap.to_tx_hash
     stage = _swap_stage(validator, swap, swap_key)
+    _add_reject_reason(validator, swap, stage, detail)
     return SwapStatus(stage, reservation.reserved_until, str(reservation.user), swap_key.hex(), detail)
+
+
+def _idle_status(miner_pk, from_chain: str, to_chain: str) -> SwapStatus:
+    """No live reservation: ``rejected`` if the pool's last draw was refused, else ``none``."""
+    rejection = _routed_rejections.get((str(miner_pk), from_chain, to_chain))
+    if rejection is None:
+        return SwapStatus('none')
+    return SwapStatus('rejected', detail={'reason': rejection.reason, 'users': rejection.users})
 
 
 def _swap_status_by_key(validator, swap_key_hex: str) -> SwapStatus:
@@ -795,6 +901,9 @@ def _swap_status_by_key(validator, swap_key_hex: str) -> SwapStatus:
         to_tx_hash = validator.state_store.get_swap_fulfillment(swap_key_hex)
         if to_tx_hash:
             detail['to_tx_hash'] = to_tx_hash
+        refund = validator.state_store.get_swap_refund(swap_key_hex)
+        if refund:
+            detail.update(refund)
         return SwapStatus(stage, swap_key=swap_key_hex, detail=detail)
     # Same detail shape as the reservation path — the Swap PDA carries the full legs.
     detail = {
@@ -806,7 +915,18 @@ def _swap_status_by_key(validator, swap_key_hex: str) -> SwapStatus:
         'from_tx_hash': swap.from_tx_hash,
         'to_tx_hash': swap.to_tx_hash,
     }
+    _add_reject_reason(validator, swap, stage, detail)
     return SwapStatus(stage, 0, str(swap.user), swap_key_hex, detail)
+
+
+def _add_reject_reason(validator, swap, stage: str, detail: dict) -> None:
+    """While a live claim awaits attestation, surface why the loop refuses it (absent when it doesn't)."""
+    if swap is None or stage != 'claimed':
+        return
+    loop = validator.solana_swap_loop
+    reason = attest_reject_reason(loop.providers, swap, loop.fee_divisor)
+    if reason is not None:
+        detail['reject_reason'] = reason
 
 
 # On-chain Swap.status is a borsh enum object; map by its variant name (not int()).

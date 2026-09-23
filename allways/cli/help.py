@@ -12,6 +12,9 @@ from rich.padding import Padding
 from rich.panel import Panel
 from rich.table import Table
 
+from allways.solana.client import SolanaClientError
+from allways.solana.rpc import SolanaRpcError
+
 DISCLAIMER = (
     'Allways is permissionless, open-source, beta software. Swaps settle directly between'
     ' counterparty wallets; the protocol never takes custody of user funds, and the protocol fee is'
@@ -182,6 +185,15 @@ class StyledGroup(click.Group):
     def __init__(self, *args, show_disclaimer: bool = False, **kwargs):
         super().__init__(*args, **kwargs)
         self.show_disclaimer = show_disclaimer
+
+    def invoke(self, ctx: click.Context):
+        # Single choke point: no RPC dict or traceback reaches the operator from any subcommand.
+        try:
+            return super().invoke(ctx)
+        except (SolanaClientError, SolanaRpcError) as e:
+            from allways.cli.swap_commands.helpers import fail, solana_failure_message  # package imports this module
+
+            fail(solana_failure_message(e))
 
     def alias_map(self) -> dict[str, list[str]]:
         """Return canonical-command -> aliases mapping."""

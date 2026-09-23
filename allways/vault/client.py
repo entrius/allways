@@ -22,8 +22,9 @@ from typing import Any, Dict, List, Optional, Sequence, Tuple
 
 from allways.vault import codec
 
-# Repo-relative default: the cargo-contract build artifact.
-DEFAULT_METADATA = (
+# A fresh cargo-contract build artifact (source checkout) wins; pip installs have no
+# smart-contracts/ tree and fall back to the copy shipped inside the package.
+_REPO_METADATA = (
     Path(__file__).resolve().parents[2]
     / 'smart-contracts'
     / 'ink-bond-vault'
@@ -31,9 +32,20 @@ DEFAULT_METADATA = (
     / 'ink'
     / 'allways_bond_vault.json'
 )
+_PACKAGED_METADATA = Path(__file__).resolve().parents[1] / 'metadata' / 'allways_bond_vault.json'
+DEFAULT_METADATA = _REPO_METADATA if _REPO_METADATA.exists() else _PACKAGED_METADATA
 
 # Dry-runs use a generous fixed budget; the actual charge is by weight used.
 DEFAULT_GAS = {'ref_time': 300_000_000_000, 'proof_size': 2_000_000}
+# A miner's own bond ops (withdraw, lock) sign with its hotkey, and the node reserves the fee for the whole gas
+# limit up front: at DEFAULT_GAS that hold is ~0.15 TAO, more than a small hotkey owns. Both messages do constant
+# work; a withdraw measured ref_time 1_105_831_291 / proof_size 104_234 on finney (2026-09-15) and a lock costs no
+# more, so ~2.7x that is headroom without the hold (~0.002 TAO).
+BOND_OP_GAS = {'ref_time': 3_000_000_000, 'proof_size': 300_000}
+# recycle_fees is permissionless and meant for cron, so the same hold must not price out a small signer. It costs
+# more than a bond op (the add_stake_recycle chain extension): a dry-run measured gas_required ref_time
+# 5_307_979_122 / proof_size 85_572 on finney (2026-09-18), so ~3x that.
+RECYCLE_GAS = {'ref_time': 16_000_000_000, 'proof_size': 300_000}
 
 
 class VaultConfigError(Exception):
@@ -106,6 +118,8 @@ class BondVaultClient:
         self.keypair = keypair
         self.metadata = metadata or codec.VaultMetadata.from_path(metadata_path or str(DEFAULT_METADATA))
         self.gas = gas or DEFAULT_GAS
+        self.bond_gas = gas or BOND_OP_GAS
+        self.recycle_gas = gas or RECYCLE_GAS
 
     @classmethod
     def from_config(cls, subtensor, config=None, keypair=None, **kwargs) -> 'BondVaultClient':
@@ -120,7 +134,7 @@ class BondVaultClient:
 
     # ─── transport ───────────────────────────────────────────────────────────
 
-    def submit(self, data: bytes, value: int = 0, keypair=None) -> VaultCallResult:
+    def submit(self, data: bytes, value: int = 0, keypair=None, gas: Optional[dict] = None) -> VaultCallResult:
         signer = keypair or self.keypair
         if signer is None:
             raise VaultConfigError('No signer configured for vault writes')
@@ -130,7 +144,7 @@ class BondVaultClient:
             call_params={
                 'dest': self.address,
                 'value': value,
-                'gas_limit': self.gas,
+                'gas_limit': gas or self.gas,
                 'storage_deposit_limit': None,
                 'data': '0x' + data.hex(),
             },
@@ -351,16 +365,18 @@ class BondVaultClient:
         return self.submit(self.metadata.call('post_collateral'), value=rao, keypair=keypair)
 
     def lock_bond(self, keypair=None) -> VaultCallResult:
-        return self.submit(self.metadata.call('lock_bond'), keypair=keypair)
+        return self.submit(self.metadata.call('lock_bond'), keypair=keypair, gas=self.bond_gas)
 
     def withdraw_collateral(self, rao: int, keypair=None) -> VaultCallResult:
-        return self.submit(self.metadata.call('withdraw_collateral', codec.u64(rao)), keypair=keypair)
+        return self.submit(
+            self.metadata.call('withdraw_collateral', codec.u64(rao)), keypair=keypair, gas=self.bond_gas
+        )
 
     def claim_slash(self, swap_ref, keypair=None) -> VaultCallResult:
         return self.submit(self.metadata.call('claim_slash', codec.hash32(swap_ref)), keypair=keypair)
 
     def recycle_fees(self, keypair=None) -> VaultCallResult:
-        return self.submit(self.metadata.call('recycle_fees'), keypair=keypair)
+        return self.submit(self.metadata.call('recycle_fees'), keypair=keypair, gas=self.recycle_gas)
 
     def vote_set_recycle_target(self, hotkey: str, netuid: int, keypair=None) -> VaultCallResult:
         """Move the ``add_stake_recycle`` destination. UNANIMOUS: every current validator must

@@ -12,10 +12,28 @@ prefix-match falls through to the raw string — so adding a new validator-side
 rejection still surfaces something useful, just untranslated.
 """
 
+import re
 from dataclasses import dataclass, field
 from typing import Callable, Optional
 
 from rich.console import Console
+
+# Rejection strings are meant to be terse identifiers, but an RPC failure can smuggle a whole
+# JSON-RPC error dict through — pull the human sentence out of the blob instead of printing it.
+_MAX_RAW_LEN = 140
+_ANCHOR_MSG_RE = re.compile(r'Error Message:\s*([^\'"]+)')  # Anchor error text inside sim logs
+_RPC_MSG_RE = re.compile(r"'message':\s*'([^']+)'")
+
+
+def _terse(raw: str) -> str:
+    """Compress a blob-length rejection to '<prefix>: <human message>'; short reasons pass through."""
+    if len(raw) <= _MAX_RAW_LEN:
+        return raw
+    m = _ANCHOR_MSG_RE.search(raw) or _RPC_MSG_RE.search(raw)
+    if m:
+        prefix = raw[: raw.index(':')] if ':' in raw[:40] else 'validator error'
+        return f'{prefix}: {m.group(1).strip().rstrip(".")}'
+    return raw[: _MAX_RAW_LEN - 1] + '…'
 
 
 @dataclass
@@ -311,6 +329,7 @@ def render_and_aggregate(
     *,
     label: str = 'V',
     context: Optional[dict] = None,
+    names: Optional[dict] = None,
 ) -> RejectionInfo:
     """Print per-validator status lines and return aggregate counts + headline.
 
@@ -320,6 +339,10 @@ def render_and_aggregate(
       ``{label}{i}: no <raw reason>``       (rejected)
       ``{label}{i}: no response — timeout`` (no rejection_reason returned)
 
+    ``names`` (axon hotkey → display label, e.g. 'vali 194') replaces the positional
+    ``{label}{i}`` tag when the response's target hotkey is known — indexes stop meaning
+    anything once the relay targets a filtered set.
+
     When ``accepted == 0`` and every rejection prefix-matches the same rule,
     a translated headline is set on the returned info. Mixed-reason failures
     fall back to ``headline=''`` so the caller can render a generic line.
@@ -328,16 +351,20 @@ def render_and_aggregate(
     info = RejectionInfo()
 
     for i, resp in enumerate(responses, 1):
+        tag = f'{label}{i}'
+        if names:
+            axon_hotkey = getattr(getattr(resp, 'axon', None), 'hotkey', '') or ''
+            tag = names.get(axon_hotkey, tag)
         accepted = bool(getattr(resp, 'accepted', None))
         raw = (getattr(resp, 'rejection_reason', '') or '').strip()
         if accepted:
             info.accepted += 1
             if raw and 'queued' in raw.lower():
                 info.queued += 1
-                console.print(f'  {label}{i}: [yellow]queued[/yellow] {raw}')
+                console.print(f'  {tag}: [yellow]queued[/yellow] {raw}')
             else:
                 # Blank reason on accept is normal — don't print the no-response fallback.
-                console.print(f'  {label}{i}: [green]ok[/green]')
+                console.print(f'  {tag}: [green]ok[/green]')
             continue
 
         # A 429 from the edge proxy carries no synapse rejection_reason — the
@@ -346,16 +373,16 @@ def render_and_aggregate(
         status_code = str(getattr(getattr(resp, 'dendrite', None), 'status_code', '') or '')
         if not raw and status_code == '429':
             info.rate_limited += 1
-            console.print(f'  {label}{i}: [yellow]rate limited[/yellow] [dim]— retry in a few seconds[/dim]')
+            console.print(f'  {tag}: [yellow]rate limited[/yellow] [dim]— retry in a few seconds[/dim]')
             continue
 
         info.raw_reasons.append(raw)
         if not raw:
             info.no_response += 1
-            console.print(f'  {label}{i}: [yellow]no response[/yellow] [dim]— timeout or validator down[/dim]')
+            console.print(f'  {tag}: [yellow]no response[/yellow] [dim]— timeout or validator down[/dim]')
         else:
             info.rejected += 1
-            console.print(f'  {label}{i}: [red]no[/red] [dim]{raw}[/dim]')
+            console.print(f'  {tag}: [red]no[/red] [dim]{_terse(raw)}[/dim]')
 
     # Rate-limited (429) with no accepts: transient by nature — a short backoff
     # and retry clears it. Set this before the no-response early-return below so
@@ -399,7 +426,7 @@ def render_and_aggregate(
         # so the user still gets *something* actionable. Treat as transient by default
         # so the user can choose to retry.
         info.category = 'unmatched'
-        info.headline = last_raw or 'Validators rejected the request.'
+        info.headline = _terse(last_raw) if last_raw else 'Validators rejected the request.'
         info.deterministic = False
         return info
 
@@ -411,7 +438,7 @@ def render_and_aggregate(
         return info
 
     category, _, det, builder = last_match
-    ctx.setdefault('raw_reason', last_raw)
+    ctx.setdefault('raw_reason', _terse(last_raw))
     info.category = category
     info.deterministic = det
     try:

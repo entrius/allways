@@ -83,11 +83,11 @@ export ALLWAYS_VAULT_SURI="$SURI"
 export ALLWAYS_VAULT_METADATA="$(pwd)/target/ink/allways_bond_vault.json"
 
 echo "== [3/9] CLI: post_collateral ${POST_TAO}τ + lock_bond"
-$ALW vault post-collateral "$POST_TAO"
+$ALW vault deposit --amount "$POST_TAO"
 $ALW vault lock
 
 echo "== [4/9] withdraw while LOCKED — must be refused"
-if $ALW vault withdraw 0.001 2>&1 | tee "$OUT_DIR/locked_withdraw.log" \
+if $ALW vault withdraw --amount 0.001 2>&1 | tee "$OUT_DIR/locked_withdraw.log" \
    | grep -q "ExtrinsicSuccess.*CollateralWithdrawn"; then
   echo "FAIL: withdraw succeeded on a locked bond"; exit 1
 fi
@@ -103,7 +103,7 @@ call vote_collect_fees_batch --args "[($DEPLOYER_SS58, $FEE_TOTAL)]"
 
 echo "== [7/9] vote_unlock(self, epoch 1) → CLI: withdraw EXACT remainder ${REMAINDER_TAO}τ"
 call vote_unlock --args "$DEPLOYER_SS58" 1
-$ALW vault withdraw "$REMAINDER_TAO" | tee "$OUT_DIR/final_withdraw.log"
+$ALW vault withdraw --amount "$REMAINDER_TAO" | tee "$OUT_DIR/final_withdraw.log"
 grep -q "Withdrew" "$OUT_DIR/final_withdraw.log" \
   || { echo "FAIL: exact-remainder withdraw did not succeed — books don't balance"; exit 1; }
 

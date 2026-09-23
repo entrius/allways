@@ -20,7 +20,6 @@ from allways.assets.asset import ProviderUnreachableError
 from allways.chains import SUPPORTED_CHAINS, get_chain_def, uses_solana_wallet
 from allways.cli.dendrite_lite import (
     broadcast_synapse,
-    discover_validators,
     find_validator_axon,
     get_ephemeral_wallet,
     invalidate_axon_cache,
@@ -254,27 +253,20 @@ def _send_reserve_synapse(axon, synapse) -> tuple:
     return accepted, reason, int(getattr(resp, 'pool_closes_at', 0) or 0)
 
 
-def _reserve_routed(client, miner, user, router_hotkey, netuid, synapse, pool_window, finalize_window):
+def _reserve_routed(client, miner, user, router_hotkey, netuid, synapse, pool_window, finalize_window, subtensor):
     """Validator-routed reservation: ask ``router_hotkey`` to enter the pool for us, then wait for the
     seat to go live with OUR pubkey pinned — no self-crank, no finalize (the router does both, #558).
     Raises ``_RoutedUnavailable`` for any failure before a pool was entered; terminal post-entry
-    outcomes (lost, unresolved) ``fail`` with re-run guidance. The subtensor connection is lazy —
-    a fresh axon-cache hit sends the synapse without ever syncing the chain."""
-    memo = {}
-
-    def _subtensor():
-        if 'st' not in memo:
-            _cfg, _wallet, memo['st'], _ = get_cli_context(need_wallet=False)
-        return memo['st']
-
-    axon = find_validator_axon(_subtensor, netuid, router_hotkey)
+    outcomes (lost, unresolved) ``fail`` with re-run guidance. ``subtensor`` is the caller's lazy getter —
+    a fresh axon-cache hit sends the synapse without this function ever syncing the chain."""
+    axon = find_validator_axon(subtensor, netuid, router_hotkey)
     if axon is None:
         raise _RoutedUnavailable(f'router {router_hotkey[:8]}… is not a serving validator on netuid {netuid}')
 
     accepted, reason, pool_closes_at = _send_reserve_synapse(axon, synapse)
     if not accepted:
         # A cached axon may be stale (validators move IPs): refresh once, then retry the send.
-        fresh_axon = find_validator_axon(_subtensor, netuid, router_hotkey, fresh=True)
+        fresh_axon = find_validator_axon(subtensor, netuid, router_hotkey, fresh=True)
         if fresh_axon is not None and (fresh_axon.ip, fresh_axon.port) != (axon.ip, axon.port):
             accepted, reason, pool_closes_at = _send_reserve_synapse(fresh_axon, synapse)
         if not accepted:
@@ -397,6 +389,13 @@ def swap_now_command(
 
     config, client = get_solana_cli_context(need_keypair=True)
     config = config or {}
+    memo = {}
+
+    def _subtensor():
+        if 'st' not in memo:
+            _cfg, _wallet, memo['st'], _ = get_cli_context(need_wallet=False)
+        return memo['st']
+
     user = client.keypair.pubkey()
     router_hotkey = (router_opt or config.get('router') or '').strip()
     routed = bool(router_hotkey) and not no_router
@@ -410,9 +409,24 @@ def swap_now_command(
         fail(f'--from-address (your source-chain address) is required for a non-{NUMERAIRE_CHAIN.upper()} source.')
     # Canonical source form before anything commits it: the finalize hash + source-lock PDA are
     # byte-keyed on this string (V-C2), so a cased variant would mint a divergent lock on-chain.
-    _src_gate = gate_provider(from_chain, client)
+    _src_gate = gate_provider(from_chain, client, _subtensor)
     if _src_gate is not None:
         user_from_addr = _src_gate.chain.normalize_address(user_from_addr)
+
+    # `--send` is an explicit promise to drive the deposit in-process, so prove the configured
+    # wallet can actually sign for the pinned source address BEFORE any fee is spent. The old
+    # order only discovered a mismatch inside _auto_send_wizard — post-bid, post-finalize — and
+    # dropped the taker onto the manual deadline path with a live reservation and real money
+    # committed (hit live on a tao source 2026-09-02: config wallet vs a different --from-address).
+    if auto_send is True and not uses_solana_wallet(from_chain):
+        _pre = _source_provider(from_chain, client, config)
+        if _pre is None or not _pre.can_send_from(user_from_addr):
+            hint = f" (configured TAO wallet: '{config.get('wallet', '?')}')" if from_chain == 'tao' else ''
+            fail(
+                f'--send: this CLI cannot send {from_chain.upper()} from {user_from_addr}{hint}. '
+                'No bid was placed and no fee was spent. Fix --from-address or the configured '
+                'wallet/creds, or re-run without --send to use the manual deposit flow deliberately.'
+            )
 
     cfg = client.get_config()
     bounds = bounds_from_config(cfg) if cfg else {}
@@ -455,7 +469,9 @@ def swap_now_command(
         cand, amts = best
 
     # Deliverability screens — before the fee-charging entry AND before sending into a doomed swap.
-    _screen_deliverability(client, config, cand, from_chain, to_chain, receive_address_opt, user_from_addr, from_amount)
+    _screen_deliverability(
+        client, config, cand, from_chain, to_chain, receive_address_opt, user_from_addr, from_amount, _subtensor
+    )
 
     # Resume a seat this taker already holds rather than paying for a second bid: a prior run may have
     # bid + drawn (or even finalized) but crashed on a transient RPC before instructing the send. The
@@ -549,7 +565,7 @@ def swap_now_command(
             )
             netuid = int(config.get('netuid') or NETUID_FINNEY)
             resv = _reserve_routed(
-                client, cand.miner, user, router_hotkey, netuid, synapse, pool_window, finalize_window
+                client, cand.miner, user, router_hotkey, netuid, synapse, pool_window, finalize_window, _subtensor
             )
         except _RoutedUnavailable as e:
             console.print(f'  [yellow]Routing failed[/yellow]: {e}')
@@ -590,7 +606,7 @@ def swap_now_command(
         f'[green]  Seat filled[/green] — receiving ~[cyan]{recv:.8g} {to_chain.upper()}[/cyan], '
         f'[cyan]{backing_label(resv_backing)}[/cyan].'
     )
-    _refuse_uncovered(client, resv, from_chain, to_chain)
+    _refuse_uncovered(client, resv, from_chain, to_chain, _subtensor)
     # Never instruct a send the reservation can't outlive: a deposit that lands after reserved_until
     # yields no claim, and the funds are stranded (straight to the miner — no escrow, no Swap, no
     # timeout, no refund). Confirmations accrue *after* the claim, so they don't belong in this margin.
@@ -645,10 +661,10 @@ def _deadline_lines(reserved_until: int, want_send: bool, now: Optional[int] = N
     return lines
 
 
-def _refuse_uncovered(client, resv, from_chain, to_chain) -> None:
+def _refuse_uncovered(client, resv, from_chain, to_chain, subtensor=None) -> None:
     """Never send into a seat whose collateral does not cover a declared alpha leg at spot — that collateral is the refund."""
     backing = str(getattr(resv, 'collateral_chain', '') or '')
-    providers = declared_leg_providers(client, backing, from_chain, to_chain)
+    providers = declared_leg_providers(client, backing, from_chain, to_chain, subtensor)
     if not providers:
         return
     (leg,) = providers
@@ -663,7 +679,9 @@ def _refuse_uncovered(client, resv, from_chain, to_chain) -> None:
         )
 
 
-def _screen_deliverability(client, config, cand, from_chain, to_chain, receive_addr, user_from_addr, from_amount):
+def _screen_deliverability(
+    client, config, cand, from_chain, to_chain, receive_addr, user_from_addr, from_amount, subtensor
+):
     """Pre-reserve deliverability screens — bounce BEFORE any fee is spent.
 
     Self-represented flows have no validator to gate for them (F7), so mirror the
@@ -672,14 +690,14 @@ def _screen_deliverability(client, config, cand, from_chain, to_chain, receive_a
     miner's receive address must accept the source funds (T18). The source-address probe is a
     courtesy warning only — a frozen source just means the deposit fails and the reservation
     lapses unclaimed. A leg whose provider can't be built read-only fails open, as before."""
-    dest_provider = gate_provider(to_chain, client)
+    dest_provider = gate_provider(to_chain, client, subtensor)
     quote = client.get_quote(cand.miner, from_chain, to_chain, cand.backing)
     if dest_provider is not None:
         # Validity only — deliverability is NOT predicted at reserve time (not a boundary; the sound
         # check is the delivery-time reverted-tx proof). A malformed address can never be delivered to.
         if not dest_provider.chain.is_valid_address(receive_addr):
             fail(f'  {receive_addr!r} is not a valid {to_chain.upper()} address. No funds moved.')
-    src_provider = gate_provider(from_chain, client)
+    src_provider = gate_provider(from_chain, client, subtensor)
     if src_provider is None:
         return
     miner_addr = getattr(quote, 'miner_from_addr', '') if quote else ''
@@ -777,7 +795,7 @@ def _auto_send_wizard(client, config, resv, miner_pk, from_chain, to_chain, from
     if from_chain == 'tao' and not _unlock_coldkey_for_send(provider.wallet):
         return False
 
-    from allways.cli.swap_commands.post_tx import relay_deposit
+    from allways.cli.swap_commands.post_tx import relay_deposit, resolve_relay_axons
 
     # Resolve validators BEFORE moving funds. This is the fragile network step — a subtensor websocket
     # connect + metagraph read — and it needs nothing from the send. Doing it first means a transient
@@ -785,7 +803,9 @@ def _auto_send_wizard(client, config, resv, miner_pk, from_chain, to_chain, from
     # money is out (which stranded a deposit past its reservation TTL, with no claim, Swap, or refund).
     try:
         vconfig, _vw, subtensor, _ = get_cli_context(need_wallet=False)
-        validator_axons = discover_validators(subtensor, int(vconfig['netuid']))
+        validator_axons, validator_names, accepts_needed = resolve_relay_axons(
+            client, subtensor, int(vconfig['netuid'])
+        )
     except Exception as e:  # noqa: BLE001 - funds still safe → clean fallback, nothing lost
         console.print(f'[yellow]  Could not reach the chain to resolve validators ({e}); no funds moved.[/yellow]')
         return False
@@ -811,7 +831,16 @@ def _auto_send_wizard(client, config, resv, miner_pk, from_chain, to_chain, from
     # relay, so any failure must become a recoverable "re-run post-tx" instruction inside the TTL.
     miner_hotkey = _miner_hotkey(client, miner_pk)
     try:
-        swap_key = relay_deposit(client, resv, miner_pk, miner_hotkey, tx_hash, validator_axons=validator_axons)
+        swap_key = relay_deposit(
+            client,
+            resv,
+            miner_pk,
+            miner_hotkey,
+            tx_hash,
+            validator_axons=validator_axons,
+            validator_names=validator_names,
+            accepts_needed=accepts_needed,
+        )
     except Exception as e:  # noqa: BLE001 - money committed; convert any error into a re-run, never a crash
         fail(
             f'  Deposit sent ({tx_hash}) but the confirm relay errored: {e}. '

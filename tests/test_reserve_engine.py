@@ -104,6 +104,26 @@ def _reserve(client, from_amount=1_000_000_000):
     return result, validator.state_store
 
 
+def test_reserve_refuses_a_fill_the_in_flight_obligations_leave_uncovered():
+    # 10**12 lamports gross, all but 1 SOL already obligated on the sol hub: a 1 SOL fill needs 1.1.
+    client = FakeClient()
+    client.miner_state.reserved_collateral = [10**12 - 10**9, 0]
+    r, _ = _reserve(client)
+    assert not r.ok and 'collateral too low' in r.reason
+
+
+def test_a_new_request_clears_the_pool_rejection_verdict():
+    from allways.validator import reserve_engine
+
+    key = (str(MINER_PK), 'sol', 'btc')
+    reserve_engine._routed_rejections[key] = reserve_engine.RoutedRejection('Insufficient collateral', ['u'])
+    try:
+        r, _ = _reserve(FakeClient())
+        assert r.ok and key not in reserve_engine._routed_rejections
+    finally:
+        reserve_engine._routed_rejections.clear()
+
+
 def test_open_happy_path_persists_routed_request():
     # Two-phase: reserve_on_behalf places a BID after a viability pre-check, then queues the
     # user's details for finalize_won_seats (the winner names the fill at finalize).
@@ -422,6 +442,9 @@ def _live_swap(variant: str):
         from_amount=1_000_000_000,
         to_amount=210_000,
         miner_from_addr='minerSOLaddr',
+        miner_to_addr='minerBTCaddr',
+        user_to_addr='userBTCaddr',
+        rate='0.0021',
         from_tx_hash='srcTxHash',
         to_tx_hash='',
     )
@@ -430,6 +453,9 @@ def _live_swap(variant: str):
 def _status_validator(tmp_path, client):
     validator, store = _stage_validator(tmp_path)
     validator.solana_client = client
+    validator.solana_swap_loop = SimpleNamespace(
+        providers={'btc': _gate_asset(lambda addr, amt: True)}, fee_divisor=100
+    )
     return validator, store
 
 
@@ -458,6 +484,24 @@ def test_expired_unclaimed_reservation_reports_none(tmp_path):
     assert swap_status(validator, HOTKEY).stage == 'none'
 
 
+def test_pool_rejection_reports_rejected_with_its_users_until_a_seat_is_live(tmp_path):
+    from allways.validator import reserve_engine
+    from allways.validator.reserve_engine import swap_status
+
+    key = (str(MINER_PK), 'btc', 'sol')
+    reserve_engine._routed_rejections[key] = reserve_engine.RoutedRejection('Insufficient collateral', ['userA'])
+    try:
+        validator, _ = _status_validator(tmp_path, StatusClient(reservation=None))
+        s = swap_status(validator, HOTKEY, from_chain='btc', to_chain='sol')
+        assert s.stage == 'rejected' and s.detail == {'reason': 'Insufficient collateral', 'users': ['userA']}
+        assert swap_status(validator, HOTKEY, from_chain='sol', to_chain='btc').stage == 'none'  # other pool
+        # A live reservation is a newer round — it speaks, the stale verdict does not.
+        validator.solana_client = StatusClient(reservation=_unclaimed_reservation(FUTURE))
+        assert swap_status(validator, HOTKEY, from_chain='btc', to_chain='sol').stage == 'reserved'
+    finally:
+        reserve_engine._routed_rejections.clear()
+
+
 def test_live_unclaimed_reservation_reports_reserved(tmp_path):
     from allways.validator.reserve_engine import swap_status
 
@@ -482,6 +526,37 @@ def test_initiated_swap_resolves_by_key_after_reservation_consumed(tmp_path):
     store.close()
 
 
+def test_reject_reason_only_surfaces_for_invalid_pending_attestation(tmp_path):
+    from allways.validator.reserve_engine import swap_status
+
+    key = b'\x15' * 32
+    reservation = SimpleNamespace(
+        reserved_until=FUTURE,
+        claimed_swap_key=key,
+        user='userSOLpk',
+        from_chain='sol',
+        to_chain='btc',
+        from_amount=1_000_000_000,
+        to_amount=210_000,
+        miner_from_addr='minerSOLaddr',
+    )
+    swap = _live_swap('PendingAttestation')
+    validator, store = _status_validator(tmp_path, StatusClient(swap=swap, reservation=reservation))
+
+    validator.solana_swap_loop.providers['btc'].chain.is_valid_address = lambda address: False
+    reason = 'dest address invalid — refusing to attest'
+    assert swap_status(validator, HOTKEY).detail['reject_reason'] == reason
+    assert swap_status(validator, HOTKEY, key.hex()).detail['reject_reason'] == reason
+
+    validator.solana_swap_loop.providers['btc'].chain.is_valid_address = lambda address: True
+    assert 'reject_reason' not in swap_status(validator, HOTKEY).detail
+
+    swap.status = type('Active', (), {})()
+    validator.solana_swap_loop.providers['btc'].chain.is_valid_address = lambda address: False
+    assert 'reject_reason' not in swap_status(validator, HOTKEY, key.hex()).detail
+    store.close()
+
+
 def test_closed_pda_by_key_with_recorded_slash_reports_timed_out(tmp_path):
     from allways.validator.reserve_engine import swap_status
 
@@ -490,6 +565,18 @@ def test_closed_pda_by_key_with_recorded_slash_reports_timed_out(tmp_path):
     store.record_swap_outcome(key.hex(), 'timed_out', 100)
     s = swap_status(validator, HOTKEY, key.hex())
     assert s.stage == 'timed_out' and s.swap_key == key.hex() and s.detail == {}
+    store.close()
+
+
+def test_closed_pda_by_key_carries_refund_facts(tmp_path):
+    from allways.validator.reserve_engine import swap_status
+
+    key = b'\x16' * 32
+    validator, store = _status_validator(tmp_path, StatusClient(swap=None))
+    store.record_swap_outcome(key.hex(), 'timed_out', 100, refund=('sol', 123, 'refundTx'))
+    s = swap_status(validator, HOTKEY, key.hex())
+    assert s.stage == 'timed_out'
+    assert s.detail == {'refund_chain': 'sol', 'refund_amount': 123, 'refund_tx_hash': 'refundTx'}
     store.close()
 
 
@@ -946,6 +1033,23 @@ def test_swap_status_reads_tao_slot_when_sol_empty(tmp_path):
     client = StatusClient(reservation={'sol': None, 'tao': _unclaimed_reservation(FUTURE)})
     validator, store = _status_validator(tmp_path, client)
     assert swap_status(validator, HOTKEY).stage == 'reserved'
+    store.close()
+
+
+def test_swap_status_by_pair_reads_that_pairs_slot_not_the_freshest(tmp_path):
+    # The offering tracks ONE seat; answering with the miner's other hub made it refund a won seat
+    # ("another user holds this miner") or adopt a stranger's reservation under the same pubkey.
+    from allways.validator.reserve_engine import swap_status
+
+    sol = _unclaimed_reservation(FUTURE + 500)  # fresher, btc->sol, a stranger
+    tao = SimpleNamespace(
+        **{**vars(_unclaimed_reservation(FUTURE)), 'user': 'ourTaoUser', 'from_chain': 'tao', 'to_chain': 'btc'}
+    )
+    client = StatusClient(reservation={'sol': sol, 'tao': tao})
+    validator, store = _status_validator(tmp_path, client)
+    assert swap_status(validator, HOTKEY).user == 'staleUserSOLpk'  # no pair: freshest, as before
+    assert swap_status(validator, HOTKEY, from_chain='tao', to_chain='btc').user == 'ourTaoUser'
+    assert swap_status(validator, HOTKEY, from_chain='eth', to_chain='sol').stage == 'none'
     store.close()
 
 

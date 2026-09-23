@@ -13,6 +13,7 @@ from .queries import (
     BULK_INSERT_CURRENT_MINER_SCORES,
     BULK_UPSERT_CROWN_HOLDERS,
     BULK_UPSERT_CURRENT_CROWN_HOLDERS,
+    BULK_UPSERT_DIRECTION_POOLS,
     BULK_UPSERT_MINER_SCORES,
     DELETE_CROWN_IN_RANGE,
     DELETE_CURRENT_CROWN_BY_DIRECTION,
@@ -133,6 +134,27 @@ class Repository(BaseRepository):
             if commit:
                 self.db.rollback()
             self.logger.error(f'Error in bulk miner_scores storage: {e}')
+            return 0
+
+    def store_direction_pools_bulk(
+        self,
+        rows: List[Tuple],
+        commit: bool = True,
+    ) -> int:
+        """Upsert the round's per-lane pools. Rows: (round_ts, from_chain, to_chain,
+        backing, pool, qualified_volume, live) — one per lane, dead lanes included."""
+        if not rows:
+            return 0
+        try:
+            with self.get_cursor() as cursor:
+                cursor.executemany(BULK_UPSERT_DIRECTION_POOLS, rows)
+                if commit:
+                    self.db.commit()
+                return len(rows)
+        except Exception as e:
+            if commit:
+                self.db.rollback()
+            self.logger.error(f'Error in bulk direction_pools storage: {e}')
             return 0
 
     def replace_current_miner_scores(

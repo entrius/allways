@@ -1,5 +1,6 @@
 """C5 — crown-time scoring replay tests."""
 
+from functools import partial  # noqa: E402
 from pathlib import Path
 from types import SimpleNamespace
 from unittest.mock import MagicMock
@@ -11,29 +12,40 @@ import pytest
 from allways.classes import ActivityTransition, MinerActivity
 from allways.constants import (
     DIRECTION_POOLS,
+    ELIGIBILITY_FILL_WINDOW_SECS,
     LAUNCH_PAIRS,
     MAX_FAILED_SWAPS,
     MAX_SCORING_BACKFILL_SECS,
-    MIN_SUCCESSFUL_SWAPS,
     MINER_POOL_SHARE,
     POOL_VOLUME_ALPHA,
+    QUALITY_VOLUME_BETA,
     RECYCLE_UID,
     SCORING_WINDOW_BLOCKS,
     required_collateral,
 )
+from allways.solana.pdas import BACKING_BITS
 from allways.utils.rate import is_executable_rate, min_executable_hub_leg
 from allways.validator import scoring as scoring_mod
 from allways.validator.event_index import SolanaEventIndex
 from allways.validator.scoring import (
+    DirectionTrace,
+    build_direction_score_rows,
     build_eligibility,
     calculate_miner_rewards,
     compute_direction_pools,
     crown_can_fund,
     crown_depth_shares,
     crown_holders_at_instant,
+    direction_eligible,
+    direction_pool_tuples,
     due_for_scoring,
+    fill_held_crown,
     is_eligible,
+    lane_volumes_to_directions,
     make_crown_predicates,
+    purse_active,
+    qualified_volume_shares,
+    recent_fill_hotkeys,
     replay_crown_time_window,
     score_and_reward_miners,
     scoring_window_bounds,
@@ -43,18 +55,15 @@ from allways.validator.scoring import (
 from allways.validator.state_store import ValidatorStateStore
 
 # Mirror production pool shares so these stay in sync if DIRECTION_POOLS changes.
+# A crown-only lane (no qualified fills in the window) pays 1−β of its pool; β recycles.
+CROWN_SLICE = 1.0 - QUALITY_VOLUME_BETA
 POOL_BTC_SOL = DIRECTION_POOLS[('btc', 'sol')]
 POOL_SOL_BTC = DIRECTION_POOLS[('sol', 'btc')]
-# Leg pool when one pair carried ALL the window's clearing volume: the pair
-# share tilts to (1−α)/pairs + α and splits evenly across its two directions.
+# Leg pool when one pair carried ALL the window's qualified volume: it is the only LIVE
+# pair, so its family holds the whole miner pool and the pair takes all of it —
+# (1−α)/1 + α = 1 — split evenly across its two directions.
 N_PAIRS = len(LAUNCH_PAIRS)
-# Volume weighting runs within a hub family (lamports and rao are not comparable):
-# a sol-family pair carrying ALL the family's volume gets family_share × ((1−α)/family + α).
-SOL_FAMILY_PAIRS = sum(1 for hub, _spoke in LAUNCH_PAIRS if hub == 'sol')
-SOL_FAMILY_SHARE = SOL_FAMILY_PAIRS / N_PAIRS
-POOL_BUSY_PAIR_LEG = (
-    MINER_POOL_SHARE * SOL_FAMILY_SHARE * ((1 - POOL_VOLUME_ALPHA) / SOL_FAMILY_PAIRS + POOL_VOLUME_ALPHA) / 2
-)
+POOL_BUSY_PAIR_LEG = MINER_POOL_SHARE / 2
 MIN_COLLATERAL = 100_000_000  # 0.1 TAO
 
 METADATA_PATH = Path(__file__).parent.parent / 'allways' / 'metadata' / 'allways_swap_manager.json'
@@ -213,6 +222,7 @@ def make_validator(
     miner_counters: dict[str, tuple[int, int]] | None = None,
     all_eligible: bool = True,
     settling: dict[str, int] | None = None,
+    recent_fills: set[str] | None = None,
 ) -> SimpleNamespace:
     """Build a SimpleNamespace stand-in for the validator.
 
@@ -221,13 +231,22 @@ def make_validator(
     exercise capacity weighting pass explicit ``max_swap_amount`` and
     ``collaterals`` overrides.
 
-    Eligibility (B3.3) is read off on-chain ``MinerState`` counters via
-    ``solana_client``. ``miner_counters`` maps hotkey → (successful, failed)
-    swaps; when omitted, every hotkey gets ``(MIN_SUCCESSFUL_SWAPS, 0)`` if
-    ``all_eligible`` (the default — a "passes the gate" miner) else ``(0, 0)``
-    (no proven successes → ineligible).
+    Eligibility is the strike counter off on-chain ``MinerState`` (``miner_counters``
+    maps hotkey → (successful, failed); successes are no longer read) AND a fill in
+    the trailing activity window, seeded per purse as UNQUALIFIED clearing rows one
+    second before ``block`` (inert for pools and β) for ``recent_fills`` — default every
+    hotkey if ``all_eligible`` else none. The ledger is stamped old so the window
+    gate is live (a fresh ledger reads strikes-only).
     """
     store = ValidatorStateStore(db_path=tmp_path / 'state.db')
+    # Ledger older than the window at ``block`` so the activity gate is live (young = strikes-only).
+    store.set_relay_meta(ValidatorStateStore.LEDGER_SINCE_KEY, str(block - ELIGIBILITY_FILL_WINDOW_SECS))
+    if recent_fills is None:
+        recent_fills = set(hotkeys) if all_eligible else set()
+    for hotkey in recent_fills:
+        # One fill per purse: the gate is per backing, and these tests quote under both.
+        for hub in BACKING_BITS:
+            store.insert_clearing_rate(block - 1, hotkey, 'btc', 'sol', 1, 1, f'elig-{hotkey}-{hub}', backing=hub)
     watcher = make_watcher(store, active=set(hotkeys))
     collaterals = collaterals or {}
     # Mirror the cold-bootstrap collateral anchor: scoring now reads collateral
@@ -251,8 +270,7 @@ def make_validator(
     database_storage = MagicMock()
     database_storage.is_enabled.return_value = False
     if miner_counters is None:
-        default = (MIN_SUCCESSFUL_SWAPS, 0) if all_eligible else (0, 0)
-        miner_counters = {hk: default for hk in hotkeys}
+        miner_counters = {hk: (0, 0) for hk in hotkeys}
     return SimpleNamespace(
         block=block,
         # Seed one window back so scoring_window_bounds yields the same window
@@ -288,32 +306,65 @@ def _miner_state(successful: int, failed: int, settling_until: int = 0) -> Simpl
 
 
 class TestIsEligibleHelper:
-    """Flat binary gate: eligible iff successes >= MIN_SUCCESSFUL_SWAPS (2) and
-    failures <= MAX_FAILED_SWAPS (2). Replaces success_rate³ × credibility."""
+    """Binary gate: failures <= MAX_FAILED_SWAPS (lifetime, on-chain) AND a fill in the
+    trailing activity window (``recent_fills``). No success minimum. ``recent_fills=None``
+    = ledger younger than the window → strikes only."""
 
-    def test_below_min_successes_ineligible(self):
-        assert is_eligible(_miner_state(0, 0)) is False
-        assert is_eligible(_miner_state(1, 0)) is False  # one short of the floor
-
-    def test_at_min_successes_eligible(self):
-        assert is_eligible(_miner_state(MIN_SUCCESSFUL_SWAPS, 0)) is True  # boundary
-
-    def test_above_min_successes_eligible(self):
-        assert is_eligible(_miner_state(50, 0)) is True
-
-    def test_at_max_failures_still_eligible(self):
-        # 2 failures tolerated at the boundary, given enough successes.
-        assert is_eligible(_miner_state(2, MAX_FAILED_SWAPS)) is True
-
-    def test_above_max_failures_ineligible(self):
-        # One failure past the cap kills eligibility regardless of success count.
+    def test_strikes_only_when_ledger_is_young(self):
+        assert is_eligible(_miner_state(0, 0)) is True
+        assert is_eligible(_miner_state(0, MAX_FAILED_SWAPS)) is True  # boundary
         assert is_eligible(_miner_state(50, MAX_FAILED_SWAPS + 1)) is False
 
-    def test_both_gates_must_pass(self):
-        # Enough successes but too many failures → out.
-        assert is_eligible(_miner_state(3, 3)) is False
-        # Few failures but too few successes → out.
-        assert is_eligible(_miner_state(1, 0)) is False
+    def test_activity_window_gates_once_ledger_is_old(self):
+        assert is_eligible(_miner_state(0, 0), hotkey='hk_a', recent_fills={'sol': {'hk_a'}}) is True
+        assert is_eligible(_miner_state(50, 0), hotkey='hk_a', recent_fills={}) is False
+        assert is_eligible(_miner_state(50, 0), hotkey='hk_a', recent_fills={'sol': {'hk_b'}}) is False
+
+    def test_strikes_override_activity(self):
+        assert (
+            is_eligible(_miner_state(50, MAX_FAILED_SWAPS + 1), hotkey='hk_a', recent_fills={'sol': {'hk_a'}}) is False
+        )
+
+    def test_no_success_minimum(self):
+        # The first completed fill is enough: zero lifetime successes, one fill in the window.
+        assert is_eligible(_miner_state(0, 0), hotkey='hk_new', recent_fills={'tao': {'hk_new'}}) is True
+
+    def test_global_reading_is_any_purse_lane_reading_is_own_purse(self):
+        """A tao-only fill keeps the miner globally eligible but only the tao lanes live."""
+        fills = {'tao': {'hk_a'}}
+        ms = _miner_state(0, 0)
+        assert is_eligible(ms, hotkey='hk_a', recent_fills=fills) is True
+        assert purse_active('hk_a', 'tao', fills) is True
+        assert purse_active('hk_a', 'sol', fills) is False
+        assert direction_eligible(ms, 'sol', 'tao', 0, backing='tao', hotkey='hk_a', recent_fills=fills) is True
+        assert direction_eligible(ms, 'sol', 'tao', 0, backing='sol', hotkey='hk_a', recent_fills=fills) is False
+        assert direction_eligible(ms, 'btc', 'sol', 0, backing='sol', hotkey='hk_a', recent_fills=fills) is False
+        # Pair-level reading: live while ANY of the pair's hubs is active.
+        assert direction_eligible(ms, 'sol', 'tao', 0, hotkey='hk_a', recent_fills=fills) is True
+        assert direction_eligible(ms, 'btc', 'sol', 0, hotkey='hk_a', recent_fills=fills) is False
+        # Young ledger: everything reads active.
+        assert purse_active('hk_a', 'sol', None) is True
+
+
+class TestRecentFillHotkeys:
+    def test_young_ledger_reads_none(self, tmp_path: Path):
+        store = ValidatorStateStore(db_path=tmp_path / 'state.db')
+        now = 100_000
+        assert recent_fill_hotkeys(store, now) is None  # stamps ledger_since = now
+        assert recent_fill_hotkeys(store, now + ELIGIBILITY_FILL_WINDOW_SECS - 1) is None
+        assert recent_fill_hotkeys(store, now + ELIGIBILITY_FILL_WINDOW_SECS) == {}
+        store.close()
+
+    def test_window_is_trailing_and_half_open(self, tmp_path: Path):
+        store = ValidatorStateStore(db_path=tmp_path / 'state.db')
+        store.set_relay_meta(ValidatorStateStore.LEDGER_SINCE_KEY, '0')
+        now = 100_000
+        w = ELIGIBILITY_FILL_WINDOW_SECS
+        store.insert_clearing_rate(now - w, 'hk_old', 'btc', 'sol', 1, 1, 'k1')  # at the edge — out
+        store.insert_clearing_rate(now - w + 1, 'hk_in', 'btc', 'sol', 1, 1, 'k2')
+        store.insert_clearing_rate(now, 'hk_now', 'sol', 'tao', 1, 1, 'k3', backing='tao', qualified=False)
+        assert recent_fill_hotkeys(store, now) == {'sol': {'hk_in'}, 'tao': {'hk_now'}}
+        store.close()
 
 
 class TestBuildEligibility:
@@ -321,8 +372,8 @@ class TestBuildEligibility:
 
     def test_maps_metagraph_hotkeys_to_gate(self):
         metagraph = make_metagraph(['hk_a', 'hk_b'])
-        client = FakeSolanaClient({'hk_a': (MIN_SUCCESSFUL_SWAPS, 0), 'hk_b': (0, 0)})
-        elig = build_eligibility(client, metagraph)
+        client = FakeSolanaClient({'hk_a': (5, 0), 'hk_b': (5, 0)})
+        elig = build_eligibility(client, metagraph, recent_fills={'sol': {'hk_a'}})
         assert elig == {'hk_a': True, 'hk_b': False}
 
     def test_off_metagraph_miner_dropped(self):
@@ -415,16 +466,13 @@ class TestGetClearingVolumes:
 
 
 class TestComputeDirectionPools:
-    """Pair-level volume weighting WITHIN a hub family: each family holds a fixed
-    share ∝ its pair count (hub-leg volumes aren't comparable across hubs), a pair's
-    share within it is (1−α)/family_pairs + α·family_volume_share, split evenly
-    between its two legs, then evenly across each leg's backing lanes (F4 — two on
-    sol↔tao, one on spokes); zero volume falls back to the same lane split of
+    """Pair-level volume weighting over LIVE pairs (≥1 qualified fill in the window)
+    within a hub family: each family's share ∝ its live pair count (hub-leg volumes
+    aren't comparable across hubs), a live pair's share within it is
+    (1−α)/live_pairs + α·family_volume_share, split evenly between its two legs, then
+    evenly across each leg's backing lanes (F4 — two on sol↔tao, one on spokes). Dead
+    pairs are present at 0.0; no volume anywhere falls back to the equal split of
     DIRECTION_POOLS. Keys are lanes: (from, to, backing)."""
-
-    # A pair's floor leg is the same under family or global blending:
-    # family_share × (1−α)/family_pairs == (1−α)/total_pairs.
-    FLOOR_LEG = MINER_POOL_SHARE * (1 - POOL_VOLUME_ALPHA) / N_PAIRS / 2
 
     def test_no_volume_falls_back_to_equal_split(self):
         pools = compute_direction_pools({})
@@ -436,43 +484,55 @@ class TestComputeDirectionPools:
         assert pools[('sol', 'tao', 'tao')] == pools[('sol', 'tao', 'sol')]
         assert sum(pools.values()) == pytest.approx(MINER_POOL_SHARE)
 
-    def test_single_pair_volume_tilts_both_its_legs_equally(self):
+    def test_single_live_pair_takes_the_whole_pool(self):
+        """One qualified fill on btc↔sol and nothing else: that pair is the only live pair
+        in the registry, so it holds the whole miner pool (half per leg) and every other
+        lane — including the TAO family — is dead at 0.0."""
         pools = compute_direction_pools({('btc', 'sol'): {'hk_a': (5, 100)}})
-        busy = self.FLOOR_LEG + MINER_POOL_SHARE * SOL_FAMILY_SHARE * POOL_VOLUME_ALPHA / 2
-        assert pools[('btc', 'sol', 'sol')] == pytest.approx(busy)
+        assert pools[('btc', 'sol', 'sol')] == pytest.approx(MINER_POOL_SHARE / 2)
         assert pools[('sol', 'btc', 'sol')] == pools[('btc', 'sol', 'sol')]  # quiet leg rides its pair
-        # The hub↔hub pair's floor leg is contested per backing lane, half each.
-        assert pools[('sol', 'tao', 'sol')] == pytest.approx(self.FLOOR_LEG / 2)
-        assert pools[('sol', 'tao', 'tao')] == pytest.approx(self.FLOOR_LEG / 2)
-        assert pools[('tao', 'sol', 'sol')] == pytest.approx(self.FLOOR_LEG / 2)
-        assert pools[('tao', 'sol', 'tao')] == pytest.approx(self.FLOOR_LEG / 2)
-        # SOL-family volume never leaks into the TAO family's fixed share.
-        assert pools[('tao', 'btc', 'tao')] == pytest.approx(MINER_POOL_SHARE / (2 * N_PAIRS))
+        dead = {lane: v for lane, v in pools.items() if lane[:2] not in (('btc', 'sol'), ('sol', 'btc'))}
+        assert dead and all(v == 0.0 for v in dead.values())
+        assert set(pools) == set(compute_direction_pools({}))  # dead lanes are listed, not dropped
         assert sum(pools.values()) == pytest.approx(MINER_POOL_SHARE)
 
-    def test_volume_is_the_hub_leg_summed_per_pair(self):
+    def test_floor_is_split_among_live_pairs_only(self):
         # BTC pair: 300 SOL (to_amount is the SOL leg of btc→sol); TAO pair:
         # 100 SOL (from_amount is the SOL leg of sol→tao). Spoke-side legs are
-        # deliberately huge to prove they never enter the weighting.
+        # deliberately huge to prove they never enter the weighting. Two live pairs,
+        # both sol family → the family holds everything, floor = (1−α)/2 each.
         pools = compute_direction_pools(
             {
                 ('btc', 'sol'): {'hk_a': (10**15, 200), 'hk_b': (10**15, 100)},
                 ('sol', 'tao'): {'hk_c': (100, 10**15)},
             }
         )
-        floor_pair = (1 - POOL_VOLUME_ALPHA) / N_PAIRS
-        alpha_leg = SOL_FAMILY_SHARE * POOL_VOLUME_ALPHA
-        assert pools[('btc', 'sol', 'sol')] == pytest.approx(MINER_POOL_SHARE * (floor_pair + alpha_leg * 0.75) / 2)
+        floor_pair = (1 - POOL_VOLUME_ALPHA) / 2
+        assert pools[('btc', 'sol', 'sol')] == pytest.approx(
+            MINER_POOL_SHARE * (floor_pair + POOL_VOLUME_ALPHA * 0.75) / 2
+        )
         # Volume tilts the whole sol↔tao PAIR (never split by backing); each
         # direction's tilted pool then halves across its two lanes.
-        tao_sol_direction = MINER_POOL_SHARE * (floor_pair + alpha_leg * 0.25) / 2
+        tao_sol_direction = MINER_POOL_SHARE * (floor_pair + POOL_VOLUME_ALPHA * 0.25) / 2
         assert pools[('tao', 'sol', 'sol')] == pytest.approx(tao_sol_direction / 2)
         assert pools[('tao', 'sol', 'tao')] == pytest.approx(tao_sol_direction / 2)
+        assert pools[('sol', 'eth', 'sol')] == 0.0  # registered, quiet → dead
         assert sum(pools.values()) == pytest.approx(MINER_POOL_SHARE)
 
-    def test_families_split_independently(self):
-        # Volume in each family tilts only its own pairs; the two families' totals
-        # stay at their fixed pair-count shares whatever the volumes are.
+    def test_dust_fill_takes_a_full_floor_when_few_pairs_are_live(self):
+        """The bootstrap bounty: next to one whale pair, a dust fill on a second pair still
+        earns that pair (1−α)/2 of the family — the floor is what makes coverage pay."""
+        pools = compute_direction_pools({('btc', 'sol'): {'hk': (1, 5_000)}, ('sol', 'eth'): {'hk': (50, 1)}})
+        dust_pair = pools[('sol', 'eth', 'sol')] + pools[('eth', 'sol', 'sol')]
+        assert dust_pair == pytest.approx(
+            MINER_POOL_SHARE * ((1 - POOL_VOLUME_ALPHA) / 2 + POOL_VOLUME_ALPHA * 50 / 5_050)
+        )
+        assert dust_pair > MINER_POOL_SHARE * 0.17
+
+    def test_families_share_by_live_pair_count(self):
+        # One live pair in each family: the families split the pool 50/50 however
+        # lopsided the (non-comparable) volumes are, and each live pair takes its
+        # whole family. Registered-but-dead pairs move nothing.
         pools = compute_direction_pools(
             {
                 ('btc', 'sol'): {'hk_a': (1, 10**12)},  # lamports, sol family
@@ -481,11 +541,18 @@ class TestComputeDirectionPools:
         )
         sol_total = sum(v for (f, t, _b), v in pools.items() if 'sol' in (f, t))
         tao_family_total = sum(v for (f, t, _b), v in pools.items() if 'sol' not in (f, t))
-        assert sol_total == pytest.approx(MINER_POOL_SHARE * SOL_FAMILY_SHARE)
-        assert tao_family_total == pytest.approx(MINER_POOL_SHARE * (1 - SOL_FAMILY_SHARE))
-        # The volumed tao pair outweighs its quiet siblings inside its family.
-        assert pools[('tao', 'eth', 'tao')] > pools[('tao', 'btc', 'tao')]
+        assert sol_total == pytest.approx(MINER_POOL_SHARE / 2)
+        assert tao_family_total == pytest.approx(MINER_POOL_SHARE / 2)
+        assert pools[('tao', 'eth', 'tao')] == pytest.approx(MINER_POOL_SHARE / 4)
+        assert pools[('tao', 'btc', 'tao')] == 0.0
         assert sum(pools.values()) == pytest.approx(MINER_POOL_SHARE)
+
+    def test_dead_family_pays_nothing(self):
+        # Only sol-family pairs live → the TAO family's fixed-by-count share is gone; its
+        # lanes are all 0 and the sol family holds the entire pool.
+        pools = compute_direction_pools({('btc', 'sol'): {'hk': (1, 10)}, ('sol', 'eth'): {'hk': (10, 1)}})
+        assert all(v == 0.0 for (f, t, _b), v in pools.items() if 'sol' not in (f, t))
+        assert sum(v for (f, t, _b), v in pools.items() if 'sol' in (f, t)) == pytest.approx(MINER_POOL_SHARE)
 
     def test_pool_conservation_holds_with_hub_hub_lanes(self):
         # The F4 lane split is budget-neutral by construction: however volume lands
@@ -1338,16 +1405,16 @@ class TestCalculateMinerRewards:
 
         rewards, _ = calculate_miner_rewards(v, v.block)
 
-        np.testing.assert_allclose(rewards[0], POOL_BTC_SOL + POOL_SOL_BTC, atol=1e-6)
+        np.testing.assert_allclose(rewards[0], CROWN_SLICE * (POOL_BTC_SOL + POOL_SOL_BTC), atol=1e-6)
         np.testing.assert_allclose(rewards.sum(), 1.0, atol=1e-6)
         v.state_store.close()
 
     def test_ineligible_miner_earns_nothing(self, tmp_path: Path):
-        """A crown-holding miner below the success floor gates to weight 0 and
-        the whole pool recycles — the flat gate is a hard 0/1 multiplier."""
+        """A crown-holding miner with no fill in the activity window gates to weight 0
+        and the whole pool recycles — the gate is a hard 0/1 multiplier."""
         hotkeys = pad_hotkeys_to_cover_recycle(['hk_a'])
-        # hk_a holds the crown but has only 1 successful swap (< MIN=2).
-        v = make_validator(tmp_path, hotkeys=hotkeys, miner_counters={'hk_a': (1, 0)})
+        # hk_a holds the crown but has not completed a swap inside the window.
+        v = make_validator(tmp_path, hotkeys=hotkeys, recent_fills=set())
         conn = v.state_store.require_connection()
         conn.execute(
             'INSERT INTO rate_events (hotkey, from_chain, to_chain, rate, block) VALUES (?, ?, ?, ?, ?)',
@@ -1394,7 +1461,7 @@ class TestCalculateMinerRewards:
 
         rewards, _ = calculate_miner_rewards(v, v.block)
 
-        np.testing.assert_allclose(rewards[0], POOL_BTC_SOL, atol=1e-6)
+        np.testing.assert_allclose(rewards[0], CROWN_SLICE * POOL_BTC_SOL, atol=1e-6)
         v.state_store.close()
 
     def test_eligible_high_fail_miner_excluded(self, tmp_path: Path):
@@ -1451,7 +1518,7 @@ class TestCalculateMinerRewards:
         rewards, _ = calculate_miner_rewards(v, v.block)
 
         # hk_a isn't in metagraph so hk_b (uid 0) becomes the crown holder.
-        np.testing.assert_allclose(rewards[0], POOL_SOL_BTC, atol=1e-6)
+        np.testing.assert_allclose(rewards[0], CROWN_SLICE * POOL_SOL_BTC, atol=1e-6)
         v.state_store.close()
 
     def test_recycle_uid_out_of_bounds_falls_back_to_zero(self, tmp_path: Path):
@@ -1583,7 +1650,7 @@ class TestHistoricalActiveState:
         rewards, _ = calculate_miner_rewards(v, v.block)
 
         # Full pool across both directions goes to hk_a (uid 0).
-        np.testing.assert_allclose(rewards[0], POOL_BTC_SOL + POOL_SOL_BTC, atol=1e-6)
+        np.testing.assert_allclose(rewards[0], CROWN_SLICE * (POOL_BTC_SOL + POOL_SOL_BTC), atol=1e-6)
         np.testing.assert_allclose(rewards.sum(), 1.0, atol=1e-6)
         v.state_store.close()
 
@@ -1660,7 +1727,7 @@ class TestHistoricalActiveState:
         # hk_a is the only miner with a rate, so it takes the entire tao→btc
         # pool for the blocks it held crown. btc→tao pool gets nothing (no
         # rates posted) and recycles.
-        np.testing.assert_allclose(rewards[0], POOL_BTC_SOL, atol=1e-6)
+        np.testing.assert_allclose(rewards[0], CROWN_SLICE * POOL_BTC_SOL, atol=1e-6)
         # Everything else recycles: btc→tao pool.
         np.testing.assert_allclose(rewards.sum(), 1.0, atol=1e-6)
         v.state_store.close()
@@ -1827,7 +1894,7 @@ class TestHistoricalActiveState:
         rewards, _ = calculate_miner_rewards(v, v.block)
 
         # hk_b (uid 0) is the only rewardable + active miner, earns btc→tao.
-        np.testing.assert_allclose(rewards[0], POOL_SOL_BTC, atol=1e-6)
+        np.testing.assert_allclose(rewards[0], CROWN_SLICE * POOL_SOL_BTC, atol=1e-6)
         np.testing.assert_allclose(rewards.sum(), 1.0, atol=1e-6)
         v.state_store.close()
 
@@ -1968,7 +2035,7 @@ class TestCapacityWeighting:
         self.seed_sol_btc_crown(v, 'hk_a')
         rewards, _ = calculate_miner_rewards(v, v.block)
         # hk_a holds 100% of tao→btc crown, full capacity, eligible, no volume penalty.
-        np.testing.assert_allclose(rewards[0], POOL_BTC_SOL, atol=1e-6)
+        np.testing.assert_allclose(rewards[0], CROWN_SLICE * POOL_BTC_SOL, atol=1e-6)
         v.state_store.close()
 
     def test_quarter_collateral_pays_sixteenth(self, tmp_path: Path):
@@ -1983,11 +2050,11 @@ class TestCapacityWeighting:
         )
         self.seed_sol_btc_crown(v, 'hk_a')
         rewards, _ = calculate_miner_rewards(v, v.block)
-        np.testing.assert_allclose(rewards[0], POOL_BTC_SOL * 0.0625, atol=1e-6)
+        np.testing.assert_allclose(rewards[0], CROWN_SLICE * POOL_BTC_SOL * 0.0625, atol=1e-6)
         # Pool conservation: hk_a got POOL_BTC_SOL*0.0625; the rest of both buckets
         # and the unallocated pool all recycle, so recycle = 1 - that share.
         recycle_uid = RECYCLE_UID if RECYCLE_UID < len(rewards) else 0
-        np.testing.assert_allclose(rewards[recycle_uid], 1.0 - POOL_BTC_SOL * 0.0625, atol=1e-6)
+        np.testing.assert_allclose(rewards[recycle_uid], 1.0 - CROWN_SLICE * POOL_BTC_SOL * 0.0625, atol=1e-6)
         np.testing.assert_allclose(rewards.sum(), 1.0, atol=1e-6)
         v.state_store.close()
 
@@ -2002,7 +2069,7 @@ class TestCapacityWeighting:
         )
         self.seed_sol_btc_crown(v, 'hk_a')
         rewards, _ = calculate_miner_rewards(v, v.block)
-        np.testing.assert_allclose(rewards[0], POOL_BTC_SOL, atol=1e-6)
+        np.testing.assert_allclose(rewards[0], CROWN_SLICE * POOL_BTC_SOL, atol=1e-6)
         v.state_store.close()
 
     def test_zero_collateral_zeros_reward(self, tmp_path: Path):
@@ -2040,8 +2107,8 @@ class TestCapacityWeighting:
             )
         conn.commit()
         rewards, _ = calculate_miner_rewards(v, v.block)
-        np.testing.assert_allclose(rewards[0], POOL_BTC_SOL * (5 / 6), atol=1e-6)
-        np.testing.assert_allclose(rewards[1], POOL_BTC_SOL * (1 / 6) * 0.04, atol=1e-6)
+        np.testing.assert_allclose(rewards[0], CROWN_SLICE * POOL_BTC_SOL * (5 / 6), atol=1e-6)
+        np.testing.assert_allclose(rewards[1], CROWN_SLICE * POOL_BTC_SOL * (1 / 6) * 0.04, atol=1e-6)
         v.state_store.close()
 
     def test_thin_undercut_inside_band_shares_instead_of_taking_all(self, tmp_path: Path):
@@ -2065,8 +2132,8 @@ class TestCapacityWeighting:
             )
         conn.commit()
         rewards, _ = calculate_miner_rewards(v, v.block)
-        np.testing.assert_allclose(rewards[0], POOL_BTC_SOL * (1 / 6) * 0.04, atol=1e-6)
-        np.testing.assert_allclose(rewards[1], POOL_BTC_SOL * (5 / 6), atol=1e-6)
+        np.testing.assert_allclose(rewards[0], CROWN_SLICE * POOL_BTC_SOL * (1 / 6) * 0.04, atol=1e-6)
+        np.testing.assert_allclose(rewards[1], CROWN_SLICE * POOL_BTC_SOL * (5 / 6), atol=1e-6)
         np.testing.assert_allclose(rewards[2], 0.0, atol=1e-6)
         v.state_store.close()
 
@@ -2089,8 +2156,8 @@ class TestCapacityWeighting:
         conn.commit()
         rewards, _ = calculate_miner_rewards(v, v.block)
         # 50/50 crown split, both at full capacity → each earns half the pool.
-        np.testing.assert_allclose(rewards[0], POOL_BTC_SOL * 0.5, atol=1e-6)
-        np.testing.assert_allclose(rewards[1], POOL_BTC_SOL * 0.5, atol=1e-6)
+        np.testing.assert_allclose(rewards[0], CROWN_SLICE * POOL_BTC_SOL * 0.5, atol=1e-6)
+        np.testing.assert_allclose(rewards[1], CROWN_SLICE * POOL_BTC_SOL * 0.5, atol=1e-6)
         v.state_store.close()
 
     def test_cold_start_max_swap_zero_is_fail_safe(self, tmp_path: Path):
@@ -2101,7 +2168,7 @@ class TestCapacityWeighting:
         self.seed_sol_btc_crown(v, 'hk_a')
         rewards, _ = calculate_miner_rewards(v, v.block)
         # Fail-safe path: capacity_factor = 1.0 regardless of collateral.
-        np.testing.assert_allclose(rewards[0], POOL_BTC_SOL, atol=1e-6)
+        np.testing.assert_allclose(rewards[0], CROWN_SLICE * POOL_BTC_SOL, atol=1e-6)
         v.state_store.close()
 
     def test_unknown_collateral_fails_closed(self, tmp_path: Path):
@@ -2152,7 +2219,7 @@ class TestCapacityWeighting:
         self.seed_sol_btc_crown(v, 'hk_a')
         rewards, _ = calculate_miner_rewards(v, v.block)
         # Fail-safe: capacity factor 1.0 → hk_a earns the full tao→btc pool.
-        np.testing.assert_allclose(rewards[0], POOL_BTC_SOL, atol=1e-6)
+        np.testing.assert_allclose(rewards[0], CROWN_SLICE * POOL_BTC_SOL, atol=1e-6)
         v.state_store.close()
 
 
@@ -2179,10 +2246,10 @@ class TestWeightingTraceRecorders:
         assert wt.eligible is False
 
 
-class TestVolumeIsNotARewardTerm:
-    """Realized volume never enters a MINER's multiplier — payout is still
-    pool x crown_share x capacity with no per-miner volume term. Volume only
-    sizes the direction pools, at pair level (compute_direction_pools)."""
+class TestQualityVolumeSlice:
+    """The β slice: each lane pool pays (1−β) on crown time × capacity and β on the
+    lane's QUALIFIED volume share (fills reserved on a crown holder). Unqualified
+    volume is inert everywhere — it neither tilts the pool nor pays the filler."""
 
     def seed_sol_btc_crown(self, v: SimpleNamespace, hotkey: str, rate: float = 0.00020) -> None:
         conn = v.state_store.require_connection()
@@ -2200,28 +2267,53 @@ class TestVolumeIsNotARewardTerm:
         block: int = 9_900,  # inside the (9_700, 10_000] window these tests score
         from_chain: str = 'btc',
         to_chain: str = 'sol',
+        qualified: bool = True,
     ) -> None:
         v.state_store.insert_clearing_rate(
-            block, miner_hotkey, from_chain, to_chain, from_amount, from_amount, uuid4().hex
+            block, miner_hotkey, from_chain, to_chain, from_amount, from_amount, uuid4().hex, qualified=qualified
         )
 
-    def test_zero_volume_crown_holder_earns_full_reward(self, tmp_path: Path):
-        """A crown holder that served nothing still earns the full direction
-        pool — whoever's volume tilted it, only crown decides who's paid."""
+    def test_qualified_filler_takes_beta_crown_holder_keeps_the_rest(self, tmp_path: Path):
+        """A posts no rate but cleared every qualified fill; B holds the whole crown.
+        The lane pool (tilted by the qualified volume) splits β to A, 1−β to B."""
+        hotkeys = pad_hotkeys_to_cover_recycle(['hk_a', 'hk_b'])
+        v = make_validator(tmp_path, hotkeys)
+        self.seed_sol_btc_crown(v, 'hk_b')
+        self.insert_volume(v, 'hk_a', from_amount=1_000_000_000)
+        rewards, _ = calculate_miner_rewards(v, v.block)
+        np.testing.assert_allclose(rewards[0], QUALITY_VOLUME_BETA * POOL_BUSY_PAIR_LEG, atol=1e-6)
+        np.testing.assert_allclose(rewards[1], CROWN_SLICE * POOL_BUSY_PAIR_LEG, atol=1e-6)
+        np.testing.assert_allclose(rewards.sum(), 1.0, atol=1e-6)
+        v.state_store.close()
+
+    def test_unqualified_volume_is_inert(self, tmp_path: Path):
+        """Volume filled off-crown neither tilts the pool nor pays: the crown holder
+        earns 1−β of the EQUAL-split pool and the β slice recycles."""
         hotkeys = pad_hotkeys_to_cover_recycle(['hk_a', 'hk_b'])
         v = make_validator(tmp_path, hotkeys)
         self.seed_sol_btc_crown(v, 'hk_a')
-        # B posts no rate, so it never holds crown — it only serves the volume.
-        self.insert_volume(v, 'hk_b', from_amount=1_000_000_000)
+        self.insert_volume(v, 'hk_b', from_amount=1_000_000_000, qualified=False)
         rewards, _ = calculate_miner_rewards(v, v.block)
-        np.testing.assert_allclose(rewards[0], POOL_BUSY_PAIR_LEG, atol=1e-6)
+        np.testing.assert_allclose(rewards[0], CROWN_SLICE * POOL_BTC_SOL, atol=1e-6)
         assert rewards[1] == 0.0
+        np.testing.assert_allclose(rewards.sum(), 1.0, atol=1e-6)
         v.state_store.close()
 
-    def test_pair_volume_tilts_the_pool_not_the_miner_term(self, tmp_path: Path):
-        """An idle network falls back to the equal split; a pair that carried
-        volume tilts its legs' pools up. The miner's own multiplier is
-        unchanged either way — same crown, same capacity, bigger pool."""
+    def test_no_qualified_volume_recycles_beta(self, tmp_path: Path):
+        """A quiet lane pays its holder 1−β; the rest of that lane's pool is burned,
+        not stretched over the holder."""
+        hotkeys = pad_hotkeys_to_cover_recycle(['hk_a'])
+        v = make_validator(tmp_path, hotkeys)
+        self.seed_sol_btc_crown(v, 'hk_a')
+        rewards, _ = calculate_miner_rewards(v, v.block)
+        recycle_uid = RECYCLE_UID if RECYCLE_UID < len(rewards) else 0
+        np.testing.assert_allclose(rewards[0], CROWN_SLICE * POOL_BTC_SOL, atol=1e-6)
+        np.testing.assert_allclose(rewards[recycle_uid], 1.0 - CROWN_SLICE * POOL_BTC_SOL, atol=1e-6)
+        v.state_store.close()
+
+    def test_qualified_own_volume_tilts_the_pool_and_pays_both_slices(self, tmp_path: Path):
+        """The sole holder who also cleared the lane's qualified volume takes the
+        whole (tilted) pool: (1−β) × crown + β × volume = 1."""
         hotkeys = pad_hotkeys_to_cover_recycle(['hk_a'])
         v_idle = make_validator(tmp_path / 'idle', hotkeys)
         self.seed_sol_btc_crown(v_idle, 'hk_a')
@@ -2234,20 +2326,264 @@ class TestVolumeIsNotARewardTerm:
         busy_rewards, _ = calculate_miner_rewards(v_busy, v_busy.block)
         v_busy.state_store.close()
 
-        np.testing.assert_allclose(idle_rewards[0], POOL_BTC_SOL, atol=1e-6)
+        np.testing.assert_allclose(idle_rewards[0], CROWN_SLICE * POOL_BTC_SOL, atol=1e-6)
         np.testing.assert_allclose(busy_rewards[0], POOL_BUSY_PAIR_LEG, atol=1e-6)
 
-    def test_crown_split_ignores_who_served(self, tmp_path: Path):
-        """Two holders splitting crown evenly split the pool evenly, even when
-        one of them served every swap."""
+    def test_beta_splits_by_qualified_notional_across_fillers(self, tmp_path: Path):
+        """Two holders split crown evenly; A cleared 3/4 of the qualified notional, B 1/4."""
         hotkeys = pad_hotkeys_to_cover_recycle(['hk_a', 'hk_b'])
         v = make_validator(tmp_path, hotkeys)
         self.seed_sol_btc_crown(v, 'hk_a')
         self.seed_sol_btc_crown(v, 'hk_b')
-        self.insert_volume(v, 'hk_a', from_amount=5_000_000_000)
+        self.insert_volume(v, 'hk_a', from_amount=3_000_000_000)
+        self.insert_volume(v, 'hk_b', from_amount=1_000_000_000)
         rewards, _ = calculate_miner_rewards(v, v.block)
-        np.testing.assert_allclose(rewards[0], rewards[1], atol=1e-9)
+        pool = POOL_BUSY_PAIR_LEG
+        np.testing.assert_allclose(rewards[0], pool * (CROWN_SLICE * 0.5 + QUALITY_VOLUME_BETA * 0.75), atol=1e-6)
+        np.testing.assert_allclose(rewards[1], pool * (CROWN_SLICE * 0.5 + QUALITY_VOLUME_BETA * 0.25), atol=1e-6)
         v.state_store.close()
+
+    def test_beta_is_not_capacity_scaled(self, tmp_path: Path):
+        """A completed fill was backed by construction: the filler's β share is paid in
+        full even when its CURRENT collateral would score a thin capacity on crown."""
+        hotkeys = pad_hotkeys_to_cover_recycle(['hk_a', 'hk_b'])
+        v = make_validator(tmp_path, hotkeys, max_swap_amount=500_000_000, collaterals={'hk_a': 550_000_000, 'hk_b': 1})
+        self.seed_sol_btc_crown(v, 'hk_a')
+        self.insert_volume(v, 'hk_b', from_amount=1_000_000_000)
+        rewards, _ = calculate_miner_rewards(v, v.block)
+        np.testing.assert_allclose(rewards[1], QUALITY_VOLUME_BETA * POOL_BUSY_PAIR_LEG, atol=1e-6)
+        v.state_store.close()
+
+    def test_ineligible_filler_earns_no_beta(self, tmp_path: Path):
+        """The flat strike gate applies to the β slice too."""
+        hotkeys = pad_hotkeys_to_cover_recycle(['hk_a', 'hk_b'])
+        v = make_validator(
+            tmp_path,
+            hotkeys,
+            miner_counters={'hk_a': (5, 0), 'hk_b': (5, MAX_FAILED_SWAPS + 1)},
+        )
+        self.seed_sol_btc_crown(v, 'hk_a')
+        self.insert_volume(v, 'hk_b', from_amount=1_000_000_000)
+        rewards, _ = calculate_miner_rewards(v, v.block)
+        assert rewards[1] == 0.0
+        np.testing.assert_allclose(rewards[0], CROWN_SLICE * POOL_BUSY_PAIR_LEG, atol=1e-6)
+        v.state_store.close()
+
+    def test_score_rows_carry_the_filler(self, tmp_path: Path):
+        """A pure filler (no crown) still gets a persisted row: crown 0, qvol 1, reward β × pool."""
+        rows = build_direction_score_rows(
+            'btc',
+            'sol',
+            'sol',
+            0.5,
+            crown_time={'hk_a': 100.0},
+            cap_weighted_time={'hk_a': 100.0},
+            eligibility={'hk_a': True, 'hk_b': True},
+            qvol_share={'hk_b': 1.0},
+        )
+        by_hk = {r.hotkey: r for r in rows}
+        assert set(by_hk) == {'hk_a', 'hk_b'}
+        np.testing.assert_allclose(by_hk['hk_a'].reward, 0.5 * CROWN_SLICE)
+        np.testing.assert_allclose((by_hk['hk_b'].crown_share, by_hk['hk_b'].qvol_share), (0.0, 1.0))
+        np.testing.assert_allclose(by_hk['hk_b'].reward, 0.5 * QUALITY_VOLUME_BETA)
+
+
+class TestQualifiedLaneVolumes:
+    def test_reader_filters_and_keys_by_lane(self, tmp_path: Path):
+        store = ValidatorStateStore(db_path=tmp_path / 'state.db')
+        store.insert_clearing_rate(9_800, 'hk_a', 'btc', 'sol', 300, 600, 'q1', backing='sol', qualified=True)
+        store.insert_clearing_rate(9_850, 'hk_a', 'btc', 'sol', 100, 200, 'u1', backing='sol', qualified=False)
+        store.insert_clearing_rate(9_900, 'hk_b', 'sol', 'tao', 50, 5, 'q2', backing='tao', qualified=True)
+        vols = store.get_qualified_lane_volumes(9_700, 10_000)
+        assert vols == {('btc', 'sol', 'sol'): {'hk_a': (300, 600)}, ('sol', 'tao', 'tao'): {'hk_b': (50, 5)}}
+        # The all-fills reporting read still sees everything.
+        assert store.get_clearing_volumes(9_700, 10_000)[('btc', 'sol')]['hk_a'] == (400, 800)
+        store.close()
+
+    def test_lane_volumes_collapse_to_pair_directions(self):
+        lanes = {('sol', 'tao', 'sol'): {'hk_a': (10, 1)}, ('sol', 'tao', 'tao'): {'hk_a': (5, 2), 'hk_b': (1, 1)}}
+        assert lane_volumes_to_directions(lanes) == {('sol', 'tao'): {'hk_a': (15, 3), 'hk_b': (1, 1)}}
+
+    def test_shares_use_the_hub_leg(self):
+        # btc→sol: the hub (sol) is the TO leg, so shares follow to_amount.
+        shares, total = qualified_volume_shares({'hk_a': (1, 300), 'hk_b': (999, 100)}, 'btc', 'sol')
+        assert total == 400
+        np.testing.assert_allclose((shares['hk_a'], shares['hk_b']), (0.75, 0.25))
+        assert qualified_volume_shares({}, 'btc', 'sol') == ({}, 0)
+
+    def test_last_reserve_start_is_per_hub_and_strictly_before(self, tmp_path: Path):
+        store = ValidatorStateStore(db_path=tmp_path / 'state.db')
+        store.insert_activity_event(100, 'hk_a', ActivityTransition.RESERVE_START, hub='sol')
+        store.insert_activity_event(150, 'hk_a', ActivityTransition.RESERVE_START, hub='tao')
+        store.insert_activity_event(200, 'hk_a', ActivityTransition.FULFILL_START, hub='sol')
+        assert store.get_last_reserve_start('hk_a', 'sol', 400) == 100
+        assert store.get_last_reserve_start('hk_a', 'tao', 400) == 150
+        assert store.get_last_reserve_start('hk_a', 'sol', 100) is None  # strictly before
+        assert store.get_last_reserve_start('hk_b', 'sol', 400) is None
+        # A NULL-hub (legacy) edge matches any hub.
+        store.insert_activity_event(300, 'hk_b', ActivityTransition.RESERVE_START)
+        assert store.get_last_reserve_start('hk_b', 'tao', 400) == 300
+        store.close()
+
+
+class TestFillHeldCrown:
+    """``fill_held_crown``: was the reserved miner in the lane's crown at reservation,
+    judged at the fill's own size? Rates are btc→sol (lower wins)."""
+
+    def _seed(self, v: SimpleNamespace, rates: dict[str, float], block: int = 0) -> None:
+        conn = v.state_store.require_connection()
+        conn.executemany(
+            'INSERT INTO rate_events (hotkey, from_chain, to_chain, rate, block) VALUES (?, ?, ?, ?, ?)',
+            [(hk, 'btc', 'sol', r, block) for hk, r in rates.items()],
+        )
+        conn.commit()
+
+    def test_best_rate_qualifies_worse_rate_does_not(self, tmp_path: Path):
+        hotkeys = pad_hotkeys_to_cover_recycle(['hk_a', 'hk_b'])
+        v = make_validator(tmp_path, hotkeys)
+        self._seed(v, {'hk_a': 0.00020, 'hk_b': 0.00021})  # b is 5% worse — outside the band
+        t = 9_900
+        # b reserved while a stands available: a is the anchor, b is off-crown.
+        v.event_watcher.apply_event(t, 'PoolResolved', {'miner': 'hk_b', 'collateral_chain': 'sol'})
+        assert fill_held_crown(v, 'hk_b', 'btc', 'sol', 'sol', 100_000_000, t) is False
+        v.event_watcher.apply_event(t + 10, 'PoolResolved', {'miner': 'hk_a', 'collateral_chain': 'sol'})
+        assert fill_held_crown(v, 'hk_a', 'btc', 'sol', 'sol', 100_000_000, t + 10) is True
+        v.state_store.close()
+
+    def test_in_band_runner_up_qualifies(self, tmp_path: Path):
+        hotkeys = pad_hotkeys_to_cover_recycle(['hk_a', 'hk_b'])
+        v = make_validator(tmp_path, hotkeys)
+        self._seed(v, {'hk_a': 0.00020, 'hk_b': 0.0002004})  # 0.2% worse — co-holds the crown
+        t = 9_900
+        v.event_watcher.apply_event(t, 'PoolResolved', {'miner': 'hk_b', 'collateral_chain': 'sol'})
+        assert fill_held_crown(v, 'hk_b', 'btc', 'sol', 'sol', 100_000_000, t) is True
+        v.state_store.close()
+
+    def test_crown_moving_after_reservation_changes_nothing(self, tmp_path: Path):
+        """A was best at reservation; B undercuts a minute later. A's fill still qualifies,
+        and a later fill on B judged at ITS reservation does too."""
+        hotkeys = pad_hotkeys_to_cover_recycle(['hk_a', 'hk_b'])
+        v = make_validator(tmp_path, hotkeys)
+        self._seed(v, {'hk_a': 0.00020})
+        t = 9_900
+        v.event_watcher.apply_event(t, 'PoolResolved', {'miner': 'hk_a', 'collateral_chain': 'sol'})
+        self._seed(v, {'hk_b': 0.00015}, block=t + 60)
+        assert fill_held_crown(v, 'hk_a', 'btc', 'sol', 'sol', 100_000_000, t) is True
+        assert fill_held_crown(v, 'hk_a', 'btc', 'sol', 'sol', 100_000_000, t + 61) is False
+        v.state_store.close()
+
+    def test_judged_at_fill_size_past_a_thin_crown_holder(self, tmp_path: Path):
+        """A (best rate) can back only a sliver; the seam routes a 400M fill to B, 1.5% off.
+        Against the min swap B is outside A's band; at THIS size A cannot fund, so B is the
+        best executable rate for the fill and qualifies."""
+        hotkeys = pad_hotkeys_to_cover_recycle(['hk_a', 'hk_b'])
+        v = make_validator(
+            tmp_path,
+            hotkeys,
+            max_swap_amount=500_000_000,
+            min_swap_amount=10_000_000,
+            collaterals={'hk_a': 20_000_000, 'hk_b': 550_000_000},
+        )
+        self._seed(v, {'hk_a': 0.00020, 'hk_b': 0.000203})
+        t = 9_900
+        v.event_watcher.apply_event(t, 'PoolResolved', {'miner': 'hk_b', 'collateral_chain': 'sol'})
+        assert fill_held_crown(v, 'hk_b', 'btc', 'sol', 'sol', 400_000_000, t) is True
+        # A tiny fill A could have backed keeps A as the anchor: B is off-crown for it.
+        assert fill_held_crown(v, 'hk_b', 'btc', 'sol', 'sol', 10_000_000, t) is False
+        v.state_store.close()
+
+    def test_busy_competitor_is_not_the_anchor(self, tmp_path: Path):
+        """B posts the best rate but is mid-swap on the sol purse at T — untakeable, so A
+        (1% worse, the best AVAILABLE rate) held the crown for the fill."""
+        hotkeys = pad_hotkeys_to_cover_recycle(['hk_a', 'hk_b'])
+        v = make_validator(tmp_path, hotkeys)
+        self._seed(v, {'hk_a': 0.000202, 'hk_b': 0.00020})
+        v.event_watcher.reserve_then_swap(
+            'hk_b', reserve_block=9_800, init_block=9_810, end_block=10_500, backing='sol'
+        )
+        t = 9_900
+        v.event_watcher.apply_event(t, 'PoolResolved', {'miner': 'hk_a', 'collateral_chain': 'sol'})
+        assert fill_held_crown(v, 'hk_a', 'btc', 'sol', 'sol', 100_000_000, t) is True
+        v.state_store.close()
+
+    def test_ingest_flags_the_clearing_row(self, tmp_path: Path):
+        """End to end through the event index: a SwapCompleted on a crown holder lands as a
+        qualified clearing row; the same fill on an off-crown miner lands unqualified."""
+        from allways.solana.events import EventRecord
+
+        hotkeys = pad_hotkeys_to_cover_recycle(['hk_a', 'hk_b'])
+        v = make_validator(tmp_path, hotkeys)
+        self._seed(v, {'hk_a': 0.00020, 'hk_b': 0.00021})
+        idx = SolanaEventIndex(v.state_store, lambda: 10**6, fill_qualifier=partial(fill_held_crown, v))
+        attribution = {'pk_a': 'hk_a', 'pk_b': 'hk_b'}
+
+        def completed(pk: str, key: bytes, reserved_at: int, done_at: int) -> list:
+            fields = {'miner': pk, 'swap_key': key, 'collateral_amount': 200_000_000, 'collateral_chain': 'sol'}
+            return [
+                EventRecord(
+                    'PoolResolved',
+                    {'miner': pk, 'winner': 'pk_r', 'requests': 1, 'collateral_chain': 'sol'},
+                    slot=reserved_at,
+                    block_time=reserved_at,
+                    signature=f's{reserved_at}',
+                ),
+                EventRecord(
+                    'SwapInitiated',
+                    {**fields, 'user': 'pk_u', 'from_amount': 100_000, 'to_amount': 200_000_000},
+                    slot=reserved_at + 1,
+                    block_time=reserved_at + 1,
+                    signature=f's{reserved_at + 1}',
+                ),
+                EventRecord(
+                    'SwapCompleted',
+                    {
+                        **fields,
+                        'from_chain': 'btc',
+                        'to_chain': 'sol',
+                        'from_amount': 100_000,
+                        'to_amount': 200_000_000,
+                    },
+                    slot=done_at,
+                    block_time=done_at,
+                    signature=f's{done_at}',
+                ),
+            ]
+
+        idx.ingest(completed('pk_a', b'\x01' * 32, 9_800, 9_850), attribution)
+        idx.ingest(completed('pk_b', b'\x02' * 32, 9_860, 9_900), attribution)
+        vols = v.state_store.get_qualified_lane_volumes(9_700, 10_000)
+        assert vols == {('btc', 'sol', 'sol'): {'hk_a': (100_000, 200_000_000)}}
+        assert {'hk_a', 'hk_b'} <= set(v.state_store.get_clearing_volumes(9_700, 10_000)[('btc', 'sol')])
+        v.state_store.close()
+
+    def test_no_qualifier_means_unqualified(self, tmp_path: Path):
+        from allways.solana.events import EventRecord
+
+        store = ValidatorStateStore(db_path=tmp_path / 'state.db')
+        idx = SolanaEventIndex(store)
+        idx.ingest(
+            [
+                EventRecord(
+                    'SwapCompleted',
+                    {
+                        'miner': 'pk_a',
+                        'swap_key': b'\x03' * 32,
+                        'from_chain': 'btc',
+                        'to_chain': 'sol',
+                        'from_amount': 1,
+                        'to_amount': 2,
+                        'collateral_amount': 2,
+                    },
+                    slot=1,
+                    block_time=9_900,
+                    signature='s',
+                )
+            ],
+            {'pk_a': 'hk_a'},
+        )
+        assert store.get_qualified_lane_volumes(0, 10_000) == {}
+        assert store.get_clearing_volumes(0, 10_000)[('btc', 'sol')]['hk_a'] == (1, 2)
+        store.close()
 
 
 class TestCapacityVolumeInteraction:
@@ -2273,8 +2609,8 @@ class TestCapacityVolumeInteraction:
         # B serves all the volume; A still holds the crown and is paid on it.
         v.state_store.insert_clearing_rate(9_900, 'hk_b', 'btc', 'sol', 1_000_000_000, 1_000_000_000, 'sk12')
         rewards, _ = calculate_miner_rewards(v, v.block)
-        # A: pool (BTC pair carried all volume) × crown 1.0 × eligible 1 × capacity 0.25.
-        np.testing.assert_allclose(rewards[0], POOL_BUSY_PAIR_LEG * 1.0 * 0.25, atol=1e-6)
+        # A: equal-split pool (B's volume is unqualified) × crown 1.0 × eligible 1 × capacity 0.25.
+        np.testing.assert_allclose(rewards[0], CROWN_SLICE * POOL_BTC_SOL * 1.0 * 0.25, atol=1e-6)
         v.state_store.close()
 
     def test_full_pool_conservation_with_all_factors(self, tmp_path: Path):
@@ -2316,33 +2652,67 @@ class TestEligibilityGateEndToEnd:
         )
         conn.commit()
 
-    def test_one_short_of_floor_earns_nothing(self, tmp_path: Path):
-        """One success below MIN_SUCCESSFUL_SWAPS (2) → ineligible → 0."""
+    def test_no_fill_in_window_earns_nothing(self, tmp_path: Path):
+        """Lapsed activity → ineligible → 0, however many lifetime successes."""
         hotkeys = pad_hotkeys_to_cover_recycle(['hk_a'])
-        v = make_validator(tmp_path, hotkeys, miner_counters={'hk_a': (MIN_SUCCESSFUL_SWAPS - 1, 0)})
+        v = make_validator(tmp_path, hotkeys, miner_counters={'hk_a': (50, 0)}, recent_fills=set())
         self.seed_btc_tao_crown(v, 'hk_a')
         rewards, _ = calculate_miner_rewards(v, v.block)
         assert rewards[0] == 0.0
         v.state_store.close()
 
-    def test_at_floor_earns_full_crown_share(self, tmp_path: Path):
-        """Exactly MIN_SUCCESSFUL_SWAPS successes → eligible → full crown share
-        (the whole btc→tao pool, no ramp scaling)."""
+    def test_first_fill_in_window_earns_full_crown_share(self, tmp_path: Path):
+        """Zero lifetime successes but one fill inside the window → eligible → full
+        crown share (no warm-up count)."""
         hotkeys = pad_hotkeys_to_cover_recycle(['hk_a'])
-        v = make_validator(tmp_path, hotkeys, miner_counters={'hk_a': (MIN_SUCCESSFUL_SWAPS, 0)})
+        v = make_validator(tmp_path, hotkeys, miner_counters={'hk_a': (0, 0)}, recent_fills={'hk_a'})
         self.seed_btc_tao_crown(v, 'hk_a')
         rewards, _ = calculate_miner_rewards(v, v.block)
-        np.testing.assert_allclose(rewards[0], POOL_SOL_BTC, atol=1e-6)
+        np.testing.assert_allclose(rewards[0], CROWN_SLICE * POOL_SOL_BTC, atol=1e-6)
+        v.state_store.close()
+
+    def test_fill_just_outside_window_lapses(self, tmp_path: Path):
+        """The window is trailing from scoring time: a fill exactly one window ago is out,
+        one second inside is in."""
+        hotkeys = pad_hotkeys_to_cover_recycle(['hk_a'])
+        w = ELIGIBILITY_FILL_WINDOW_SECS
+        v = make_validator(tmp_path / 'out', hotkeys, block=w + 10_000, recent_fills=set())
+        v.state_store.insert_clearing_rate(10_000, 'hk_a', 'btc', 'sol', 1, 1, 'edge')
+        self.seed_btc_tao_crown(v, 'hk_a')
+        rewards, _ = calculate_miner_rewards(v, v.block)
+        assert rewards[0] == 0.0
+        v.state_store.close()
+
+        v = make_validator(tmp_path / 'in', hotkeys, block=w + 10_000, recent_fills=set())
+        v.state_store.insert_clearing_rate(10_001, 'hk_a', 'btc', 'sol', 1, 1, 'edge')
+        self.seed_btc_tao_crown(v, 'hk_a')
+        rewards, _ = calculate_miner_rewards(v, v.block)
+        np.testing.assert_allclose(rewards[0], CROWN_SLICE * POOL_SOL_BTC, atol=1e-6)
+        v.state_store.close()
+
+    def test_young_ledger_is_strikes_only(self, tmp_path: Path):
+        """A validator whose clearing ledger is younger than the window must not zero the
+        network: with no fill on record the miner still earns, strikes still bite."""
+        hotkeys = pad_hotkeys_to_cover_recycle(['hk_a', 'hk_b'])
+        v = make_validator(
+            tmp_path, hotkeys, miner_counters={'hk_a': (0, 0), 'hk_b': (9, MAX_FAILED_SWAPS + 1)}, recent_fills=set()
+        )
+        v.state_store.set_relay_meta(ValidatorStateStore.LEDGER_SINCE_KEY, str(v.block - 60))
+        self.seed_btc_tao_crown(v, 'hk_a')
+        self.seed_btc_tao_crown(v, 'hk_b')
+        rewards, _ = calculate_miner_rewards(v, v.block)
+        assert rewards[0] > 0.0
+        assert rewards[1] == 0.0
         v.state_store.close()
 
     def test_at_failure_cap_still_eligible(self, tmp_path: Path):
-        """Failures exactly at MAX_FAILED_SWAPS (2), with enough successes →
+        """Failures exactly at MAX_FAILED_SWAPS (2), with a fill in the window →
         still eligible → full crown share."""
         hotkeys = pad_hotkeys_to_cover_recycle(['hk_a'])
         v = make_validator(tmp_path, hotkeys, miner_counters={'hk_a': (8, MAX_FAILED_SWAPS)})
         self.seed_btc_tao_crown(v, 'hk_a')
         rewards, _ = calculate_miner_rewards(v, v.block)
-        np.testing.assert_allclose(rewards[0], POOL_SOL_BTC, atol=1e-6)
+        np.testing.assert_allclose(rewards[0], CROWN_SLICE * POOL_SOL_BTC, atol=1e-6)
         v.state_store.close()
 
     def test_one_past_failure_cap_zero_reward(self, tmp_path: Path):
@@ -2359,7 +2729,7 @@ class TestEligibilityGateEndToEnd:
         """An ineligible holder's crown share recycles to the owner UID, not to
         other miners — pool conservation holds."""
         hotkeys = pad_hotkeys_to_cover_recycle(['hk_a'])
-        v = make_validator(tmp_path, hotkeys, miner_counters={'hk_a': (1, 0)})
+        v = make_validator(tmp_path, hotkeys, recent_fills=set())
         self.seed_btc_tao_crown(v, 'hk_a')
         rewards, _ = calculate_miner_rewards(v, v.block)
         recycle_uid = RECYCLE_UID if RECYCLE_UID < len(rewards) else 0
@@ -2404,8 +2774,8 @@ class TestHistoricalCollateralReplay:
             {'miner': 'hk_a', 'amount': 440_000_000, 'total': 550_000_000},
         )
         rewards, _ = calculate_miner_rewards(v, v.block)
-        # capacity_factor = (110M / (1.1 × 500M))^2 = 0.2^2 = 0.04; pool 0.5 → reward 0.02.
-        np.testing.assert_allclose(rewards[0], POOL_BTC_SOL * 0.04, atol=1e-6)
+        # capacity_factor = (110M / (1.1 × 500M))^2 = 0.2^2 = 0.04.
+        np.testing.assert_allclose(rewards[0], CROWN_SLICE * POOL_BTC_SOL * 0.04, atol=1e-6)
         v.state_store.close()
 
     def test_mid_window_topup_blends_capacity(self, tmp_path: Path):
@@ -2432,7 +2802,7 @@ class TestHistoricalCollateralReplay:
         )
         rewards, _ = calculate_miner_rewards(v, v.block)
         # First 150 blocks at cap 0.0625 ((1/4)^2), next 150 at cap 1.0 → mean cap 0.53125.
-        np.testing.assert_allclose(rewards[0], POOL_BTC_SOL * 0.53125, atol=1e-6)
+        np.testing.assert_allclose(rewards[0], CROWN_SLICE * POOL_BTC_SOL * 0.53125, atol=1e-6)
         v.state_store.close()
 
 
@@ -2506,6 +2876,29 @@ class TestNonEarnerDiagnosis:
             swap_bounds={'sol': (100_000_000, 500_000_000)},
         )
         assert reason.startswith('competitive_but_unfilled'), reason
+
+    def test_dead_pair_never_masks_a_live_pairs_reason(self):
+        """A miner quoting a dead pair AND a live pair it lost on reads the live reason;
+        dead_pair is reported only when nothing else explains the zero."""
+        from allways.validator.scoring import DirectionTrace
+        from allways.validator.scoring_trace import diagnose_non_earner
+
+        dead = DirectionTrace(pool=0.0)
+        kwargs = dict(
+            eligible=True,
+            ever_active={'hk'},
+            collaterals={'hk': 500_000_000},
+            swap_bounds={'sol': (100_000_000, 500_000_000)},
+        )
+        reason = diagnose_non_earner(
+            'hk',
+            {('eth', 'sol'): 1.0, ('btc', 'sol'): 281.0},
+            direction_traces={('eth', 'sol'): dead, ('btc', 'sol'): self._trace(280.0)},
+            **kwargs,
+        )
+        assert reason.startswith('outbid'), reason
+        reason = diagnose_non_earner('hk', {('eth', 'sol'): 1.0}, direction_traces={('eth', 'sol'): dead}, **kwargs)
+        assert reason.startswith('dead_pair (eth→sol'), reason
 
 
 class TestNonEarnerLinesUseLiveRates:
@@ -2680,7 +3073,9 @@ class TestScoreSnapshots:
             ('hk_a', 'btc', 'sol', 0.00020, 0),
         )
         conn.commit()
-        v.state_store.insert_clearing_rate(9_900, 'hk_a', 'btc', 'sol', 5_000_000_000_000, 1_000_000_000, 'sk14')
+        v.state_store.insert_clearing_rate(
+            9_900, 'hk_a', 'btc', 'sol', 5_000_000_000_000, 1_000_000_000, 'sk14', qualified=True
+        )
         v.database_storage.is_enabled.return_value = True
         return v
 
@@ -2690,20 +3085,47 @@ class TestScoreSnapshots:
         kwargs = v.database_storage.flush_scoring_window.call_args.kwargs
         rows = kwargs['miner_score_rows']
         assert len(rows) == 1
-        (round_ts, hotkey, from_c, to_c, backing, eligible, pool, crown_share, capacity, reward) = rows[0]
+        (round_ts, hotkey, from_c, to_c, backing, eligible, pool, crown_share, capacity, reward, qvol_share) = rows[0]
         assert round_ts == v.block  # round keyed by window_end
         assert (hotkey, from_c, to_c, backing) == ('hk_a', 'btc', 'sol', 'sol')
         assert eligible is True
-        np.testing.assert_allclose((crown_share, capacity), (1.0, 1.0))
-        # hk_a's own swap put all the window's volume on the BTC pair, so the
+        np.testing.assert_allclose((crown_share, capacity, qvol_share), (1.0, 1.0, 1.0))
+        # hk_a's own QUALIFIED swap put all the window's volume on the BTC pair, so the
         # pool is tilted — and the row carries it, because a reader given only
         # the other factors could not tell which pool the round paid on.
         np.testing.assert_allclose(pool, POOL_BUSY_PAIR_LEG, atol=1e-9)
         # The persisted factors reproduce the persisted reward, and the
         # persisted reward is what the weights actually paid.
-        expected = pool * crown_share * capacity
+        expected = pool * (CROWN_SLICE * crown_share * capacity + QUALITY_VOLUME_BETA * qvol_share)
         np.testing.assert_allclose(reward, expected, atol=1e-9)
         np.testing.assert_allclose(reward, rewards[0], atol=1e-6)
+
+    def test_round_flush_writes_every_lane_pool(self, tmp_path: Path):
+        """direction_pools rows: one per lane every round, dead lanes at pool 0 / live
+        False, live lanes carrying the qualified volume the β slice paid on; the
+        pools sum to the miner pool share."""
+        v = self._solo_with_storage(tmp_path)
+        calculate_miner_rewards(v, v.block)
+        rows = v.database_storage.flush_scoring_window.call_args.kwargs['direction_pool_rows']
+        by_lane = {(r[1], r[2], r[3]): r for r in rows}
+        assert set(by_lane) == set(compute_direction_pools({}))  # every lane, every round
+        assert all(r[0] == v.block for r in rows)
+        live = by_lane[('btc', 'sol', 'sol')]
+        assert live[4] == pytest.approx(POOL_BUSY_PAIR_LEG) and live[5] == 1_000_000_000 and live[6] is True
+        quiet_leg = by_lane[('sol', 'btc', 'sol')]  # no fill of its own, rides its live pair
+        assert quiet_leg[5] == 0 and quiet_leg[6] is True
+        dead = by_lane[('sol', 'eth', 'sol')]
+        assert dead[4] == 0.0 and dead[5] == 0 and dead[6] is False
+        assert sum(r[4] for r in rows) == pytest.approx(MINER_POOL_SHARE)
+        v.state_store.close()
+
+    def test_silent_network_fallback_pays_every_lane_with_no_pair_live(self):
+        """The fallback pays every lane (pool > 0) but no pair cleared a qualified fill, so
+        the ledger's live flag stays False everywhere — live is pair volume, not pool > 0."""
+        traces = {lane: DirectionTrace(pool=pool) for lane, pool in compute_direction_pools({}).items()}
+        rows = direction_pool_tuples(traces, 4_600)
+        assert all(r[4] > 0 for r in rows)
+        assert not any(r[6] for r in rows)
 
     def test_ineligible_miner_is_not_a_crown_candidate(self, tmp_path: Path):
         """An ineligible miner (strikes / hub mid-settle) is removed from crown
@@ -2735,8 +3157,8 @@ class TestScoreSnapshots:
             tmp_path,
             hotkeys,
             miner_counters={
-                'hk_struck': (MIN_SUCCESSFUL_SWAPS, MAX_FAILED_SWAPS + 1),
-                'hk_ok': (MIN_SUCCESSFUL_SWAPS, 0),
+                'hk_struck': (5, MAX_FAILED_SWAPS + 1),
+                'hk_ok': (5, 0),
             },
         )
         v.database_storage.is_enabled.return_value = True
@@ -2751,7 +3173,7 @@ class TestScoreSnapshots:
         rows = [r for r in v.database_storage.flush_scoring_window.call_args.kwargs['miner_score_rows']]
         lane_rows = [r for r in rows if (r[2], r[3]) == ('btc', 'sol')]
         assert [r[1] for r in lane_rows] == ['hk_ok']
-        (_ts, _hk, _f, _t, _b, eligible, pool, crown_share, _cap, reward) = lane_rows[0]
+        (_ts, _hk, _f, _t, _b, eligible, pool, crown_share, _cap, reward, _qv) = lane_rows[0]
         assert eligible is True
         np.testing.assert_allclose(crown_share, 1.0)
         assert reward > 0.0
@@ -2961,12 +3383,31 @@ class TestDualBackingLanes:
 
         rewards, _ = calculate_miner_rewards(v, v.block)
 
-        np.testing.assert_allclose(rewards[0], DIRECTION_POOLS[('sol', 'tao')], atol=1e-6)
+        np.testing.assert_allclose(rewards[0], CROWN_SLICE * DIRECTION_POOLS[('sol', 'tao')], atol=1e-6)
         rows = v.database_storage.flush_scoring_window.call_args.kwargs['miner_score_rows']
         # (ts, hotkey, from, to, backing, eligible, pool, crown_share, capacity, reward)
         rewards_by_lane = {(r[2], r[3], r[4]): r[9] for r in rows if r[1] == 'hk_a'}
         assert rewards_by_lane[('sol', 'tao', 'sol')] > 0
         assert rewards_by_lane[('sol', 'tao', 'tao')] > 0
+        v.state_store.close()
+
+    def test_activity_is_per_purse(self, tmp_path: Path):
+        """A dual-purse miner whose only fill in the window drew on the TAO purse earns the
+        tao lane and nothing on the sol lane — a dead SOL watcher can't ride a live TAO purse."""
+        hotkeys = pad_hotkeys_to_cover_recycle(['hk_a'])
+        v = make_validator(tmp_path, hotkeys, collaterals={'hk_a': 550_000_000}, recent_fills=set(), **self.BOUNDS)
+        v.state_store.insert_clearing_rate(v.block - 1, 'hk_a', 'sol', 'tao', 1, 1, 'tao-fill', backing='tao')
+        v.database_storage.is_enabled.return_value = True
+        self._seed_quote(v, 'hk_a', 'sol')
+        self._seed_quote(v, 'hk_a', 'tao')
+        self._fund_tao(v, 'hk_a')
+
+        rewards, _ = calculate_miner_rewards(v, v.block)
+
+        np.testing.assert_allclose(rewards[0], CROWN_SLICE * self.LANE_POOL, atol=1e-6)
+        rows = v.database_storage.flush_scoring_window.call_args.kwargs['miner_score_rows']
+        lanes = {(r[2], r[3], r[4]) for r in rows if r[1] == 'hk_a' and r[9] > 0}
+        assert lanes == {('sol', 'tao', 'tao')}
         v.state_store.close()
 
     def test_tao_backed_quote_alone_earns_the_tao_lane(self, tmp_path: Path):
@@ -2980,7 +3421,7 @@ class TestDualBackingLanes:
         rewards, _ = calculate_miner_rewards(v, v.block)
 
         assert rewards[0] > 0
-        np.testing.assert_allclose(rewards[0], self.LANE_POOL, atol=1e-6)
+        np.testing.assert_allclose(rewards[0], CROWN_SLICE * self.LANE_POOL, atol=1e-6)
         v.state_store.close()
 
     def test_sol_only_rival_competes_only_for_the_sol_lane(self, tmp_path: Path):
@@ -2995,8 +3436,8 @@ class TestDualBackingLanes:
 
         rewards, _ = calculate_miner_rewards(v, v.block)
 
-        np.testing.assert_allclose(rewards[0], self.LANE_POOL * 1.5, atol=1e-6)
-        np.testing.assert_allclose(rewards[1], self.LANE_POOL * 0.5, atol=1e-6)
+        np.testing.assert_allclose(rewards[0], CROWN_SLICE * self.LANE_POOL * 1.5, atol=1e-6)
+        np.testing.assert_allclose(rewards[1], CROWN_SLICE * self.LANE_POOL * 0.5, atol=1e-6)
         v.state_store.close()
 
     def test_tao_busy_swap_zeroes_only_the_tao_lane(self, tmp_path: Path):
@@ -3015,7 +3456,7 @@ class TestDualBackingLanes:
 
         rewards, _ = calculate_miner_rewards(v, v.block)
 
-        np.testing.assert_allclose(rewards[0], self.LANE_POOL, atol=1e-6)
+        np.testing.assert_allclose(rewards[0], CROWN_SLICE * self.LANE_POOL, atol=1e-6)
         v.state_store.close()
 
     def test_tao_settle_zeroes_only_the_tao_lane_row(self, tmp_path: Path):
@@ -3035,5 +3476,5 @@ class TestDualBackingLanes:
 
         rewards, _ = calculate_miner_rewards(v, v.block)
 
-        np.testing.assert_allclose(rewards[0], self.LANE_POOL, atol=1e-6)
+        np.testing.assert_allclose(rewards[0], CROWN_SLICE * self.LANE_POOL, atol=1e-6)
         v.state_store.close()

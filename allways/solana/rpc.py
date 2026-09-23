@@ -8,6 +8,7 @@ import base64
 import os
 import time
 from typing import Any, List, Optional, Tuple
+from urllib.parse import urlsplit, urlunsplit
 
 import base58
 import requests
@@ -25,6 +26,16 @@ def resolve_rpc_url(explicit: Optional[str] = None) -> str:
     if key and 'api-key=' not in url:
         url = f'{url}{"&" if "?" in url else "?"}api-key={key}'
     return url
+
+
+def redact_rpc_url(url: str) -> str:
+    """The URL with provider API keys masked — safe for status output, logs, and pastes.
+    Keys ride either a query param (Helius ``?api-key=…``) or a bare path segment
+    (Alchemy ``/v2/<key>``), so mask every query value and any long path segment."""
+    parts = urlsplit(url)
+    path = '/'.join('***' if len(seg) >= 20 else seg for seg in parts.path.split('/'))
+    query = '&'.join(f'{p.split("=", 1)[0]}=***' for p in parts.query.split('&') if p)
+    return urlunsplit((parts.scheme, parts.netloc, path, query, ''))
 
 
 def resolve_ws_url(rpc_url: str, explicit: Optional[str] = None) -> str:

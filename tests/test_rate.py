@@ -1,10 +1,15 @@
-"""Tests for allways.utils.rate — to_amount calculation and fee deduction math."""
+"""Tests for allways.utils.rate — to_amount calculation and fee deduction math — and the
+seam's ``rate_quote`` candidates built on top of it."""
 
 from dataclasses import replace
 from decimal import Decimal
+from types import SimpleNamespace
 from unittest.mock import patch
 
+from solders.keypair import Keypair as SolKeypair
+
 from allways.chains import get_chain_def
+from allways.cli.swap_commands.swap_intake import compute_intake_amounts
 from allways.constants import BTC_TO_SAT, RATE_PRECISION, TAO_TO_RAO
 from allways.utils.rate import (
     apply_fee_deduction,
@@ -15,6 +20,8 @@ from allways.utils.rate import (
     quantize_rate_display,
     quantize_rate_fixed,
 )
+from allways.validator.binding import hotkey_ss58
+from allways.validator.reserve_engine import RATE_LEVELS_LIMIT, rate_quote
 
 # Chain decimals
 TAO_DEC = 9
@@ -537,3 +544,91 @@ class TestQuantizeRate:
         assert quantize_rate_display(5.00001) == 5.0
         assert quantize_rate_display(1.23459) == 1.2345
         assert quantize_rate_display(0.0) == 0.0
+
+
+class TestRateQuoteCandidates:
+    """``rate_quote`` candidates: the selector's ranking for the asked size, served whole so a
+    consumer can walk a tolerance band with no second scan. Bounds 0.1–5 SOL, deep collateral."""
+
+    MIN = 100_000_000
+    MAX = 5_000_000_000
+    SOL = 1_000_000_000
+
+    def _validator(self, from_chain, to_chain, rates, unbound=()):
+        """One sol-backed miner per rate, in that order; ``unbound`` indexes have no Binding PDA."""
+        miners = [SolKeypair().pubkey() for _ in rates]
+        hotkeys = {str(pk): bytes([i + 1]) * 32 for i, pk in enumerate(miners) if i not in unbound}
+        quotes = [
+            SimpleNamespace(
+                miner=pk,
+                from_chain=from_chain,
+                to_chain=to_chain,
+                rate=int(Decimal(rate) * RATE_PRECISION),
+                collateral_chain='sol',
+            )
+            for pk, rate in zip(miners, rates)
+        ]
+        client = SimpleNamespace(
+            get_config=lambda: SimpleNamespace(min_swap_amount=self.MIN, max_swap_amount=self.MAX),
+            get_all=lambda kind: [(q.miner, q) for q in quotes],
+            get_miner_state=lambda pk: SimpleNamespace(active=True, collateral=100 * self.SOL),
+            get_binding=lambda pk: SimpleNamespace(hotkey=hotkeys[str(pk)]) if str(pk) in hotkeys else None,
+        )
+        return SimpleNamespace(solana_client=client), [
+            hotkey_ss58(hotkeys[str(pk)]) if str(pk) in hotkeys else None for pk in miners
+        ]
+
+    def test_candidates_follow_selector_order_capped(self):
+        # 6 quotes, sol→btc for 1 SOL: most BTC first, an exact tie keeps input order, 6th cut.
+        rates = ['0.5', '0.6', '0.5', '0.55', '0.45', '0.4']
+        validator, hotkeys = self._validator('sol', 'btc', rates)
+        rq = rate_quote(validator, 'sol', 'btc', self.SOL)
+        assert [c['rate_display'] for c in rq.candidates] == ['0.6', '0.55', '0.5', '0.5', '0.45']
+        assert [c['miner_hotkey'] for c in rq.candidates] == [hotkeys[i] for i in (1, 3, 0, 2, 4)]
+        assert len(rq.candidates) == RATE_LEVELS_LIMIT
+        assert rq.candidates[0] == {
+            'miner_hotkey': rq.quote.miner_hotkey,
+            'rate_display': rq.quote.rate_display,
+            'to_amount': rq.quote.to_amount,
+            'max_from_amount': self.MAX,
+        }
+        assert rq.candidates[1]['to_amount'] == 55_000_000
+        assert rq.min_from_amount == self.MIN  # hub source: min_swap as-is
+
+    def test_miss_carries_min_and_no_candidates(self):
+        validator, _ = self._validator('sol', 'btc', ['0.5'])
+        rq = rate_quote(validator, 'sol', 'btc', self.MIN - 1)
+        assert rq.quote is None and 'below min swap' in rq.reason
+        assert rq.candidates == []
+        assert rq.min_from_amount == self.MIN and rq.max_from_amount == self.MAX
+
+    def test_unbound_miners_backfill_before_the_cap(self):
+        # 7 viable, the selector's top pick unbound: the quote is the best BOUND intake, the
+        # unbound one never rides, and the next bound miner backfills the fifth slot.
+        rates = ['0.5', '0.6', '0.5', '0.55', '0.45', '0.4', '0.3']
+        validator, hotkeys = self._validator('sol', 'btc', rates, unbound={1})
+        rq = rate_quote(validator, 'sol', 'btc', self.SOL)
+        assert rq.quote.miner_hotkey == hotkeys[3] == rq.candidates[0]['miner_hotkey']
+        assert rq.quote.to_amount == 55_000_000 == rq.candidates[0]['to_amount']
+        assert [c['miner_hotkey'] for c in rq.candidates] == [hotkeys[i] for i in (3, 0, 2, 4, 5)]
+
+    def test_min_from_amount_is_in_source_units_for_a_spoke_source(self):
+        # btc→sol: the minimum is on the SOL (hub) leg. The floor is the smallest BTC amount whose
+        # SOL leg reaches min_swap at the best level rate — exact, so its predecessor falls short.
+        validator, _ = self._validator('btc', 'sol', ['0.5', '0.25'])
+        rq = rate_quote(validator, 'btc', 'sol', 10_000_000)
+        floor = rq.min_from_amount
+        assert floor == 2_500_000  # 0.025 BTC at 0.25 BTC/SOL → exactly 0.1 SOL
+        assert compute_intake_amounts('btc', 'sol', floor, '0.25').collateral_amount >= self.MIN
+        assert compute_intake_amounts('btc', 'sol', floor - 1, '0.25').collateral_amount < self.MIN
+
+    def test_spoke_source_miss_below_min_still_carries_the_floor(self):
+        # The level rate prices the floor even when nothing fits the asked size.
+        validator, _ = self._validator('btc', 'sol', ['0.5', '0.25'])
+        rq = rate_quote(validator, 'btc', 'sol', 2_500_000 - 1)
+        assert rq.quote is None and 'below min swap' in rq.reason
+        assert rq.min_from_amount == 2_500_000 and rq.candidates == []
+
+    def test_spoke_source_min_is_zero_without_depth(self):
+        validator, _ = self._validator('btc', 'sol', [])
+        assert rate_quote(validator, 'btc', 'sol', 10_000_000).min_from_amount == 0

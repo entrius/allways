@@ -31,7 +31,7 @@ def counted(monkeypatch):
     """A seam whose chain reads are counted — each fixture builds a fresh memo."""
     calls = {'status': 0, 'scan': 0}
 
-    def fake_status(_validator, miner_hotkey, swap_key=''):
+    def fake_status(_validator, miner_hotkey, swap_key='', from_chain='', to_chain=''):
         calls['status'] += 1
         return SwapStatus('reserved', 999, f'user-{calls["status"]}', swap_key)
 
@@ -106,7 +106,7 @@ def test_failures_are_not_cached(counted, monkeypatch):
     server, calls = counted
     state = {'fail': True}
 
-    def flaky(_validator, _miner_hotkey, swap_key=''):
+    def flaky(_validator, _miner_hotkey, swap_key='', from_chain='', to_chain=''):
         if state['fail']:
             raise RuntimeError('getAccountInfo: HTTP 429')
         calls['status'] += 1
@@ -118,3 +118,22 @@ def test_failures_are_not_cached(counted, monkeypatch):
     state['fail'] = False
     # Same bucket: the retry reaches the producer instead of replaying the failure.
     assert _get(server, '/status?miner_hotkey=hk')['user'] == 'recovered'
+
+
+def test_a_verdict_change_is_never_served_from_the_memo(counted):
+    # A 'rejected' verdict published or cleared mid-bucket must reach the very next poll.
+    from allways.validator import reserve_engine
+
+    server, calls = counted
+    key = ('m', 'a', 'b')
+    try:
+        _get(server, '/status?miner_hotkey=hk')
+        reserve_engine._publish_verdict(key, reserve_engine.RoutedRejection('refused', []))
+        assert _get(server, '/status?miner_hotkey=hk')['user'] == 'user-2'
+        reserve_engine._clear_verdict(key)
+        assert _get(server, '/status?miner_hotkey=hk')['user'] == 'user-3'
+        reserve_engine._clear_verdict(key)  # nothing to clear: no epoch bump, the memo holds
+        assert _get(server, '/status?miner_hotkey=hk')['user'] == 'user-3'
+        assert calls['status'] == 3
+    finally:
+        reserve_engine._clear_verdict(key)

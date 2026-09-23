@@ -408,23 +408,96 @@ class ValidatorStateStore:
         from_amount: int,
         to_amount: int,
         swap_key: str,
+        backing: str = 'sol',
+        qualified: bool = False,
     ) -> None:
         """Persist one completed swap's realized legs, keyed by ``swap_key`` hex so a
         cursor-reset / RPC-prune re-ingest can't double-count volume. ``block_num`` is
-        the unix ``blockTime``; the legs are stored as decimal strings (u128-safe)."""
+        the unix ``blockTime``; the legs are stored as decimal strings (u128-safe).
+        ``qualified`` = the fill was reserved on a crown holder (scoring.fill_held_crown)."""
         self._execute(
             """
-            INSERT INTO clearing_rates (block_num, hotkey, from_chain, to_chain, from_amount, to_amount, swap_key)
-            VALUES (?, ?, ?, ?, ?, ?, ?)
+            INSERT INTO clearing_rates
+                (block_num, hotkey, from_chain, to_chain, from_amount, to_amount, swap_key, backing, qualified)
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
             ON CONFLICT(swap_key) DO NOTHING
             """,
-            (block_num, hotkey, from_chain, to_chain, str(int(from_amount)), str(int(to_amount)), swap_key),
+            (
+                block_num,
+                hotkey,
+                from_chain,
+                to_chain,
+                str(int(from_amount)),
+                str(int(to_amount)),
+                swap_key,
+                backing,
+                1 if qualified else 0,
+            ),
         )
+
+    def get_qualified_lane_volumes(
+        self, start_time: int, end_time: int
+    ) -> Dict[Tuple[str, str, str], Dict[str, Tuple[int, int]]]:
+        """``{(from_chain, to_chain, backing): {hotkey: (from_amount_sum, to_amount_sum)}}`` over
+        ``(start_time, end_time]``, QUALIFIED fills only — the series both the pool weighting and
+        the β quality-volume slice read. Summed in Python (legs are TEXT, u128-safe)."""
+        rows = self._fetchall(
+            """
+            SELECT from_chain, to_chain, backing, hotkey, from_amount, to_amount FROM clearing_rates
+            WHERE qualified = 1 AND block_num > ? AND block_num <= ?
+            """,
+            (start_time, end_time),
+        )
+        volumes: Dict[Tuple[str, str, str], Dict[str, Tuple[int, int]]] = {}
+        for r in rows:
+            lane = volumes.setdefault((r['from_chain'], r['to_chain'], r['backing']), {})
+            from_sum, to_sum = lane.get(r['hotkey'], (0, 0))
+            lane[r['hotkey']] = (from_sum + int(r['from_amount']), to_sum + int(r['to_amount']))
+        return volumes
+
+    def get_recent_fill_hotkeys(self, start_time: int, end_time: int) -> Dict[str, Set[str]]:
+        """``{backing: {hotkey}}`` — per purse, the hotkeys that completed a fill drawing on it in
+        ``(start_time, end_time]``: the activity half of the eligibility gate. Any lane, qualified
+        or not; a hub with no fills is absent."""
+        rows = self._fetchall(
+            'SELECT DISTINCT hotkey, backing FROM clearing_rates WHERE block_num > ? AND block_num <= ?',
+            (start_time, end_time),
+        )
+        out: Dict[str, Set[str]] = {}
+        for r in rows:
+            out.setdefault(r['backing'], set()).add(r['hotkey'])
+        return out
+
+    LEDGER_SINCE_KEY = 'clearing_ledger_since'
+
+    def clearing_ledger_since(self, now: int) -> int:
+        """When this database started recording fills — stamped ``now`` on first call and kept
+        thereafter. The activity gate reads strikes-only until the ledger is a full window old,
+        so a fresh validator DB cannot zero every miner while it catches up."""
+        stored = self.get_relay_meta(self.LEDGER_SINCE_KEY)
+        if stored is not None:
+            return int(stored)
+        self.set_relay_meta(self.LEDGER_SINCE_KEY, str(int(now)))
+        return int(now)
+
+    def get_last_reserve_start(self, hotkey: str, hub: str, before: int) -> Optional[int]:
+        """Block time of the miner's most recent RESERVE_START on ``hub`` strictly before
+        ``before`` — a completed swap's reservation instant (one live swap per hub, so the last
+        reserve edge before its SwapCompleted is its own). NULL-hub legacy rows match any hub."""
+        row = self._fetchone(
+            """
+            SELECT block_num FROM activity_events
+            WHERE hotkey = ? AND kind = ? AND block_num < ? AND (hub IS NULL OR hub = ?)
+            ORDER BY block_num DESC, id DESC LIMIT 1
+            """,
+            (hotkey, int(ActivityTransition.RESERVE_START), before, hub),
+        )
+        return int(row['block_num']) if row is not None else None
 
     def get_clearing_volumes(self, start_time: int, end_time: int) -> Dict[Tuple[str, str], Dict[str, Tuple[int, int]]]:
         """``{(from_chain, to_chain): {hotkey: (from_amount_sum, to_amount_sum)}}``
-        over ``(start_time, end_time]`` — the windowed realized-volume read.
-        Scoring no longer consumes it; the dashboard and treasury reporting do.
+        over ``(start_time, end_time]`` — the windowed realized-volume read, ALL fills.
+        Reporting reads this; scoring reads ``get_qualified_lane_volumes``.
         Summed in Python: the legs are stored as TEXT (u128-safe) and SQL SUM
         would coerce them to float."""
         rows = self._fetchall(
@@ -451,20 +524,55 @@ class ValidatorStateStore:
 
     # ─── swap_outcomes (terminal per-swap truth for the seam) ───────────
 
-    def record_swap_outcome(self, swap_key: str, outcome: str, block_time: int) -> None:
+    def record_swap_outcome(
+        self,
+        swap_key: str,
+        outcome: str,
+        block_time: int,
+        refund: Optional[Tuple[str, Optional[int], Optional[str]]] = None,
+    ) -> None:
         """Persist a swap's terminal outcome (``completed`` | ``timed_out``) keyed by
-        swap_key hex. Upsert: a cursor-reset re-ingest of the same event is a no-op."""
+        swap_key hex. Upsert: a cursor-reset re-ingest of the same event is a no-op; the
+        COALESCEs ensure a re-ingest or factless outcome write never blanks refund facts."""
+        refund_chain, refund_amount, refund_tx = refund or (None, None, None)
         self._execute(
             """
-            INSERT INTO swap_outcomes (swap_key, outcome, block_time) VALUES (?, ?, ?)
-            ON CONFLICT(swap_key) DO UPDATE SET outcome = excluded.outcome, block_time = excluded.block_time
+            INSERT INTO swap_outcomes
+                (swap_key, outcome, block_time, refund_chain, refund_amount, refund_tx)
+            VALUES (?, ?, ?, ?, ?, ?)
+            ON CONFLICT(swap_key) DO UPDATE SET
+                outcome = excluded.outcome,
+                block_time = excluded.block_time,
+                refund_chain = COALESCE(excluded.refund_chain, refund_chain),
+                refund_amount = COALESCE(excluded.refund_amount, refund_amount),
+                refund_tx = COALESCE(excluded.refund_tx, refund_tx)
             """,
-            (swap_key, outcome, block_time),
+            (
+                swap_key,
+                outcome,
+                block_time,
+                refund_chain,
+                str(refund_amount) if refund_amount is not None else None,
+                refund_tx,
+            ),
         )
 
     def get_swap_outcome(self, swap_key: str) -> Optional[str]:
         row = self._fetchone('SELECT outcome FROM swap_outcomes WHERE swap_key = ?', (swap_key,))
         return row['outcome'] if row is not None else None
+
+    def get_swap_refund(self, swap_key: str) -> Optional[dict]:
+        row = self._fetchone(
+            'SELECT refund_chain, refund_amount, refund_tx FROM swap_outcomes WHERE swap_key = ?', (swap_key,)
+        )
+        if row is None or row['refund_amount'] is None:
+            return None
+        refund = {'refund_amount': int(row['refund_amount'])}
+        if row['refund_chain'] is not None:
+            refund['refund_chain'] = row['refund_chain']
+        if row['refund_tx'] is not None:
+            refund['refund_tx_hash'] = row['refund_tx']
+        return refund
 
     def prune_swap_outcomes(self, cutoff_block: int) -> None:
         """Drop outcome (and fulfillment-hash) rows older than ``cutoff_block``. No anchor row —
@@ -912,6 +1020,13 @@ class ValidatorStateStore:
             cols = [row[1] for row in conn.execute('PRAGMA table_info(swap_outcomes)')]
             if cols and 'outcome' not in cols:
                 conn.execute('DROP TABLE swap_outcomes')
+                cols = []
+            if cols and 'refund_chain' not in cols:
+                conn.execute('ALTER TABLE swap_outcomes ADD COLUMN refund_chain TEXT')
+            if cols and 'refund_amount' not in cols:
+                conn.execute('ALTER TABLE swap_outcomes ADD COLUMN refund_amount TEXT')
+            if cols and 'refund_tx' not in cols:
+                conn.execute('ALTER TABLE swap_outcomes ADD COLUMN refund_tx TEXT')
             # Pre-M2 deployments lack the clearing_rates idempotency key. Purge unkeyed rows:
             # NULL keys never collide with ON CONFLICT(swap_key), so a post-upgrade replay would
             # double-count them — a one-time <=2h volume gap buys a safe dedup invariant.
@@ -956,6 +1071,14 @@ class ValidatorStateStore:
             cols = [row[1] for row in conn.execute('PRAGMA table_info(activity_events)')]
             if cols and 'hub' not in cols:
                 conn.execute('ALTER TABLE activity_events ADD COLUMN hub TEXT')
+            # Quality volume: a clearing row carries the backing it drew on and whether the fill
+            # was reserved on a crown holder. Pre-upgrade rows read unqualified (no reservation
+            # replay behind them) — they age out of the pool window within a day.
+            cols = [row[1] for row in conn.execute('PRAGMA table_info(clearing_rates)')]
+            if cols and 'backing' not in cols:
+                conn.execute("ALTER TABLE clearing_rates ADD COLUMN backing TEXT NOT NULL DEFAULT 'sol'")
+            if cols and 'qualified' not in cols:
+                conn.execute('ALTER TABLE clearing_rates ADD COLUMN qualified INTEGER NOT NULL DEFAULT 0')
             conn.executescript(
                 """
                 CREATE TABLE IF NOT EXISTS rate_events (
@@ -1026,7 +1149,9 @@ class ValidatorStateStore:
                     to_chain    TEXT NOT NULL,
                     from_amount TEXT NOT NULL,
                     to_amount   TEXT NOT NULL,
-                    swap_key    TEXT
+                    swap_key    TEXT,
+                    backing     TEXT NOT NULL DEFAULT 'sol',
+                    qualified   INTEGER NOT NULL DEFAULT 0
                 );
                 CREATE INDEX IF NOT EXISTS idx_clearing_rates_dir_block
                     ON clearing_rates(from_chain, to_chain, block_num);
@@ -1042,7 +1167,10 @@ class ValidatorStateStore:
                 CREATE TABLE IF NOT EXISTS swap_outcomes (
                     swap_key    TEXT PRIMARY KEY,
                     outcome     TEXT NOT NULL,
-                    block_time  INTEGER NOT NULL
+                    block_time  INTEGER NOT NULL,
+                    refund_chain TEXT,
+                    refund_amount TEXT,
+                    refund_tx   TEXT
                 );
 
                 -- Delivery-leg tx hash per swap (SwapFulfilled), keyed by swap_key hex.

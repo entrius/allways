@@ -109,3 +109,28 @@ def test_status_json_includes_bound_hotkey(monkeypatch):
 
     assert result.exit_code == 0, result.output
     assert f'"bound_hotkey": "{ss58}"' in result.output
+
+
+def test_status_redacts_rpc_api_key(monkeypatch):
+    _patch(monkeypatch, {'network': 'test'}, None)
+    client = _client()
+    client.rpc.url = 'https://mainnet.helius-rpc.com/?api-key=supersecretvalue'
+    monkeypatch.setattr(status, 'get_solana_cli_context', lambda need_keypair=True: ({}, client))
+
+    result = CliRunner().invoke(status.status_command, [])
+
+    assert result.exit_code == 0, result.output
+    assert 'supersecretvalue' not in result.output
+    assert 'api-key=***' in result.output
+
+
+def test_status_json_redacts_rpc_api_key(monkeypatch):
+    _patch(monkeypatch, {'network': 'test'}, None)
+    client = _client()
+    client.rpc.url = 'https://mainnet.helius-rpc.com/?api-key=supersecretvalue'
+    monkeypatch.setattr(status, 'get_solana_cli_context', lambda need_keypair=True: ({}, client))
+
+    result = CliRunner().invoke(status.status_command, ['--json'])
+
+    assert result.exit_code == 0, result.output
+    assert 'supersecretvalue' not in result.output

@@ -24,6 +24,7 @@ from allways.validator.reserve_engine import (
     reserve_on_behalf,
     scan_deposit,
     swap_status,
+    verdict_epoch,
 )
 
 SEAM_HOST = os.environ.get('ALLWAYS_SEAM_HOST', '127.0.0.1')
@@ -40,11 +41,15 @@ def _ttl_bucket() -> int:
 
 
 def _make_handler(validator, secret: str):
-    # Closed over, not keyed on: the validator need not be hashable. lru_cache skips storing
-    # exceptions, so a transient RPC fault retries instead of pinning for the bucket.
+    # Memos are per server, closing over this validator rather than keying on it: the validator
+    # is not required to be hashable, and no module-level table pins it alive. lru_cache does not
+    # store exceptions, so a transient RPC fault is retried rather than pinned for the bucket;
+    # maxsize caps the table so a long-lived seam can't grow an entry per swap ever polled.
+    # `_epoch` keys the memo on the pool-verdict epoch: a read still in flight when a 'rejected' verdict
+    # is published or cleared lands under the old key, so the next poll re-reads instead of inheriting it.
     @lru_cache(maxsize=512)
-    def cached_status(miner_hotkey: str, swap_key: str, _bucket: int):
-        return swap_status(validator, miner_hotkey, swap_key)
+    def cached_status(miner_hotkey: str, swap_key: str, from_chain: str, to_chain: str, _bucket: int, _epoch: int):
+        return swap_status(validator, miner_hotkey, swap_key, from_chain, to_chain)
 
     @lru_cache(maxsize=512)
     def cached_deposit_scan(miner_hotkey: str, _bucket: int):
@@ -78,18 +83,31 @@ def _make_handler(validator, secret: str):
             q = {k: v[0] for k, v in parse_qs(url.query).items()}
             try:
                 if url.path == '/rate':
-                    # Depth rides along on hit AND miss — the offering's oversize copy ("max right
-                    # now is X") needs the true max exactly when no quote fits the asked size.
+                    # Depth rides along on hit AND miss — the offering's size copy ("min/max right
+                    # now is X") needs the true bounds exactly when no quote fits the asked size.
                     rq = rate_quote(validator, q['from'], q['to'], int(q['amount']))
-                    depth = {'levels': rq.levels, 'max_from_amount': rq.max_from_amount}
+                    depth = {
+                        'levels': rq.levels,
+                        'max_from_amount': rq.max_from_amount,
+                        'min_from_amount': rq.min_from_amount,
+                        'candidates': rq.candidates,
+                    }
                     if rq.quote is None:
                         return self._send(404, {'error': rq.reason, **depth})
                     return self._send(200, {**rq.quote.__dict__, **depth})
                 if url.path == '/status':
                     # Optional swap_key (hex, persisted by the consumer at claim time) resolves the
                     # swap directly — the only route to post-attestation stages, since vote_initiate
-                    # consumes the reservation at quorum.
-                    status = cached_status(q['miner_hotkey'], q.get('swap_key', ''), _ttl_bucket())
+                    # consumes the reservation at quorum. Optional from_chain/to_chain pick the
+                    # reservation slot carrying that pair (v3.1 holds one per hub).
+                    status = cached_status(
+                        q['miner_hotkey'],
+                        q.get('swap_key', ''),
+                        q.get('from_chain', ''),
+                        q.get('to_chain', ''),
+                        _ttl_bucket(),
+                        verdict_epoch(),
+                    )
                     return self._send(200, status.__dict__)
                 if url.path == '/deposit-scan':
                     # Hash-finder for the offering's deposit watcher — /confirm stays the verifier.

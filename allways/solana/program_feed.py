@@ -1,17 +1,13 @@
-"""Pushed program events over a Solana WebSocket (`logsSubscribe`).
-
-One daemon thread holds a `logsSubscribe(mentions=[program])` session on the RPC's wss twin (a keyed Helius
-HTTP URL derives its keyed wss endpoint), decodes every `Program data:` line through the canonical event
-decoder, and hands (name, event) to the handlers registered per event name. A dropped socket reconnects
-with jittered backoff; a handler exception is logged, never fatal. Consumers that need "did I miss
-something while the socket was down" keep their own poll as the backstop — the feed is latency, not truth.
-"""
+"""Pushed program events over a Solana WebSocket: `logsSubscribe(mentions=[account])` on the RPC's wss twin,
+decoded and dispatched per event name, reconnecting with jittered backoff. The account defaults to the program;
+a miner narrows it to its own pubkey. The feed is latency, not truth — consumers keep a catch-up for gaps."""
 
 import asyncio
 import base64
 import json
 import random
 import threading
+import time
 from collections import defaultdict
 from typing import Any, Callable, Dict, List, Optional
 
@@ -46,20 +42,28 @@ def events_from_logs(logs: List[str]) -> List[tuple]:
 
 
 class ProgramEventFeed:
-    """`logsSubscribe` on one program, dispatched to per-event handlers on the feed thread (keep them short —
-    hand real work to a timer/executor). `connected` tells a consumer whether to trust the push path or
-    fall back to polling."""
+    """Handlers run on the feed thread (keep them short). `connected` is set once the node acks the subscribe;
+    `session` counts acks so a consumer can catch up after each one. ``max_session_secs`` resubscribes on a
+    schedule — pings prove the socket, not that the node still delivers."""
 
-    def __init__(self, ws_url: str, program_id) -> None:
+    def __init__(self, ws_url: str, program_id, mentions=None, max_session_secs: Optional[float] = None) -> None:
         self.ws_url = ws_url
         self.program_id = str(program_id)
+        self.mentions = str(mentions) if mentions is not None else self.program_id
+        self.max_session_secs = max_session_secs
         self._handlers: Dict[str, List[Handler]] = defaultdict(list)
         self._connected = threading.Event()
+        self._session_count = 0
         self._thread: Optional[threading.Thread] = None
 
     @property
     def connected(self) -> bool:
         return self._connected.is_set()
+
+    @property
+    def session(self) -> int:
+        """Acknowledged subscriptions so far; a change means events may have been missed in between."""
+        return self._session_count
 
     def on(self, event_name: str, handler: Handler) -> None:
         self._handlers[event_name].append(handler)
@@ -89,6 +93,18 @@ class ProgramEventFeed:
 
     # ── transport ───────────────────────────────────────────────────────────
 
+    def handle_frame(self, msg: dict) -> None:
+        """One inbound frame: the subscribe ack (id 1) marks the feed live; notifications dispatch."""
+        if msg.get('id') == 1:
+            if 'error' in msg:
+                raise ConnectionError(f'logsSubscribe rejected: {msg["error"]}')
+            self._session_count += 1
+            self._connected.set()
+            log = bt.logging.info if self._session_count == 1 else bt.logging.debug
+            log(f'program feed: logsSubscribe({self.mentions}) @ {_mask(self.ws_url)} (session {self._session_count})')
+        elif msg.get('method') == 'logsNotification':
+            self.handle_notification(msg)
+
     async def _session(self) -> None:
         import websockets
 
@@ -96,28 +112,38 @@ class ProgramEventFeed:
             'jsonrpc': '2.0',
             'id': 1,
             'method': 'logsSubscribe',
-            'params': [{'mentions': [self.program_id]}, {'commitment': 'confirmed'}],
+            'params': [{'mentions': [self.mentions]}, {'commitment': 'confirmed'}],
         }
+        deadline = time.monotonic() + self.max_session_secs if self.max_session_secs else None
         async with websockets.connect(self.ws_url, ping_interval=20, ping_timeout=20, max_size=None) as ws:
             await ws.send(json.dumps(sub))
-            self._connected.set()
-            bt.logging.info(f'program feed: logsSubscribe({self.program_id}) @ {_mask(self.ws_url)}')
-            async for raw in ws:
+            while True:
+                remaining = None if deadline is None else deadline - time.monotonic()
+                if remaining is not None and remaining <= 0:
+                    return  # scheduled resubscribe
+                try:
+                    raw = await asyncio.wait_for(ws.recv(), remaining)
+                except asyncio.TimeoutError:
+                    return
                 try:
                     msg = json.loads(raw)
                 except (ValueError, TypeError):
                     continue
-                if msg.get('method') == 'logsNotification':
-                    self.handle_notification(msg)
+                self.handle_frame(msg)
 
     def _run(self) -> None:
         backoff = RECONNECT_MIN_SECS
+        failures = 0
         while True:
             try:
                 asyncio.run(self._session())
                 backoff = RECONNECT_MIN_SECS
+                failures = 0
             except Exception as e:
-                bt.logging.warning(f'program feed: socket down ({e}); reconnecting in ~{backoff:.0f}s')
+                failures += 1
+                # An endpoint with no WebSocket fails every attempt; say so once, not every 30 s.
+                log = bt.logging.warning if failures == 1 else bt.logging.debug
+                log(f'program feed: socket down ({e}); reconnecting in ~{backoff:.0f}s')
             finally:
                 self._connected.clear()
             threading.Event().wait(backoff * random.uniform(0.8, 1.2))

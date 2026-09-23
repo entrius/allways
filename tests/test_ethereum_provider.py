@@ -8,6 +8,7 @@ Covers the ETH-specific hazards: EIP-55 casing at every comparison boundary, inc
 from typing import Optional
 
 import pytest
+from eth_account import Account
 
 from allways.assets.asset import ProviderUnreachableError
 from allways.assets.eth import Ether
@@ -530,6 +531,7 @@ SEND_RESPONSES = {
     'eth_blockNumber': hex(100),
     'eth_getBlockByNumber': {'baseFeePerGas': hex(10**9)},
     'eth_maxPriorityFeePerGas': hex(10**9),
+    'eth_getCode': '0x',
     'eth_getTransactionCount': '0x0',
     'eth_getBalance': hex(10**19),
 }
@@ -781,6 +783,56 @@ class TestTransferGas:
         responses = dict(SEND_RESPONSES, eth_sendRawTransaction='0x' + 'cc' * 32, eth_estimateGas=estimate)
         rpc_stub(provider, responses)
         return provider.send_amount(RECIPIENT, 10**15)
+
+    def _signed_raw(self, gas):
+        signed = Account.sign_transaction(
+            {
+                'chainId': 1,
+                'nonce': 0,
+                'to': RECIPIENT,
+                'value': 10**15,
+                'gas': gas,
+                'maxFeePerGas': 3 * 10**9,
+                'maxPriorityFeePerGas': 10**9,
+            },
+            TEST_KEY,
+        )
+        return getattr(signed, 'raw_transaction', None) or getattr(signed, 'rawTransaction')
+
+    def test_contract_destination_signs_with_fulfillment_gas_floor(self, provider):
+        broadcast = {}
+
+        def capture(params):
+            broadcast['raw'] = params[0]
+            return TX
+
+        responses = dict(
+            SEND_RESPONSES, eth_getCode='0x6080', eth_estimateGas=hex(25_000), eth_sendRawTransaction=capture
+        )
+        calls = counting_rpc_stub(provider, responses)
+        assert provider.send_amount(RECIPIENT, 10**15) == (TX, 0)
+        assert calls['eth_getCode'] == 1
+        assert broadcast['raw'].removeprefix('0x') == self._signed_raw(100_000).hex().removeprefix('0x')
+
+    def test_eoa_destination_signs_with_estimated_gas(self, provider):
+        broadcast = {}
+
+        def capture(params):
+            broadcast['raw'] = params[0]
+            return TX
+
+        responses = dict(SEND_RESPONSES, eth_estimateGas=hex(25_000), eth_sendRawTransaction=capture)
+        rpc_stub(provider, responses)
+        assert provider.send_amount(RECIPIENT, 10**15) == (TX, 0)
+        assert broadcast['raw'].removeprefix('0x') == self._signed_raw(30_000).hex().removeprefix('0x')
+
+    def test_contract_destination_balance_preflight_uses_fulfillment_gas_floor(self, provider):
+        balance = 10**15 + 30_000 * 3 * 10**9
+        responses = dict(SEND_RESPONSES, eth_getCode='0x6080', eth_estimateGas=hex(25_000), eth_getBalance=hex(balance))
+        rpc_stub(provider, responses)
+        assert provider.send_amount(RECIPIENT, 10**15) is None
+        assert 'Insufficient' in provider.last_send_error
+        assert str(100_000 * 3 * 10**9) in provider.last_send_error
 
     def test_estimate_sizes_the_send_with_headroom(self, provider):
         assert self._send(provider, hex(50_000)) is not None  # 60k limit, under cap

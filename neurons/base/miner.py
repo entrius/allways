@@ -28,6 +28,8 @@ class BaseMinerNeuron(BaseNeuron):
         self.loop = asyncio.get_event_loop()
 
         self.should_exit: bool = False
+        # Set by a pushed event (e.g. our swap turning Active) to cut the inter-poll sleep short.
+        self.wake_event = threading.Event()
         self.is_running: bool = False
         self.thread: Union[threading.Thread, None] = None
 
@@ -63,7 +65,8 @@ class BaseMinerNeuron(BaseNeuron):
                     time.sleep(min(2**consecutive_errors, 30))
 
                 self.step += 1
-                time.sleep(self.config.miner.poll_interval)
+                self.wake_event.wait(self.config.miner.poll_interval)
+                self.wake_event.clear()
 
         except KeyboardInterrupt:
             bt.logging.success('Miner killed by keyboard interrupt.')

@@ -237,6 +237,14 @@ class EvmCoin(EvmAsset):
                 bt.logging.warning(
                     f'{to_address} refuses {prefix} transfers — broadcasting a floor-gas attempt as refusal evidence'
                 )
+            else:
+                try:
+                    has_code = (self.chain.eth_rpc('eth_getCode', [to_address, 'latest']) or '0x') != '0x'
+                except Exception:
+                    has_code = False
+                if has_code:
+                    # The floor makes any revert receipt adjudicable; unused gas is refunded on normal delivery.
+                    gas = max(gas, ETH_FULFILL_GAS_FLOOR)
 
             nonce = int(self.chain.eth_rpc('eth_getTransactionCount', [acct.address, 'pending']), 16)
 

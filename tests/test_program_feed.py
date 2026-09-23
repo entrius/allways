@@ -1,6 +1,11 @@
+import asyncio
 import base64
+import json
 import os
+import sys
+import types
 
+import pytest
 from solders.pubkey import Pubkey
 
 from allways.solana.layouts import EVENT_DISCRIMINATORS, EVENT_LAYOUTS
@@ -57,3 +62,56 @@ def test_resolve_ws_url_swaps_scheme_and_keeps_the_key(monkeypatch):
     monkeypatch.setenv('SOLANA_WS_URL', 'wss://override')
     assert resolve_ws_url('https://x') == 'wss://override'
     assert os.environ['SOLANA_WS_URL'] == 'wss://override'
+
+
+def test_mentions_defaults_to_the_program_and_narrows_to_a_miner():
+    assert ProgramEventFeed('ws://x', 'prog').mentions == 'prog'
+    assert ProgramEventFeed('ws://x', 'prog', mentions=MINER).mentions == str(MINER)
+
+
+def test_connected_only_after_the_subscribe_ack_and_session_counts_acks():
+    feed = ProgramEventFeed('ws://x', 'prog')
+    assert not feed.connected and feed.session == 0
+    feed.handle_frame({'jsonrpc': '2.0', 'result': 7, 'id': 1})
+    assert feed.connected and feed.session == 1
+    feed.handle_frame({'jsonrpc': '2.0', 'result': 8, 'id': 1})
+    assert feed.session == 2
+
+
+def test_rejected_subscribe_raises_so_the_session_reconnects():
+    feed = ProgramEventFeed('ws://x', 'prog')
+    with pytest.raises(ConnectionError):
+        feed.handle_frame({'jsonrpc': '2.0', 'error': {'code': -32601}, 'id': 1})
+    assert not feed.connected
+
+
+class FakeSocket:
+    def __init__(self, frames):
+        self.frames = list(frames)
+        self.sent = []
+
+    async def __aenter__(self):
+        return self
+
+    async def __aexit__(self, *exc):
+        return False
+
+    async def send(self, data):
+        self.sent.append(json.loads(data))
+
+    async def recv(self):
+        if self.frames:
+            return json.dumps(self.frames.pop(0))
+        await asyncio.sleep(3600)  # a quiet socket
+
+
+def test_session_subscribes_to_the_mentioned_account_and_ends_on_schedule(monkeypatch):
+    sock = FakeSocket([{'jsonrpc': '2.0', 'result': 1, 'id': 1}])
+    monkeypatch.setitem(sys.modules, 'websockets', types.SimpleNamespace(connect=lambda *a, **k: sock))
+    feed = ProgramEventFeed('ws://x', 'prog', mentions=MINER, max_session_secs=0.2)
+
+    asyncio.run(feed._session())  # returns on its own once the session is due for a resubscribe
+
+    assert sock.sent[0]['method'] == 'logsSubscribe'
+    assert sock.sent[0]['params'][0] == {'mentions': [str(MINER)]}
+    assert feed.session == 1

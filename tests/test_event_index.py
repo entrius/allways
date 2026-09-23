@@ -591,11 +591,47 @@ class TestIngestSwapOutcomes:
         idx = SolanaEventIndex(store)
         key = bytes(range(32))
         idx.ingest(
-            [rec('SwapTimedOut', miner='pk_a', block_time=400, swap_key=key, collateral_amount=10, slash=1)],
+            [
+                rec(
+                    'SwapTimedOut',
+                    miner='pk_a',
+                    block_time=400,
+                    slot=7,
+                    swap_key=key,
+                    collateral_chain='sol',
+                    collateral_amount=10,
+                    reimbursement=11,
+                    slash=1,
+                )
+            ],
             ATTR,
         )
         assert store.get_swap_outcome(key.hex()) == 'timed_out'
+        assert store.get_swap_refund(key.hex()) == {
+            'refund_chain': 'sol',
+            'refund_amount': 11,
+            'refund_tx_hash': 'sig7',
+        }
         assert store.get_swap_outcome(DEFAULT_SWAP_KEY.hex()) is None  # only the event's key lands
+        store.close()
+
+    def test_tao_timeout_records_refund_without_transaction(self, tmp_path: Path):
+        store = make_store(tmp_path)
+        key = bytes(range(32))
+        SolanaEventIndex(store).ingest(
+            [
+                rec(
+                    'SwapTimedOut',
+                    miner='pk_a',
+                    block_time=400,
+                    swap_key=key,
+                    collateral_chain='tao',
+                    reimbursement=2**63,  # past sqlite's int64 bind limit — proves the TEXT store
+                )
+            ],
+            ATTR,
+        )
+        assert store.get_swap_refund(key.hex()) == {'refund_chain': 'tao', 'refund_amount': 2**63}
         store.close()
 
     def test_swap_cancelled_records_cancelled_outcome(self, tmp_path: Path):
@@ -618,6 +654,7 @@ class TestIngestSwapOutcomes:
             ATTR,
         )
         assert store.get_swap_outcome(key.hex()) == 'cancelled'
+        assert store.get_swap_refund(key.hex()) is None
         store.close()
 
     def test_stale_claim_closed_records_expired_outcome(self, tmp_path: Path):
@@ -657,15 +694,54 @@ class TestIngestSwapOutcomes:
         assert store.get_clearing_volumes(0, 1000) == {}  # no UID → no volume credited
         store.close()
 
+    def test_unbound_miner_timeout_records_refund(self, tmp_path: Path):
+        store = make_store(tmp_path)
+        key = bytes(range(32))
+        SolanaEventIndex(store).ingest(
+            [
+                rec(
+                    'SwapTimedOut',
+                    miner='pk_c',
+                    block_time=400,
+                    slot=8,
+                    swap_key=key,
+                    collateral_chain='sol',
+                    reimbursement=13,
+                )
+            ],
+            ATTR,
+        )
+        assert store.get_swap_refund(key.hex()) == {
+            'refund_chain': 'sol',
+            'refund_amount': 13,
+            'refund_tx_hash': 'sig8',
+        }
+        store.close()
+
     def test_reingest_of_same_event_is_a_noop_upsert(self, tmp_path: Path):
         """A cursor reset can replay history — the outcome row upserts instead of erroring."""
         store = make_store(tmp_path)
         idx = SolanaEventIndex(store)
         key = bytes(range(32))
-        event = rec('SwapTimedOut', miner='pk_a', block_time=400, swap_key=key, collateral_amount=10, slash=1)
+        event = rec(
+            'SwapTimedOut',
+            miner='pk_a',
+            block_time=400,
+            slot=9,
+            swap_key=key,
+            collateral_amount=10,
+            reimbursement=14,
+            slash=1,
+        )
         idx.ingest([event], ATTR)
         idx.ingest([event], ATTR)
+        store.record_swap_outcome(key.hex(), 'timed_out', 400)
         assert store.get_swap_outcome(key.hex()) == 'timed_out'
+        assert store.get_swap_refund(key.hex()) == {
+            'refund_chain': 'sol',
+            'refund_amount': 14,
+            'refund_tx_hash': 'sig9',
+        }
         store.close()
 
     def test_legacy_b35_table_is_dropped_and_recreated(self, tmp_path: Path):
@@ -678,6 +754,24 @@ class TestIngestSwapOutcomes:
         store = ValidatorStateStore(db_path=db)
         store.record_swap_outcome('ab' * 32, 'timed_out', 100)
         assert store.get_swap_outcome('ab' * 32) == 'timed_out'
+        store.close()
+
+    def test_legacy_outcome_table_gains_refund_columns(self, tmp_path: Path):
+        import sqlite3
+
+        db = tmp_path / 'state.db'
+        with sqlite3.connect(db) as conn:
+            conn.execute(
+                'CREATE TABLE swap_outcomes '
+                '(swap_key TEXT PRIMARY KEY, outcome TEXT NOT NULL, block_time INTEGER NOT NULL)'
+            )
+        store = ValidatorStateStore(db_path=db)
+        store.record_swap_outcome('ab' * 32, 'timed_out', 100, refund=('sol', 15, 'sig'))
+        assert store.get_swap_refund('ab' * 32) == {
+            'refund_chain': 'sol',
+            'refund_amount': 15,
+            'refund_tx_hash': 'sig',
+        }
         store.close()
 
     def test_prune_drops_old_outcomes(self, tmp_path: Path):

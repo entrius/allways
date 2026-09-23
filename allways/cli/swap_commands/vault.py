@@ -17,8 +17,8 @@ from decimal import Decimal, InvalidOperation
 
 import click
 
-from allways.cli.help import StyledGroup
-from allways.cli.swap_commands.helpers import console, fail, get_cli_context, loading
+from allways.cli.help import StyledAliasGroup, StyledGroup
+from allways.cli.swap_commands.helpers import FINITE_FLOAT, console, fail, get_cli_context, loading
 from allways.constants import TAO_HUB_VAULT_ADDRESSES, TAO_TO_RAO
 from allways.vault import BondVaultClient, VaultConfigError, codec
 
@@ -79,7 +79,8 @@ def _report(result, ok_msg: str):
             console.print(f'[red]Call failed[/red]{f" [dim]({result.error})[/dim]" if result.error else ""}')
     else:
         console.print(f'[green]{ok_msg}[/green]')
-    if result.events:
+    # The raw event list is a diagnostic — only worth the noise when the call failed.
+    if not result.ok and result.events:
         console.print(f'  [dim]events: {", ".join(result.events)}[/dim]')
     console.print(f'  [dim]extrinsic: {result.extrinsic_hash}[/dim]\n')
 
@@ -113,7 +114,7 @@ def _rao_to_tao_flag(rao: int) -> str:
 # ─── Command group ───────────────────────────────────────────────────────────
 
 
-@click.group('vault', cls=StyledGroup, show_disclaimer=True)
+@click.group('vault', cls=StyledAliasGroup, show_disclaimer=True)
 def vault_group():
     """TAO bond vault (Bittensor-side collateral for TAO-hub pairs).
 
@@ -125,15 +126,19 @@ def vault_group():
 
 @vault_group.command('recycle', show_disclaimer=True)
 @click.option('--force', is_flag=True, help='Submit even if the pot reads as empty/unreadable.')
-def vault_recycle(force):
+@click.option('--hotkey', 'use_hotkey', is_flag=True, help='Sign with the wallet hotkey (no password — for cron).')
+def vault_recycle(force, use_hotkey):
     """Drain the pot into the SN7 pool (permissionless, caller pays ~0.003 τ).
+
+    [dim]Anyone may call it, so the signer only pays the postage: the wallet COLDKEY by default
+    (that's where the TAO is), --hotkey for unattended runs, ALLWAYS_VAULT_SURI overrides both.[/dim]
 
     [dim]The pot is settled fees PLUS any TAO sent straight to the vault address — donated
     TAO is swept automatically, nobody can move it anywhere else. Fees only fill at true-up
     boundaries / exits / slash surpluses; cron this at a fixed offset AFTER the true-up
     cadence, more often is wasted postage.[/dim]
     """
-    vault = _client()
+    vault = _client(use_coldkey=not use_hotkey)
 
     pot = vault.get_recyclable_pot()
     if pot is not None:
@@ -204,17 +209,29 @@ def vault_status(miner):
     console.print()
 
 
-@vault_group.command('post-collateral', show_disclaimer=True)
-@click.argument('amount_tao', type=float)
-def vault_post_collateral(amount_tao):
-    """Post AMOUNT_TAO into the vault as bond (signed by the wallet hotkey)."""
-    vault = _client()
-    rao = int(amount_tao * TAO_TO_RAO)
+@vault_group.command('deposit', show_disclaimer=True)
+@click.option('--amount', default=None, type=FINITE_FLOAT, help='Amount in TAO')
+def vault_deposit(amount: float | None):
+    """Deposit TAO collateral into the bond vault (signed by the wallet hotkey).
+
+    [dim]The TAO twin of `alw collateral deposit` (SOL). Then `alw vault lock` to enter service.[/dim]
+
+    [dim]Examples:
+        $ alw vault deposit --amount 5.0
+        $ alw vault deposit  (prompts interactively)[/dim]
+    """
+    if amount is None:
+        amount = click.prompt('Amount to deposit (TAO)', type=FINITE_FLOAT)
+    rao = int(amount * TAO_TO_RAO)
     if rao <= 0:
         fail('Amount must be > 0')
-    with loading(f'Posting {_fmt_tao(rao)} to the vault...'):
+    vault = _client()
+    with loading(f'Depositing {_fmt_tao(rao)} into the vault...'):
         result = vault.post_collateral(rao)
-    _report(result, f'Posted {_fmt_tao(rao)}')
+    _report(result, f'Deposited {_fmt_tao(rao)}')
+
+
+vault_group.add_alias('deposit', 'post-collateral')
 
 
 @vault_group.command('lock', show_disclaimer=True)
@@ -231,18 +248,20 @@ def vault_lock():
 
 
 @vault_group.command('withdraw', show_disclaimer=True)
-@click.argument('amount_tao', type=float)
-def vault_withdraw(amount_tao):
-    """Withdraw AMOUNT_TAO from an UNLOCKED bond back to the hotkey.
+@click.option('--amount', default=None, type=FINITE_FLOAT, help='Amount in TAO')
+def vault_withdraw(amount: float | None):
+    """Withdraw TAO collateral from an UNLOCKED bond back to the hotkey.
 
     [dim]The exit residual fee settle runs BEFORE validators unlock you, so once you
     are unlocked the vault balance is exact and fully withdrawable. If the call is
     refused, re-check `alw vault status <hotkey>` for the post-settle figure.[/dim]
     """
-    vault = _client()
-    rao = int(amount_tao * TAO_TO_RAO)
+    if amount is None:
+        amount = click.prompt('Amount to withdraw (TAO)', type=FINITE_FLOAT)
+    rao = int(amount * TAO_TO_RAO)
     if rao <= 0:
         fail('Amount must be > 0')
+    vault = _client()
     with loading(f'Withdrawing {_fmt_tao(rao)}...'):
         result = vault.withdraw_collateral(rao)
     _report(result, f'Withdrew {_fmt_tao(rao)}')

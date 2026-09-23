@@ -66,6 +66,14 @@ def hub_busy_until(state, bit: int) -> int:
     return int(arr or 0)
 
 
+def hub_reserved_collateral(state, bit: int) -> int:
+    """ONE hub's collateral already obligated to in-flight swaps (contract ``MinerState::reserved``), in
+    the backing's own units. A pre-v3.3 shape carries no array — nothing is reserved."""
+    arr = getattr(state, 'reserved_collateral', ())
+    idx = max(bit.bit_length() - 1, 0)
+    return int(arr[idx]) if idx < len(arr) else 0
+
+
 Pubkey32 = _Raw(32)
 Hash32 = _Raw(32)
 Sig64 = _Raw(64)
