@@ -327,7 +327,8 @@ class Alpha(Asset):
             # The chain debits ONE position: a summed balance is not sendable, and a transfer_stake would
             # dispatch and fail, paying a fee per poll until the swap timed out.
             bt.logging.error(
-                f'{LOG_ALPHA} no single hotkey of {from_ss58} holds {amount} netuid-{self.netuid} alpha — not sending'
+                f'{LOG_ALPHA} no single hotkey of {from_ss58} holds {amount} netuid-{self.netuid} alpha — not sending. '
+                'A delivery is ONE transfer from ONE hotkey: keep this alpha on a single hotkey (btcli stake move)'
             )
             return None
 
