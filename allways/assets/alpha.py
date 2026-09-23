@@ -154,15 +154,15 @@ class Alpha(Asset):
 
     def stakes(self, coldkey: str) -> List[Tuple[str, int]]:
         """(hotkey, alpha) held by ``coldkey`` on this netuid; raises on a read failure."""
-        infos = self.subtensor.get_stake_info_for_coldkey(coldkey)
+        try:
+            infos = self.subtensor.get_stake_info_for_coldkey(coldkey)
+        except Exception as e:
+            raise ProviderUnreachableError(f'{self.chain_def.id} stake unavailable for {coldkey}: {e}') from e
         return [(info.hotkey_ss58, int(info.stake.rao)) for info in infos if int(info.netuid) == self.netuid]
 
     def get_balance(self, address: str) -> int:
-        try:
-            return sum(alpha for _, alpha in self.stakes(address))
-        except Exception as e:
-            bt.logging.error(f'{LOG_ALPHA} get_balance failed: {e}')
-            return 0
+        """Alpha held on this netuid across every hotkey; raises when the read fails — see Tao's."""
+        return sum(alpha for _, alpha in self.stakes(address))
 
     def transfers_enabled(self) -> bool:
         """Whether this alpha can move at all: the subnet exists, its token was started, and

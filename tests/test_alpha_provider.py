@@ -182,6 +182,17 @@ def _stake(hotkey, rao, netuid=NETUID):
     return SimpleNamespace(hotkey_ss58=hotkey, netuid=netuid, stake=SimpleNamespace(rao=rao))
 
 
+def test_balance_read_failure_raises_rather_than_reading_as_empty():
+    """Unknown is not zero: a swallowed read reports an empty wallet, which drops the
+    miner's quotes on a network blip."""
+
+    def boom(_ck):
+        raise ConnectionError('subtensor down')
+
+    with pytest.raises(ProviderUnreachableError):
+        Alpha(CHAIN_SN7, SimpleNamespace(get_stake_info_for_coldkey=boom)).get_balance(MINER)
+
+
 def test_get_balance_sums_this_netuid_across_hotkeys():
     stakes = [_stake('hk1', 100), _stake('hk2', 250), _stake('hk3', 999, netuid=NETUID + 1)]
     assert Alpha(CHAIN_SN7, SimpleNamespace(get_stake_info_for_coldkey=lambda ck: stakes)).get_balance(MINER) == 350

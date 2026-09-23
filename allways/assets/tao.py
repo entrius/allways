@@ -634,13 +634,14 @@ class Tao(Asset, Chain):
             return None
 
     def get_balance(self, address: str) -> int:
-        """Get balance for a TAO address in rao."""
+        """Balance of a TAO address in rao; raises when the read fails.
+
+        Unknown is not zero: a swallowed read reported an empty wallet, which reads as
+        "cannot fund this leg" and drops the miner's quotes on a network blip."""
         try:
-            balance = self.subtensor.get_balance(address)
-            return int(balance)
+            return int(self.subtensor.get_balance(address))
         except Exception as e:
-            bt.logging.error(f'TAO get_balance failed: {e}')
-            return 0
+            raise ProviderUnreachableError(f'TAO balance unavailable for {address}: {e}') from e
 
     def is_valid_address(self, address: str) -> bool:
         """Validate an SS58 address."""
