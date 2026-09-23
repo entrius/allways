@@ -218,12 +218,18 @@ def _toggles(transfer=True, subtoken=True, exists=True):
     return SimpleNamespace(substrate=SimpleNamespace(query=lambda m, name, params: flags[name]))
 
 
-def test_cancel_evidence_on_transfer_toggle_off():
-    assert Alpha(CHAIN_SN7, _toggles(transfer=False)).cancel_evidence(MINER, 1) == CANCEL_REASON_ALPHA_TRANSFER_DISABLED
-    assert Alpha(CHAIN_SN7, _toggles(subtoken=False)).cancel_evidence(MINER, 1) == CANCEL_REASON_ALPHA_TRANSFER_DISABLED
+def test_transfer_toggle_off_defers_but_never_cancels():
+    """The toggle is the subnet owner's to flip at any block, and a cancel leaves the taker's deposit
+    with the miner — so an owner running a miner on its own alpha could flip it after every deposit.
+    A flip is a deferral hint only; the swap holds and, if transfers never return, times out at the
+    extension ceiling exactly like an EVM getCode hint."""
+    off = Alpha(CHAIN_SN7, _toggles(transfer=False))
+    assert off.cancel_evidence(MINER, 1) is None
+    assert off.can_deliver_to(MINER, 1) is False
+    assert off.delivery_refused(MINER, 0) is True
+    assert Alpha(CHAIN_SN7, _toggles(subtoken=False)).cancel_evidence(MINER, 1) is None
     assert Alpha(CHAIN_SN7, _toggles()).cancel_evidence(MINER, 1) is None
-    assert Alpha(CHAIN_SN7, _toggles(transfer=False)).can_deliver_to(MINER, 1) is False
-    assert Alpha(CHAIN_SN7, _toggles(transfer=False)).delivery_refused(MINER, 0) is True
+    assert Alpha(CHAIN_SN7, _toggles()).delivery_refused(MINER, 0) is False
 
 
 def test_a_pruned_subnet_is_not_deliverable():
@@ -234,14 +240,19 @@ def test_a_pruned_subnet_is_not_deliverable():
     assert Alpha(CHAIN_SN7, gone).cancel_evidence(MINER, 1) == CANCEL_REASON_ALPHA_TRANSFER_DISABLED
 
 
-def test_unreadable_toggle_is_not_evidence():
+def test_unreadable_toggle_is_not_evidence_and_defers_the_slash():
+    """Reserve fails open (not a security boundary); cancel needs positive evidence; the slash gate must
+    RAISE — returning False there read an RPC failure as "not refused" and let the slash proceed, where
+    every other provider's unreadable probe defers it."""
+
     def boom(*a, **k):
         raise RuntimeError('rpc down')
 
     p = Alpha(CHAIN_SN7, SimpleNamespace(substrate=SimpleNamespace(query=boom)))
     assert p.can_deliver_to(MINER, 1) is True
-    assert p.delivery_refused(MINER, 0) is False
     assert p.cancel_evidence(MINER, 1) is None
+    with pytest.raises(ProviderUnreachableError):
+        p.delivery_refused(MINER, 0)
 
 
 # ─── sending ────────────────────────────────────────────────────────────────

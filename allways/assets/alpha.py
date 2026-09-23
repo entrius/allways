@@ -172,6 +172,14 @@ class Alpha(Asset):
         """Alpha held on this netuid across every hotkey; raises when the read fails — see Tao's."""
         return sum(alpha for _, alpha in self.stakes(address))
 
+    def subnet_flag(self, name: str) -> bool:
+        """One SubtensorModule per-netuid flag, read live; raises ProviderUnreachableError on a read failure."""
+        try:
+            flag = self.subtensor.substrate.query('SubtensorModule', name, [self.netuid])
+        except Exception as e:
+            raise ProviderUnreachableError(f'{self.chain_def.id} {name} unavailable: {e}') from e
+        return bool(getattr(flag, 'value', flag))
+
     def transfers_enabled(self) -> bool:
         """Whether this alpha can move at all: the subnet exists, its token was started, and
         transfers are on. Raises on a read failure.
@@ -181,11 +189,7 @@ class Alpha(Asset):
         SubtokenEnabled is false until the owner calls start_call, and never returns to false.
         TransferToggle is flippable by the owner (or root) at any block, so it is re-read here
         rather than cached — it is the only one of the three that can turn off mid-swap."""
-        flags = (
-            self.subtensor.substrate.query('SubtensorModule', name, [self.netuid])
-            for name in ('NetworksAdded', 'SubtokenEnabled', 'TransferToggle')
-        )
-        return all(bool(getattr(flag, 'value', flag)) for flag in flags)
+        return all(self.subnet_flag(name) for name in ('NetworksAdded', 'SubtokenEnabled', 'TransferToggle'))
 
     def can_deliver_to(self, address: str, amount: int, from_address: Optional[str] = None) -> bool:
         try:
@@ -194,17 +198,22 @@ class Alpha(Asset):
             return True
 
     def delivery_refused(self, address: str, since_unix: int) -> bool:
-        try:
-            return not self.transfers_enabled()
-        except Exception:
-            return False
+        """Deferral hint: transfers are off right now. Raises when unreadable, so the loop defers rather
+        than reading an RPC failure as "not refused" and slashing on it."""
+        return not self.transfers_enabled()
 
     def cancel_evidence(
         self, address: str, amount: int, tx_hash: Optional[str] = None, from_address: Optional[str] = None
     ) -> Optional[int]:
-        """A subnet that disabled transfers strands every miner on it — no-fault."""
+        """No-fault only when the subnet itself is gone (pruned: its alpha was force-liquidated to TAO, so
+        there is nothing left to deliver). A TransferToggle flip is deliberately NOT cancel evidence: the
+        toggle is the subnet owner's to flip at any block, a cancel leaves the taker's deposit with the
+        miner, and an owner running a miner on its own alpha could flip it after every deposit. It stays
+        a deferral (`delivery_refused`) — the swap holds while transfers are off and, like an EVM
+        getCode hint, times out at the extension ceiling if they never return. A subnet whose owner
+        disables transfers is the miner's counterparty risk for quoting it."""
         try:
-            return None if self.transfers_enabled() else CANCEL_REASON_ALPHA_TRANSFER_DISABLED
+            return None if self.subnet_flag('NetworksAdded') else CANCEL_REASON_ALPHA_TRANSFER_DISABLED
         except Exception:
             return None
 
