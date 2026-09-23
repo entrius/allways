@@ -117,9 +117,6 @@ pub const CANCEL_REASON_INVALID_DEST: u8 = 6;
 /// The subnet is gone (pruned, its alpha force-liquidated to TAO): undeliverable through no fault of
 /// the miner. An owner's TransferToggle flip only defers — it is never this.
 pub const CANCEL_REASON_ALPHA_TRANSFER_DISABLED: u8 = 7;
-/// The recipient coldkey is at subtensor's StakingHotkeys cap with no hotkey in common with the miner:
-/// no transfer_stake can land there — no fault of the miner.
-pub const CANCEL_REASON_ALPHA_DEST_FULL: u8 = 8;
 pub const CANCEL_REASON_OTHER: u8 = 255;
 
 /// Slots the draw's seed slot is pinned ahead of the arming crank. Three leader windows (4 slots

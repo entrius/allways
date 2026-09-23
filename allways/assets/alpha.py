@@ -5,7 +5,7 @@ import bittensor as bt
 from allways.assets.asset import Asset, ProviderUnreachableError, SendResult, TransactionInfo
 from allways.assets.tao import Broadcasts, Decoder, Settler, Tao, Transfer
 from allways.chains import ChainDefinition
-from allways.constants import CANCEL_REASON_ALPHA_DEST_FULL, CANCEL_REASON_ALPHA_TRANSFER_DISABLED
+from allways.constants import CANCEL_REASON_ALPHA_TRANSFER_DISABLED
 
 LOG_ALPHA = '[Alpha]'
 # Matched by name: SubtensorModule's indices move on runtime upgrades.
@@ -185,46 +185,34 @@ class Alpha(Asset):
             raise ProviderUnreachableError(f'{self.chain_def.id} StakingHotkeys unavailable for {coldkey}: {e}') from e
         return [Tao.as_ss58(hotkey) for hotkey in (getattr(value, 'value', value) or [])]
 
-    def landing_hotkey(self, from_addr: str, to_addr: str, amount: int) -> Optional[str]:
-        """The hotkey a delivery of ``amount`` from ``from_addr`` can land on at ``to_addr``: one the sender
-        holds enough on that the recipient already stakes to (never grows the recipient's list), else the
-        sender's largest sufficient one while the recipient's list can still grow. None when no single
-        hotkey holds ``amount`` (a summed balance is not a sendable one) or the recipient is at the cap
-        with nothing in common. Raises when unreadable."""
+    def landing_hotkeys(self, from_addr: str, to_addr: str, amount: int) -> Optional[Tuple[str, str]]:
+        """(origin, destination) hotkeys for a delivery of ``amount``: the sender's position holding all of it
+        (one the recipient already stakes to first), landing on that same hotkey while the recipient's
+        StakingHotkeys can take it, else on a hotkey the recipient already stakes to — a full list never
+        blocks a delivery. None when no single hotkey holds ``amount``. Raises when unreadable."""
         held = [(hotkey, alpha) for hotkey, alpha in self.stakes(from_addr) if alpha >= amount]
         if not held:
             return None
-        recipient = set(self.staking_hotkeys(to_addr))
+        recipient = self.staking_hotkeys(to_addr)
         shared = [stake for stake in held if stake[0] in recipient]
-        if shared:
-            return max(shared, key=lambda stake: stake[1])[0]
-        if len(recipient) >= MAX_THIRD_PARTY_STAKING_HOTKEYS:
-            return None
-        return max(held, key=lambda stake: stake[1])[0]
+        origin = max(shared or held, key=lambda stake: stake[1])[0]
+        if origin in recipient or len(recipient) < MAX_THIRD_PARTY_STAKING_HOTKEYS:
+            return origin, origin
+        return origin, recipient[0]
 
     def send_blocker(self, from_address: str, to_address: str, amount: int) -> Optional[str]:
         """A transfer_stake debits ONE hotkey position, so a stake split across hotkeys cannot be sent as one leg."""
         try:
-            if self.landing_hotkey(from_address, to_address, amount) is not None:
-                return None
             largest = max((alpha for _, alpha in self.stakes(from_address)), default=0)
         except ProviderUnreachableError:
             return None
-        name, scale = self.chain_def.id.upper(), 10**self.chain_def.decimals
         if largest >= amount:
-            return f"the miner's coldkey cannot take {name} from any hotkey you hold (its staking-hotkey list is full)"
+            return None
+        name, scale = self.chain_def.id.upper(), 10**self.chain_def.decimals
         return (
             f'{name} must go out as one transfer_stake from one hotkey; your largest position holds '
             f'{largest / scale:.9g} of the {amount / scale:.9g} needed — move it onto one hotkey first'
         )
-
-    def recipient_full(self, to_addr: str, from_addr: str) -> bool:
-        """Positive evidence ``to_addr`` can take no delivery from ``from_addr`` at all: its StakingHotkeys
-        is at the cap and the sender holds this alpha on none of them. Raises when unreadable."""
-        recipient = set(self.staking_hotkeys(to_addr))
-        if len(recipient) < MAX_THIRD_PARTY_STAKING_HOTKEYS:
-            return False
-        return not any(hotkey in recipient for hotkey, alpha in self.stakes(from_addr) if alpha > 0)
 
     def subnet_flag(self, name: str) -> bool:
         """One SubtensorModule per-netuid flag, read live; raises ProviderUnreachableError on a read failure."""
@@ -247,9 +235,7 @@ class Alpha(Asset):
 
     def can_deliver_to(self, address: str, amount: int, from_address: Optional[str] = None) -> bool:
         try:
-            if not self.transfers_enabled():
-                return False
-            return from_address is None or not self.recipient_full(address, from_address)
+            return self.transfers_enabled()
         except Exception:
             return True
 
@@ -271,11 +257,39 @@ class Alpha(Asset):
         try:
             if not self.subnet_flag('NetworksAdded'):
                 return CANCEL_REASON_ALPHA_TRANSFER_DISABLED
-            if from_address is not None and self.recipient_full(address, from_address):
-                return CANCEL_REASON_ALPHA_DEST_FULL
             return None
         except Exception:
             return None
+
+    def transfer(self, to_address: str, origin_hotkey: str, destination_hotkey: str, amount: int) -> Any:
+        """A plain (never MEV-shielded) transfer_stake, or transfer_stake_and_hotkey to land on a different hotkey."""
+        if origin_hotkey == destination_hotkey:
+            return self.subtensor.transfer_stake(
+                wallet=self.wallet,
+                destination_coldkey_ss58=to_address,
+                hotkey_ss58=origin_hotkey,
+                origin_netuid=self.netuid,
+                destination_netuid=self.netuid,
+                amount=bt.Balance.from_rao(int(amount)),
+                mev_protection=False,
+                wait_for_inclusion=True,
+                wait_for_finalization=False,
+            )
+        call = self.subtensor.compose_call(
+            'SubtensorModule',
+            'transfer_stake_and_hotkey',
+            {
+                'destination_coldkey': to_address,
+                'origin_hotkey': origin_hotkey,
+                'destination_hotkey': destination_hotkey,
+                'origin_netuid': self.netuid,
+                'destination_netuid': self.netuid,
+                'alpha_amount': int(amount),
+            },
+        )
+        return self.subtensor.sign_and_send_extrinsic(
+            call=call, wallet=self.wallet, wait_for_inclusion=True, wait_for_finalization=False
+        )
 
     def find_recent_outgoing(self, from_addr: str, to_addr: str, amount: int) -> Optional[str]:
         return self.chain.find_outgoing(self.scan_cursors, from_addr, to_addr, amount, *self.ledger)
@@ -283,7 +297,7 @@ class Alpha(Asset):
     def send_amount(
         self, to_address: str, amount: int, from_address: Optional[str] = None, dedup_key: Optional[str] = None
     ) -> SendResult:
-        """transfer_stake from a hotkey the recipient can take (``landing_hotkey``); dedup and hash handling mirror Tao."""
+        """Deliver from one sufficient hotkey (``landing_hotkeys``); dedup and hash handling mirror Tao."""
         if self.wallet is None:
             bt.logging.error(f'{LOG_ALPHA} send_amount called on a read-only {self.chain_def.id} (no wallet)')
             return None
@@ -305,33 +319,21 @@ class Alpha(Asset):
             return landed
 
         try:
-            hotkey = self.landing_hotkey(from_ss58, to_address, amount)
+            hotkeys = self.landing_hotkeys(from_ss58, to_address, amount)
         except Exception as e:
             bt.logging.error(f'{LOG_ALPHA} cannot pick a landing hotkey for {to_address}: {e} — not sending')
             return None
-        if hotkey is None:
-            # Either no single hotkey holds the amount (the chain debits ONE position, a summed balance is
-            # not sendable) or the recipient is at its StakingHotkeys cap with nothing in common — a
-            # transfer_stake would dispatch and fail, paying a fee per poll until the swap timed out.
+        if hotkeys is None:
+            # The chain debits ONE position: a summed balance is not sendable, and a transfer_stake would
+            # dispatch and fail, paying a fee per poll until the swap timed out.
             bt.logging.error(
-                f'{LOG_ALPHA} no hotkey of {from_ss58} can land {amount} netuid-{self.netuid} alpha at '
-                f'{to_address} (single-hotkey inventory, or recipient at the StakingHotkeys cap) — not sending'
+                f'{LOG_ALPHA} no single hotkey of {from_ss58} holds {amount} netuid-{self.netuid} alpha — not sending'
             )
             return None
 
         attempt_head = self.chain.record_send_attempt(self.broadcasted_txids, scope, to_address, amount)
         # The SDK never raises here: every failure comes back as a response, possibly without a hash.
-        response = self.subtensor.transfer_stake(
-            wallet=self.wallet,
-            destination_coldkey_ss58=to_address,
-            hotkey_ss58=hotkey,
-            origin_netuid=self.netuid,
-            destination_netuid=self.netuid,
-            amount=bt.Balance.from_rao(int(amount)),
-            mev_protection=False,
-            wait_for_inclusion=True,
-            wait_for_finalization=False,
-        )
+        response = self.transfer(to_address, *hotkeys, amount)
         # The signed extrinsic exists before broadcast, so its hash outlives a lost receipt.
         receipt = getattr(response, 'extrinsic_receipt', None)
         tx_hash = getattr(receipt, 'extrinsic_hash', None) or Tao.extrinsic_hash(getattr(response, 'extrinsic', None))

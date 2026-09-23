@@ -9,7 +9,7 @@ from allways.assets.alpha import Alpha
 from allways.assets.asset import ProviderUnreachableError
 from allways.assets.tao import BETA_ESCROW, Tao
 from allways.chains import ALPHA_NETUIDS, CHAIN_SN7, CHAIN_SN74
-from allways.constants import CANCEL_REASON_ALPHA_DEST_FULL, CANCEL_REASON_ALPHA_TRANSFER_DISABLED
+from allways.constants import CANCEL_REASON_ALPHA_TRANSFER_DISABLED
 
 MINER = 'minerCold'
 USER = 'userCold'
@@ -280,10 +280,16 @@ def _sender(stakes, *, response=None, calls=None, recipient_hotkeys=()):
         calls.append(kwargs)
         return landed if response is None else response
 
+    def sign_and_send_extrinsic(call, **kwargs):
+        calls.append(call)
+        return landed if response is None else response
+
     subtensor = SimpleNamespace(
         get_current_block=lambda: HEAD,
         get_stake_info_for_coldkey=lambda ck: stakes,
         transfer_stake=transfer_stake,
+        compose_call=lambda module, function, params: {'call_function': function, **params},
+        sign_and_send_extrinsic=sign_and_send_extrinsic,
         substrate=SimpleNamespace(
             get_block_number=lambda h: BLOCK,
             query=lambda m, name, params: list(recipient_hotkeys) if name == 'StakingHotkeys' else True,
@@ -366,26 +372,22 @@ def test_send_lands_on_a_hotkey_the_recipient_already_stakes_to():
     assert calls[0]['hotkey_ss58'] == 'small'
 
 
-def test_send_refuses_a_recipient_at_the_cap_with_nothing_in_common():
-    """The extrinsic would dispatch and fail with TooManyStakingHotkeys, and the dedup ladder would
-    re-send it every poll (fee each time) until the swap timed out and slashed."""
-    p, calls = _sender([_stake('big', 9_000)], recipient_hotkeys=FULL)
-    assert p.send_amount(USER, 5_000, dedup_key='swap-1') is None
-    assert calls == []
-    assert p.can_deliver_to(USER, 5_000, from_address=MINER) is False
-    assert p.cancel_evidence(USER, 5_000, from_address=MINER) == CANCEL_REASON_ALPHA_DEST_FULL
-    # No committed sender → nothing to compare hotkeys against: not evidence.
-    assert p.can_deliver_to(USER, 5_000) is True
-    assert p.cancel_evidence(USER, 5_000) is None
-
-
-def test_a_full_recipient_with_a_shared_hotkey_is_the_miners_inventory_problem():
-    """The miner holds alpha on a hotkey the recipient already stakes to, just not enough: it CAN deliver
-    once it tops that position up, so this is neither undeliverable nor no-fault."""
+def test_a_recipient_at_the_cap_is_paid_onto_a_hotkey_it_already_stakes_to():
+    """A plain transfer_stake would grow a full StakingHotkeys and fail (TooManyStakingHotkeys), so the
+    miner lands the stake on one of the recipient's own hotkeys — same netuid, exact, no fee. A full list
+    is never undeliverable, so it is never no-fault either."""
     p, calls = _sender([_stake('hk3', 100), _stake('big', 9_000)], recipient_hotkeys=FULL)
-    assert p.send_amount(USER, 5_000, dedup_key='swap-1') is None
-    assert calls == []
-    assert p.can_deliver_to(USER, 5_000, from_address=MINER) is True
+    assert p.send_amount(USER, 5_000, dedup_key='swap-1') == (TXID, BLOCK)
+    (call,) = calls
+    assert call == {
+        'call_function': 'transfer_stake_and_hotkey',
+        'destination_coldkey': USER,
+        'origin_hotkey': 'big',
+        'destination_hotkey': 'hk0',
+        'origin_netuid': NETUID,
+        'destination_netuid': NETUID,
+        'alpha_amount': 5_000,
+    }
     assert p.cancel_evidence(USER, 5_000, from_address=MINER) is None
 
 
@@ -407,8 +409,6 @@ def test_a_split_stake_is_blocked_before_reserve_with_the_largest_position_named
         ' — move it onto one hotkey first'
     )
     assert p.send_blocker(USER, MINER, 5 * 10**9) is None
-    full, _ = _sender([_stake('big', 9_000)], recipient_hotkeys=FULL)
-    assert 'staking-hotkey list is full' in full.send_blocker(USER, MINER, 5_000)
 
 
 def test_an_unreadable_stake_does_not_block_the_swap():
