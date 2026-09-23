@@ -717,10 +717,6 @@ def _screen_deliverability(
         # check is the delivery-time reverted-tx proof). A malformed address can never be delivered to.
         if not dest_provider.chain.is_valid_address(receive_addr):
             fail(f'  {receive_addr!r} is not a valid {to_chain.upper()} address. No funds moved.')
-        miner_to = getattr(quote, 'miner_to_addr', '') if quote else ''
-        blocker = miner_to and dest_provider.receive_blocker(receive_addr, miner_to)
-        if blocker:
-            fail(f'  {blocker}. No funds moved.')
     if src_provider is None:
         return
     miner_addr = getattr(quote, 'miner_from_addr', '') if quote else ''

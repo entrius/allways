@@ -416,12 +416,3 @@ def test_an_unreadable_stake_does_not_block_the_swap():
         raise ConnectionError('rpc down')
 
     assert Alpha(CHAIN_SN7, SimpleNamespace(get_stake_info_for_coldkey=boom)).send_blocker(USER, MINER, 1) is None
-
-
-def test_a_destination_at_the_cap_sharing_no_miner_hotkey_is_refused_at_reserve():
-    full, _ = _sender([_stake('big', 9_000)], recipient_hotkeys=FULL)
-    assert 'already stakes to 128 hotkeys' in full.receive_blocker(USER, MINER)
-    shared, _ = _sender([_stake('hk3', 9_000)], recipient_hotkeys=FULL)
-    assert shared.receive_blocker(USER, MINER) is None
-    fresh, _ = _sender([_stake('big', 9_000)])
-    assert fresh.receive_blocker(USER, MINER) is None

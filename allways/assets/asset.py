@@ -199,10 +199,6 @@ class Asset(ABC):
         """Why ``amount`` cannot leave ``from_address`` for ``to_address`` as ONE transfer, else None; fails open."""
         return None
 
-    def receive_blocker(self, address: str, from_address: str) -> Optional[str]:
-        """Why ``address`` can take nothing at all from ``from_address``, else None; fails open."""
-        return None
-
     def can_deliver_to(self, address: str, amount: int, from_address: Optional[str] = None) -> bool:
         """Reserve-time gate: False only on positive evidence the destination cannot receive.
 

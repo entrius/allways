@@ -481,8 +481,7 @@ def test_deadline_notice_never_shows_negative_runway():
 
 
 class _Gate:
-    def __init__(self, reject=(), malformed=(), enabled=True, blocker=None, receive=None):
-        self.receive = receive
+    def __init__(self, reject=(), malformed=(), enabled=True, blocker=None):
         self.enabled = enabled
         self.blocker = blocker
         self.reject = set(reject)
@@ -496,9 +495,6 @@ class _Gate:
 
     def send_blocker(self, from_address, to_address, amount):
         return self.blocker
-
-    def receive_blocker(self, address, from_address):
-        return self.receive
 
     def can_deliver_to(self, addr, amount, from_address=None):
         self.checked.append(addr)
@@ -538,15 +534,6 @@ def test_screen_refuses_a_source_that_cannot_go_out_as_one_transfer():
     client.get_quote.return_value = types.SimpleNamespace(miner_from_addr='mineraddr')
     with pytest.raises(SystemExit):
         _screen(_Gate(blocker='split across hotkeys'), 'sn7', 'sol', client)
-
-
-def test_screen_refuses_a_destination_that_cannot_receive_from_the_miner():
-    import pytest
-
-    client = MagicMock()
-    client.get_quote.return_value = types.SimpleNamespace(miner_to_addr='minerdeliver', miner_from_addr='')
-    with pytest.raises(SystemExit):
-        _screen(_Gate(receive='at the staking-hotkey cap'), 'sol', 'sn7', client)
 
 
 def test_screen_blocks_rejecting_miner_receive_address():

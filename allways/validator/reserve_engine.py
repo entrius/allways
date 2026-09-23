@@ -243,9 +243,6 @@ def reserve_on_behalf(
             miner_to_addr
         ):
             return ReserveResult(False, 'destination must differ from the miner delivery address')
-        blocker = miner_to_addr and provider.receive_blocker(user_to_addr, miner_to_addr)
-        if blocker:
-            return ReserveResult(False, blocker)
     # Same gate, source side (T18): the miner's receive address must accept the user's funds —
     # a miner quoting a malformed/rejecting/blacklisted address griefs takers into a burned fee.
     src_provider = providers.get(from_chain)
