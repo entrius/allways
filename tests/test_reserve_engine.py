@@ -147,6 +147,7 @@ def test_open_normalizes_the_source_address_at_intake():
         'sol': SimpleNamespace(
             transfers_enabled=lambda: True,
             send_blocker=lambda frm, to, amt: None,
+            receive_blocker=lambda addr, frm: None,
             chain=SimpleNamespace(normalize_address=lambda a: a.lower()),
         )
     }
@@ -162,6 +163,7 @@ def _gate_asset(can_deliver, valid=lambda addr: True, enabled=True, blocker=None
     return SimpleNamespace(
         transfers_enabled=lambda: enabled,
         send_blocker=lambda frm, to, amt: blocker,
+        receive_blocker=lambda addr, frm: None,
         can_deliver_to=lambda addr, amt, from_address=None: can_deliver(addr, amt),
         chain=SimpleNamespace(is_valid_address=valid, normalize_address=lambda addr: addr),
     )
@@ -230,6 +232,18 @@ def test_source_that_cannot_go_out_as_one_transfer_rejects_before_any_bid():
     validator.axon_assets = {'sol': _gate_asset(lambda addr, amt: True, blocker='split across hotkeys')}
     result = reserve_on_behalf(validator, HOTKEY, 'sol', 'btc', USER_PK, str(USER_PK), 'userBTCaddr', 10**9)
     assert (result.ok, result.reason, client.calls) == (False, 'split across hotkeys', [])
+
+
+def test_destination_that_cannot_receive_from_the_miner_rejects_before_any_bid():
+    # An alpha coldkey at the 128 staking-hotkey cap sharing none with the miner: delivery can never land.
+    client = FakeClient()
+    client.quote.miner_to_addr = 'minerBTCdeliver'
+    validator = _validator(client)
+    gate = _gate_asset(lambda addr, amt: True)
+    gate.receive_blocker = lambda addr, frm: 'cannot receive' if frm == 'minerBTCdeliver' else None
+    validator.axon_assets = {'btc': gate}
+    result = reserve_on_behalf(validator, HOTKEY, 'sol', 'btc', USER_PK, str(USER_PK), 'userBTCaddr', 10**9)
+    assert (result.ok, result.reason, client.calls) == (False, 'cannot receive', [])
 
 
 def test_user_to_addr_equal_miner_delivery_address_rejects():

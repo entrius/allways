@@ -218,6 +218,18 @@ class Alpha(Asset):
             f'{largest / scale:.9g} of the {amount / scale:.9g} needed — move it onto one hotkey first'
         )
 
+    def receive_blocker(self, address: str, from_address: str) -> Optional[str]:
+        """A coldkey at the staking-hotkey cap sharing no hotkey with the sender can take no transfer_stake."""
+        try:
+            if not self.recipient_full(address, from_address):
+                return None
+        except ProviderUnreachableError:
+            return None
+        return (
+            f'your {self.chain_def.id.upper()} destination already stakes to {MAX_THIRD_PARTY_STAKING_HOTKEYS} '
+            "hotkeys (subtensor's limit) and none is the miner's, so it cannot receive — use another coldkey"
+        )
+
     def recipient_full(self, to_addr: str, from_addr: str) -> bool:
         """Positive evidence ``to_addr`` can take no delivery from ``from_addr`` at all: its StakingHotkeys
         is at the cap and the sender holds this alpha on none of them. Raises when unreadable."""
