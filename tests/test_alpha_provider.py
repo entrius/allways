@@ -9,7 +9,7 @@ from allways.assets.alpha import Alpha
 from allways.assets.asset import ProviderUnreachableError
 from allways.assets.tao import Tao
 from allways.chains import ALPHA_NETUIDS, CHAIN_SN7, CHAIN_SN74
-from allways.constants import CANCEL_REASON_ALPHA_TRANSFER_DISABLED
+from allways.constants import CANCEL_REASON_ALPHA_DEST_FULL, CANCEL_REASON_ALPHA_TRANSFER_DISABLED
 
 MINER = 'minerCold'
 USER = 'userCold'
@@ -262,7 +262,7 @@ class _Wallet:
     coldkeypub = SimpleNamespace(ss58_address=MINER)
 
 
-def _sender(stakes, *, response=None, calls=None):
+def _sender(stakes, *, response=None, calls=None, recipient_hotkeys=()):
     calls = [] if calls is None else calls
     receipt = SimpleNamespace(extrinsic_hash=TXID, block_hash='0xincl')
     landed = SimpleNamespace(success=True, message='', extrinsic=_ext(), extrinsic_receipt=receipt)
@@ -275,7 +275,10 @@ def _sender(stakes, *, response=None, calls=None):
         get_current_block=lambda: HEAD,
         get_stake_info_for_coldkey=lambda ck: stakes,
         transfer_stake=transfer_stake,
-        substrate=SimpleNamespace(get_block_number=lambda h: BLOCK),
+        substrate=SimpleNamespace(
+            get_block_number=lambda h: BLOCK,
+            query=lambda m, name, params: list(recipient_hotkeys) if name == 'StakingHotkeys' else True,
+        ),
     )
     p = Alpha(CHAIN_SN7, subtensor, _Wallet())
     p.chain.get_block = lambda n: {'extrinsics': []}
@@ -341,3 +344,46 @@ def test_whole_position_sentinel_is_not_an_amount():
     assert p.decode_transfer_stake(_ext(alpha=2**64 - 1), False) is None
     assert _verify(_provider(exts=[_ext(alpha=2**64 - 1)]), amount=1) is None
     assert _verify(_provider(exts=[_ext(alpha=2**64 - 2)]), amount=1).amount == 2**64 - 2
+
+
+FULL = [f'hk{i}' for i in range(128)]  # a recipient at subtensor's StakingHotkeys cap
+
+
+def test_send_lands_on_a_hotkey_the_recipient_already_stakes_to():
+    """A transfer that lands on a hotkey the recipient already holds never grows its StakingHotkeys,
+    so it can never hit the cap — preferred even over a larger position."""
+    p, calls = _sender([_stake('small', 6_000), _stake('big', 9_000)], recipient_hotkeys=['small'])
+    assert p.send_amount(USER, 5_000, dedup_key='swap-1') == (TXID, BLOCK)
+    assert calls[0]['hotkey_ss58'] == 'small'
+
+
+def test_send_refuses_a_recipient_at_the_cap_with_nothing_in_common():
+    """The extrinsic would dispatch and fail with TooManyStakingHotkeys, and the dedup ladder would
+    re-send it every poll (fee each time) until the swap timed out and slashed."""
+    p, calls = _sender([_stake('big', 9_000)], recipient_hotkeys=FULL)
+    assert p.send_amount(USER, 5_000, dedup_key='swap-1') is None
+    assert calls == []
+    assert p.can_deliver_to(USER, 5_000, from_address=MINER) is False
+    assert p.cancel_evidence(USER, 5_000, from_address=MINER) == CANCEL_REASON_ALPHA_DEST_FULL
+    # No committed sender → nothing to compare hotkeys against: not evidence.
+    assert p.can_deliver_to(USER, 5_000) is True
+    assert p.cancel_evidence(USER, 5_000) is None
+
+
+def test_a_full_recipient_with_a_shared_hotkey_is_the_miners_inventory_problem():
+    """The miner holds alpha on a hotkey the recipient already stakes to, just not enough: it CAN deliver
+    once it tops that position up, so this is neither undeliverable nor no-fault."""
+    p, calls = _sender([_stake('hk3', 100), _stake('big', 9_000)], recipient_hotkeys=FULL)
+    assert p.send_amount(USER, 5_000, dedup_key='swap-1') is None
+    assert calls == []
+    assert p.can_deliver_to(USER, 5_000, from_address=MINER) is True
+    assert p.cancel_evidence(USER, 5_000, from_address=MINER) is None
+
+
+def test_send_needs_one_hotkey_holding_the_whole_amount():
+    """get_balance sums across hotkeys, but the chain debits ONE position: a summed balance passed the
+    miner's inventory gate while the send failed every pass and rode to a slash."""
+    p, calls = _sender([_stake('a', 3_000), _stake('b', 3_000)])
+    assert p.get_balance(MINER) == 6_000
+    assert p.send_amount(USER, 5_000, dedup_key='swap-1') is None
+    assert calls == []

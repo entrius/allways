@@ -69,6 +69,9 @@ CANCEL_REASON_INVALID_DEST = 6
 # can never happen — no-fault. A TransferToggle flip is NOT this: it is owner-flippable at any block and
 # only defers (see Alpha.cancel_evidence). Mirrored in constants.rs.
 CANCEL_REASON_ALPHA_TRANSFER_DISABLED = 7
+# The recipient coldkey is at subtensor's StakingHotkeys cap and holds nothing on any hotkey the miner
+# could deliver from, so no transfer_stake can land (TooManyStakingHotkeys) — no-fault. Mirrored in constants.rs.
+CANCEL_REASON_ALPHA_DEST_FULL = 8
 CANCEL_REASON_OTHER = 255
 
 BTC_MIN_FEE_RATE = 5
