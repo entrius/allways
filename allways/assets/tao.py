@@ -18,6 +18,9 @@ Decoder = Callable[[Any, bool], Optional[Transfer]]
 Settler = Callable[[int, int, Transfer], Optional[Tuple[str, int]]]
 # dedup_scope -> (to, amount, extrinsic_hash, seen_block); one dict per asset (see send_amount).
 Broadcasts = Dict[str, Tuple[str, int, str, int]]
+# Subtensor's beta-basket escrow: PalletId b'subtensr' sub-account b'beta/esc'. Keyless protocol custody —
+# transfer_stake into it fails (CannotUseSystemAccount) and TAO sent there is stranded, so it is never a payee.
+BETA_ESCROW = ss58_encode((b'modl' + b'subtensr' + b'beta/esc').ljust(32, b'\0'), 42)
 
 
 class Tao(Asset, Chain):
@@ -648,7 +651,7 @@ class Tao(Asset, Chain):
         try:
             if not isinstance(address, str) or len(address) != 48:
                 return False
-            return is_valid_ss58_address(address)
+            return is_valid_ss58_address(address) and address != BETA_ESCROW
         except Exception:
             return False
 

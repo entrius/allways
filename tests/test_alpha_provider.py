@@ -7,7 +7,7 @@ import pytest
 from allways.assets import ASSET_REGISTRY
 from allways.assets.alpha import Alpha
 from allways.assets.asset import ProviderUnreachableError
-from allways.assets.tao import Tao
+from allways.assets.tao import BETA_ESCROW, Tao
 from allways.chains import ALPHA_NETUIDS, CHAIN_SN7, CHAIN_SN74
 from allways.constants import CANCEL_REASON_ALPHA_DEST_FULL, CANCEL_REASON_ALPHA_TRANSFER_DISABLED
 
@@ -98,6 +98,15 @@ def test_alphas_are_registered_and_bind_the_tao_chain():
     p = Alpha(CHAIN_SN7, SimpleNamespace())
     assert isinstance(p, Alpha) and isinstance(p.chain, Tao) and p.netuid == 7
     assert Alpha(CHAIN_SN74, SimpleNamespace()).netuid == 74
+
+
+def test_beta_escrow_is_never_a_valid_payee_on_tao_or_alpha():
+    # Keyless protocol custody: transfer_stake into it fails (CannotUseSystemAccount), TAO sent there is
+    # stranded. Invalid at the chain, so reserve refuses it and an in-flight swap cancels no-fault.
+    assert BETA_ESCROW == '5EYCAe5jLQhn6ofDSwHx3AZmsZPVFHnKpstqap4vqwDWtp7s'
+    for chain in (Tao(SimpleNamespace()), Alpha(CHAIN_SN7, SimpleNamespace()).chain):
+        assert not chain.is_valid_address(BETA_ESCROW)
+        assert chain.is_valid_address('5GrwvaEF5zXb26Fz9rcQpDWS57CtERHpNehXCPcNoHGKutQY')
 
 
 # ─── verification ───────────────────────────────────────────────────────────
