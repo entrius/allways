@@ -9,8 +9,17 @@ from allways.constants import CANCEL_REASON_ALPHA_TRANSFER_DISABLED
 
 LOG_ALPHA = '[Alpha]'
 # Matched by name: SubtensorModule's indices move on runtime upgrades.
-TRANSFER_STAKE = ('SubtensorModule', 'transfer_stake')
-SETTLED_EVENTS = {('System', 'ExtrinsicSuccess'), ('SubtensorModule', 'StakeTransferred')}
+# Both calls change the owning coldkey and share one dispatch path, so both settle 1:1 within a subnet.
+TRANSFER_STAKE_CALLS = {
+    ('SubtensorModule', 'transfer_stake'),
+    ('SubtensorModule', 'transfer_stake_and_hotkey'),
+}
+EXTRINSIC_SUCCESS = ('System', 'ExtrinsicSuccess')
+# One per call — transfer_stake emits the first, transfer_stake_and_hotkey the second.
+STAKE_TRANSFER_EVENTS = {
+    ('SubtensorModule', 'StakeTransferred'),
+    ('SubtensorModule', 'StakeAndHotkeyTransferred'),
+}
 
 
 def event_name(record: Any) -> Optional[Tuple[str, str]]:
@@ -78,27 +87,34 @@ class Alpha(Asset):
             raise ProviderUnreachableError(f'{self.chain_def.id} price unavailable: {e}') from e
 
     def decode_transfer_stake(self, ext: Any, is_raw: bool) -> Optional[Transfer]:
-        """(hash, dest_coldkey, alpha, sender) of a top-level transfer_stake onto this netuid, else None."""
+        """(hash, dest_coldkey, alpha, sender) of a top-level stake transfer within this netuid, else None."""
         if is_raw:
-            return None  # the raw fallback only parses Balances transfers
+            # The raw fallback only parses Balances transfers, so it cannot see a stake transfer at all.
+            # Returning None here would read as "no such payment" — a slash-eligible verdict on a dest leg.
+            raise ProviderUnreachableError(f'{self.chain_def.id} raw block fallback cannot decode a stake transfer')
         ext_data = ext.value if hasattr(ext, 'value') else ext
         if not isinstance(ext_data, dict):
             return None
         call = ext_data.get('call') or {}
-        if (call.get('call_module'), call.get('call_function')) != TRANSFER_STAKE:
+        if (call.get('call_module'), call.get('call_function')) not in TRANSFER_STAKE_CALLS:
             return None
         args = {a.get('name'): a.get('value') for a in call.get('call_args') or [] if isinstance(a, dict)}
         try:
-            if int(args['destination_netuid']) != self.netuid:
+            # Both netuids, not just the destination: only a within-subnet transfer moves alpha 1:1. A
+            # cross-netuid call unstakes through the AMM and lands a DIFFERENT amount of our alpha, so
+            # crediting its origin-denominated alpha_amount would pay out on funds that never arrived.
+            if int(args['origin_netuid']) != self.netuid or int(args['destination_netuid']) != self.netuid:
                 return None
             alpha = int(args['alpha_amount'])
         except (KeyError, TypeError, ValueError):
             return None
+        # The hotkeys are deliberately unread: the destination coldkey owns the stake whichever hotkey
+        # it lands on, so they change who takes a delegate cut, never ownership or the amount.
         dest = Tao.as_ss58(args.get('destination_coldkey'))
         return Tao.extrinsic_hash(ext), dest, alpha, Tao.as_ss58(ext_data.get('address'))
 
     def stake_moved(self, block_num: int, extrinsic_idx: int) -> bool:
-        """True iff the extrinsic dispatched successfully AND emitted StakeTransferred; raises when unreadable."""
+        """True iff the extrinsic dispatched successfully AND emitted its transfer event; raises when unreadable."""
         block_hash = self.chain.get_block_hash(block_num)
         if not block_hash:
             raise ProviderUnreachableError(f'{self.chain_def.id} block hash unavailable for {block_num}')
@@ -108,7 +124,8 @@ class Alpha(Asset):
         indexed = [(Tao.event_extrinsic_idx(r), event_name(r)) for r in events]
         if all(idx is None for idx, _ in indexed):
             raise ProviderUnreachableError(f'no ApplyExtrinsic phase recognised in {len(events)} events at {block_num}')
-        return SETTLED_EVENTS <= {name for idx, name in indexed if idx == extrinsic_idx}
+        names = {name for idx, name in indexed if idx == extrinsic_idx}
+        return EXTRINSIC_SUCCESS in names and bool(names & STAKE_TRANSFER_EVENTS)
 
     def settled_transfer_stake(self, block_num: int, ext_idx: int, transfer: Transfer) -> Optional[Tuple[str, int]]:
         """(sender, alpha) from the CALL once settled — the event's amount is the TAO-equivalent."""

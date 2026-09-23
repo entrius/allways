@@ -21,7 +21,15 @@ HEAD = BLOCK + 10
 NETUID = CHAIN_SN7.netuid
 
 
-def _ext(alpha=5_000, netuid=NETUID, dest=MINER, sender=USER, module='SubtensorModule', function='transfer_stake'):
+def _ext(
+    alpha=5_000,
+    netuid=NETUID,
+    dest=MINER,
+    sender=USER,
+    module='SubtensorModule',
+    function='transfer_stake',
+    origin_netuid=None,
+):
     """The real substrate.get_block shape: a GenericExtrinsic with bytes .extrinsic_hash and a .value dict."""
     value = {
         'address': sender,
@@ -31,7 +39,7 @@ def _ext(alpha=5_000, netuid=NETUID, dest=MINER, sender=USER, module='SubtensorM
             'call_args': [
                 {'name': 'destination_coldkey', 'value': dest},
                 {'name': 'hotkey', 'value': HOTKEY},
-                {'name': 'origin_netuid', 'value': netuid},
+                {'name': 'origin_netuid', 'value': netuid if origin_netuid is None else origin_netuid},
                 {'name': 'destination_netuid', 'value': netuid},
                 {'name': 'alpha_amount', 'value': alpha},
             ],
@@ -114,6 +122,31 @@ def test_included_but_failed_transfer_stake_is_not_settled():
     assert _verify(_provider(events=failed)) is None
     assert _verify(_provider(events=[_event('System', 'ExtrinsicSuccess')])) is None
     assert _verify(_provider(events=[_settled_events()[0]])) is None
+
+
+def test_cross_netuid_transfer_is_not_credited():
+    """alpha_amount is denominated in the ORIGIN subnet: a cross-netuid call routes through the AMM
+    and lands a different amount of ours, so crediting it would pay out on funds that never arrived."""
+    assert _verify(_provider(exts=[_ext(origin_netuid=NETUID + 1)])) is None
+
+
+def test_raw_block_raises_rather_than_reading_as_absent():
+    """The raw fallback parses Balances only. Reading it as 'no such payment' would slash a paid leg."""
+    p = _provider()
+    p.chain.get_block = lambda n: {'extrinsics': [_ext()], '_raw': True}
+    with pytest.raises(ProviderUnreachableError):
+        _verify(p)
+
+
+def test_transfer_stake_and_hotkey_settles_on_its_own_event():
+    """The sibling call also changes the owning coldkey; only its settlement event differs."""
+    ext = _ext(function='transfer_stake_and_hotkey')
+    events = [
+        _event('SubtensorModule', 'StakeAndHotkeyTransferred'),
+        _event('System', 'ExtrinsicSuccess'),
+    ]
+    info = _verify(_provider(exts=[ext], events=events))
+    assert info is not None and info.amount == 5_000
 
 
 def test_wrong_netuid_or_underpay_do_not_match():
