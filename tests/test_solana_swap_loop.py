@@ -915,3 +915,59 @@ class TestMissingProviderNeverSlashes:
         del providers['sol']
         swap = make_swap(status='Fulfilled', timeout_at=1000, max_extend_at=1200)
         assert loop.decide(swap, now=5000).decision == SwapDecision.TIMEOUT
+
+
+# ── Published leg confirmations (seam serves these; it must never recompute them) ────────────
+def test_conf_counts_are_structured_and_the_log_string_is_unchanged():
+    from allways.validator.solana_swap_loop import _conf_counts, _confs
+
+    info = SimpleNamespace(confirmations=1)
+    assert _conf_counts('btc', info) == (1, 2)
+    assert _confs('btc', info) == '1/2 confs'
+    # An absent or unmined leg reads 0, never None.
+    assert _conf_counts('btc', None) == (0, 2)
+    assert _confs('btc', None) == '0/2 confs'
+
+
+def test_source_leg_confirmations_are_published_for_the_seam():
+    loop, providers = loop_with(result=False)  # matched but unconfirmed
+    providers['btc'].confirmations = 1
+    swap = make_swap(status='PendingAttestation')
+    loop.decide(swap, now=1500)
+    entry = loop.leg_confs[swap.swap_key.hex()]
+    assert entry['source']['have'] == 1
+    assert entry['source']['need'] == 2  # btc min_confirmations, straight off the registry
+    assert entry['source']['at'] > 0  # observation stamp so a consumer can age it
+
+
+def test_dest_leg_confirmations_are_published_too():
+    loop, providers = loop_with(result=False)
+    providers['sol'].confirmations = 7
+    swap = make_swap(status='Fulfilled')
+    loop.decide(swap, now=1500)
+    assert loop.leg_confs[swap.swap_key.hex()]['dest']['have'] == 7
+
+
+def test_publishing_never_touches_a_provider_of_its_own():
+    # The counts are a byproduct of verifications decide() already made. Publishing must add no
+    # calls — a read per publish would multiply spoke-chain traffic by the consumer's poll rate.
+    loop, providers = loop_with(result=True)
+    swap = make_swap(status='Fulfilled')
+    loop.decide(swap, now=1500)
+    before = len(providers['sol'].calls)
+    loop._publish_confs(swap, 'dest', 'sol', SimpleNamespace(confirmations=3))
+    assert len(providers['sol'].calls) == before
+
+
+def test_published_table_is_bounded():
+    from allways.validator.solana_swap_loop import CONF_CACHE_MAX
+
+    loop, _ = loop_with()
+    for i in range(CONF_CACHE_MAX + 25):
+        loop._publish_confs(
+            SimpleNamespace(swap_key=bytes([i % 256]) * 32),
+            'source',
+            'btc',
+            SimpleNamespace(confirmations=0),
+        )
+    assert len(loop.leg_confs) <= CONF_CACHE_MAX

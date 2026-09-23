@@ -10,6 +10,8 @@ delivery haircut); the protocol's 1% is skimmed from the miner's SOL collateral 
 validator verifies the dest leg delivered `apply_fee_deduction(to_amount, FEE_DIVISOR)`.
 """
 
+import time
+from collections import OrderedDict
 from enum import Enum
 from typing import Any, Dict, List, NamedTuple, Optional, Set, Tuple
 
@@ -48,6 +50,10 @@ class SwapAction(NamedTuple):
     reason_code: Optional[int] = None  # CANCEL_REASON_* discriminant carried by a REFUSE (cancel_swap)
 
 
+# Published confirmation progress is capped so a long-lived validator cannot grow an entry per
+# swap it has ever decided; oldest-touched falls out first.
+CONF_CACHE_MAX = 512
+
 # Decisions that drive an on-chain write this pass.
 ACTIONABLE = frozenset(
     {
@@ -84,10 +90,16 @@ def _status_name(swap: Any) -> str:
     return s if isinstance(s, str) else type(s).__name__
 
 
+def _conf_counts(chain_id: str, info: Any) -> Tuple[int, int]:
+    """(observed, required) confirmations for a leg. Unmined or absent legs read 0."""
+    have = int(getattr(info, 'confirmations', 0) or 0)
+    return have, int(get_chain_def(chain_id).min_confirmations)
+
+
 def _confs(chain_id: str, info: Any) -> str:
     """Confirmation progress of a leg, e.g. '1/2 confs'. Unmined or absent legs read 0."""
-    have = int(getattr(info, 'confirmations', 0) or 0)
-    return f'{have}/{get_chain_def(chain_id).min_confirmations} confs'
+    have, need = _conf_counts(chain_id, info)
+    return f'{have}/{need} confs'
 
 
 def _swap_key_hex(key: Any) -> str:
@@ -144,6 +156,25 @@ class SolanaSwapLoop:
         # (the Swap PDA closes at the verdict), and the moment to refuse an initiate.
         self.relay = relay
         self.reject_warned: Set[str] = set()  # dedupe reject warnings, one per swap key
+        # Confirmation progress per live swap leg, for the seam to SERVE — never to recompute.
+        # The loop verifies both legs every pass anyway (to decide attest/extend/timeout), so
+        # publishing what it already read is free. A seam that recomputed instead would spend one
+        # spoke-chain verification per /status poll, per swap, per open tab — and the spoke
+        # ladders (Esplora, the EVM RPCs) rate-limit far harder than Solana does. Keyed by swap
+        # key hex → {'source'|'dest': {'have', 'need', 'at'}}; 'at' is the observation stamp, so a
+        # consumer can age the number instead of presenting a stale count as current.
+        self.leg_confs: 'OrderedDict[str, Dict[str, Dict[str, int]]]' = OrderedDict()
+
+    def _publish_confs(self, swap: Any, leg: str, chain_id: str, info: Any) -> None:
+        """Record a leg's confirmation progress for the seam. Pure bookkeeping over a read the
+        caller already performed — this must never trigger I/O of its own."""
+        have, need = _conf_counts(chain_id, info)
+        key = _swap_key_hex(swap.swap_key)
+        entry = self.leg_confs.pop(key, None) or {}
+        entry[leg] = {'have': have, 'need': need, 'at': int(time.time())}
+        self.leg_confs[key] = entry  # re-insert at the end: most recently touched
+        while len(self.leg_confs) > CONF_CACHE_MAX:
+            self.leg_confs.popitem(last=False)
 
     def expected_user_receives(self, swap: Any) -> int:
         """Dest amount the miner must deliver = 99% of the pinned to_amount (Option A)."""
@@ -296,6 +327,7 @@ class SolanaSwapLoop:
             block_hint=int(getattr(swap, 'to_tx_block', 0)),
             sender=swap.miner_to_addr,
         )
+        self._publish_confs(swap, 'dest', swap.to_chain, d_info)
         if d_status == 'down':
             # Same ceiling as the no-provider branch in decide(): a leg that never becomes judgeable (RPC
             # down, meta missing its token-balance arrays) must not defer forever or the collateral freezes.
@@ -391,6 +423,7 @@ class SolanaSwapLoop:
             block_hint=int(getattr(swap, 'from_tx_block', 0)),
             sender=swap.user_from_addr,
         )
+        self._publish_confs(swap, 'source', swap.from_chain, info)
         if s_status == 'down':
             return SwapAction(SwapDecision.SKIP, reason='source provider unreachable')
         if s_status == 'pending':
