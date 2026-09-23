@@ -1186,9 +1186,7 @@ def test_attach_leg_confs_serves_the_loops_cache():
 
     key = bytes(range(32))
     published = {'source': {'have': 1, 'need': 2, 'at': 1_700_000_000}}
-    validator = SimpleNamespace(
-        solana_swap_loop=SimpleNamespace(leg_confs={key.hex(): published})
-    )
+    validator = SimpleNamespace(solana_swap_loop=SimpleNamespace(leg_confs={key.hex(): published}))
     detail = {}
     _attach_leg_confs(validator, key, detail)
     assert detail['leg_confs'] == published
