@@ -129,6 +129,7 @@ def create_assets(
     providers: Dict[str, Asset] = {}
 
     for chain_id, cls, kwarg_names in ASSET_REGISTRY:
+        name = getattr(cls, 'func', cls).__name__  # a partial (alpha rows) has no __name__ of its own
         required = required_chains is None or chain_id in required_chains
         try:
             provider_kwargs = {k: kwargs[k] for k in kwarg_names if k in kwargs}
@@ -142,13 +143,13 @@ def create_assets(
             # disables rather than failing the boot. A miner that quotes the pair (explicitly
             # in required_chains) still fails hard — it must not advertise what it can't serve.
             if check and required_chains is not None and chain_id in required_chains:
-                raise RuntimeError(f'{cls.__name__} failed startup check: {e}') from e
-            bt.logging.warning(f'{cls.__name__} disabled on this network: {e} — {chain_id} pairs are unavailable here')
+                raise RuntimeError(f'{name} failed startup check: {e}') from e
+            bt.logging.warning(f'{name} disabled on this network: {e} — {chain_id} pairs are unavailable here')
         except Exception as e:
             if check and required:
-                raise RuntimeError(f'{cls.__name__} failed startup check: {e}') from e
+                raise RuntimeError(f'{name} failed startup check: {e}') from e
             bt.logging.warning(
-                f'{cls.__name__} disabled: {e}'
+                f'{name} disabled: {e}'
                 + (f' — {chain_id}-pair swaps cannot be fulfilled until this is fixed' if check else '')
             )
 
