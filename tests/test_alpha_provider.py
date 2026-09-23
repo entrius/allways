@@ -396,3 +396,23 @@ def test_send_needs_one_hotkey_holding_the_whole_amount():
     assert p.get_balance(MINER) == 6_000
     assert p.send_amount(USER, 5_000, dedup_key='swap-1') is None
     assert calls == []
+
+
+def test_a_split_stake_is_blocked_before_reserve_with_the_largest_position_named():
+    """A taker's alpha split across hotkeys cannot go out as one transfer_stake; two partial sends each
+    fail the amount match and strand the deposit with the miner — so refuse the swap up front."""
+    p, _ = _sender([_stake('a', 6 * 10**9), _stake('b', 6 * 10**9)])
+    assert p.send_blocker(USER, MINER, 10 * 10**9) == (
+        'SN7 must go out as one transfer_stake from one hotkey; your largest position holds 6 of the 10 needed'
+        ' — move it onto one hotkey first'
+    )
+    assert p.send_blocker(USER, MINER, 5 * 10**9) is None
+    full, _ = _sender([_stake('big', 9_000)], recipient_hotkeys=FULL)
+    assert 'staking-hotkey list is full' in full.send_blocker(USER, MINER, 5_000)
+
+
+def test_an_unreadable_stake_does_not_block_the_swap():
+    def boom(ck):
+        raise ConnectionError('rpc down')
+
+    assert Alpha(CHAIN_SN7, SimpleNamespace(get_stake_info_for_coldkey=boom)).send_blocker(USER, MINER, 1) is None

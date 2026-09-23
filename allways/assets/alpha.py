@@ -202,6 +202,22 @@ class Alpha(Asset):
             return None
         return max(held, key=lambda stake: stake[1])[0]
 
+    def send_blocker(self, from_address: str, to_address: str, amount: int) -> Optional[str]:
+        """A transfer_stake debits ONE hotkey position, so a stake split across hotkeys cannot be sent as one leg."""
+        try:
+            if self.landing_hotkey(from_address, to_address, amount) is not None:
+                return None
+            largest = max((alpha for _, alpha in self.stakes(from_address)), default=0)
+        except ProviderUnreachableError:
+            return None
+        name, scale = self.chain_def.id.upper(), 10**self.chain_def.decimals
+        if largest >= amount:
+            return f"the miner's coldkey cannot take {name} from any hotkey you hold (its staking-hotkey list is full)"
+        return (
+            f'{name} must go out as one transfer_stake from one hotkey; your largest position holds '
+            f'{largest / scale:.9g} of the {amount / scale:.9g} needed — move it onto one hotkey first'
+        )
+
     def recipient_full(self, to_addr: str, from_addr: str) -> bool:
         """Positive evidence ``to_addr`` can take no delivery from ``from_addr`` at all: its StakingHotkeys
         is at the cap and the sender holds this alpha on none of them. Raises when unreadable."""
