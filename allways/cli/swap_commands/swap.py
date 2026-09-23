@@ -633,8 +633,22 @@ def swap_now_command(
         f'[green]  Reserved.[/green] Send [cyan]{amount_opt} {from_chain.upper()}[/cyan] to '
         f'[cyan]{resv.miner_from_addr}[/cyan], then run [bold]alw swap post-tx[/bold] with the tx hash.'
     )
-    for line in _deadline_lines(int(resv.reserved_until), want_send):
+    for line in _alpha_send_lines(from_chain) + _deadline_lines(int(resv.reserved_until), want_send):
         console.print(line)
+
+
+def _alpha_send_lines(from_chain: str) -> List[str]:
+    """How a subnet-alpha deposit must be sent to be seen at all. The validator credits only a top-level
+    `SubtensorModule.transfer_stake` naming an exact amount: a MEV-shielded send (btcli's default) executes
+    inside the block's on_initialize, and a batched/proxied one inside a wrapper — neither is a top-level
+    transfer_stake, so the deposit is invisible and the funds are stranded with the miner."""
+    if get_chain_def(from_chain).netuid is None:
+        return []
+    return [
+        f'  [yellow]Send it as a plain transfer_stake for the exact amount[/yellow] — with btcli add '
+        f'[bold]--no-mev-protection[/bold]; a shielded, batched or proxied transfer, or a "transfer all", '
+        f'cannot be verified and those {from_chain.upper()} are lost to the miner.'
+    ]
 
 
 def _deadline_lines(reserved_until: int, want_send: bool, now: Optional[int] = None) -> List[str]:

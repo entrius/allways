@@ -14,6 +14,7 @@ from unittest.mock import MagicMock, patch
 from allways.cli.swap_commands.helpers import live_unclaimed
 from allways.cli.swap_commands.swap import (
     _SEND_MARGIN_SECS,
+    _alpha_send_lines,
     _deadline_lines,
     _poll_drawn,
     _poll_reservation,
@@ -614,3 +615,11 @@ def test_send_with_uncontrolled_source_aborts_before_any_bid():
     assert 'No bid was placed' in result.output
     client.open_or_request.assert_not_called()  # the money-touching call never happened
     client.get_config.assert_not_called()  # aborted before even reading chain config
+
+
+def test_alpha_source_is_told_to_send_a_plain_unshielded_transfer_stake():
+    """btcli shields stake transfers by default; a shielded call executes in on_initialize, never as a
+    top-level transfer_stake, so the validator cannot see it and the deposit is stranded."""
+    (line,) = _alpha_send_lines('sn7')
+    assert '--no-mev-protection' in line and 'transfer_stake' in line
+    assert _alpha_send_lines('tao') == [] and _alpha_send_lines('btc') == []

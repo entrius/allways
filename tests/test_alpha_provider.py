@@ -321,3 +321,12 @@ def test_failed_response_with_a_signed_extrinsic_keeps_its_hash():
     p, _ = _sender([_stake('hk', 9_000)], response=signed_only)
     assert p.send_amount(USER, 5_000, dedup_key='swap-1') is None
     assert p.broadcasted_txids['swap-1'][2] == TXID
+
+
+def test_whole_position_sentinel_is_not_an_amount():
+    """u64::MAX means "my whole live position" on subtensor, so the call's figure is not what moved:
+    a dust position would otherwise satisfy any pinned amount (validator and miner both credit >=)."""
+    p = Alpha(CHAIN_SN7, SimpleNamespace())
+    assert p.decode_transfer_stake(_ext(alpha=2**64 - 1), False) is None
+    assert _verify(_provider(exts=[_ext(alpha=2**64 - 1)]), amount=1) is None
+    assert _verify(_provider(exts=[_ext(alpha=2**64 - 2)]), amount=1).amount == 2**64 - 2
