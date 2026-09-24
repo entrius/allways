@@ -12,7 +12,7 @@ from solders.keypair import Keypair
 
 from allways.assets import ASSET_REGISTRY
 from allways.chains import get_chain_def
-from allways.cli.swap_commands import swap
+from allways.cli.swap_commands import helpers, swap
 
 BTC_ADDRESS = 'bc1qxy2kgdygjrsqtzq2n0yrf2493p83kkfjhx0wlh'
 TAO_ADDRESS = bt.Keypair.create_from_seed('0x' + '11' * 32).ss58_address
@@ -23,8 +23,8 @@ EVM_ADDRESS = '0xf39Fd6e51aad88F6F4ce6aB8827279cffFb92266'
 def _good_address(chain_id):
     if chain_id == 'btc':
         return BTC_ADDRESS
-    if chain_id == 'tao':
-        return TAO_ADDRESS
+    if chain_id == 'tao' or chain_id.startswith('sn'):
+        return TAO_ADDRESS  # alpha is held by a subtensor coldkey: TAO's address space
     if chain_id in ('sol', 'solusdc'):
         return SOL_ADDRESS
     return EVM_ADDRESS
@@ -71,7 +71,7 @@ def test_gate_provider_builds_every_registered_asset(spec):
     client = MagicMock()
     client.rpc.url = 'http://offline.invalid'
     client.keypair = MagicMock()
-    assert swap._gate_provider(spec.chain_id, client, {}, lambda: MagicMock()) is not None
+    assert swap.gate_provider(spec.chain_id, client, lambda: MagicMock()) is not None
 
 
 def test_gate_provider_reports_constructor_failure(monkeypatch):
@@ -81,13 +81,13 @@ def test_gate_provider_reports_constructor_failure(monkeypatch):
 
     monkeypatch.setattr('allways.assets.ASSET_REGISTRY', (SimpleNamespace(chain_id='bad', cls=Broken, kwarg_names=()),))
     console = MagicMock()
-    monkeypatch.setattr(swap, 'console', console)
+    monkeypatch.setattr(helpers, 'console', console)
 
-    assert swap._gate_provider('bad', MagicMock(), {}, lambda: MagicMock()) is None
+    assert swap.gate_provider('bad', MagicMock(), lambda: MagicMock()) is None
     console.print.assert_called_once_with('  [yellow]could not check BAD address here[/yellow]')
 
 
 def test_non_tao_gate_provider_does_not_get_subtensor():
     getter = MagicMock(side_effect=AssertionError('subtensor requested for a non-tao chain'))
-    swap._gate_provider('btc', MagicMock(), {}, getter)
+    swap.gate_provider('btc', MagicMock(), getter)
     getter.assert_not_called()

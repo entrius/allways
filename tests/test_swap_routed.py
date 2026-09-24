@@ -63,7 +63,7 @@ def _run(client, *, argv_extra=(), responses=None, axon=AXON, config=None, confi
     info = types.SimpleNamespace(headline='router unreachable', accepted=0)
     with (
         patch('allways.cli.swap_commands.swap.get_solana_cli_context', return_value=(config, client)),
-        patch('allways.cli.swap_commands.swap._gate_provider', return_value=None),
+        patch('allways.cli.swap_commands.swap.gate_provider', return_value=None),
         patch('allways.cli.swap_commands.swap.candidate_miners', return_value=[cand]),
         patch('allways.cli.swap_commands.swap.select_best_miner', return_value=(cand, amts)),
         patch('allways.cli.swap_commands.swap.find_validator_axon', return_value=axon) as find_axon,
@@ -266,7 +266,7 @@ def test_stale_cached_axon_refreshes_once_then_succeeds():
     info = types.SimpleNamespace(headline='no response', accepted=0)
     with (
         patch('allways.cli.swap_commands.swap.get_solana_cli_context', return_value=(None, client)),
-        patch('allways.cli.swap_commands.swap._gate_provider', return_value=None),
+        patch('allways.cli.swap_commands.swap.gate_provider', return_value=None),
         patch('allways.cli.swap_commands.swap.candidate_miners', return_value=[cand]),
         patch('allways.cli.swap_commands.swap.select_best_miner', return_value=(cand, amts)),
         patch('allways.cli.swap_commands.swap.find_validator_axon', side_effect=[stale, fresh]) as find_axon,
