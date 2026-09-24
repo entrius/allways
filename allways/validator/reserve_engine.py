@@ -901,6 +901,7 @@ def swap_status(
         'miner_from_addr': reservation.miner_from_addr,
     }
     if swap_key == EMPTY_SWAP_KEY:
+        _attach_collateral_verdict(validator, miner_pk, reservation, detail)
         return SwapStatus('reserved', reservation.reserved_until, str(reservation.user), detail=detail)
     swap = client.get_swap(swap_key)
     if swap is not None:
@@ -910,6 +911,21 @@ def swap_status(
     stage = _swap_stage(validator, swap, swap_key)
     _add_reject_reason(validator, swap, stage, detail)
     return SwapStatus(stage, reservation.reserved_until, str(reservation.user), swap_key.hex(), detail)
+
+
+def _attach_collateral_verdict(validator, miner_pk, reservation, detail: dict) -> None:
+    """``collateral_ok`` for a seat whose backing is declared (TAO behind an sn<N> leg): the verdict
+    ingest pinned at the fill block, so a consumer can hold the deposit while it is false. A read of
+    the stored verdict only — the seam never prices a leg. Absent for an exact leg, and until the
+    fill event is ingested."""
+    backing = str(reservation.collateral_chain)
+    if backing in (reservation.from_chain, reservation.to_chain):
+        return
+    ok = validator.state_store.collateral_verdict(
+        str(miner_pk), backing, int(reservation.created_at), int(reservation.collateral_amount)
+    )
+    if ok is not None:
+        detail['collateral_ok'] = ok
 
 
 def _idle_status(miner_pk, from_chain: str, to_chain: str) -> SwapStatus:
