@@ -378,7 +378,9 @@ def lane_volumes_to_directions(
     """Collapse the per-lane qualified volumes into the pair-direction shape
     ``compute_direction_pools`` reads — pool volume is never split by backing."""
     out: Dict[Tuple[str, str], Dict[str, Tuple[int, ...]]] = {}
-    for (from_chain, to_chain, _backing), by_hotkey in lane_volumes.items():
+    for (from_chain, to_chain, backing), by_hotkey in lane_volumes.items():
+        if backing not in declarable_backings(from_chain, to_chain):
+            continue  # a lane no quote may declare now (a fill reserved before the rule) scores nothing
         direction = out.setdefault((from_chain, to_chain), {})
         for hotkey, sums in by_hotkey.items():
             prev = direction.get(hotkey, (0,) * len(sums))
@@ -553,12 +555,14 @@ def calculate_miner_rewards(self: Validator, current_time: int) -> Tuple[np.ndar
         qvol, trace.qualified_volume = qualified_volume_shares(
             lane_volumes.get((from_chain, to_chain, backing), {}), from_chain, to_chain
         )
+        if (from_chain, to_chain, backing) not in quoted:
+            continue  # never quoted: no crown, no ledger rows to rewrite
         intervals: Optional[List[Tuple[int, int, Dict[str, float], float]]] = None
         if storage_enabled:
             intervals = []
             intervals_by_dir[(from_chain, to_chain, backing)] = intervals
-        if pool <= 0 or (from_chain, to_chain, backing) not in quoted:
-            continue  # dead pair or never-quoted lane: nothing to pay; the trace still lists it
+        if pool <= 0:
+            continue  # dead pair this window — nothing to pay; the trace still lists it at pool=0
         min_swap_hub, max_swap_hub = swap_bounds.get(backing, (0, 0))
         # Ineligible miners are not crown candidates on this lane (see lane_eligible_hotkeys).
         lane_candidates = lane_eligible_hotkeys(
@@ -694,9 +698,9 @@ def miner_score_tuples(score_rows: List[ScoreRow], ts: int) -> List[Tuple]:
 
 
 def direction_pool_tuples(direction_traces: Dict[Tuple[str, str, str], DirectionTrace], ts: int) -> List[Tuple]:
-    """Shape the round's pools for the ``direction_pools`` ledger: one row per lane,
-    dead lanes included at pool 0 — ``(round_ts, from, to, backing, pool, qualified_volume,
-    live)``. Hub / pair emission over time is a plain sum over these.
+    """Shape the round's pools for the ``direction_pools`` ledger: one row per paid or live lane
+    — ``(round_ts, from, to, backing, pool, qualified_volume, live)``; a dead, unpaid lane is
+    omitted (the registry holds ~21k). Hub / pair emission over time is a plain sum over these.
 
     ``live`` is the PAIR's liveness — qualified volume on any of its lanes, the same test
     ``compute_direction_pools`` pays on — not ``pool > 0``: the silent-network fallback pays
@@ -716,6 +720,7 @@ def direction_pool_tuples(direction_traces: Dict[Tuple[str, str, str], Direction
             pair_volume[canonical_pair(from_chain, to_chain)] > 0,
         )
         for (from_chain, to_chain, backing), trace in direction_traces.items()
+        if trace.pool > 0 or pair_volume[canonical_pair(from_chain, to_chain)] > 0
     ]
 
 
@@ -1249,8 +1254,11 @@ def snapshot_current_crown_holders(
         bt.logging.warning(f'swap-bounds read failed in live snapshot: {e}')
         swap_bounds = {}
     recent_fills = recent_fill_hotkeys(self.state_store, ts)
-    rows_by_direction: Dict[Tuple[str, str, str], List[Tuple[str, str, str, str, float, float, int]]] = {}
     quoted = self.state_store.quoted_lanes()
+    # A quoted lane no quote may declare now (sol-backed sol↔snN) holds no crown: clear its rows.
+    rows_by_direction: Dict[Tuple[str, str, str], List[Tuple[str, str, str, str, float, float, int]]] = {
+        lane: [] for lane in quoted if lane[2] not in declarable_backings(lane[0], lane[1])
+    }
     for from_chain, to_chain in DIRECTION_POOLS:
         for backing in declarable_backings(from_chain, to_chain):
             if (from_chain, to_chain, backing) not in quoted:

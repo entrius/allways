@@ -1363,6 +1363,13 @@ class TestSnapshotCurrentCrownHolders:
         assert list(snapshot_current_crown_holders(v, v.block)) == [('sol', 'btc', 'sol')]
         v.state_store.close()
 
+    def test_a_quoted_lane_no_longer_declarable_is_cleared(self, tmp_path: Path):
+        v = make_validator(tmp_path, ['hk_funded'], collaterals={'hk_funded': 500_000_000})
+        self._seed_rate(v.state_store, 'hk_funded', 326.0, 'sol', 'sn7')  # a sol-backed quote from before
+
+        assert snapshot_current_crown_holders(v, v.block)[('sol', 'sn7', 'sol')] == []
+        v.state_store.close()
+
     def test_boundary_squat_excluded_from_live_table(self, tmp_path: Path):
         """The squatter posts the best, executable rate but their 0.15 TAO
         collateral can't fund the ~0.45 SOL leg it forces. The live table must
@@ -2462,6 +2469,10 @@ class TestQualifiedLaneVolumes:
         lanes = {('sol', 'tao', 'sol'): {'hk_a': (10, 1)}, ('sol', 'tao', 'tao'): {'hk_a': (5, 2), 'hk_b': (1, 1)}}
         assert lane_volumes_to_directions(lanes) == {('sol', 'tao'): {'hk_a': (15, 3), 'hk_b': (1, 1)}}
 
+    def test_an_undeclarable_lane_adds_no_volume(self):
+        lanes = {('sol', 'sn7', 'sol'): {'hk_a': (10**9, 1, 10**9)}, ('sol', 'sn7', 'tao'): {'hk_b': (1, 1, 5)}}
+        assert lane_volumes_to_directions(lanes) == {('sol', 'sn7'): {'hk_b': (1, 1, 5)}}
+
     def test_shares_use_the_hub_leg(self):
         # btc→sol: the hub (sol) is the TO leg, so shares follow to_amount.
         shares, total = qualified_volume_shares({'hk_a': (1, 300), 'hk_b': (999, 100)}, 'btc', 'sol')
@@ -3158,22 +3169,19 @@ class TestScoreSnapshots:
         np.testing.assert_allclose(reward, expected, atol=1e-9)
         np.testing.assert_allclose(reward, rewards[0], atol=1e-6)
 
-    def test_round_flush_writes_every_lane_pool(self, tmp_path: Path):
-        """direction_pools rows: one per lane every round, dead lanes at pool 0 / live
-        False, live lanes carrying the qualified volume the β slice paid on; the
-        pools sum to the miner pool share."""
+    def test_round_flush_writes_paid_or_live_lanes_only(self, tmp_path: Path):
+        """direction_pools rows: one per paid or live lane, carrying the qualified volume the
+        β slice paid on; a dead, unpaid lane is omitted."""
         v = self._solo_with_storage(tmp_path)
         calculate_miner_rewards(v, v.block)
         rows = v.database_storage.flush_scoring_window.call_args.kwargs['direction_pool_rows']
         by_lane = {(r[1], r[2], r[3]): r for r in rows}
-        assert set(by_lane) == set(compute_direction_pools({}))  # every lane, every round
+        assert set(by_lane) == {('btc', 'sol', 'sol'), ('sol', 'btc', 'sol')}  # the live pair only
         assert all(r[0] == v.block for r in rows)
         live = by_lane[('btc', 'sol', 'sol')]
         assert live[4] == pytest.approx(POOL_BUSY_PAIR_LEG) and live[5] == 1_000_000_000 and live[6] is True
         quiet_leg = by_lane[('sol', 'btc', 'sol')]  # no fill of its own, rides its live pair
         assert quiet_leg[5] == 0 and quiet_leg[6] is True
-        dead = by_lane[('sol', 'eth', 'sol')]
-        assert dead[4] == 0.0 and dead[5] == 0 and dead[6] is False
         assert sum(r[4] for r in rows) == pytest.approx(2 * POOL_BUSY_PAIR_LEG)  # the idle families recycle
         v.state_store.close()
 
