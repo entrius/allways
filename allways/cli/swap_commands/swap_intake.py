@@ -344,10 +344,12 @@ def max_intake_from_amount(
     min_swap: int,
     max_swap: int,
     bounds_by_backing: Optional[BoundsByBacking] = None,
+    providers=None,
 ) -> int:
     """Largest source amount (smallest units) this candidate can execute right now — the depth behind
     its rate. The same gates as ``viable_intakes``, solved for size instead of checked at one: the
-    collateral requirement inverted exactly, clamped by ``max_swap``, 0 when even ``min_swap`` doesn't fit."""
+    collateral requirement inverted exactly, clamped by ``max_swap``, 0 when even ``min_swap`` doesn't fit.
+    A declared alpha leg's cap is priced at head through ``providers`` (unpriceable = 0)."""
     try:
         rate = float(candidate.rate_display)
     except (TypeError, ValueError):
@@ -361,10 +363,20 @@ def max_intake_from_amount(
         cap = min(cap, hi)
     if cap <= 0 or cap < lo:
         return 0
-    if candidate.backing == from_chain:
-        return cap  # the bounded leg IS the source
-    if candidate.backing != to_chain:
+    leg = collateral_leg(candidate.backing, from_chain, to_chain)
+    if leg is None:
         return 0
+    if leg != candidate.backing:
+        whole = 10 ** get_chain_def(leg).decimals
+        try:
+            rao_per_whole = (providers or {})[leg].value_rao(whole)
+        except (KeyError, ProviderUnreachableError):
+            return 0
+        if rao_per_whole <= 0:
+            return 0
+        cap = cap * whole // rao_per_whole  # the TAO cap in the declared leg's own units
+    if leg == from_chain:
+        return cap  # the bounded leg IS the source
     canon_from, canon_to = canonical_pair(from_chain, to_chain)
     return max_from_for_to_cap(
         cap,
