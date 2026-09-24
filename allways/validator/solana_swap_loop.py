@@ -21,6 +21,7 @@ from solders.pubkey import Pubkey
 from allways import dev_signal
 from allways.assets.asset import ProviderUnreachableError
 from allways.chains import compute_extension_target_secs, get_chain_def
+from allways.cli.swap_commands.swap_intake import collateral_matches, leg_value
 from allways.constants import CANCEL_REASON_INVALID_DEST, CANCEL_REASON_OTHER, EXTENSION_PADDING_SECONDS
 from allways.solana import pdas
 from allways.solana.client import benign_marker, swap_from_solana, swap_key_from_tx_hash
@@ -138,6 +139,38 @@ def attest_reject_reason(providers: Dict[str, Any], swap: Any, fee_divisor: int)
     return None
 
 
+def collateral_verdict_for(
+    state_store: Any,
+    miner: Any,
+    backing: str,
+    from_chain: str,
+    from_amount: int,
+    to_chain: str,
+    to_amount: int,
+    collateral_amount: int,
+    created_at: int,
+    providers: Dict[str, Any],
+) -> bool:
+    """Read or compute the declared-leg collateral verdict pinned to the fill block."""
+    if backing in (from_chain, to_chain):
+        return True
+    saved = state_store.collateral_verdict(str(miner), backing, int(created_at), int(collateral_amount))
+    if saved is not None:
+        return saved
+    value = leg_value(
+        backing,
+        from_chain,
+        int(from_amount),
+        to_chain,
+        int(to_amount),
+        providers,
+        created_at=int(created_at),
+    )
+    ok = collateral_matches(int(collateral_amount), value)
+    state_store.record_collateral_verdict(str(miner), backing, int(created_at), int(collateral_amount), ok)
+    return ok
+
+
 class SolanaSwapLoop:
     def __init__(
         self,
@@ -146,6 +179,7 @@ class SolanaSwapLoop:
         fee_divisor: int = 100,
         read_only: bool = False,
         relay: Any = None,
+        state_store: Any = None,
     ):
         self.client = solana_client
         self.providers = assets
@@ -155,6 +189,7 @@ class SolanaSwapLoop:
         # cannot get anywhere else: the reimbursement address of a live off-chain-backed swap
         # (the Swap PDA closes at the verdict), and the moment to refuse an initiate.
         self.relay = relay
+        self.state_store = state_store
         self.reject_warned: Set[str] = set()  # dedupe reject warnings, one per swap key
         # Confirmation progress per live swap leg, for the seam to SERVE — never to recompute.
         # The loop verifies both legs every pass anyway (to decide attest/extend/timeout), so
@@ -413,6 +448,27 @@ class SolanaSwapLoop:
         if reason:
             self._reject_logged(swap, reason)
             return SwapAction(SwapDecision.REJECT, reason=reason)
+        backing = str(swap.collateral_chain)
+        if backing not in (swap.from_chain, swap.to_chain):
+            if reservation is None:
+                return SwapAction(SwapDecision.WAIT, reason='no reservation read')
+            try:
+                ok = collateral_verdict_for(
+                    self.state_store,
+                    swap.miner,
+                    backing,
+                    swap.from_chain,
+                    int(swap.from_amount),
+                    swap.to_chain,
+                    int(swap.to_amount),
+                    int(swap.collateral_amount),
+                    int(reservation.created_at),
+                    self.providers,
+                )
+            except (ProviderUnreachableError, ValueError) as e:
+                return SwapAction(SwapDecision.SKIP, reason=f'alpha leg unpriceable at fill block: {e}')
+            if not ok:
+                return SwapAction(SwapDecision.REJECT, reason='collateral does not match the alpha leg at fill block')
         # Source deposit must exist, confirm, be sent BY the reserved user, AND be fresh vs the
         # Reservation before we'd attest — sender pin matches the relay's confirm_deposit check.
         s_status, info = self._fetch_leg(

@@ -1,11 +1,11 @@
 """Taker swap-intake — miner selection + on-chain amount derivation. No click, no owned RPC config.
 
 Mirrors the contract: ``collateral_amount`` is the leg denominated in the quote's BACKING (the
-bounded, collateral-backed notional) — ``backing.rs::collateral_leg_amount``, so a "sol"-backed
+bounded, collateral-backed notional) — ``backing.rs::collateral_leg_bind``, so a "sol"-backed
 quote is sized against its SOL leg and a "tao"-backed one against its TAO leg, in rao. Uses the
 shared ``calculate_to_amount`` so the CLI's pinned amounts agree with the miner + validator
-byte-for-byte. Every launch pair has a hub leg (sol↔spoke / tao↔spoke); a spoke↔spoke pair is
-rejected here. The one network-touching helper (``candidate_miners``) takes the Solana client as a
+byte-for-byte. Every launch pair has an anchor leg (``hub_leg``: a hub or an alpha); a spoke↔spoke pair
+is rejected here. The one network-touching helper (``candidate_miners``) takes the Solana client as a
 parameter, so the CLI taker path and the validator reserve engine build the same candidate set from
 the same reads.
 """
@@ -15,11 +15,14 @@ from dataclasses import dataclass
 from decimal import Decimal
 from typing import Dict, List, Optional, Tuple
 
+from allways.assets.asset import ProviderUnreachableError
 from allways.chains import canonical_pair, get_chain_def
 from allways.constants import (
     COLLATERAL_REQUIREMENT_BPS,
+    DECLARED_COLLATERAL_BAND_BPS,
     NUMERAIRE_CHAIN,
     RATE_PRECISION,
+    family,
     hub_leg,
     required_collateral,
 )
@@ -171,7 +174,7 @@ def bounds_from_config(cfg) -> BoundsByBacking:
 def hub_bounds(bounds: BoundsByBacking, from_chain: str, to_chain: str) -> Tuple[int, int]:
     """The pair's HUB-leg swap bounds, in the hub's own smallest unit — what the rate-executability
     gates (``is_executable_rate`` / selection scalars) anchor on. (0, 0) = unset/permissive for a
-    pair with no hub leg. Distinct from the per-BACKING size gate: sol↔tao is SOL-anchored here even
+    pair whose anchor is not a hub (an alpha anchor has no hub bounds — see the PR3 gate). Distinct from the per-BACKING size gate: sol↔tao is SOL-anchored here even
     when a tao-backed quote's size is gated on the TAO bounds."""
     hub = hub_leg(from_chain, to_chain)
     return bounds.get(hub, (0, 0)) if hub else (0, 0)
@@ -187,14 +190,50 @@ def _bounds_for(
     return bounds_by_backing.get(backing, (min_swap, max_swap))
 
 
-def collateral_leg_amount(backing: str, from_chain: str, from_amount: int, to_chain: str, to_amount: int) -> int:
-    """The leg denominated in ``backing`` — the amount its collateral is sized against. Mirrors
-    ``backing.rs::collateral_leg_amount``: validity is "backing ∈ legs", nothing about the pair."""
+def leg_value(
+    backing: str,
+    from_chain: str,
+    from_amount: int,
+    to_chain: str,
+    to_amount: int,
+    providers=None,
+    created_at: Optional[int] = None,
+) -> int:
+    """The exact backing leg, or a declared alpha leg valued at head or ``created_at``."""
     if backing == from_chain:
         return from_amount
     if backing == to_chain:
         return to_amount
+    for leg, amount in ((from_chain, from_amount), (to_chain, to_amount)):
+        if family(leg) != backing:
+            continue
+        provider = (providers or {}).get(leg)
+        if provider is None:
+            raise ValueError(f'{leg} leg is declared: a {leg} provider is needed to price it in {backing}')
+        if created_at is None:
+            return provider.value_rao(amount)
+        return provider.value_rao(amount, block=provider.chain.block_at(int(created_at)))
     raise ValueError(f'{from_chain}->{to_chain}: no leg is denominated in the "{backing}" backing')
+
+
+def collateral_matches(collateral_amount: int, value: int) -> bool:
+    """Whether collateral is within the two-sided declared-leg band."""
+    value = int(value)
+    return value > 0 and abs(int(collateral_amount) - value) * 10_000 <= value * DECLARED_COLLATERAL_BAND_BPS
+
+
+def transfers_off_reason(from_chain: str, to_chain: str, providers: Dict) -> Optional[str]:
+    """Why the pair cannot settle because a leg's asset has transfers switched off chain-wide, else None.
+    An unreadable switch fails open: the settlement deferral, not reserve, is the boundary."""
+    for chain in (from_chain, to_chain):
+        provider = providers.get(chain)
+        try:
+            if provider is None or provider.transfers_enabled():
+                continue
+        except ProviderUnreachableError:
+            continue
+        return f'{chain.upper()} transfers are switched off on-chain; {from_chain.upper()}→{to_chain.upper()} cannot settle'
+    return None
 
 
 def compute_intake_amounts(
@@ -203,21 +242,22 @@ def compute_intake_amounts(
     from_amount: int,
     rate_display: str,
     backing: str = NUMERAIRE_CHAIN,
+    providers=None,
 ) -> IntakeAmounts:
     """Derive (collateral_amount, from_amount, to_amount) for a swap of ``from_amount`` (source smallest-units).
 
-    ``rate_display`` is the miner's canonical 'dest per 1 hub' rate. Requires one leg to be a hub.
+    ``rate_display`` is the miner's canonical 'dest per 1 anchor' rate. Requires an anchor leg (``hub_leg``).
     ``collateral_amount`` is the ``backing``'s leg, in that asset's own units — the figure
-    ``finalize_reservation`` bounds and collateralizes.
+    ``finalize_reservation`` bounds and collateralizes. ``providers`` prices a declared alpha leg.
     """
     if hub_leg(from_chain, to_chain) is None:
-        raise ValueError(f'{from_chain}->{to_chain}: a hub leg (sol or tao) is required (every pair is hub<->spoke)')
+        raise ValueError(f'{from_chain}->{to_chain}: no anchor leg (a hub or an alpha) — not a valid pair')
     canon_from, canon_to = canonical_pair(from_chain, to_chain)
     is_reverse = from_chain != canon_from
     to_amount = calculate_to_amount(
         from_amount, rate_display, is_reverse, get_chain_def(canon_to).decimals, get_chain_def(canon_from).decimals
     )
-    collateral_amount = collateral_leg_amount(backing, from_chain, from_amount, to_chain, to_amount)
+    collateral_amount = leg_value(backing, from_chain, from_amount, to_chain, to_amount, providers)
     return IntakeAmounts(collateral_amount=collateral_amount, from_amount=from_amount, to_amount=to_amount)
 
 
@@ -269,13 +309,14 @@ def viable_intakes(
     min_swap: int,
     max_swap: int,
     bounds_by_backing: Optional[BoundsByBacking] = None,
+    providers=None,
 ) -> List[Tuple[MinerCandidate, IntakeAmounts]]:
     """Every candidate passing the executable-rate + viability gates, with derived amounts.
     Stable input order. The single gating path shared by auto-select and --miner.
 
     ``min_swap``/``max_swap`` are the pair's HUB-leg bounds (``hub_bounds``): ``is_executable_rate``
     is the crown/squat heuristic about a rate nobody can route, defined on the hub leg. The purse +
-    size gate below is the per-backing one."""
+    size gate below is the per-backing one. ``providers`` prices a declared alpha leg (unpriceable = unviable)."""
     out: List[Tuple[MinerCandidate, IntakeAmounts]] = []
     for c in candidates:
         try:
@@ -285,9 +326,9 @@ def viable_intakes(
         if not is_executable_rate(rate, from_chain, to_chain, min_swap, max_swap):
             continue
         try:
-            amts = compute_intake_amounts(from_chain, to_chain, from_amount, c.rate_display, c.backing)
-        except ValueError:
-            continue  # backing not in this pair's legs — the contract would refuse it too
+            amts = compute_intake_amounts(from_chain, to_chain, from_amount, c.rate_display, c.backing, providers)
+        except (ValueError, ProviderUnreachableError):
+            continue  # unpriceable leg, or a backing outside this pair — the contract would refuse it too
         if amts.to_amount <= 0:
             continue
         lo, hi = _bounds_for(c.backing, bounds_by_backing, min_swap, max_swap)
@@ -354,6 +395,7 @@ def unviable_reason(
     min_swap: int,
     max_swap: int,
     bounds_by_backing: Optional[BoundsByBacking] = None,
+    providers=None,
 ) -> str:
     """Why nothing was quotable — the gates of ``viable_intakes``, spelled out for the taker.
 
@@ -370,8 +412,8 @@ def unviable_reason(
             reasons.append('rate not executable')
             continue
         try:
-            amts = compute_intake_amounts(from_chain, to_chain, from_amount, c.rate_display, c.backing)
-        except ValueError as e:
+            amts = compute_intake_amounts(from_chain, to_chain, from_amount, c.rate_display, c.backing, providers)
+        except (ValueError, ProviderUnreachableError) as e:
             reasons.append(str(e))
             continue
         if amts.to_amount <= 0:
@@ -396,6 +438,7 @@ def select_best_miner(
     min_swap: int,
     max_swap: int,
     bounds_by_backing: Optional[BoundsByBacking] = None,
+    providers=None,
 ) -> Optional[Tuple[MinerCandidate, IntakeAmounts]]:
     """Among executable + viable miners, pick the one giving the user the most dest (``to_amount``).
 
@@ -403,5 +446,7 @@ def select_best_miner(
     tie only, toward "sol": at identical value the instant-SOL-refund guarantee is strictly better
     for the taker than a TAO reimbursement that lands shortly after the timeout. Remaining ties fall
     back to first-seen (stable input order)."""
-    viable = viable_intakes(candidates, from_chain, to_chain, from_amount, min_swap, max_swap, bounds_by_backing)
+    viable = viable_intakes(
+        candidates, from_chain, to_chain, from_amount, min_swap, max_swap, bounds_by_backing, providers
+    )
     return max(viable, key=lambda p: (p[1].to_amount, p[0].backing == NUMERAIRE_CHAIN), default=None)

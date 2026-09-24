@@ -41,7 +41,7 @@ def _run(client, *, argv_extra=(), confirm_input=None):
     argv += ['--receive-address', USER, *argv_extra]
     with (
         patch('allways.cli.swap_commands.swap.get_solana_cli_context', return_value=({}, client)),
-        patch('allways.cli.swap_commands.swap._gate_provider', return_value=None),
+        patch('allways.cli.swap_commands.swap.gate_provider', return_value=None),
         patch('allways.cli.swap_commands.swap.candidate_miners', return_value=[cand]),
         patch('allways.cli.swap_commands.swap.select_best_miner', return_value=(cand, amts)),
         patch('allways.cli.swap_commands.swap._save_pending'),

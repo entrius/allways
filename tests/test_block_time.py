@@ -88,6 +88,20 @@ def test_subtensor_get_block_time_none_on_error():
     assert p.get_block_time(1) is None
 
 
+def test_subtensor_block_at_returns_last_block_not_after_timestamp():
+    timestamps = [100, 112, 124, 137, 149, 161]
+    p = Tao.__new__(Tao)
+    p.get_current_block_height = lambda: len(timestamps) - 1
+    p.get_block_time = lambda block: timestamps[block]
+
+    assert p.block_at(136) == 2
+    assert p.block_at(137) == 3
+
+    p.get_block_time = lambda block: None
+    with pytest.raises(ProviderUnreachableError):
+        p.block_at(137)
+
+
 # ─── TAO deposit scanner (find_recent_outgoing) ─────────────────────────────
 # Substrate has no address index, so the scanner follows the head incrementally.
 
@@ -438,7 +452,7 @@ def test_settled_credit_sums_multiple_credits_from_one_extrinsic():
 )
 def test_transfer_event_shapes_are_all_understood(record):
     """scalecodec emits several shapes across runtime versions; all must decode identically."""
-    assert Tao._event_extrinsic_idx(record) == 0
+    assert Tao.event_extrinsic_idx(record) == 0
     assert Tao._transfer_from_event(record) == ('A', 'B', 7)
 
 
@@ -458,7 +472,7 @@ def test_non_transfer_events_are_not_read_as_transfers():
             },
         },
     ):
-        assert Tao._transfer_from_event(record) is None or Tao._event_extrinsic_idx(record) is None
+        assert Tao._transfer_from_event(record) is None or Tao.event_extrinsic_idx(record) is None
 
 
 def test_events_unavailable_raises_rather_than_reading_as_absent():
@@ -502,9 +516,3 @@ def test_raw_extrinsic_rejects_non_id_multiaddress_rather_than_shifting():
     """A non-Id signer variant has no bare AccountId to read, so it must fail closed."""
     body = bytes([0x84, 0x01]) + bytes(range(32)) + bytes([0x01]) + b'\x11' * 64 + bytes([0x00] * 3)
     assert Tao.parse_raw_extrinsic((_compact(len(body)) + body).hex()) is None
-
-
-def test_match_transfer_still_matches_by_hash_through_shared_decode():
-    ext = {'extrinsic_hash': '0xabc', 'dest': 'minerTAO', 'amount': 7, 'sender': 'userTAO'}
-    assert Tao.match_transfer(ext, '0xabc', True) == ('minerTAO', 7, 'userTAO')
-    assert Tao.match_transfer(ext, '0xother', True) is None

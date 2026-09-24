@@ -1,3 +1,5 @@
+import re
+
 from allways.classes import MinerActivity
 
 # ─── Network ───────────────────────────────────────────────
@@ -63,6 +65,10 @@ CANCEL_REASON_ERC20_FEE_ENABLED = 4
 CANCEL_REASON_SPL_FROZEN = 5
 # The destination fails the chain's offline format check: unpayable by construction, never the miner's fault.
 CANCEL_REASON_INVALID_DEST = 6
+# The subnet is gone (pruned: NetworksAdded false, its alpha force-liquidated to TAO), so the delivery
+# can never happen — no-fault. A TransferToggle flip is NOT this: it is owner-flippable at any block and
+# only defers (see Alpha.cancel_evidence). Mirrored in constants.rs.
+CANCEL_REASON_ALPHA_TRANSFER_DISABLED = 7
 CANCEL_REASON_OTHER = 255
 
 BTC_MIN_FEE_RATE = 5
@@ -93,31 +99,42 @@ EVENT_RETENTION_SECS = 4 * 3600
 REWARD_MINER_STATES: frozenset[MinerActivity] = frozenset({MinerActivity.AVAILABLE})
 # Hub (collateral-capable) chains, PRIORITY-ORDERED: the earlier hub anchors a hub↔hub pair, so
 # sol↔tao stays SOL-anchored (grandfathered — existing quotes keep their stored convention).
-# A pair is valid iff one leg is a hub; that leg is its pricing + bounds anchor ('dest per 1 hub').
+# A pair is valid iff one leg is a hub or an alpha; hub_leg() names that anchor ('dest per 1 anchor').
 HUB_CHAINS = ('sol', 'tao')
 # The SOL constant — the Solana ledger's own asset (reservation fee, local collateral purse,
 # the `alw miner quotes` default hub). "Is this the pair's hub" reads go through hub_leg() instead.
 NUMERAIRE_CHAIN = 'sol'
 
 
+def family(chain: str) -> str:
+    """The backing family a chain settles in (twin of ``backing.rs::family``): an sn<N> alpha settles in TAO."""
+    return 'tao' if re.fullmatch(r'sn[0-9]+', chain) else chain
+
+
 def is_hub(chain: str) -> bool:
-    """True iff ``chain`` can anchor a pair (and back quotes with its own collateral purse)."""
+    """True iff ``chain`` backs quotes with its own collateral purse (a literal hub, not an alpha)."""
     return chain in HUB_CHAINS
 
 
 def hub_leg(from_chain: str, to_chain: str) -> str | None:
-    """The pair's hub anchor — its pricing/bounds leg. None for a spoke↔spoke pair (invalid)."""
+    """The pair's anchor — its pricing leg and scoring family: the literal hub if one is a leg, else the
+    alphabetically first family-bearing leg (an alpha is its own scoring family). None = invalid pair."""
     for hub in HUB_CHAINS:
         if hub in (from_chain, to_chain):
             return hub
-    return None
+    family_legs = sorted(chain for chain in (from_chain, to_chain) if family(chain) != chain)
+    return family_legs[0] if family_legs else None
 
 
 def declarable_backings(from_chain: str, to_chain: str) -> list[str]:
     """The pair's hub-capable legs = the backings a quote may declare = its scoring lanes (F4):
-    two on the hub↔hub pair (sol↔tao), one on a spoke pair, none on a spoke↔spoke pair (invalid)."""
-    return [hub for hub in HUB_CHAINS if hub in (from_chain, to_chain)]
+    the hubs among the legs' families — two on sol↔tao, one on a spoke or alpha pair, none if invalid."""
+    return [hub for hub in HUB_CHAINS if hub in {family(from_chain), family(to_chain)}]
 
+
+SUBNET_LIMIT = 128  # SubtensorModule::SubnetLimit — no netuid above this can exist
+# Netuid 0 is root (TAO itself, not an alpha), so alphas start at 1 and run through SUBNET_LIMIT.
+ALPHA_NETUIDS = range(1, SUBNET_LIMIT + 1)
 
 # Chains paired against each hub; add a chain here to launch its pairs.
 LAUNCH_SPOKES = (
@@ -139,11 +156,16 @@ LAUNCH_SPOKES = (
     'paxg',
     'solusdc',
 )
-# Every launch pair as (hub, spoke): each hub pairs against every spoke except itself. sol↔tao
-# lands exactly once (under SOL, its anchor) because sol never appears in LAUNCH_SPOKES.
+# Alpha tokens paired against each hub; add a subnet here to launch its pairs.
+# Every registered subnet alpha launches. A subnet whose transfers are off is the MINER's problem —
+# it should not quote one — not a list we curate here and re-curate on every registration.
+LAUNCH_ALPHAS: tuple[str, ...] = tuple(f'sn{n}' for n in ALPHA_NETUIDS)
+# Every launch pair in canonical order: each hub against every spoke and alpha (sol↔tao lands once,
+# under SOL, because sol never appears in LAUNCH_SPOKES). Alpha↔spoke pairs are gated on the
+# emissions redesign and deliberately absent.
 LAUNCH_PAIRS: tuple[tuple[str, str], ...] = tuple(
     (hub, spoke) for hub in HUB_CHAINS for spoke in LAUNCH_SPOKES if spoke != hub
-)
+) + tuple((hub, alpha) for hub in HUB_CHAINS for alpha in LAUNCH_ALPHAS)
 # Fixed burn: pools sum to MINER_POOL_SHARE instead of 1.0, so at least
 # BURN_RATE of every round recycles to RECYCLE_UID before any shortfall.
 BURN_RATE = 0.0
@@ -245,6 +267,8 @@ SWAP_OUTCOME_RETENTION_SECS = 7 * 86400
 # Collateral a miner must post to back a swap = collateral_amount × this/10_000. Mirrors the contract's
 # COLLATERAL_REQUIREMENT_BPS (constants.rs) — keep in sync. 11_000 = 1.10×.
 COLLATERAL_REQUIREMENT_BPS = 11_000
+# Allowed rounding/provider drift around a declared alpha leg's value at the reservation's fill block.
+DECLARED_COLLATERAL_BAND_BPS = 100
 
 
 def required_collateral(collateral_amount: int) -> int:

@@ -16,6 +16,7 @@ from allways.validator.solana_swap_loop import (
     SwapAction,
     SwapDecision,
 )
+from allways.validator.state_store import ValidatorStateStore
 
 INITIATED_AT = 1000  # dest-freshness floor
 RESV_CREATED_AT = 1200  # source-freshness floor
@@ -34,7 +35,10 @@ def make_swap(
     from_chain='btc',
     to_chain='sol',
     collateral_chain='sol',
+    collateral_amount=None,
 ):
+    if collateral_amount is None:  # the program's invariant: an exact backing leg IS collateral_amount
+        collateral_amount = from_amount if collateral_chain == from_chain else to_amount
     return SimpleNamespace(
         swap_key=key,
         miner='minerPK',
@@ -42,6 +46,7 @@ def make_swap(
         from_chain=from_chain,
         to_chain=to_chain,
         collateral_chain=collateral_chain,
+        collateral_amount=collateral_amount,
         from_tx_hash='srctx',
         to_tx_hash='dsttx',
         miner_from_addr='minerBTC',
@@ -120,14 +125,14 @@ def make_reservation(created_at=RESV_CREATED_AT, reserved_until=1_000_000, max_e
     )
 
 
-def loop_with(result=True, created_at=RESV_CREATED_AT, reservation=None):
+def loop_with(result=True, created_at=RESV_CREATED_AT, reservation=None, state_store=None):
     providers = {'btc': RecordingProvider(result), 'sol': RecordingProvider(result)}
     resv = reservation if reservation is not None else make_reservation(created_at=created_at)
     client = SimpleNamespace(
         get_swaps=lambda: [],
         get_reservation=lambda miner, backing='sol': resv,
     )
-    return SolanaSwapLoop(client, providers, fee_divisor=100), providers
+    return SolanaSwapLoop(client, providers, fee_divisor=100, state_store=state_store), providers
 
 
 def test_expected_user_receives_is_99_percent():
@@ -380,6 +385,95 @@ def test_pending_attestation_absurd_to_amount_rejected():
     loop, _ = loop_with(result=True)
     swap = make_swap(status='PendingAttestation', to_amount=1000 * 10_000)  # expected 1000
     assert loop.decide(swap, now=1500).decision == SwapDecision.REJECT
+
+
+def _alpha_loop(tmp_path, value_rao):
+    """sol→sn7, tao-backed: the sn7 leg is declared and pinned to the fill block."""
+    loop, providers = loop_with(result=True, state_store=ValidatorStateStore(tmp_path / 'state.db'))
+    price_calls = []
+
+    def price(amount, block=None):
+        price_calls.append((amount, block))
+        return value_rao(amount)
+
+    providers['sn7'] = SimpleNamespace(
+        value_rao=price,
+        price_calls=price_calls,
+        chain=SimpleNamespace(
+            block_at=lambda created_at: 777,
+            normalize_address=str,
+            is_valid_address=lambda a: True,
+        ),
+    )
+    swap = make_swap(
+        status='PendingAttestation',
+        from_chain='sol',
+        to_chain='sn7',
+        collateral_chain='tao',
+        from_amount=1_000_000_000,
+        to_amount=5_000_000_000,
+        collateral_amount=10**9,
+    )
+    return loop, providers, swap
+
+
+def test_pending_attestation_computes_and_saves_pinned_pass(tmp_path):
+    loop, providers, swap = _alpha_loop(tmp_path, lambda amount: 10**9)
+    assert loop.decide(swap, now=1500).decision == SwapDecision.ATTEST
+    assert providers['sn7'].price_calls == [(5_000_000_000, 777)]
+    assert loop.state_store.collateral_verdict('minerPK', 'tao', RESV_CREATED_AT, 10**9) is True
+
+
+def test_pending_attestation_saved_pass_does_not_reprice(tmp_path):
+    loop, providers, swap = _alpha_loop(tmp_path, lambda amount: (_ for _ in ()).throw(AssertionError('repriced')))
+    loop.state_store.record_collateral_verdict('minerPK', 'tao', RESV_CREATED_AT, 10**9, True)
+    assert loop.decide(swap, now=1500).decision == SwapDecision.ATTEST
+    assert providers['sn7'].price_calls == []
+
+
+def test_pending_attestation_saved_fail_rejects_without_repricing(tmp_path):
+    loop, providers, swap = _alpha_loop(tmp_path, lambda amount: (_ for _ in ()).throw(AssertionError('repriced')))
+    loop.state_store.record_collateral_verdict('minerPK', 'tao', RESV_CREATED_AT, 10**9, False)
+    action = loop.decide(swap, now=1500)
+    assert action.decision == SwapDecision.REJECT
+    assert providers['sn7'].price_calls == []
+    assert providers['sol'].calls == []
+
+
+def test_pending_attestation_ignores_saved_verdict_for_different_collateral(tmp_path):
+    loop, providers, swap = _alpha_loop(tmp_path, lambda amount: 2 * 10**9)
+    loop.state_store.record_collateral_verdict('minerPK', 'tao', RESV_CREATED_AT, 2 * 10**9, True)
+
+    assert loop.decide(swap, now=1500).decision == SwapDecision.REJECT
+    assert providers['sn7'].price_calls == [(5_000_000_000, 777)]
+
+
+def test_pending_attestation_unreachable_pinned_price_skips(tmp_path):
+    def down(amount):
+        raise ProviderUnreachableError('price')
+
+    loop, _, swap = _alpha_loop(tmp_path, down)
+    action = loop.decide(swap, now=1500)
+    assert action.decision == SwapDecision.SKIP and 'price' in action.reason
+
+
+def test_pending_attestation_price_move_after_fill_does_not_change_verdict(tmp_path):
+    price = {'value': 10**9}
+    loop, providers, swap = _alpha_loop(tmp_path, lambda amount: price['value'])
+    assert loop.decide(swap, now=1500).decision == SwapDecision.ATTEST
+    price['value'] = 2 * 10**9
+    assert loop.decide(swap, now=1500).decision == SwapDecision.ATTEST
+    assert providers['sn7'].price_calls == [(5_000_000_000, 777)]
+
+
+def test_pending_attestation_exact_leg_never_reads_a_price():
+    def never(amount):
+        raise AssertionError('an exact leg was priced')
+
+    loop, providers = loop_with(result=True)
+    for provider in providers.values():
+        provider.value_rao = never
+    assert loop.decide(make_swap(status='PendingAttestation'), now=1500).decision == SwapDecision.ATTEST
 
 
 def test_pending_attestation_to_amount_off_by_two_rejected():
@@ -665,12 +759,23 @@ class VoteRecordingClient:
 
 def test_run_once_casts_votes_per_decision():
     swaps = [
-        ('pk1', make_swap(status='PendingAttestation', key=b'\x01' * 32)),
+        # regression: the initiate vote must carry the swap's backing (a tao-backed sol→tao swap)
+        (
+            'pk1',
+            make_swap(
+                status='PendingAttestation',
+                key=b'\x01' * 32,
+                from_chain='sol',
+                to_chain='tao',
+                collateral_chain='tao',
+                from_amount=1_000_000_000,
+                to_amount=5_000_000_000,
+            ),
+        ),
         ('pk2', make_swap(status='Active', timeout_at=1000, key=b'\x02' * 32)),
         ('pk3', make_swap(status='Fulfilled', key=b'\x03' * 32)),
     ]
     swaps[1][1].user = 'USERPK'  # timeout vote needs the user pubkey
-    swaps[0][1].collateral_chain = 'tao'  # regression: the initiate vote must carry the swap's backing
     providers = {'btc': RecordingProvider(True), 'sol': RecordingProvider(True)}
     client = VoteRecordingClient(swaps)
     loop = SolanaSwapLoop(client, providers, fee_divisor=100)
@@ -788,8 +893,15 @@ class _Relay:
 
 
 def _loop_with_relay(relay, backing='tao'):
-    swap = make_swap(status='PendingAttestation')
-    swap.collateral_chain = backing
+    # sol→tao: the one pair both purses can legally back.
+    swap = make_swap(
+        status='PendingAttestation',
+        from_chain='sol',
+        to_chain='tao',
+        collateral_chain=backing,
+        from_amount=1_000_000_000,
+        to_amount=5_000_000_000,
+    )
     providers = {'btc': RecordingProvider(True), 'sol': RecordingProvider(True)}
     client = SimpleNamespace(
         get_swaps=lambda: [('pda', swap)],
@@ -828,8 +940,14 @@ def test_the_loop_shows_the_relay_every_live_swap_it_walks():
 
 
 def test_a_loop_with_no_relay_configured_decides_exactly_as_before():
-    swap = make_swap(status='PendingAttestation')
-    swap.collateral_chain = 'tao'
+    swap = make_swap(
+        status='PendingAttestation',
+        from_chain='sol',
+        to_chain='tao',
+        collateral_chain='tao',
+        from_amount=1_000_000_000,
+        to_amount=5_000_000_000,
+    )
     loop, _ = loop_with()
     assert loop.relay is None
     assert loop.decide(swap, now=1500).decision == SwapDecision.ATTEST

@@ -114,6 +114,9 @@ pub const CANCEL_REASON_SPL_FROZEN: u8 = 5;
 /// The destination fails the chain's offline format check: unpayable by construction, never the
 /// miner's fault.
 pub const CANCEL_REASON_INVALID_DEST: u8 = 6;
+/// The subnet is gone (pruned, its alpha force-liquidated to TAO): undeliverable through no fault of
+/// the miner. An owner's TransferToggle flip only defers — it is never this.
+pub const CANCEL_REASON_ALPHA_TRANSFER_DISABLED: u8 = 7;
 pub const CANCEL_REASON_OTHER: u8 = 255;
 
 /// Slots the draw's seed slot is pinned ahead of the arming crank. Three leader windows (4 slots
@@ -417,7 +420,7 @@ pub fn fulfillment_grace_secs(to_chain: &str) -> i64 {
         FULFILL_GRACE_BTC_SECS
     } else if to_chain.eq_ignore_ascii_case("sol") {
         FULFILL_GRACE_SOL_SECS
-    } else if to_chain.eq_ignore_ascii_case("tao") {
+    } else if crate::backing::family(to_chain).eq_ignore_ascii_case(BACKING_CHAIN_TAO) {
         FULFILL_GRACE_TAO_SECS
     } else {
         FULFILL_GRACE_DEFAULT_SECS
@@ -501,6 +504,8 @@ mod tests {
         assert_eq!(fulfillment_grace_secs("BTC"), FULFILL_GRACE_BTC_SECS);
         assert_eq!(fulfillment_grace_secs("sol"), FULFILL_GRACE_SOL_SECS);
         assert_eq!(fulfillment_grace_secs("tao"), FULFILL_GRACE_TAO_SECS);
+        assert_eq!(fulfillment_grace_secs("sn7"), FULFILL_GRACE_TAO_SECS);
+        assert_eq!(fulfillment_grace_secs("sn74"), FULFILL_GRACE_TAO_SECS);
         // An unknown chain must get a real grace, never 0 (that would reopen paid-and-slashed).
         assert_eq!(fulfillment_grace_secs("eth"), FULFILL_GRACE_DEFAULT_SECS);
         assert!(FULFILL_GRACE_DEFAULT_SECS > 0);

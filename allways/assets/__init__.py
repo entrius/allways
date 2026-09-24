@@ -1,7 +1,9 @@
-from typing import Dict, NamedTuple, Optional, Set, Tuple, Type
+from functools import partial
+from typing import Callable, Dict, NamedTuple, Optional, Set, Tuple, Type
 
 import bittensor as bt
 
+from allways.assets.alpha import Alpha
 from allways.assets.arbusdc import ArbUsdc
 from allways.assets.asset import Asset, MissingTestnetDeployment, SendResult, TransactionInfo
 from allways.assets.aster import Aster
@@ -25,6 +27,7 @@ from allways.assets.solusdc import SolUsdc
 from allways.assets.spl_token import SplToken
 from allways.assets.tao import Tao
 from allways.assets.uni import Uni
+from allways.chains import ALPHA_CHAINS
 
 __all__ = [
     'Asset',
@@ -54,6 +57,7 @@ __all__ = [
     'SolanaChain',
     'SplToken',
     'SolUsdc',
+    'Alpha',
     'create_assets',
 ]
 
@@ -63,8 +67,13 @@ class AssetSpec(NamedTuple):
     in code it resolves to an Asset built as ``cls(**forwarded create_assets kwargs)``."""
 
     chain_id: str
-    cls: Type[Asset]
+    cls: Callable[..., Asset]  # a class, or a partial binding one to its ChainDefinition
     kwarg_names: Tuple[str, ...]  # create_assets kwargs this asset's constructor takes
+
+    @property
+    def asset_cls(self) -> Type[Asset]:
+        """The class behind ``cls`` — itself, or the one a partial binds. For family checks."""
+        return getattr(self.cls, 'func', self.cls)
 
 
 ASSET_REGISTRY: Tuple[AssetSpec, ...] = (
@@ -86,6 +95,12 @@ ASSET_REGISTRY: Tuple[AssetSpec, ...] = (
     AssetSpec('polusdc', PolUsdc, ()),
     AssetSpec('paxg', Paxg, ()),
     AssetSpec('solusdc', SolUsdc, ('solana_rpc_url', 'solana_keypair')),
+    # One row per subnet alpha, bound to its ChainDefinition. `partial` is the binding a
+    # per-netuid subclass used to be: same class, different netuid, no file each.
+    *(
+        AssetSpec(chain_id, partial(Alpha, chain_def), ('subtensor', 'wallet'))
+        for chain_id, chain_def in ALPHA_CHAINS.items()
+    ),
 )
 
 
@@ -114,6 +129,7 @@ def create_assets(
     providers: Dict[str, Asset] = {}
 
     for chain_id, cls, kwarg_names in ASSET_REGISTRY:
+        name = getattr(cls, 'func', cls).__name__  # a partial (alpha rows) has no __name__ of its own
         required = required_chains is None or chain_id in required_chains
         try:
             provider_kwargs = {k: kwargs[k] for k in kwarg_names if k in kwargs}
@@ -127,13 +143,13 @@ def create_assets(
             # disables rather than failing the boot. A miner that quotes the pair (explicitly
             # in required_chains) still fails hard — it must not advertise what it can't serve.
             if check and required_chains is not None and chain_id in required_chains:
-                raise RuntimeError(f'{cls.__name__} failed startup check: {e}') from e
-            bt.logging.warning(f'{cls.__name__} disabled on this network: {e} — {chain_id} pairs are unavailable here')
+                raise RuntimeError(f'{name} failed startup check: {e}') from e
+            bt.logging.warning(f'{name} disabled on this network: {e} — {chain_id} pairs are unavailable here')
         except Exception as e:
             if check and required:
-                raise RuntimeError(f'{cls.__name__} failed startup check: {e}') from e
+                raise RuntimeError(f'{name} failed startup check: {e}') from e
             bt.logging.warning(
-                f'{cls.__name__} disabled: {e}'
+                f'{name} disabled: {e}'
                 + (f' — {chain_id}-pair swaps cannot be fulfilled until this is fixed' if check else '')
             )
 

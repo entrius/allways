@@ -191,6 +191,14 @@ class Asset(ABC):
     @abstractmethod
     def get_balance(self, address: str) -> int: ...
 
+    def transfers_enabled(self) -> bool:
+        """False only when the chain has switched transfers of this asset off for everyone; raises when unreadable."""
+        return True
+
+    def send_blocker(self, from_address: str, to_address: str, amount: int) -> Optional[str]:
+        """Why ``amount`` cannot leave ``from_address`` for ``to_address`` as ONE transfer, else None; fails open."""
+        return None
+
     def can_deliver_to(self, address: str, amount: int, from_address: Optional[str] = None) -> bool:
         """Reserve-time gate: False only on positive evidence the destination cannot receive.
 
