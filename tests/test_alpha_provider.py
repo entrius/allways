@@ -7,7 +7,7 @@ import pytest
 from allways.assets import ASSET_REGISTRY
 from allways.assets.alpha import Alpha
 from allways.assets.asset import ProviderUnreachableError
-from allways.assets.tao import Tao
+from allways.assets.tao import BETA_ESCROW, Tao
 from allways.chains import ALPHA_NETUIDS, CHAIN_SN7, CHAIN_SN74
 from allways.constants import CANCEL_REASON_ALPHA_TRANSFER_DISABLED
 
@@ -98,6 +98,15 @@ def test_alphas_are_registered_and_bind_the_tao_chain():
     p = Alpha(CHAIN_SN7, SimpleNamespace())
     assert isinstance(p, Alpha) and isinstance(p.chain, Tao) and p.netuid == 7
     assert Alpha(CHAIN_SN74, SimpleNamespace()).netuid == 74
+
+
+def test_beta_escrow_is_never_a_valid_payee_on_tao_or_alpha():
+    # Keyless protocol custody: transfer_stake into it fails (CannotUseSystemAccount), TAO sent there is
+    # stranded. Invalid at the chain, so reserve refuses it and an in-flight swap cancels no-fault.
+    assert BETA_ESCROW == '5EYCAe5jLQhn6ofDSwHx3AZmsZPVFHnKpstqap4vqwDWtp7s'
+    for chain in (Tao(SimpleNamespace()), Alpha(CHAIN_SN7, SimpleNamespace()).chain):
+        assert not chain.is_valid_address(BETA_ESCROW)
+        assert chain.is_valid_address('5GrwvaEF5zXb26Fz9rcQpDWS57CtERHpNehXCPcNoHGKutQY')
 
 
 # ─── verification ───────────────────────────────────────────────────────────
@@ -227,12 +236,18 @@ def _toggles(transfer=True, subtoken=True, exists=True):
     return SimpleNamespace(substrate=SimpleNamespace(query=lambda m, name, params: flags[name]))
 
 
-def test_cancel_evidence_on_transfer_toggle_off():
-    assert Alpha(CHAIN_SN7, _toggles(transfer=False)).cancel_evidence(MINER, 1) == CANCEL_REASON_ALPHA_TRANSFER_DISABLED
-    assert Alpha(CHAIN_SN7, _toggles(subtoken=False)).cancel_evidence(MINER, 1) == CANCEL_REASON_ALPHA_TRANSFER_DISABLED
+def test_transfer_toggle_off_defers_but_never_cancels():
+    """The toggle is the subnet owner's to flip at any block, and a cancel leaves the taker's deposit
+    with the miner — so an owner running a miner on its own alpha could flip it after every deposit.
+    A flip is a deferral hint only; the swap holds and, if transfers never return, times out at the
+    extension ceiling exactly like an EVM getCode hint."""
+    off = Alpha(CHAIN_SN7, _toggles(transfer=False))
+    assert off.cancel_evidence(MINER, 1) is None
+    assert off.can_deliver_to(MINER, 1) is False
+    assert off.delivery_refused(MINER, 0) is True
+    assert Alpha(CHAIN_SN7, _toggles(subtoken=False)).cancel_evidence(MINER, 1) is None
     assert Alpha(CHAIN_SN7, _toggles()).cancel_evidence(MINER, 1) is None
-    assert Alpha(CHAIN_SN7, _toggles(transfer=False)).can_deliver_to(MINER, 1) is False
-    assert Alpha(CHAIN_SN7, _toggles(transfer=False)).delivery_refused(MINER, 0) is True
+    assert Alpha(CHAIN_SN7, _toggles()).delivery_refused(MINER, 0) is False
 
 
 def test_a_pruned_subnet_is_not_deliverable():
@@ -243,14 +258,19 @@ def test_a_pruned_subnet_is_not_deliverable():
     assert Alpha(CHAIN_SN7, gone).cancel_evidence(MINER, 1) == CANCEL_REASON_ALPHA_TRANSFER_DISABLED
 
 
-def test_unreadable_toggle_is_not_evidence():
+def test_unreadable_toggle_is_not_evidence_and_defers_the_slash():
+    """Reserve fails open (not a security boundary); cancel needs positive evidence; the slash gate must
+    RAISE — returning False there read an RPC failure as "not refused" and let the slash proceed, where
+    every other provider's unreadable probe defers it."""
+
     def boom(*a, **k):
         raise RuntimeError('rpc down')
 
     p = Alpha(CHAIN_SN7, SimpleNamespace(substrate=SimpleNamespace(query=boom)))
     assert p.can_deliver_to(MINER, 1) is True
-    assert p.delivery_refused(MINER, 0) is False
     assert p.cancel_evidence(MINER, 1) is None
+    with pytest.raises(ProviderUnreachableError):
+        p.delivery_refused(MINER, 0)
 
 
 # ─── sending ────────────────────────────────────────────────────────────────
@@ -260,7 +280,7 @@ class _Wallet:
     coldkeypub = SimpleNamespace(ss58_address=MINER)
 
 
-def _sender(stakes, *, response=None, calls=None):
+def _sender(stakes, *, response=None, calls=None, recipient_hotkeys=()):
     calls = [] if calls is None else calls
     receipt = SimpleNamespace(extrinsic_hash=TXID, block_hash='0xincl')
     landed = SimpleNamespace(success=True, message='', extrinsic=_ext(), extrinsic_receipt=receipt)
@@ -269,11 +289,20 @@ def _sender(stakes, *, response=None, calls=None):
         calls.append(kwargs)
         return landed if response is None else response
 
+    def sign_and_send_extrinsic(call, **kwargs):
+        calls.append(call)
+        return landed if response is None else response
+
     subtensor = SimpleNamespace(
         get_current_block=lambda: HEAD,
         get_stake_info_for_coldkey=lambda ck: stakes,
         transfer_stake=transfer_stake,
-        substrate=SimpleNamespace(get_block_number=lambda h: BLOCK),
+        compose_call=lambda module, function, params: {'call_function': function, **params},
+        sign_and_send_extrinsic=sign_and_send_extrinsic,
+        substrate=SimpleNamespace(
+            get_block_number=lambda h: BLOCK,
+            query=lambda m, name, params: list(recipient_hotkeys) if name == 'StakingHotkeys' else True,
+        ),
     )
     p = Alpha(CHAIN_SN7, subtensor, _Wallet())
     p.chain.get_block = lambda n: {'extrinsics': []}
@@ -339,3 +368,70 @@ def test_whole_position_sentinel_is_not_an_amount():
     assert p.decode_transfer_stake(_ext(alpha=2**64 - 1), False) is None
     assert _verify(_provider(exts=[_ext(alpha=2**64 - 1)]), amount=1) is None
     assert _verify(_provider(exts=[_ext(alpha=2**64 - 2)]), amount=1).amount == 2**64 - 2
+
+
+FULL = [f'hk{i}' for i in range(128)]  # a recipient at subtensor's StakingHotkeys cap
+
+
+def test_send_lands_on_a_hotkey_the_recipient_already_stakes_to():
+    """A transfer that lands on a hotkey the recipient already holds never grows its StakingHotkeys,
+    so it can never hit the cap — preferred even over a larger position."""
+    p, calls = _sender([_stake('small', 6_000), _stake('big', 9_000)], recipient_hotkeys=['small'])
+    assert p.send_amount(USER, 5_000, dedup_key='swap-1') == (TXID, BLOCK)
+    assert calls[0]['hotkey_ss58'] == 'small'
+
+
+def test_a_recipient_at_the_cap_is_paid_onto_a_hotkey_it_already_stakes_to():
+    """A plain transfer_stake would grow a full StakingHotkeys and fail (TooManyStakingHotkeys), so the
+    miner lands the stake on one of the recipient's own hotkeys — same netuid, exact, no fee. A full list
+    is never undeliverable, so it is never no-fault either."""
+    p, calls = _sender([_stake('hk3', 100), _stake('big', 9_000)], recipient_hotkeys=FULL)
+    assert p.send_amount(USER, 5_000, dedup_key='swap-1') == (TXID, BLOCK)
+    (call,) = calls
+    assert call == {
+        'call_function': 'transfer_stake_and_hotkey',
+        'destination_coldkey': USER,
+        'origin_hotkey': 'big',
+        'destination_hotkey': 'hk0',
+        'origin_netuid': NETUID,
+        'destination_netuid': NETUID,
+        'alpha_amount': 5_000,
+    }
+    assert p.cancel_evidence(USER, 5_000, from_address=MINER) is None
+
+
+def test_send_needs_one_hotkey_holding_the_whole_amount():
+    """get_balance sums across hotkeys, but the chain debits ONE position: a summed balance passed the
+    miner's inventory gate while the send failed every pass and rode to a slash."""
+    p, calls = _sender([_stake('a', 3_000), _stake('b', 3_000)])
+    assert p.get_balance(MINER) == 6_000
+    assert p.send_amount(USER, 5_000, dedup_key='swap-1') is None
+    assert calls == []
+
+
+def test_a_split_stake_is_blocked_before_reserve_with_the_largest_position_named():
+    """A taker's alpha split across hotkeys cannot go out as one transfer_stake; two partial sends each
+    fail the amount match and strand the deposit with the miner — so refuse the swap up front."""
+    p, _ = _sender([_stake('a', 6 * 10**9), _stake('b', 6 * 10**9)])
+    assert p.send_blocker(USER, MINER, 10 * 10**9) == (
+        'SN7 must go out as one transfer_stake from one hotkey; your largest position holds 6 of the 10 needed'
+        ' — move it onto one hotkey first'
+    )
+    assert p.send_blocker(USER, MINER, 5 * 10**9) is None
+
+
+def test_an_unreadable_stake_does_not_block_the_swap():
+    def boom(ck):
+        raise ConnectionError('rpc down')
+
+    assert Alpha(CHAIN_SN7, SimpleNamespace(get_stake_info_for_coldkey=boom)).send_blocker(USER, MINER, 1) is None
+
+
+def test_locked_alpha_the_sender_cannot_move_blocks_the_reservation():
+    """A send past the lock-free amount carries the lock and fails at a default recipient: refuse it up front."""
+    p, _ = _sender([_stake('big', 9 * 10**9)])
+    p.subtensor.substrate.runtime_call = lambda api, method, params: {params[0][0]: {NETUID: {'available': 4 * 10**9}}}
+    assert p.send_blocker(USER, MINER, 5 * 10**9) == (
+        'only 4 of your SN7 is free to send (the rest is locked); swap that much or less'
+    )
+    assert p.send_blocker(USER, MINER, 4 * 10**9) is None

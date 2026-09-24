@@ -52,6 +52,7 @@ from allways.cli.swap_commands.swap_intake import (
     rate_display_from_fixed,
     select_best_miner,
     to_smallest_units,
+    transfers_off_reason,
     unviable_reason,
     viable_intakes,
 )
@@ -646,9 +647,10 @@ def _alpha_send_lines(from_chain: str) -> List[str]:
     if get_chain_def(from_chain).netuid is None:
         return []
     return [
-        f'  [yellow]Send it as a plain transfer_stake for the exact amount[/yellow]; a batched or proxied '
-        f'transfer, or a "transfer all", cannot be verified and those {from_chain.upper()} are lost to the '
-        "miner. A MEV-shielded send lands 1-2 blocks later: post the inner transfer_stake's hash, not the shield's."
+        f'  [yellow]Send it as ONE plain transfer_stake for the exact amount, from one hotkey that holds all of '
+        f'it[/yellow]; a split, batched or proxied transfer, or a "transfer all", cannot be verified and those '
+        f'{from_chain.upper()} are lost to the miner. A MEV-shielded send lands 1-2 blocks later: post the inner '
+        "transfer_stake's hash, not the shield's."
     ]
 
 
@@ -718,13 +720,16 @@ def _screen_deliverability(
     courtesy warning only — a frozen source just means the deposit fails and the reservation
     lapses unclaimed. A leg whose provider can't be built read-only fails open, as before."""
     dest_provider = gate_provider(to_chain, client, subtensor)
+    src_provider = gate_provider(from_chain, client, subtensor)
+    off = transfers_off_reason(from_chain, to_chain, {from_chain: src_provider, to_chain: dest_provider})
+    if off:
+        fail(f'  {off}. Reservation refused. No funds moved.')
     quote = client.get_quote(cand.miner, from_chain, to_chain, cand.backing)
     if dest_provider is not None:
         # Validity only — deliverability is NOT predicted at reserve time (not a boundary; the sound
         # check is the delivery-time reverted-tx proof). A malformed address can never be delivered to.
         if not dest_provider.chain.is_valid_address(receive_addr):
             fail(f'  {receive_addr!r} is not a valid {to_chain.upper()} address. No funds moved.')
-    src_provider = gate_provider(from_chain, client, subtensor)
     if src_provider is None:
         return
     miner_addr = getattr(quote, 'miner_from_addr', '') if quote else ''
@@ -735,6 +740,9 @@ def _screen_deliverability(
             f"  This miner's {from_chain.upper()} receive address cannot accept the source funds "
             '— pick another miner (--miner). No funds moved.'
         )
+    blocker = user_from_addr and miner_addr and src_provider.send_blocker(user_from_addr, miner_addr, from_amount)
+    if blocker:
+        fail(f'  {blocker}. No funds moved.')
     if user_from_addr and not src_provider.can_deliver_to(user_from_addr, from_amount):
         console.print(
             f'  [yellow]Heads-up: your {from_chain.upper()} source address looks unable to move funds '

@@ -143,7 +143,13 @@ def test_open_normalizes_the_source_address_at_intake():
     # canonicalize at intake so a checksummed EVM-style entry can't mint a divergent lock.
     client = FakeClient()
     validator = _validator(client)
-    validator.axon_assets = {'sol': SimpleNamespace(chain=SimpleNamespace(normalize_address=lambda a: a.lower()))}
+    validator.axon_assets = {
+        'sol': SimpleNamespace(
+            transfers_enabled=lambda: True,
+            send_blocker=lambda frm, to, amt: None,
+            chain=SimpleNamespace(normalize_address=lambda a: a.lower()),
+        )
+    }
     r = reserve_on_behalf(validator, HOTKEY, 'sol', 'btc', USER_PK, 'MiXeDcAsE', 'userBTCaddr', 1_000_000_000)
     assert r.ok
     queued = validator.state_store.pending_routed_requests(str(MINER_PK), 'sol', 'btc')
@@ -151,9 +157,11 @@ def test_open_normalizes_the_source_address_at_intake():
     validator.state_store.close()
 
 
-def _gate_asset(can_deliver, valid=lambda addr: True):
+def _gate_asset(can_deliver, valid=lambda addr: True, enabled=True, blocker=None):
     """Duck-typed asset for the reserve deliverability gates (can_deliver_to + chain format check)."""
     return SimpleNamespace(
+        transfers_enabled=lambda: enabled,
+        send_blocker=lambda frm, to, amt: blocker,
         can_deliver_to=lambda addr, amt, from_address=None: can_deliver(addr, amt),
         chain=SimpleNamespace(is_valid_address=valid, normalize_address=lambda addr: addr),
     )
@@ -181,6 +189,17 @@ def test_missing_spoke_provider_rejects_before_bid():
     assert client.calls == []
 
 
+def test_leg_with_transfers_switched_off_rejects_before_any_bid():
+    # A subnet owner's TransferToggle / SubtokenEnabled: no dest address can take it, so never open the swap.
+    client = FakeClient()
+    validator = _validator(client)
+    validator.axon_assets = {'btc': _gate_asset(lambda addr, amt: True, enabled=False)}
+    result = reserve_on_behalf(validator, HOTKEY, 'sol', 'btc', USER_PK, str(USER_PK), 'userBTCaddr', 10**9)
+    assert not result.ok
+    assert 'BTC transfers are switched off on-chain; SOL→BTC cannot settle' in result.reason
+    assert client.calls == []
+
+
 def test_malformed_destination_address_rejects_before_any_bid():
     # F4: address FORMAT is screened first — offline, and a malformed dest can never deliver.
     client = FakeClient()
@@ -201,6 +220,16 @@ def test_malformed_miner_receive_address_rejects():
     assert not result.ok
     assert 'miner receive address' in result.reason
     assert client.calls == []
+
+
+def test_source_that_cannot_go_out_as_one_transfer_rejects_before_any_bid():
+    # A taker's alpha split across hotkeys: partial sends each miss the amount and strand with the miner.
+    client = FakeClient()
+    client.quote.miner_from_addr = 'minerSOLaddr'
+    validator = _validator(client)
+    validator.axon_assets = {'sol': _gate_asset(lambda addr, amt: True, blocker='split across hotkeys')}
+    result = reserve_on_behalf(validator, HOTKEY, 'sol', 'btc', USER_PK, str(USER_PK), 'userBTCaddr', 10**9)
+    assert (result.ok, result.reason, client.calls) == (False, 'split across hotkeys', [])
 
 
 def test_user_to_addr_equal_miner_delivery_address_rejects():

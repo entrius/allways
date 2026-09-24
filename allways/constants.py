@@ -65,8 +65,9 @@ CANCEL_REASON_ERC20_FEE_ENABLED = 4
 CANCEL_REASON_SPL_FROZEN = 5
 # The destination fails the chain's offline format check: unpayable by construction, never the miner's fault.
 CANCEL_REASON_INVALID_DEST = 6
-# The subnet owner/root disabled alpha transfers (TransferToggle / SubtokenEnabled): strands every
-# miner on that subnet at once — no-fault. Mirrored in constants.rs.
+# The subnet is gone (pruned: NetworksAdded false, its alpha force-liquidated to TAO), so the delivery
+# can never happen — no-fault. A TransferToggle flip is NOT this: it is owner-flippable at any block and
+# only defers (see Alpha.cancel_evidence). Mirrored in constants.rs.
 CANCEL_REASON_ALPHA_TRANSFER_DISABLED = 7
 CANCEL_REASON_OTHER = 255
 

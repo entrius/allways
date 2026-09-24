@@ -1,6 +1,8 @@
 """Provider startup checks: chains the miner doesn't quote degrade to a warning; quoted (required)
 chains still fail hard — a tao<->sol miner must start without BTC creds, a btc miner must not."""
 
+from functools import partial
+
 import pytest
 
 from allways import assets as cp
@@ -85,3 +87,13 @@ def test_evm_network_names_match_the_rpc_registry():
         served = getattr(asset.chain, 'network_def', None)
         if served and asset.chain_def.networks:
             assert set(asset.chain_def.networks) == set(served.chain_ids), chain_id
+
+
+def test_a_partial_bound_provider_degrades_by_its_class_name(monkeypatch):
+    """Alpha rows are `partial(Alpha, chain_def)`, which carries no __name__: the failure branches
+    formatted `cls.__name__` and raised AttributeError instead of the intended warning/RuntimeError,
+    so an optional alpha that failed its check (a subtensor hiccup at boot) killed the neuron."""
+    monkeypatch.setattr(cp, 'ASSET_REGISTRY', (('sn7', partial(_Boom), ()), ('sol', _Ok, ())))
+    assert set(cp.create_assets(check=True, required_chains={'sol'})) == {'sol'}
+    with pytest.raises(RuntimeError, match='_Boom failed startup check'):
+        cp.create_assets(check=True, required_chains={'sn7', 'sol'})

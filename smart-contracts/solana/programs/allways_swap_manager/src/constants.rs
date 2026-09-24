@@ -114,7 +114,8 @@ pub const CANCEL_REASON_SPL_FROZEN: u8 = 5;
 /// The destination fails the chain's offline format check: unpayable by construction, never the
 /// miner's fault.
 pub const CANCEL_REASON_INVALID_DEST: u8 = 6;
-/// The subnet owner disabled alpha transfers: undeliverable through no fault of the miner.
+/// The subnet is gone (pruned, its alpha force-liquidated to TAO): undeliverable through no fault of
+/// the miner. An owner's TransferToggle flip only defers — it is never this.
 pub const CANCEL_REASON_ALPHA_TRANSFER_DISABLED: u8 = 7;
 pub const CANCEL_REASON_OTHER: u8 = 255;
 
