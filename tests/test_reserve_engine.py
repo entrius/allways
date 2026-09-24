@@ -502,7 +502,7 @@ def _status_validator(tmp_path, client):
     validator, store = _stage_validator(tmp_path)
     validator.solana_client = client
     validator.solana_swap_loop = SimpleNamespace(
-        providers={'btc': _gate_asset(lambda addr, amt: True)}, fee_divisor=100
+        providers={'btc': _gate_asset(lambda addr, amt: True)}, fee_divisor=100, reject_reasons={}
     )
     return validator, store
 
@@ -517,6 +517,7 @@ def _unclaimed_reservation(reserved_until: int):
         from_amount=10_000,
         to_amount=47_000_000,
         miner_from_addr='tb1qminer',
+        collateral_chain='sol',
     )
 
 
@@ -557,6 +558,61 @@ def test_live_unclaimed_reservation_reports_reserved(tmp_path):
     validator, _ = _status_validator(tmp_path, client)
     s = swap_status(validator, HOTKEY)
     assert s.stage == 'reserved' and s.user == 'staleUserSOLpk'
+
+
+def _declared_reservation(reserved_until: int):
+    """sn7→btc with TAO behind the sn7 leg: a declared backing, whose verdict ingest pins at fill."""
+    return SimpleNamespace(
+        reserved_until=reserved_until,
+        claimed_swap_key=b'\x00' * 32,
+        user='userSOLpk',
+        from_chain='sn7',
+        to_chain='btc',
+        from_amount=5_000_000_000,
+        to_amount=5_000_000,
+        miner_from_addr='minerColdkey',
+        collateral_chain='tao',
+        collateral_amount=10**9,
+        created_at=1_200,
+    )
+
+
+def test_reserved_seat_serves_the_pinned_collateral_verdict(tmp_path):
+    from allways.validator.reserve_engine import swap_status
+
+    validator, store = _status_validator(tmp_path, StatusClient(reservation=_declared_reservation(FUTURE)))
+    assert 'collateral_ok' not in swap_status(validator, HOTKEY).detail  # fill event not ingested yet
+    store.record_collateral_verdict(str(MINER_PK), 'tao', 1_200, 10**9, False)
+    assert swap_status(validator, HOTKEY).detail['collateral_ok'] is False
+    store.record_collateral_verdict(str(MINER_PK), 'tao', 1_200, 10**9, True)
+    assert swap_status(validator, HOTKEY).detail['collateral_ok'] is True
+    store.close()
+
+
+def test_exact_backing_leg_carries_no_collateral_verdict(tmp_path):
+    from allways.validator.reserve_engine import swap_status
+
+    exact = _declared_reservation(FUTURE)
+    exact.from_chain = 'tao'  # the backing IS a leg: bound on-chain, nothing to verify
+    validator, store = _status_validator(tmp_path, StatusClient(reservation=exact))
+    store.record_collateral_verdict(str(MINER_PK), 'tao', 1_200, 10**9, False)
+    assert 'collateral_ok' not in swap_status(validator, HOTKEY).detail
+    store.close()
+
+
+def test_claimed_swap_surfaces_the_loops_collateral_reject_reason(tmp_path):
+    from allways.validator.reserve_engine import swap_status
+    from allways.validator.solana_swap_loop import COLLATERAL_REJECT_REASON
+
+    key = b'\x16' * 32
+    swap = _live_swap('PendingAttestation')
+    validator, store = _status_validator(tmp_path, StatusClient(swap=swap))
+    assert 'reject_reason' not in swap_status(validator, HOTKEY, key.hex()).detail  # loop not there yet
+    validator.solana_swap_loop.reject_reasons[key.hex()] = COLLATERAL_REJECT_REASON
+    assert swap_status(validator, HOTKEY, key.hex()).detail['reject_reason'] == COLLATERAL_REJECT_REASON
+    swap.status = type('Active', (), {})()
+    assert 'reject_reason' not in swap_status(validator, HOTKEY, key.hex()).detail
+    store.close()
 
 
 def test_initiated_swap_resolves_by_key_after_reservation_consumed(tmp_path):
@@ -1091,7 +1147,13 @@ def test_swap_status_by_pair_reads_that_pairs_slot_not_the_freshest(tmp_path):
 
     sol = _unclaimed_reservation(FUTURE + 500)  # fresher, btc->sol, a stranger
     tao = SimpleNamespace(
-        **{**vars(_unclaimed_reservation(FUTURE)), 'user': 'ourTaoUser', 'from_chain': 'tao', 'to_chain': 'btc'}
+        **{
+            **vars(_unclaimed_reservation(FUTURE)),
+            'user': 'ourTaoUser',
+            'from_chain': 'tao',
+            'to_chain': 'btc',
+            'collateral_chain': 'tao',
+        }
     )
     client = StatusClient(reservation={'sol': sol, 'tao': tao})
     validator, store = _status_validator(tmp_path, client)

@@ -901,6 +901,7 @@ def swap_status(
         'miner_from_addr': reservation.miner_from_addr,
     }
     if swap_key == EMPTY_SWAP_KEY:
+        _attach_collateral_verdict(validator, miner_pk, reservation, detail)
         return SwapStatus('reserved', reservation.reserved_until, str(reservation.user), detail=detail)
     swap = client.get_swap(swap_key)
     if swap is not None:
@@ -908,8 +909,23 @@ def swap_status(
         detail['to_tx_hash'] = swap.to_tx_hash
     _attach_leg_confs(validator, swap_key, detail)
     stage = _swap_stage(validator, swap, swap_key)
-    _add_reject_reason(validator, swap, stage, detail)
+    _add_reject_reason(validator, swap, swap_key, stage, detail)
     return SwapStatus(stage, reservation.reserved_until, str(reservation.user), swap_key.hex(), detail)
+
+
+def _attach_collateral_verdict(validator, miner_pk, reservation, detail: dict) -> None:
+    """``collateral_ok`` for a seat whose backing is declared (TAO behind an sn<N> leg): the verdict
+    ingest pinned at the fill block, so a consumer can hold the deposit while it is false. A read of
+    the stored verdict only — the seam never prices a leg. Absent for an exact leg, and until the
+    fill event is ingested."""
+    backing = str(reservation.collateral_chain)
+    if backing in (reservation.from_chain, reservation.to_chain):
+        return
+    ok = validator.state_store.collateral_verdict(
+        str(miner_pk), backing, int(reservation.created_at), int(reservation.collateral_amount)
+    )
+    if ok is not None:
+        detail['collateral_ok'] = ok
 
 
 def _idle_status(miner_pk, from_chain: str, to_chain: str) -> SwapStatus:
@@ -950,17 +966,19 @@ def _swap_status_by_key(validator, swap_key_hex: str) -> SwapStatus:
         'from_tx_hash': swap.from_tx_hash,
         'to_tx_hash': swap.to_tx_hash,
     }
-    _add_reject_reason(validator, swap, stage, detail)
+    _add_reject_reason(validator, swap, swap_key, stage, detail)
     _attach_leg_confs(validator, swap_key, detail)
     return SwapStatus(stage, 0, str(swap.user), swap_key_hex, detail)
 
 
-def _add_reject_reason(validator, swap, stage: str, detail: dict) -> None:
-    """While a live claim awaits attestation, surface why the loop refuses it (absent when it doesn't)."""
+def _add_reject_reason(validator, swap, swap_key: bytes, stage: str, detail: dict) -> None:
+    """While a live claim awaits attestation, surface why the loop refuses it (absent when it doesn't):
+    the offline gates recomputed here, else what the loop published when it walked the swap (the
+    declared-collateral verdict needs the fill block, which only the loop prices)."""
     if swap is None or stage != 'claimed':
         return
     loop = validator.solana_swap_loop
-    reason = attest_reject_reason(loop.providers, swap, loop.fee_divisor)
+    reason = attest_reject_reason(loop.providers, swap, loop.fee_divisor) or loop.reject_reasons.get(swap_key.hex())
     if reason is not None:
         detail['reject_reason'] = reason
 

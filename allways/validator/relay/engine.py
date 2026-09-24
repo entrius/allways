@@ -29,6 +29,7 @@ from allways.constants import (
     RELAY_RECONCILE_INTERVAL_SECS,
     RELAY_SWAP_RETENTION_SECS,
     VOTE_ROUND_TTL_SECS,
+    family,
 )
 from allways.solana import pdas
 from allways.validator.binding import build_attribution
@@ -173,13 +174,18 @@ class BondRelay:
             bt.logging.warning(f'relay: could not snapshot swap facts: {e}')
 
     def user_backing_address(self, swap: Any) -> str:
-        """The user's address on the collateral chain — whichever leg is denominated in it.
+        """The user's address on the collateral chain — the leg denominated in it, else the leg that
+        settles in its family (an sn<N> leg is paid out in TAO), as ``backing.rs::collateral_leg_user_addr``.
         Needs no new on-chain field: both legs are pinned at finalize (the D5 verification)."""
         backing = str(getattr(swap, 'collateral_chain', '') or '').lower()
-        if str(getattr(swap, 'from_chain', '')).lower() == backing:
-            return str(getattr(swap, 'user_from_addr', '') or '')
-        if str(getattr(swap, 'to_chain', '')).lower() == backing:
-            return str(getattr(swap, 'user_to_addr', '') or '')
+        legs = [
+            (str(getattr(swap, 'from_chain', '')).lower(), str(getattr(swap, 'user_from_addr', '') or '')),
+            (str(getattr(swap, 'to_chain', '')).lower(), str(getattr(swap, 'user_to_addr', '') or '')),
+        ]
+        for matches in (lambda chain: chain == backing, lambda chain: family(chain) == backing):
+            for chain, addr in legs:
+                if matches(chain):
+                    return addr
         return ''
 
     def has_pending_debit(self, miner: str) -> bool:

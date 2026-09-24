@@ -375,13 +375,14 @@ def max_intake_from_amount(
     )
 
 
-def _bound_phrase(bound: int, backing: str, from_chain: str, rate_display: str) -> str:
+def _bound_phrase(bound: int, backing: str, from_chain: str, to_chain: str, rate_display: str) -> str:
     """A bound phrased for the taker. Bounds are contract facts in the BACKING asset; takers think
     in what they're sending, so when the backing is the dest-side hub leg (canonical source — the
-    rate is 'dest per 1 hub'), add the source-side figure it can convert exactly. Display only
-    (float, marked ≈) — never fed back into any gate."""
+    rate is 'dest per 1 hub'), add the source-side figure it can convert exactly. A declared backing
+    (TAO behind an sn<N> leg) is not a leg, so the pair's rate cannot convert it: native only.
+    Display only (float, marked ≈) — never fed back into any gate."""
     native = f'{bound / 10 ** get_chain_def(backing).decimals:.4f} {backing.upper()}'
-    if backing == from_chain or backing != canonical_pair(from_chain, backing)[0]:
+    if backing != to_chain or backing != canonical_pair(from_chain, to_chain)[0]:
         return native
     src_amount = bound / 10 ** get_chain_def(backing).decimals * float(rate_display)
     return f'≈{src_amount:.6g} {from_chain.upper()} ({native} leg)'
@@ -422,9 +423,9 @@ def unviable_reason(
         lo, hi = _bounds_for(c.backing, bounds_by_backing, min_swap, max_swap)
         gate = swap_gate(amts.collateral_amount, c.collateral, lo, hi)
         if gate == GATE_BELOW_MIN:
-            reasons.append(f'below min swap ({_bound_phrase(lo, c.backing, from_chain, c.rate_display)})')
+            reasons.append(f'below min swap ({_bound_phrase(lo, c.backing, from_chain, to_chain, c.rate_display)})')
         elif gate == GATE_ABOVE_MAX:
-            reasons.append(f'above max swap ({_bound_phrase(hi, c.backing, from_chain, c.rate_display)})')
+            reasons.append(f'above max swap ({_bound_phrase(hi, c.backing, from_chain, to_chain, c.rate_display)})')
         elif gate == GATE_LOW_COLLATERAL:
             reasons.append(swap_viable(amts.collateral_amount, c.collateral, lo, hi, c.backing)[1])
     return '; '.join(dict.fromkeys(reasons)) or 'no executable quote'
