@@ -431,6 +431,24 @@ def test_the_payee_is_the_user_leg_denominated_in_the_backing():
     assert relay.store.get_relay_swap(SWAP2)['user_addr'] == USER_TAO
 
 
+def test_the_payee_on_an_alpha_leg_is_its_bittensor_address():
+    # sn95→btc, TAO-backed: no leg is TAO, but the sn95 leg settles in TAO — its coldkey is paid.
+    relay = _relay()
+    swap = _live_swap(from_chain='sn95', to_chain='btc')
+    swap.user_from_addr = USER_TAO
+    swap.user_to_addr = 'user-btc-addr'
+    relay.observe_swap(swap)
+    assert relay.store.get_relay_swap(SWAP)['user_addr'] == USER_TAO
+
+
+def test_the_exact_backing_leg_outranks_a_family_leg():
+    relay = _relay()
+    swap = _live_swap(from_chain='sn7', to_chain='tao')
+    swap.user_from_addr = HOTKEY2  # the sn7 coldkey; TAO itself is the dest leg
+    relay.observe_swap(swap)
+    assert relay.store.get_relay_swap(SWAP)['user_addr'] == USER_TAO
+
+
 def test_a_locally_backed_swap_needs_no_snapshot():
     relay = _relay()
     relay.observe_swap(_live_swap(backing='sol'))
