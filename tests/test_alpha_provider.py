@@ -199,11 +199,11 @@ def test_get_balance_sums_this_netuid_across_hotkeys():
 
 
 def test_value_rao_floors_and_raises_on_failure():
-    p = Alpha(CHAIN_SN7, SimpleNamespace(get_subnet_price=lambda netuid: SimpleNamespace(rao=333_333_333)))
+    p = Alpha(CHAIN_SN7, SimpleNamespace(get_subnet_price=lambda netuid, block=None: SimpleNamespace(rao=333_333_333)))
     assert p.value_rao(3) == 0
     assert p.value_rao(3_000_000_000) == 999_999_999
 
-    def boom(netuid):
+    def boom(netuid, block=None):
         raise RuntimeError('rpc down')
 
     with pytest.raises(ProviderUnreachableError):

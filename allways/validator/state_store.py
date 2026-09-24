@@ -20,7 +20,6 @@ locked" — the local dev env runs two validators against the same file.
 
 import sqlite3
 import threading
-import time
 from pathlib import Path
 from typing import Callable, Dict, List, Optional, Sequence, Set, Tuple
 
@@ -586,21 +585,28 @@ class ValidatorStateStore:
 
     # ─── collateral_verdicts (declared alpha leg at fill block) ────────
 
-    def record_collateral_verdict(self, miner: str, backing: str, created_at: int, ok: bool) -> None:
+    def record_collateral_verdict(
+        self, miner: str, backing: str, created_at: int, collateral_amount: int, ok: bool
+    ) -> None:
         self._execute(
             """
-            INSERT INTO collateral_verdicts (miner, backing, created_at, ok) VALUES (?, ?, ?, ?)
-            ON CONFLICT(miner, backing, created_at) DO UPDATE SET ok = excluded.ok
+            INSERT INTO collateral_verdicts (miner, backing, created_at, collateral_amount, ok)
+            VALUES (?, ?, ?, ?, ?)
+            ON CONFLICT(miner, backing, created_at) DO UPDATE SET
+                collateral_amount = excluded.collateral_amount,
+                ok = excluded.ok
             """,
-            (str(miner), str(backing), int(created_at), 1 if ok else 0),
+            (str(miner), str(backing), int(created_at), int(collateral_amount), 1 if ok else 0),
         )
 
-    def collateral_verdict(self, miner: str, backing: str, created_at: int) -> Optional[bool]:
+    def collateral_verdict(self, miner: str, backing: str, created_at: int, collateral_amount: int) -> Optional[bool]:
         row = self._fetchone(
-            'SELECT ok FROM collateral_verdicts WHERE miner = ? AND backing = ? AND created_at = ?',
+            'SELECT collateral_amount, ok FROM collateral_verdicts WHERE miner = ? AND backing = ? AND created_at = ?',
             (str(miner), str(backing), int(created_at)),
         )
-        return bool(row['ok']) if row is not None else None
+        if row is None or int(row['collateral_amount']) != int(collateral_amount):
+            return None
+        return bool(row['ok'])
 
     # ─── swap_fulfillments (delivery-leg hash for post-close receipts) ──
 
@@ -977,7 +983,7 @@ class ValidatorStateStore:
             """,
             (cutoff_block,),
         )
-        self._execute('DELETE FROM collateral_verdicts WHERE created_at < ?', (int(time.time()) - 86400,))
+        self._execute('DELETE FROM collateral_verdicts WHERE created_at < ?', (cutoff_block,))
 
     def close(self) -> None:
         with self.lock:
@@ -1204,10 +1210,11 @@ class ValidatorStateStore:
                 );
 
                 CREATE TABLE IF NOT EXISTS collateral_verdicts (
-                    miner      TEXT,
-                    backing    TEXT,
-                    created_at INTEGER,
-                    ok         INTEGER,
+                    miner             TEXT NOT NULL,
+                    backing           TEXT NOT NULL,
+                    created_at        INTEGER NOT NULL,
+                    collateral_amount INTEGER NOT NULL,
+                    ok                INTEGER NOT NULL,
                     PRIMARY KEY(miner, backing, created_at)
                 );
 

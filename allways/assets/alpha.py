@@ -86,11 +86,7 @@ class Alpha(Asset):
     def value_rao(self, amount: int, block: Optional[int] = None) -> int:
         """Value in rao of ``amount`` alpha base units at ``block`` (or head), floored."""
         try:
-            price = (
-                self.subtensor.get_subnet_price(self.netuid, block=block)
-                if block is not None
-                else self.subtensor.get_subnet_price(self.netuid)
-            )
+            price = self.subtensor.get_subnet_price(self.netuid, block=block)
             return int(amount) * int(price.rao) // 10**self.chain_def.decimals
         except Exception as e:
             raise ProviderUnreachableError(f'{self.chain_def.id} price unavailable: {e}') from e

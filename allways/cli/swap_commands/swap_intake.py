@@ -183,32 +183,16 @@ def _bounds_for(
     return bounds_by_backing.get(backing, (min_swap, max_swap))
 
 
-def leg_value(backing: str, from_chain: str, from_amount: int, to_chain: str, to_amount: int, providers=None) -> int:
-    """The backing leg in backing units (twin of ``backing.rs::collateral_leg_bind``): exact, or a declared alpha leg priced at spot."""
-    if backing == from_chain:
-        return from_amount
-    if backing == to_chain:
-        return to_amount
-    for leg, amount in ((from_chain, from_amount), (to_chain, to_amount)):
-        if family(leg) != backing:
-            continue
-        provider = (providers or {}).get(leg)
-        if provider is None:
-            raise ValueError(f'{leg} leg is declared: a {leg} provider is needed to price it in {backing}')
-        return provider.value_rao(amount)
-    raise ValueError(f'{from_chain}->{to_chain}: no leg is denominated in the "{backing}" backing')
-
-
-def pinned_leg_value(
+def leg_value(
     backing: str,
     from_chain: str,
     from_amount: int,
     to_chain: str,
     to_amount: int,
-    created_at: int,
     providers=None,
+    created_at: Optional[int] = None,
 ) -> int:
-    """The exact backing leg, or a declared alpha leg valued at the reservation's fill block."""
+    """The exact backing leg, or a declared alpha leg valued at head or ``created_at``."""
     if backing == from_chain:
         return from_amount
     if backing == to_chain:
@@ -219,14 +203,16 @@ def pinned_leg_value(
         provider = (providers or {}).get(leg)
         if provider is None:
             raise ValueError(f'{leg} leg is declared: a {leg} provider is needed to price it in {backing}')
-        block = provider.chain.block_at(int(created_at))
-        return provider.value_rao(amount, block=block)
+        if created_at is None:
+            return provider.value_rao(amount)
+        return provider.value_rao(amount, block=provider.chain.block_at(int(created_at)))
     raise ValueError(f'{from_chain}->{to_chain}: no leg is denominated in the "{backing}" backing')
 
 
 def collateral_matches(collateral_amount: int, value: int) -> bool:
     """Whether collateral is within the two-sided declared-leg band."""
-    return abs(int(collateral_amount) - int(value)) * 10_000 <= int(value) * DECLARED_COLLATERAL_BAND_BPS
+    value = int(value)
+    return value > 0 and abs(int(collateral_amount) - value) * 10_000 <= value * DECLARED_COLLATERAL_BAND_BPS
 
 
 def compute_intake_amounts(

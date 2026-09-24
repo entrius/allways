@@ -9,7 +9,6 @@ from allways.classes import ActivityTransition, MinerActivity
 from allways.constants import RATE_PRECISION
 from allways.solana.events import EventRecord
 from allways.validator import forward as forward_mod
-from allways.validator import state_store as state_store_mod
 from allways.validator.event_index import SolanaEventIndex
 from allways.validator.scoring import replay_crown_time_window
 from allways.validator.state_store import ValidatorStateStore
@@ -57,7 +56,16 @@ def test_fill_ingest_pins_declared_collateral_from_reservation_created_at(tmp_pa
         to_amount=5_000,
         reserved_until=10_500,
     )
-    client = SimpleNamespace(get_reservation=lambda miner, backing: SimpleNamespace(created_at=1_234))
+    reservation = SimpleNamespace(
+        collateral_chain='tao',
+        from_chain='sol',
+        to_chain='sn7',
+        collateral_amount=10_100,
+        from_amount=1_000,
+        to_amount=5_000,
+        created_at=1_234,
+    )
+    client = SimpleNamespace(get_reservation=lambda miner, backing: reservation)
     validator = SimpleNamespace(
         state_store=store,
         event_ingest=SimpleNamespace(poll=lambda cursor: ([filled], 'sig1')),
@@ -70,21 +78,64 @@ def test_fill_ingest_pins_declared_collateral_from_reservation_created_at(tmp_pa
 
     forward_mod.ingest_solana_events(validator)
 
-    assert store.collateral_verdict('pk_a', 'tao', 1_234) is True
+    assert store.collateral_verdict('pk_a', 'tao', 1_234, 10_100) is True
     assert price_calls == [('block', 1_234), ('value', 5_000, 77)]
 
 
-def test_collateral_verdicts_prune_after_one_day(tmp_path: Path, monkeypatch):
+def test_stale_fill_event_does_not_pin_newer_reservation(tmp_path: Path, monkeypatch):
+    store = make_store(tmp_path)
+    price_calls = []
+    provider = SimpleNamespace(
+        chain=SimpleNamespace(block_at=lambda created_at: price_calls.append(created_at) or 77),
+        value_rao=lambda amount, block=None: 10_000,
+    )
+    stale_fill = rec(
+        'ReservationFilled',
+        miner='pk_a',
+        block_time=9_999,
+        from_chain='sol',
+        to_chain='sn7',
+        collateral_chain='tao',
+        collateral_amount=10_100,
+        from_amount=1_000,
+        to_amount=5_000,
+        reserved_until=10_500,
+    )
+    newer = SimpleNamespace(
+        collateral_chain='tao',
+        from_chain='sol',
+        to_chain='sn7',
+        collateral_amount=20_000,
+        from_amount=1_000,
+        to_amount=6_000,
+        created_at=2_345,
+    )
+    validator = SimpleNamespace(
+        state_store=store,
+        event_ingest=SimpleNamespace(poll=lambda cursor: ([stale_fill], 'sig1')),
+        bond_relay=None,
+        solana_client=SimpleNamespace(get_reservation=lambda miner, backing: newer),
+        assets={'sn7': provider},
+        event_index=SimpleNamespace(ingest=lambda records, attribution: len(records)),
+    )
+    monkeypatch.setattr(forward_mod, 'build_attribution', lambda client: {})
+
+    forward_mod.ingest_solana_events(validator)
+
+    assert store.collateral_verdict('pk_a', 'tao', 2_345, 20_000) is None
+    assert price_calls == []
+
+
+def test_collateral_verdicts_prune_at_caller_cutoff(tmp_path: Path):
     now = 200_000
     store = make_store(tmp_path)
-    store.record_collateral_verdict('old', 'tao', now - 86401, True)
-    store.record_collateral_verdict('live', 'tao', now - 86400, False)
-    monkeypatch.setattr(state_store_mod.time, 'time', lambda: now)
+    store.record_collateral_verdict('old', 'tao', now - 86401, 10_000, True)
+    store.record_collateral_verdict('live', 'tao', now - 86400, 20_000, False)
 
-    store.prune_events_older_than(0)
+    store.prune_events_older_than(now - 86400)
 
-    assert store.collateral_verdict('old', 'tao', now - 86401) is None
-    assert store.collateral_verdict('live', 'tao', now - 86400) is False
+    assert store.collateral_verdict('old', 'tao', now - 86401, 10_000) is None
+    assert store.collateral_verdict('live', 'tao', now - 86400, 20_000) is False
 
 
 def make_index(store: ValidatorStateStore, ttl: int = RESERVATION_TTL) -> SolanaEventIndex:

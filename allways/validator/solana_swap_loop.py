@@ -19,7 +19,7 @@ from solders.pubkey import Pubkey
 from allways import dev_signal
 from allways.assets.asset import ProviderUnreachableError
 from allways.chains import compute_extension_target_secs, get_chain_def
-from allways.cli.swap_commands.swap_intake import collateral_matches, pinned_leg_value
+from allways.cli.swap_commands.swap_intake import collateral_matches, leg_value
 from allways.constants import CANCEL_REASON_INVALID_DEST, CANCEL_REASON_OTHER, EXTENSION_PADDING_SECONDS
 from allways.solana import pdas
 from allways.solana.client import benign_marker, swap_from_solana, swap_key_from_tx_hash
@@ -142,14 +142,20 @@ def collateral_verdict_for(
     """Read or compute the declared-leg collateral verdict pinned to the fill block."""
     if backing in (from_chain, to_chain):
         return True
-    saved = state_store.collateral_verdict(str(miner), backing, int(created_at))
+    saved = state_store.collateral_verdict(str(miner), backing, int(created_at), int(collateral_amount))
     if saved is not None:
         return saved
-    value = pinned_leg_value(
-        backing, from_chain, int(from_amount), to_chain, int(to_amount), int(created_at), providers
+    value = leg_value(
+        backing,
+        from_chain,
+        int(from_amount),
+        to_chain,
+        int(to_amount),
+        providers,
+        created_at=int(created_at),
     )
     ok = collateral_matches(int(collateral_amount), value)
-    state_store.record_collateral_verdict(str(miner), backing, int(created_at), ok)
+    state_store.record_collateral_verdict(str(miner), backing, int(created_at), int(collateral_amount), ok)
     return ok
 
 
@@ -648,11 +654,9 @@ class SolanaSwapLoop:
             resolved.append(str(miner))
         return resolved
 
-    def run_once(self, now: int, state_store: Any = None) -> List[Tuple[str, SwapDecision]]:
+    def run_once(self, now: int) -> List[Tuple[str, SwapDecision]]:
         """One pass: discover live swaps, decide each, and cast the vote (or LOG when read_only).
         Returns the per-swap decisions for observability."""
-        if state_store is not None:
-            self.state_store = state_store
         out: List[Tuple[str, SwapDecision]] = []
         for _pubkey, acct in self.client.get_swaps():
             # get_swaps returns raw accounts (no swap_key field); flatten like the miner does. Already-flat

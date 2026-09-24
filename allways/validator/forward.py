@@ -53,7 +53,7 @@ async def forward(self: Validator) -> None:
         bt.logging.info(f'forward step #{self.step}: resolved {len(resolved)} reservation pool(s)')
     if finalized:
         bt.logging.info(f'forward step #{self.step}: finalized {len(finalized)} routed seat(s)')
-    decisions = await asyncio.to_thread(self.solana_swap_loop.run_once, now, self.state_store)
+    decisions = await asyncio.to_thread(self.solana_swap_loop.run_once, now)
     bt.logging.info(
         f'forward step #{self.step} @ block {self.block}: solana swap loop processed {len(decisions)} live swap(s)'
     )
@@ -115,6 +115,53 @@ def clear_provider_caches(self: Validator) -> None:
         provider.chain.clear_pass_tip()  # reset the per-pass hoisted chain tip (one getSlot/pass, not per-leg)
 
 
+def pin_declared_collateral(self: Validator, records) -> None:
+    for record in records:
+        if record.name != 'ReservationFilled':
+            continue
+        fields = record.fields
+        miner = fields.get('miner')
+        event_backing = str(fields.get('collateral_chain', '') or '')
+        if not event_backing:
+            continue
+        try:
+            reservation = self.solana_client.get_reservation(miner, event_backing)
+            if reservation is None:
+                continue
+            backing = str(reservation.collateral_chain)
+            from_chain = str(reservation.from_chain)
+            to_chain = str(reservation.to_chain)
+            from_amount = int(reservation.from_amount)
+            to_amount = int(reservation.to_amount)
+            collateral_amount = int(reservation.collateral_amount)
+            created_at = int(reservation.created_at)
+            event_values = (
+                event_backing,
+                str(fields['from_chain']),
+                str(fields['to_chain']),
+                int(fields['from_amount']),
+                int(fields['to_amount']),
+                int(fields['collateral_amount']),
+            )
+            reservation_values = (backing, from_chain, to_chain, from_amount, to_amount, collateral_amount)
+            if created_at <= 0 or reservation_values != event_values or backing in (from_chain, to_chain):
+                continue
+            collateral_verdict_for(
+                self.state_store,
+                miner,
+                backing,
+                from_chain,
+                from_amount,
+                to_chain,
+                to_amount,
+                collateral_amount,
+                created_at,
+                self.assets,
+            )
+        except Exception as e:
+            bt.logging.warning(f'forward: could not pin declared collateral for {miner}: {e}')
+
+
 def ingest_solana_events(self: Validator) -> None:
     """Poll program events newer than the stored cursor and fold them into the
     crown ``SolanaEventIndex`` (active/activity/collateral/rate tables), attributing
@@ -139,33 +186,7 @@ def ingest_solana_events(self: Validator) -> None:
     relay_ok = True
     if records:
         attribution = build_attribution(self.solana_client)
-        for record in records:
-            if record.name != 'ReservationFilled':
-                continue
-            fields = record.fields
-            backing = str(fields.get('collateral_chain', '') or '')
-            from_chain, to_chain = str(fields.get('from_chain', '')), str(fields.get('to_chain', ''))
-            if not backing or backing in (from_chain, to_chain):
-                continue
-            miner = fields.get('miner')
-            try:
-                reservation = self.solana_client.get_reservation(miner, backing)
-                if reservation is None:
-                    raise ValueError('reservation unavailable')
-                collateral_verdict_for(
-                    self.state_store,
-                    miner,
-                    backing,
-                    from_chain,
-                    int(fields['from_amount']),
-                    to_chain,
-                    int(fields['to_amount']),
-                    int(fields['collateral_amount']),
-                    int(reservation.created_at),
-                    self.assets,
-                )
-            except Exception as e:
-                bt.logging.warning(f'forward: could not pin declared collateral for {miner}: {e}')
+        pin_declared_collateral(self, records)
         written = self.event_index.ingest(records, attribution)
         bt.logging.info(f'forward: ingested {written}/{len(records)} solana event(s)')
         # The relay reads the same stream separately: it keys by Solana pubkey and must keep

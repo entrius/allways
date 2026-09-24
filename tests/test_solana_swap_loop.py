@@ -125,14 +125,14 @@ def make_reservation(created_at=RESV_CREATED_AT, reserved_until=1_000_000, max_e
     )
 
 
-def loop_with(result=True, created_at=RESV_CREATED_AT, reservation=None):
+def loop_with(result=True, created_at=RESV_CREATED_AT, reservation=None, state_store=None):
     providers = {'btc': RecordingProvider(result), 'sol': RecordingProvider(result)}
     resv = reservation if reservation is not None else make_reservation(created_at=created_at)
     client = SimpleNamespace(
         get_swaps=lambda: [],
         get_reservation=lambda miner, backing='sol': resv,
     )
-    return SolanaSwapLoop(client, providers, fee_divisor=100), providers
+    return SolanaSwapLoop(client, providers, fee_divisor=100, state_store=state_store), providers
 
 
 def test_expected_user_receives_is_99_percent():
@@ -389,7 +389,7 @@ def test_pending_attestation_absurd_to_amount_rejected():
 
 def _alpha_loop(tmp_path, value_rao):
     """sol→sn7, tao-backed: the sn7 leg is declared and pinned to the fill block."""
-    loop, providers = loop_with(result=True)
+    loop, providers = loop_with(result=True, state_store=ValidatorStateStore(tmp_path / 'state.db'))
     price_calls = []
 
     def price(amount, block=None):
@@ -405,7 +405,6 @@ def _alpha_loop(tmp_path, value_rao):
             is_valid_address=lambda a: True,
         ),
     )
-    loop.state_store = ValidatorStateStore(tmp_path / 'state.db')
     swap = make_swap(
         status='PendingAttestation',
         from_chain='sol',
@@ -422,23 +421,31 @@ def test_pending_attestation_computes_and_saves_pinned_pass(tmp_path):
     loop, providers, swap = _alpha_loop(tmp_path, lambda amount: 10**9)
     assert loop.decide(swap, now=1500).decision == SwapDecision.ATTEST
     assert providers['sn7'].price_calls == [(5_000_000_000, 777)]
-    assert loop.state_store.collateral_verdict('minerPK', 'tao', RESV_CREATED_AT) is True
+    assert loop.state_store.collateral_verdict('minerPK', 'tao', RESV_CREATED_AT, 10**9) is True
 
 
 def test_pending_attestation_saved_pass_does_not_reprice(tmp_path):
     loop, providers, swap = _alpha_loop(tmp_path, lambda amount: (_ for _ in ()).throw(AssertionError('repriced')))
-    loop.state_store.record_collateral_verdict('minerPK', 'tao', RESV_CREATED_AT, True)
+    loop.state_store.record_collateral_verdict('minerPK', 'tao', RESV_CREATED_AT, 10**9, True)
     assert loop.decide(swap, now=1500).decision == SwapDecision.ATTEST
     assert providers['sn7'].price_calls == []
 
 
 def test_pending_attestation_saved_fail_rejects_without_repricing(tmp_path):
     loop, providers, swap = _alpha_loop(tmp_path, lambda amount: (_ for _ in ()).throw(AssertionError('repriced')))
-    loop.state_store.record_collateral_verdict('minerPK', 'tao', RESV_CREATED_AT, False)
+    loop.state_store.record_collateral_verdict('minerPK', 'tao', RESV_CREATED_AT, 10**9, False)
     action = loop.decide(swap, now=1500)
     assert action.decision == SwapDecision.REJECT
     assert providers['sn7'].price_calls == []
     assert providers['sol'].calls == []
+
+
+def test_pending_attestation_ignores_saved_verdict_for_different_collateral(tmp_path):
+    loop, providers, swap = _alpha_loop(tmp_path, lambda amount: 2 * 10**9)
+    loop.state_store.record_collateral_verdict('minerPK', 'tao', RESV_CREATED_AT, 2 * 10**9, True)
+
+    assert loop.decide(swap, now=1500).decision == SwapDecision.REJECT
+    assert providers['sn7'].price_calls == [(5_000_000_000, 777)]
 
 
 def test_pending_attestation_unreachable_pinned_price_skips(tmp_path):

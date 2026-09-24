@@ -48,7 +48,7 @@ from allways.cli.swap_commands.swap_intake import (
     collateral_matches,
     compute_intake_amounts,
     hub_bounds,
-    pinned_leg_value,
+    leg_value,
     rate_display_from_fixed,
     select_best_miner,
     to_smallest_units,
@@ -684,14 +684,14 @@ def _refuse_uncovered(client, resv, from_chain, to_chain, subtensor=None) -> Non
         return
     (leg,) = providers
     try:
-        value = pinned_leg_value(
+        value = leg_value(
             backing,
             from_chain,
             int(resv.from_amount),
             to_chain,
             int(resv.to_amount),
-            int(resv.created_at),
             providers,
+            created_at=int(resv.created_at),
         )
     except (ValueError, ProviderUnreachableError) as e:
         console.print(

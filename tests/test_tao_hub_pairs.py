@@ -26,7 +26,6 @@ from allways.cli.swap_commands.swap_intake import (
     hub_bounds,
     leg_value,
     max_intake_from_amount,
-    pinned_leg_value,
     required_collateral,
     select_best_miner,
     unviable_reason,
@@ -168,7 +167,7 @@ class TestTaoHubIntake:
         with pytest.raises(ValueError, match='no leg'):
             leg_value('tao', 'sol', SOL, 'avax', 1, {'sn7': sn7})
 
-    def test_pinned_leg_value_prices_a_declared_alpha_leg_at_fill_block(self):
+    def test_leg_value_prices_a_declared_alpha_leg_at_fill_block(self):
         calls = []
         chain = SimpleNamespace(block_at=lambda created_at: calls.append(('block', created_at)) or 123)
 
@@ -177,11 +176,11 @@ class TestTaoHubIntake:
             return 15 * TAO
 
         sn7 = SimpleNamespace(chain=chain, value_rao=value_rao)
-        assert pinned_leg_value('tao', 'sol', SOL, 'sn7', 5 * TAO, 1_700_000_000, {'sn7': sn7}) == 15 * TAO
+        assert leg_value('tao', 'sol', SOL, 'sn7', 5 * TAO, {'sn7': sn7}, created_at=1_700_000_000) == 15 * TAO
         assert calls == [('block', 1_700_000_000), ('value', 5 * TAO, 123)]
 
-    def test_pinned_leg_value_leaves_an_exact_leg_untouched(self):
-        assert pinned_leg_value('tao', 'sol', SOL, 'tao', TAO, 1_700_000_000) == TAO
+    def test_leg_value_leaves_a_pinned_exact_leg_untouched(self):
+        assert leg_value('tao', 'sol', SOL, 'tao', TAO, created_at=1_700_000_000) == TAO
 
     def test_sol_to_sn7_is_sized_by_its_backing(self):
         sn7 = SimpleNamespace(value_rao=lambda amount: 7 * TAO)
@@ -361,3 +360,5 @@ def test_collateral_matches_one_percent_both_directions():
     assert collateral_matches(10_100, 10_000)
     assert not collateral_matches(9_899, 10_000)
     assert not collateral_matches(10_101, 10_000)
+    assert not collateral_matches(0, 0)
+    assert not collateral_matches(-1, -1)
