@@ -253,6 +253,9 @@ def reserve_on_behalf(
             or not src_provider.can_deliver_to(miner_from_addr, from_amount)
         ):
             return ReserveResult(False, 'miner receive address cannot accept the source funds')
+        blocker = miner_from_addr and src_provider.send_blocker(user_from_addr, miner_from_addr, from_amount)
+        if blocker:
+            return ReserveResult(False, blocker)
 
     try:
         user_pk = Pubkey.from_string(user_pubkey)

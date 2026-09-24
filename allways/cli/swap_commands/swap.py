@@ -647,9 +647,10 @@ def _alpha_send_lines(from_chain: str) -> List[str]:
     if get_chain_def(from_chain).netuid is None:
         return []
     return [
-        f'  [yellow]Send it as a plain transfer_stake for the exact amount[/yellow]; a batched or proxied '
-        f'transfer, or a "transfer all", cannot be verified and those {from_chain.upper()} are lost to the '
-        "miner. A MEV-shielded send lands 1-2 blocks later: post the inner transfer_stake's hash, not the shield's."
+        f'  [yellow]Send it as ONE plain transfer_stake for the exact amount, from one hotkey that holds all of '
+        f'it[/yellow]; a split, batched or proxied transfer, or a "transfer all", cannot be verified and those '
+        f'{from_chain.upper()} are lost to the miner. A MEV-shielded send lands 1-2 blocks later: post the inner '
+        "transfer_stake's hash, not the shield's."
     ]
 
 
@@ -739,6 +740,9 @@ def _screen_deliverability(
             f"  This miner's {from_chain.upper()} receive address cannot accept the source funds "
             '— pick another miner (--miner). No funds moved.'
         )
+    blocker = user_from_addr and miner_addr and src_provider.send_blocker(user_from_addr, miner_addr, from_amount)
+    if blocker:
+        fail(f'  {blocker}. No funds moved.')
     if user_from_addr and not src_provider.can_deliver_to(user_from_addr, from_amount):
         console.print(
             f'  [yellow]Heads-up: your {from_chain.upper()} source address looks unable to move funds '
