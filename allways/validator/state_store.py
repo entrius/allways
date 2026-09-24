@@ -971,7 +971,9 @@ class ValidatorStateStore:
         anchor key (F4): on a dual-backing direction each backing's lane is
         scored on its own rate stream, so keeping only the direction's newest
         row would delete the sibling backing's anchor and silently drop that
-        lane out of the crown at window start."""
+        lane out of the crown at window start.
+        Also drops declared-collateral verdicts older than the cutoff (attest lands within ~2.5h of a fill).
+        """
         self._execute(
             """
             DELETE FROM rate_events

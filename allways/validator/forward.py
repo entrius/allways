@@ -122,8 +122,8 @@ def pin_declared_collateral(self: Validator, records) -> None:
         fields = record.fields
         miner = fields.get('miner')
         event_backing = str(fields.get('collateral_chain', '') or '')
-        if not event_backing:
-            continue
+        if not event_backing or event_backing in (fields.get('from_chain'), fields.get('to_chain')):
+            continue  # an exact leg is bound on-chain: no price, no RPC
         try:
             reservation = self.solana_client.get_reservation(miner, event_backing)
             if reservation is None:
