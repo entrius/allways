@@ -1,6 +1,5 @@
 import re
 from collections import Counter
-from itertools import combinations
 
 from allways.classes import MinerActivity
 
@@ -125,13 +124,13 @@ def is_hub(chain: str) -> bool:
 
 
 def hub_leg(from_chain: str, to_chain: str) -> str | None:
-    """The pair's anchor — its pricing leg and scoring family: the literal hub if one is a leg, else the
-    alphabetically first family-bearing leg (an alpha is its own scoring family). None = invalid pair."""
+    """The pair's anchor — its pricing leg: the literal hub if one is a leg, else the alpha leg of an
+    alpha↔spoke pair. None = invalid pair (spoke↔spoke, alpha↔alpha)."""
     for hub in HUB_CHAINS:
         if hub in (from_chain, to_chain):
             return hub
-    family_legs = sorted(chain for chain in (from_chain, to_chain) if family(chain) != chain)
-    return family_legs[0] if family_legs else None
+    alpha_legs = [chain for chain in (from_chain, to_chain) if is_alpha(chain)]
+    return alpha_legs[0] if len(alpha_legs) == 1 else None
 
 
 def collateral_leg(backing: str, from_chain: str, to_chain: str) -> str | None:
@@ -156,6 +155,8 @@ def declarable_backings(from_chain: str, to_chain: str) -> list[str]:
     """The backings a quote may declare = the pair's scoring lanes (F4): its hub legs — two on sol↔tao,
     one on a spoke pair, none if invalid. Every alpha pair is TAO-backed only, so each alpha fill's
     collateral is its TAO value."""
+    if hub_leg(from_chain, to_chain) is None:
+        return []
     if is_alpha(from_chain) or is_alpha(to_chain):
         return ['tao']
     return [hub for hub in HUB_CHAINS if hub in (from_chain, to_chain)]
@@ -190,13 +191,12 @@ LAUNCH_SPOKES = (
 # it should not quote one — not a list we curate here and re-curate on every registration.
 LAUNCH_ALPHAS: tuple[str, ...] = tuple(f'sn{n}' for n in ALPHA_NETUIDS)
 # Every launch pair in canonical order: each hub against every spoke and alpha (sol↔tao lands once,
-# under SOL, because sol never appears in LAUNCH_SPOKES), then each alpha against every spoke and
-# the other alphas.
+# under SOL, because sol never appears in LAUNCH_SPOKES), then each alpha against every spoke. No
+# alpha↔alpha: subtensor swaps one alpha for another natively.
 LAUNCH_PAIRS: tuple[tuple[str, str], ...] = (
     tuple((hub, spoke) for hub in HUB_CHAINS for spoke in LAUNCH_SPOKES if spoke != hub)
     + tuple((hub, alpha) for hub in HUB_CHAINS for alpha in LAUNCH_ALPHAS)
     + tuple((alpha, spoke) for alpha in LAUNCH_ALPHAS for spoke in LAUNCH_SPOKES if not is_hub(spoke))
-    + tuple(combinations(sorted(LAUNCH_ALPHAS), 2))
 )
 # Fixed burn: pools sum to MINER_POOL_SHARE instead of 1.0, so at least
 # BURN_RATE of every round recycles to RECYCLE_UID before any shortfall.
