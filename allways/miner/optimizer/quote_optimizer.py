@@ -344,7 +344,7 @@ def quote_qualifies(view: ProgramView, quote, lane: Lane) -> bool:
     if rate <= 0:
         return False
     min_swap, max_swap = view.bounds(lane.backing)
-    if not is_executable_rate(rate / RATE_PRECISION, lane.from_chain, lane.to_chain, min_swap, max_swap):
+    if not is_executable_rate(rate / RATE_PRECISION, lane.from_chain, lane.to_chain, min_swap, max_swap, lane.backing):
         return False
     return view.purse(str(quote.miner), lane.backing) >= required_collateral(max(min_swap, 1))
 
@@ -1666,7 +1666,8 @@ class QuoteOptimizer:
         floor = view.eligibility_floor(backing)
         if view.purse(self.me, backing) < floor:
             reasons.append(f'the {backing} purse is under its {format_amount(floor, backing, 2)} eligibility floor')
-        if not is_executable_rate(int(quote.rate) / RATE_PRECISION, lane.from_chain, lane.to_chain, min_swap, max_swap):
+        rate_display = int(quote.rate) / RATE_PRECISION
+        if not is_executable_rate(rate_display, lane.from_chain, lane.to_chain, min_swap, max_swap, backing):
             reasons.append('the quoted rate cannot route under the swap bounds')
         if self.api is not None:
             fills = self.api.last_fill_times(self.hotkey)
