@@ -21,10 +21,11 @@ import bittensor as bt
 import numpy as np
 
 from allways import dev_signal
-from allways.chains import canonical_pair
+from allways.chains import canonical_pair, get_chain_def
 from allways.classes import ActivityTransition, MinerActivity, next_activity
 from allways.cli.swap_commands.swap_intake import bounds_from_config
 from allways.constants import (
+    ALPHA_FAMILY,
     CAPACITY_CURVE_EXPONENT,
     CLEARING_RETENTION_SECS,
     CROWN_RATE_BAND,
@@ -43,9 +44,11 @@ from allways.constants import (
     SCORING_WINDOW_BLOCKS,
     SCORING_WINDOW_SECS,
     SWAP_OUTCOME_RETENTION_SECS,
+    collateral_leg,
     declarable_backings,
     hub_leg,
     required_collateral,
+    scoring_family,
 )
 from allways.eligibility import RecentFills, direction_eligible, is_eligible
 from allways.solana.pdas import BACKING_BITS
@@ -63,7 +66,7 @@ if TYPE_CHECKING:
 class DirectionTrace:
     pool: float = 0.0
     crown_time: Dict[str, float] = field(default_factory=dict)
-    qualified_volume: int = 0  # lane's qualified hub-leg notional over the pool window
+    qualified_volume: int = 0  # lane's qualified family notional over the pool window (family_notional)
     cap_weighted_time: Dict[str, float] = field(default_factory=dict)
     unfilled_time: int = 0
     best_rate: float = 0.0
@@ -370,26 +373,34 @@ def build_direction_score_rows(
 
 
 def lane_volumes_to_directions(
-    lane_volumes: Dict[Tuple[str, str, str], Dict[str, Tuple[int, int]]],
-) -> Dict[Tuple[str, str], Dict[str, Tuple[int, int]]]:
+    lane_volumes: Dict[Tuple[str, str, str], Dict[str, Tuple[int, ...]]],
+) -> Dict[Tuple[str, str], Dict[str, Tuple[int, ...]]]:
     """Collapse the per-lane qualified volumes into the pair-direction shape
     ``compute_direction_pools`` reads — pool volume is never split by backing."""
-    out: Dict[Tuple[str, str], Dict[str, Tuple[int, int]]] = {}
-    for (from_chain, to_chain, _backing), by_hotkey in lane_volumes.items():
+    out: Dict[Tuple[str, str], Dict[str, Tuple[int, ...]]] = {}
+    for (from_chain, to_chain, backing), by_hotkey in lane_volumes.items():
+        if backing not in declarable_backings(from_chain, to_chain):
+            continue  # a lane no quote may declare now (a fill reserved before the rule) scores nothing
         direction = out.setdefault((from_chain, to_chain), {})
-        for hotkey, (from_sum, to_sum) in by_hotkey.items():
-            prev_from, prev_to = direction.get(hotkey, (0, 0))
-            direction[hotkey] = (prev_from + from_sum, prev_to + to_sum)
+        for hotkey, sums in by_hotkey.items():
+            prev = direction.get(hotkey, (0,) * len(sums))
+            direction[hotkey] = tuple(a + b for a, b in zip(prev, sums))
     return out
 
 
+def family_notional(from_chain: str, to_chain: str, sums: Tuple[int, ...]) -> int:
+    """A direction's volume in its family's one unit: the TAO collateral on an alpha pair, else the hub leg."""
+    if scoring_family(from_chain, to_chain) == ALPHA_FAMILY:
+        return sums[2]
+    return sums[0] if from_chain == hub_leg(from_chain, to_chain) else sums[1]
+
+
 def qualified_volume_shares(
-    lane_volume: Dict[str, Tuple[int, int]], from_chain: str, to_chain: str
+    lane_volume: Dict[str, Tuple[int, ...]], from_chain: str, to_chain: str
 ) -> Tuple[Dict[str, float], int]:
-    """``({hotkey: share}, total)`` of one lane's qualified hub-leg notional — the
+    """``({hotkey: share}, total)`` of one lane's qualified family notional — the
     β slice's per-miner split. Empty when nothing qualified cleared on the lane."""
-    leg = 0 if from_chain == hub_leg(from_chain, to_chain) else 1
-    notional = {hk: sums[leg] for hk, sums in lane_volume.items() if sums[leg] > 0}
+    notional = {hk: n for hk, sums in lane_volume.items() if (n := family_notional(from_chain, to_chain, sums)) > 0}
     total = sum(notional.values())
     if total <= 0:
         return {}, 0
@@ -397,29 +408,28 @@ def qualified_volume_shares(
 
 
 def compute_direction_pools(
-    clearing_volumes: Dict[Tuple[str, str], Dict[str, Tuple[int, int]]],
+    clearing_volumes: Dict[Tuple[str, str], Dict[str, Tuple[int, ...]]],
 ) -> Dict[Tuple[str, str, str], float]:
     """Volume-weighted pools from a trailing window of QUALIFIED swaps
-    (``get_clearing_volumes`` shape), keyed by lane ``(from, to, backing)``.
-    A pair is LIVE iff it cleared qualified volume in the window; only live
-    pairs are paid. Each live pair earns ``(1−α)/live_pairs_in_family + α × its
-    share of the family's hub-leg notional``, split evenly between its two
-    directions — weighting at pair level means one leg can't be inflated
-    without inflating the whole pair — then evenly again across each
-    direction's backing lanes (F4, budget-neutral: sol↔tao's pair pool splits
-    across its two lanes, spokes carry one). A dead pair's lanes are present at
-    0.0. No volume anywhere → the equal split over the whole registry (the
-    day-one / silent-network fallback). Pools sum to ``MINER_POOL_SHARE``,
-    not 1.0 — the burn lives here.
+    (``get_qualified_lane_volumes`` shape, collapsed to directions), keyed by lane
+    ``(from, to, backing)``.
 
-    Volumes are the pair's HUB-leg notional, so they are only comparable
-    within one hub's family (lamports vs rao — converting across would smuggle
-    a price oracle in). Each hub family therefore holds a share of the pool
-    proportional to its LIVE pair count — oracle-free, and a registered-but-
-    unfilled pair moves nothing — and the α-blend runs within it. So the floor
-    scales with activity, not registry size: adding dead pairs changes nobody's
-    pool, and keeping a pair funded costs one qualified fill per window. Volume
-    is never split by backing — same non-comparability argument."""
+    Every pair belongs to one family (``scoring_family``: sol, tao, or alpha for any
+    pair with an alpha leg), and every family holds an equal share of the pool —
+    so alpha pairs, however many, can never move the SOL or TAO pools. A family
+    with no live pair pays nothing and its share recycles.
+
+    A pair is LIVE iff it cleared qualified volume in the window; only live pairs
+    are paid. Each live pair earns ``(1−α)/live_pairs_in_family + α × its share of
+    the family's notional``, split evenly between its two directions — weighting at
+    pair level means one leg can't be inflated without inflating the whole pair —
+    then evenly across each direction's backing lanes (F4). No volume anywhere →
+    ``DIRECTION_POOLS``, the same equal family shares split evenly (the silent-network
+    fallback). Pools sum to at most ``MINER_POOL_SHARE``.
+
+    Notional is one unit per family (``family_notional``): the hub leg for SOL and
+    TAO, the fill's TAO collateral for alpha. Units never mix across families, so
+    no price oracle is needed."""
     pair_directions: Dict[Tuple[str, str], List[Tuple[str, str]]] = {}
     for from_chain, to_chain in DIRECTION_POOLS:
         pair_directions.setdefault(canonical_pair(from_chain, to_chain), []).append((from_chain, to_chain))
@@ -428,10 +438,10 @@ def compute_direction_pools(
     for pair, directions in pair_directions.items():
         volume = 0
         for from_chain, to_chain in directions:
-            # Hub-and-spoke: every direction has its hub on exactly one leg, so the
-            # hub side is the notional comparable across the family's pairs.
-            leg = 0 if from_chain == hub_leg(from_chain, to_chain) else 1
-            volume += sum(sums[leg] for sums in clearing_volumes.get((from_chain, to_chain), {}).values())
+            volume += sum(
+                family_notional(from_chain, to_chain, sums)
+                for sums in clearing_volumes.get((from_chain, to_chain), {}).values()
+            )
         pair_volumes[pair] = volume
 
     live_pairs = {pair for pair, volume in pair_volumes.items() if volume > 0}
@@ -444,12 +454,12 @@ def compute_direction_pools(
 
     families: Dict[str, List[Tuple[str, str]]] = {}
     for pair in pair_directions:
-        families.setdefault(hub_leg(*pair) or pair[0], []).append(pair)
+        families.setdefault(scoring_family(*pair), []).append(pair)
+    family_share = 1.0 / len(families)
 
     pools: Dict[Tuple[str, str, str], float] = {}
     for family_pairs in families.values():
         family_live = [p for p in family_pairs if p in live_pairs]
-        family_share = len(family_live) / len(live_pairs)
         family_volume = sum(pair_volumes[p] for p in family_live)
         equal_pair_share = 1.0 / len(family_live) if family_live else 0.0
         for pair in family_pairs:
@@ -537,6 +547,7 @@ def calculate_miner_rewards(self: Validator, current_time: int) -> Tuple[np.ndar
     # pair-level pool weighting and each lane's β slice, so the pools it pays sum to exactly 1.
     lane_volumes = self.state_store.get_qualified_lane_volumes(current_time - POOL_VOLUME_WINDOW_SECS, current_time)
     pools = compute_direction_pools(lane_volumes_to_directions(lane_volumes))
+    quoted = self.state_store.quoted_lanes()
 
     for (from_chain, to_chain, backing), pool in pools.items():
         trace = DirectionTrace(pool=pool)
@@ -544,6 +555,8 @@ def calculate_miner_rewards(self: Validator, current_time: int) -> Tuple[np.ndar
         qvol, trace.qualified_volume = qualified_volume_shares(
             lane_volumes.get((from_chain, to_chain, backing), {}), from_chain, to_chain
         )
+        if (from_chain, to_chain, backing) not in quoted:
+            continue  # never quoted: no crown, no ledger rows to rewrite
         intervals: Optional[List[Tuple[int, int, Dict[str, float], float]]] = None
         if storage_enabled:
             intervals = []
@@ -575,6 +588,7 @@ def calculate_miner_rewards(self: Validator, current_time: int) -> Tuple[np.ndar
             max_swap_hub=max_swap_hub,
             backing=backing,
             purse_known=direction_purse_known(backing),
+            unit_value=collateral_unit_value(self, from_chain, to_chain, backing, current_time),
         )
         total_crown_dir = sum(crown_time.values())
 
@@ -684,9 +698,9 @@ def miner_score_tuples(score_rows: List[ScoreRow], ts: int) -> List[Tuple]:
 
 
 def direction_pool_tuples(direction_traces: Dict[Tuple[str, str, str], DirectionTrace], ts: int) -> List[Tuple]:
-    """Shape the round's pools for the ``direction_pools`` ledger: one row per lane,
-    dead lanes included at pool 0 — ``(round_ts, from, to, backing, pool, qualified_volume,
-    live)``. Hub / pair emission over time is a plain sum over these.
+    """Shape the round's pools for the ``direction_pools`` ledger: one row per paid or live lane
+    — ``(round_ts, from, to, backing, pool, qualified_volume, live)``; a dead, unpaid lane is
+    omitted (the registry holds ~21k). Hub / pair emission over time is a plain sum over these.
 
     ``live`` is the PAIR's liveness — qualified volume on any of its lanes, the same test
     ``compute_direction_pools`` pays on — not ``pool > 0``: the silent-network fallback pays
@@ -706,6 +720,7 @@ def direction_pool_tuples(direction_traces: Dict[Tuple[str, str, str], Direction
             pair_volume[canonical_pair(from_chain, to_chain)] > 0,
         )
         for (from_chain, to_chain, backing), trace in direction_traces.items()
+        if trace.pool > 0 or pair_volume[canonical_pair(from_chain, to_chain)] > 0
     ]
 
 
@@ -736,11 +751,12 @@ def snapshot_current_miner_scores(
     recent_fills = recent_fill_hotkeys(self.state_store, ts)
     lane_volumes = self.state_store.get_qualified_lane_volumes(ts - POOL_VOLUME_WINDOW_SECS, ts)
     pools = compute_direction_pools(lane_volumes_to_directions(lane_volumes))
+    quoted = self.state_store.quoted_lanes()
     for (from_chain, to_chain, backing), pool in pools.items():
         trace = DirectionTrace(pool=pool)
         qvol, _ = qualified_volume_shares(lane_volumes.get((from_chain, to_chain, backing), {}), from_chain, to_chain)
-        if pool <= 0:
-            continue  # dead pair this window — nothing to pay; the trace still lists it at pool=0
+        if pool <= 0 or (from_chain, to_chain, backing) not in quoted:
+            continue  # dead pair or never-quoted lane: nothing to pay; the trace still lists it
         min_swap_hub, max_swap_hub = swap_bounds.get(backing, (0, 0))
         lane_candidates = lane_eligible_hotkeys(
             live_states, rewardable_hotkeys, from_chain, to_chain, ts, backing=backing, recent_fills=recent_fills
@@ -758,6 +774,7 @@ def snapshot_current_miner_scores(
             max_swap_hub=max_swap_hub,
             backing=backing,
             purse_known=direction_purse_known(backing),
+            unit_value=collateral_unit_value(self, from_chain, to_chain, backing, ts),
         )
         if not crown_time and not qvol:
             continue
@@ -946,6 +963,24 @@ def rewardable_by_activity(
     return out
 
 
+def collateral_unit_value(self: Validator, from_chain: str, to_chain: str, backing: str, now: int) -> Optional[float]:
+    """Backing units per smallest unit of the lane's collateral leg: 1.0 for an exact leg, else the declared
+    alpha's price, read at most once per scoring window. A failed read keeps the last good price; None = never
+    read, so executability goes unchecked."""
+    leg = collateral_leg(backing, from_chain, to_chain)
+    if leg in (None, backing):
+        return 1.0
+    read_at, value = self.alpha_prices.get(leg, (None, None))
+    if read_at is None or now - read_at >= SCORING_WINDOW_SECS:
+        whole = 10 ** get_chain_def(leg).decimals
+        try:
+            value = self.assets[leg].value_rao(whole) / whole
+        except Exception as e:
+            bt.logging.warning(f'{leg} price read failed, keeping the last price ({value}): {e}')
+        self.alpha_prices[leg] = (now, value)
+    return value
+
+
 def direction_purse_known(backing: Optional[str]) -> bool:
     """Whether the crown has this lane's funding purse to gate against.
 
@@ -956,13 +991,15 @@ def direction_purse_known(backing: Optional[str]) -> bool:
     return backing in HUB_CHAINS
 
 
-def crown_can_fund(hotkey, rate, from_chain, to_chain, min_swap_hub, max_swap_hub, collaterals):
+def crown_can_fund(
+    hotkey, rate, from_chain, to_chain, min_swap_hub, max_swap_hub, collaterals, bounded_chain=None, unit_value=1.0
+):
     """Boundary-squat gate: a miner who cannot fund their own rate's smallest hub leg
     at the contract's 1.10× reserve requirement (mirroring routing's ``swap_viable``)
     is unreservable at any size and earns no crown. Unknown collateral counts as zero
     (fail closed) — the live-state reconcile seeds a baseline for every bound active
     miner, so absent means the chain doesn't know this miner either."""
-    min_leg = min_executable_hub_leg(rate, from_chain, to_chain, min_swap_hub, max_swap_hub)
+    min_leg = min_executable_hub_leg(rate, from_chain, to_chain, min_swap_hub, max_swap_hub, bounded_chain, unit_value)
     return min_leg == 0 or collaterals.get(hotkey, 0) >= required_collateral(min_leg)
 
 
@@ -986,17 +1023,26 @@ def crown_depth_shares(
     return {hk: depth / total for hk, depth in depths.items()}
 
 
-def make_crown_predicates(from_chain, to_chain, min_swap_hub, max_swap_hub, collaterals):
+def make_crown_predicates(
+    from_chain, to_chain, min_swap_hub, max_swap_hub, collaterals, backing=None, unit_value: Optional[float] = 1.0
+):
     """Crown-eligibility predicates ``(executable_check, can_fund)`` shared by the
     scoring replay and the live snapshot, so the live crown view can never diverge
-    from the rewarded ledger. Both are the shared rate utils with this direction's
-    hub-leg bounds/collateral bound in."""
+    from the rewarded ledger. Both are the shared rate utils with the lane's backing
+    bounds applied to its collateral leg (``collateral_leg``), valued at ``unit_value``;
+    an unreadable value (None) drops the bounds (executability unchecked)."""
+    bounded_chain = collateral_leg(backing, from_chain, to_chain) if backing else None
+    if unit_value is None:
+        min_swap_hub = max_swap_hub = 0
+        unit_value = 1.0
     executable_check = partial(
         is_executable_rate,
         from_chain=from_chain,
         to_chain=to_chain,
         min_swap_hub=min_swap_hub,
         max_swap_hub=max_swap_hub,
+        bounded_chain=bounded_chain,
+        unit_value=unit_value,
     )
     can_fund = partial(
         crown_can_fund,
@@ -1004,6 +1050,8 @@ def make_crown_predicates(from_chain, to_chain, min_swap_hub, max_swap_hub, coll
         to_chain=to_chain,
         min_swap_hub=min_swap_hub,
         max_swap_hub=max_swap_hub,
+        bounded_chain=bounded_chain,
+        unit_value=unit_value,
         collaterals=collaterals,
     )
     return executable_check, can_fund
@@ -1024,6 +1072,7 @@ def replay_crown_time_window(
     rate_band: float = CROWN_RATE_BAND,
     backing: Optional[str] = None,
     purse_known: bool = True,
+    unit_value: Optional[float] = 1.0,
 ) -> Dict[str, float]:
     """Walk the merged event stream, return ``{hotkey: crown_seconds_float}``.
     Every qualified miner within ``rate_band`` of the best qualified rate holds
@@ -1045,7 +1094,8 @@ def replay_crown_time_window(
     defaults to the pair's hub leg — a spoke pair's single lane, and every pre-lane call site.
 
     ``min_swap_hub``/``max_swap_hub`` are the lane's BACKING-hub bounds (that hub's
-    smallest-units, matching the purse). Bounds at 0 disable the executability filter
+    smallest-units, matching the purse), applied to the collateral leg valued at ``unit_value``
+    (``collateral_unit_value``). Bounds at 0 disable the executability filter
     (matches the contract's "unset" sentinel); the rate-positive floor still applies.
     ``purse_known=False`` (``direction_purse_known``: no purse stream for the backing —
     spoke↔spoke only) keeps the rate gates but runs the purse-axis ones neutral:
@@ -1069,7 +1119,9 @@ def replay_crown_time_window(
     canon_from, _ = canonical_pair(from_chain, to_chain)
     lower_rate_wins = from_chain != canon_from
 
-    executable_check, can_fund = make_crown_predicates(from_chain, to_chain, min_swap_hub, max_swap_hub, collaterals)
+    executable_check, can_fund = make_crown_predicates(
+        from_chain, to_chain, min_swap_hub, max_swap_hub, collaterals, backing, unit_value
+    )
 
     crown_time: Dict[str, float] = {}
     cap_weighted_time: Dict[str, float] = {}
@@ -1202,9 +1254,15 @@ def snapshot_current_crown_holders(
         bt.logging.warning(f'swap-bounds read failed in live snapshot: {e}')
         swap_bounds = {}
     recent_fills = recent_fill_hotkeys(self.state_store, ts)
-    rows_by_direction: Dict[Tuple[str, str, str], List[Tuple[str, str, str, str, float, float, int]]] = {}
+    quoted = self.state_store.quoted_lanes()
+    # A quoted lane no quote may declare now (sol-backed sol↔snN) holds no crown: clear its rows.
+    rows_by_direction: Dict[Tuple[str, str, str], List[Tuple[str, str, str, str, float, float, int]]] = {
+        lane: [] for lane in quoted if lane[2] not in declarable_backings(lane[0], lane[1])
+    }
     for from_chain, to_chain in DIRECTION_POOLS:
         for backing in declarable_backings(from_chain, to_chain):
+            if (from_chain, to_chain, backing) not in quoted:
+                continue  # never quoted: no holder, and no rows to clear
             min_swap_hub, max_swap_hub = swap_bounds.get(backing, (0, 0))
             bounds_set = min_swap_hub > 0 or max_swap_hub > 0
             purse_known = direction_purse_known(backing)
@@ -1228,7 +1286,13 @@ def snapshot_current_crown_holders(
             # credits a holder the ledger drops. Built per lane so each
             # closure captures the right chain pair and bounds.
             executable_check, can_fund = make_crown_predicates(
-                from_chain, to_chain, min_swap_hub, max_swap_hub, collaterals
+                from_chain,
+                to_chain,
+                min_swap_hub,
+                max_swap_hub,
+                collaterals,
+                backing,
+                collateral_unit_value(self, from_chain, to_chain, backing, ts),
             )
 
             holders = crown_holders_at_instant(
@@ -1303,7 +1367,15 @@ def fill_held_crown(
     canon_from, _ = canonical_pair(from_chain, to_chain)
     lower_rate_wins = from_chain != canon_from
     rewardable_by_state = rewardable_by_activity(activity, lane_candidates, lane_serving_hubs(backing)) | {hotkey}
-    executable_check, _ = make_crown_predicates(from_chain, to_chain, min_swap_hub, max_swap_hub, collaterals)
+    executable_check, _ = make_crown_predicates(
+        from_chain,
+        to_chain,
+        min_swap_hub,
+        max_swap_hub,
+        collaterals,
+        backing,
+        collateral_unit_value(self, from_chain, to_chain, backing, at_time),
+    )
     bounds_set = min_swap_hub > 0 or max_swap_hub > 0
     need = required_collateral(int(collateral_amount))
 

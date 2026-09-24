@@ -6,7 +6,7 @@ on who is quotable.
 
 from typing import Dict, Optional, Set
 
-from allways.constants import MAX_FAILED_SWAPS
+from allways.constants import MAX_FAILED_SWAPS, declarable_backings
 from allways.solana.layouts import lock_max
 from allways.solana.pdas import BACKING_BITS
 
@@ -78,7 +78,11 @@ def direction_eligible(
     if not is_eligible(miner_state, now, hotkey=hotkey, recent_fills=recent_fills):
         return False
     if backing is not None:
-        return hub_free(miner_state, backing, now) and purse_active(hotkey, backing, recent_fills)
+        return (
+            backing in declarable_backings(from_chain, to_chain)
+            and hub_free(miner_state, backing, now)
+            and purse_active(hotkey, backing, recent_fills)
+        )
     hubs = [c for c in (from_chain, to_chain) if c in BACKING_BITS]
     if not hubs:
         return True

@@ -200,6 +200,12 @@ class ValidatorStateStore:
         )
         return {(r['hotkey'], r['from_chain'], r['to_chain'], r['collateral_chain']): r['rate'] for r in rows}
 
+    def quoted_lanes(self) -> Set[Tuple[str, str, str]]:
+        """Every ``(from_chain, to_chain, collateral_chain)`` lane any miner ever quoted. The prune keeps
+        each lane's last rate as its anchor, so a lane outside this set has never had a crown."""
+        rows = self._fetchall('SELECT DISTINCT from_chain, to_chain, collateral_chain FROM rate_events')
+        return {(r['from_chain'], r['to_chain'], r['collateral_chain']) for r in rows}
+
     def rate_lanes_touched_in_range(self, start_block: int, end_block: int) -> Set[Tuple[str, str, str, str]]:
         """Lanes with any rate event in ``(start_block, end_block]`` — the
         reconcile's per-lane quiet-window guard reads this so a stale live
@@ -411,16 +417,19 @@ class ValidatorStateStore:
         swap_key: str,
         backing: str = 'sol',
         qualified: bool = False,
+        collateral_amount: int = 0,
     ) -> None:
         """Persist one completed swap's realized legs, keyed by ``swap_key`` hex so a
         cursor-reset / RPC-prune re-ingest can't double-count volume. ``block_num`` is
         the unix ``blockTime``; the legs are stored as decimal strings (u128-safe).
-        ``qualified`` = the fill was reserved on a crown holder (scoring.fill_held_crown)."""
+        ``qualified`` = the fill was reserved on a crown holder (scoring.fill_held_crown).
+        ``collateral_amount`` = the backing's leg the fill locked (an alpha fill's TAO value)."""
         self._execute(
             """
             INSERT INTO clearing_rates
-                (block_num, hotkey, from_chain, to_chain, from_amount, to_amount, swap_key, backing, qualified)
-            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
+                (block_num, hotkey, from_chain, to_chain, from_amount, to_amount, swap_key, backing, qualified,
+                 collateral_amount)
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
             ON CONFLICT(swap_key) DO NOTHING
             """,
             (
@@ -433,27 +442,32 @@ class ValidatorStateStore:
                 swap_key,
                 backing,
                 1 if qualified else 0,
+                str(int(collateral_amount)),
             ),
         )
 
     def get_qualified_lane_volumes(
         self, start_time: int, end_time: int
-    ) -> Dict[Tuple[str, str, str], Dict[str, Tuple[int, int]]]:
-        """``{(from_chain, to_chain, backing): {hotkey: (from_amount_sum, to_amount_sum)}}`` over
-        ``(start_time, end_time]``, QUALIFIED fills only — the series both the pool weighting and
+    ) -> Dict[Tuple[str, str, str], Dict[str, Tuple[int, int, int]]]:
+        """``{(from_chain, to_chain, backing): {hotkey: (from_amount_sum, to_amount_sum, collateral_sum)}}``
+        over ``(start_time, end_time]``, QUALIFIED fills only — the series both the pool weighting and
         the β quality-volume slice read. Summed in Python (legs are TEXT, u128-safe)."""
         rows = self._fetchall(
             """
-            SELECT from_chain, to_chain, backing, hotkey, from_amount, to_amount FROM clearing_rates
-            WHERE qualified = 1 AND block_num > ? AND block_num <= ?
+            SELECT from_chain, to_chain, backing, hotkey, from_amount, to_amount, collateral_amount
+            FROM clearing_rates WHERE qualified = 1 AND block_num > ? AND block_num <= ?
             """,
             (start_time, end_time),
         )
-        volumes: Dict[Tuple[str, str, str], Dict[str, Tuple[int, int]]] = {}
+        volumes: Dict[Tuple[str, str, str], Dict[str, Tuple[int, int, int]]] = {}
         for r in rows:
             lane = volumes.setdefault((r['from_chain'], r['to_chain'], r['backing']), {})
-            from_sum, to_sum = lane.get(r['hotkey'], (0, 0))
-            lane[r['hotkey']] = (from_sum + int(r['from_amount']), to_sum + int(r['to_amount']))
+            from_sum, to_sum, collateral_sum = lane.get(r['hotkey'], (0, 0, 0))
+            lane[r['hotkey']] = (
+                from_sum + int(r['from_amount']),
+                to_sum + int(r['to_amount']),
+                collateral_sum + int(r['collateral_amount']),
+            )
         return volumes
 
     def get_recent_fill_hotkeys(self, start_time: int, end_time: int) -> Dict[str, Set[str]]:
@@ -1108,6 +1122,9 @@ class ValidatorStateStore:
                 conn.execute("ALTER TABLE clearing_rates ADD COLUMN backing TEXT NOT NULL DEFAULT 'sol'")
             if cols and 'qualified' not in cols:
                 conn.execute('ALTER TABLE clearing_rates ADD COLUMN qualified INTEGER NOT NULL DEFAULT 0')
+            # Alpha-family volume is the fill's TAO collateral. Pre-upgrade rows read 0 and age out in a day.
+            if cols and 'collateral_amount' not in cols:
+                conn.execute("ALTER TABLE clearing_rates ADD COLUMN collateral_amount TEXT NOT NULL DEFAULT '0'")
             conn.executescript(
                 """
                 CREATE TABLE IF NOT EXISTS rate_events (
@@ -1180,7 +1197,8 @@ class ValidatorStateStore:
                     to_amount   TEXT NOT NULL,
                     swap_key    TEXT,
                     backing     TEXT NOT NULL DEFAULT 'sol',
-                    qualified   INTEGER NOT NULL DEFAULT 0
+                    qualified   INTEGER NOT NULL DEFAULT 0,
+                    collateral_amount TEXT NOT NULL DEFAULT '0'
                 );
                 CREATE INDEX IF NOT EXISTS idx_clearing_rates_dir_block
                     ON clearing_rates(from_chain, to_chain, block_num);

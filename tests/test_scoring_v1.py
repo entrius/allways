@@ -11,8 +11,10 @@ import pytest
 
 from allways.classes import ActivityTransition, MinerActivity
 from allways.constants import (
+    ALPHA_FAMILY,
     DIRECTION_POOLS,
     ELIGIBILITY_FILL_WINDOW_SECS,
+    FAMILY_PAIR_COUNTS,
     LAUNCH_PAIRS,
     MAX_FAILED_SWAPS,
     MAX_SCORING_BACKFILL_SECS,
@@ -21,7 +23,10 @@ from allways.constants import (
     QUALITY_VOLUME_BETA,
     RECYCLE_UID,
     SCORING_WINDOW_BLOCKS,
+    SCORING_WINDOW_SECS,
+    TAO_TO_RAO,
     required_collateral,
+    scoring_family,
 )
 from allways.eligibility import purse_active
 from allways.solana.pdas import BACKING_BITS
@@ -33,6 +38,7 @@ from allways.validator.scoring import (
     build_direction_score_rows,
     build_eligibility,
     calculate_miner_rewards,
+    collateral_unit_value,
     compute_direction_pools,
     crown_can_fund,
     crown_depth_shares,
@@ -59,11 +65,11 @@ from allways.validator.state_store import ValidatorStateStore
 CROWN_SLICE = 1.0 - QUALITY_VOLUME_BETA
 POOL_BTC_SOL = DIRECTION_POOLS[('btc', 'sol')]
 POOL_SOL_BTC = DIRECTION_POOLS[('sol', 'btc')]
-# Leg pool when one pair carried ALL the window's qualified volume: it is the only LIVE
-# pair, so its family holds the whole miner pool and the pair takes all of it —
-# (1−α)/1 + α = 1 — split evenly across its two directions.
+# Leg pool when one pair carried ALL the window's qualified volume: it is its family's only
+# LIVE pair, so it takes the family's whole equal share — (1−α)/1 + α = 1 — split evenly
+# across its two directions.
 N_PAIRS = len(LAUNCH_PAIRS)
-POOL_BUSY_PAIR_LEG = MINER_POOL_SHARE / 2
+POOL_BUSY_PAIR_LEG = MINER_POOL_SHARE / len(FAMILY_PAIR_COUNTS) / 2
 MIN_COLLATERAL = 100_000_000  # 0.1 TAO
 
 METADATA_PATH = Path(__file__).parent.parent / 'allways' / 'metadata' / 'allways_swap_manager.json'
@@ -290,6 +296,8 @@ def make_validator(
         # Live collateral mirrors the seeded event tables so the scoring-round
         # reconcile is a no-op unless a test diverges them deliberately.
         solana_client=FakeSolanaClient(miner_counters, collaterals=collaterals, settling=settling),
+        assets={},
+        alpha_prices={},
     )
 
 
@@ -466,41 +474,47 @@ class TestGetClearingVolumes:
 
 
 class TestComputeDirectionPools:
-    """Pair-level volume weighting over LIVE pairs (≥1 qualified fill in the window)
-    within a hub family: each family's share ∝ its live pair count (hub-leg volumes
-    aren't comparable across hubs), a live pair's share within it is
-    (1−α)/live_pairs + α·family_volume_share, split evenly between its two legs, then
-    evenly across each leg's backing lanes (F4 — two on sol↔tao, one on spokes). Dead
-    pairs are present at 0.0; no volume anywhere falls back to the equal split of
-    DIRECTION_POOLS. Keys are lanes: (from, to, backing)."""
+    """Every pair belongs to one family (sol, tao, or alpha for any pair with an alpha leg);
+    each family holds an equal share of the pool and an idle family's share recycles. Inside a
+    family a live pair's share is (1−α)/live_pairs + α·family_volume_share, split evenly between
+    its two legs, then across each leg's backing lanes (F4). Volume is the hub leg for sol/tao and
+    the fill's TAO collateral for alpha. Dead pairs are present at 0.0; no volume anywhere falls
+    back to DIRECTION_POOLS. Keys are lanes: (from, to, backing)."""
 
-    def test_no_volume_falls_back_to_equal_split(self):
+    FAMILY = MINER_POOL_SHARE / len(FAMILY_PAIR_COUNTS)
+
+    @staticmethod
+    def family_total(pools, family):
+        return sum(v for (f, t, _b), v in pools.items() if scoring_family(f, t) == family)
+
+    def test_every_alpha_pair_is_in_the_alpha_family(self):
+        for pair in (('sol', 'sn7'), ('tao', 'sn7'), ('sn7', 'avax'), ('sn64', 'sn7')):
+            assert scoring_family(*pair) == ALPHA_FAMILY
+        assert scoring_family('sol', 'btc') == 'sol' and scoring_family('sol', 'tao') == 'sol'
+        assert scoring_family('tao', 'eth') == 'tao'
+        assert set(FAMILY_PAIR_COUNTS) == {'sol', 'tao', ALPHA_FAMILY}
+
+    def test_no_volume_falls_back_to_equal_family_shares(self):
         pools = compute_direction_pools({})
-        # Spoke lanes keep the exact per-direction fallback pool.
         assert pools[('btc', 'sol', 'sol')] == DIRECTION_POOLS[('btc', 'sol')]
-        assert pools[('tao', 'btc', 'tao')] == DIRECTION_POOLS[('tao', 'btc')]
         # sol↔tao's two lanes split their direction's pool — budget-neutral, not grown.
         assert pools[('sol', 'tao', 'sol')] == DIRECTION_POOLS[('sol', 'tao')] / 2
         assert pools[('sol', 'tao', 'tao')] == pools[('sol', 'tao', 'sol')]
-        assert sum(pools.values()) == pytest.approx(MINER_POOL_SHARE)
+        for family in FAMILY_PAIR_COUNTS:
+            assert self.family_total(pools, family) == pytest.approx(self.FAMILY)
 
-    def test_single_live_pair_takes_the_whole_pool(self):
-        """One qualified fill on btc↔sol and nothing else: that pair is the only live pair
-        in the registry, so it holds the whole miner pool (half per leg) and every other
-        lane — including the TAO family — is dead at 0.0."""
+    def test_single_live_pair_takes_its_whole_family_share(self):
         pools = compute_direction_pools({('btc', 'sol'): {'hk_a': (5, 100)}})
-        assert pools[('btc', 'sol', 'sol')] == pytest.approx(MINER_POOL_SHARE / 2)
+        assert pools[('btc', 'sol', 'sol')] == pytest.approx(self.FAMILY / 2)
         assert pools[('sol', 'btc', 'sol')] == pools[('btc', 'sol', 'sol')]  # quiet leg rides its pair
         dead = {lane: v for lane, v in pools.items() if lane[:2] not in (('btc', 'sol'), ('sol', 'btc'))}
         assert dead and all(v == 0.0 for v in dead.values())
         assert set(pools) == set(compute_direction_pools({}))  # dead lanes are listed, not dropped
-        assert sum(pools.values()) == pytest.approx(MINER_POOL_SHARE)
+        assert sum(pools.values()) == pytest.approx(self.FAMILY)  # the idle families' shares recycle
 
     def test_floor_is_split_among_live_pairs_only(self):
-        # BTC pair: 300 SOL (to_amount is the SOL leg of btc→sol); TAO pair:
-        # 100 SOL (from_amount is the SOL leg of sol→tao). Spoke-side legs are
-        # deliberately huge to prove they never enter the weighting. Two live pairs,
-        # both sol family → the family holds everything, floor = (1−α)/2 each.
+        # BTC pair: 300 SOL (to_amount is the SOL leg of btc→sol); TAO pair: 100 SOL (from_amount of
+        # sol→tao). Spoke-side legs are huge to prove they never enter the weighting.
         pools = compute_direction_pools(
             {
                 ('btc', 'sol'): {'hk_a': (10**15, 200), 'hk_b': (10**15, 100)},
@@ -508,64 +522,66 @@ class TestComputeDirectionPools:
             }
         )
         floor_pair = (1 - POOL_VOLUME_ALPHA) / 2
-        assert pools[('btc', 'sol', 'sol')] == pytest.approx(
-            MINER_POOL_SHARE * (floor_pair + POOL_VOLUME_ALPHA * 0.75) / 2
-        )
-        # Volume tilts the whole sol↔tao PAIR (never split by backing); each
-        # direction's tilted pool then halves across its two lanes.
-        tao_sol_direction = MINER_POOL_SHARE * (floor_pair + POOL_VOLUME_ALPHA * 0.25) / 2
+        assert pools[('btc', 'sol', 'sol')] == pytest.approx(self.FAMILY * (floor_pair + POOL_VOLUME_ALPHA * 0.75) / 2)
+        # Volume tilts the whole sol↔tao PAIR; each direction's pool then halves across its two lanes.
+        tao_sol_direction = self.FAMILY * (floor_pair + POOL_VOLUME_ALPHA * 0.25) / 2
         assert pools[('tao', 'sol', 'sol')] == pytest.approx(tao_sol_direction / 2)
         assert pools[('tao', 'sol', 'tao')] == pytest.approx(tao_sol_direction / 2)
         assert pools[('sol', 'eth', 'sol')] == 0.0  # registered, quiet → dead
-        assert sum(pools.values()) == pytest.approx(MINER_POOL_SHARE)
+        assert sum(pools.values()) == pytest.approx(self.FAMILY)
 
     def test_dust_fill_takes_a_full_floor_when_few_pairs_are_live(self):
         """The bootstrap bounty: next to one whale pair, a dust fill on a second pair still
         earns that pair (1−α)/2 of the family — the floor is what makes coverage pay."""
         pools = compute_direction_pools({('btc', 'sol'): {'hk': (1, 5_000)}, ('sol', 'eth'): {'hk': (50, 1)}})
         dust_pair = pools[('sol', 'eth', 'sol')] + pools[('eth', 'sol', 'sol')]
-        assert dust_pair == pytest.approx(
-            MINER_POOL_SHARE * ((1 - POOL_VOLUME_ALPHA) / 2 + POOL_VOLUME_ALPHA * 50 / 5_050)
-        )
-        assert dust_pair > MINER_POOL_SHARE * 0.17
+        assert dust_pair == pytest.approx(self.FAMILY * ((1 - POOL_VOLUME_ALPHA) / 2 + POOL_VOLUME_ALPHA * 50 / 5_050))
 
-    def test_families_share_by_live_pair_count(self):
-        # One live pair in each family: the families split the pool 50/50 however
-        # lopsided the (non-comparable) volumes are, and each live pair takes its
-        # whole family. Registered-but-dead pairs move nothing.
+    def test_live_families_share_equally_whatever_their_volume(self):
         pools = compute_direction_pools(
             {
                 ('btc', 'sol'): {'hk_a': (1, 10**12)},  # lamports, sol family
-                ('tao', 'eth'): {'hk_b': (5, 10**9)},  # rao (tao is the hub leg of tao↔eth), tao family
+                ('tao', 'eth'): {'hk_b': (5, 10**9)},  # rao, tao family
+                ('sol', 'sn7'): {'hk_c': (1, 1, 10)},  # TAO collateral, alpha family
             }
         )
-        sol_total = sum(v for (f, t, _b), v in pools.items() if 'sol' in (f, t))
-        tao_family_total = sum(v for (f, t, _b), v in pools.items() if 'sol' not in (f, t))
-        assert sol_total == pytest.approx(MINER_POOL_SHARE / 2)
-        assert tao_family_total == pytest.approx(MINER_POOL_SHARE / 2)
-        assert pools[('tao', 'eth', 'tao')] == pytest.approx(MINER_POOL_SHARE / 4)
+        for family in FAMILY_PAIR_COUNTS:
+            assert self.family_total(pools, family) == pytest.approx(self.FAMILY)
+        assert pools[('tao', 'eth', 'tao')] == pytest.approx(self.FAMILY / 2)
         assert pools[('tao', 'btc', 'tao')] == 0.0
         assert sum(pools.values()) == pytest.approx(MINER_POOL_SHARE)
 
-    def test_dead_family_pays_nothing(self):
-        # Only sol-family pairs live → the TAO family's fixed-by-count share is gone; its
-        # lanes are all 0 and the sol family holds the entire pool.
-        pools = compute_direction_pools({('btc', 'sol'): {'hk': (1, 10)}, ('sol', 'eth'): {'hk': (10, 1)}})
-        assert all(v == 0.0 for (f, t, _b), v in pools.items() if 'sol' not in (f, t))
-        assert sum(v for (f, t, _b), v in pools.items() if 'sol' in (f, t)) == pytest.approx(MINER_POOL_SHARE)
+    def test_alpha_pairs_cannot_move_the_sol_or_tao_pools(self):
+        core = {('btc', 'sol'): {'hk_a': (1, 500)}, ('tao', 'eth'): {'hk_b': (5, 900)}}
+        alpha = {(f'sn{n}', 'avax'): {'hk_c': (10**12, 1, 10**12)} for n in range(1, 129)}
+        before = compute_direction_pools(core)
+        after = compute_direction_pools({**core, **alpha})
+        for lane, pool in before.items():
+            if scoring_family(*lane[:2]) != ALPHA_FAMILY:
+                assert after[lane] == pool
 
-    def test_pool_conservation_holds_with_hub_hub_lanes(self):
-        # The F4 lane split is budget-neutral by construction: however volume lands
-        # (none, spoke-only, hub↔hub-heavy, mixed), lanes still sum to MINER_POOL_SHARE.
+    def test_idle_alpha_family_pays_nothing(self):
+        pools = compute_direction_pools({('btc', 'sol'): {'hk': (1, 10)}, ('tao', 'eth'): {'hk': (10, 1)}})
+        assert self.family_total(pools, ALPHA_FAMILY) == 0.0
+        assert sum(pools.values()) == pytest.approx(2 * self.FAMILY)  # the alpha third recycles
+
+    def test_alpha_volume_is_the_tao_collateral(self):
+        # sn7↔avax cleared 3x the TAO value of sn64↔avax, however many alpha units each moved.
+        pools = compute_direction_pools(
+            {('sn7', 'avax'): {'hk_a': (1, 10**15, 300)}, ('sn64', 'avax'): {'hk_b': (10**15, 1, 100)}}
+        )
+        sn7 = pools[('sn7', 'avax', 'tao')] + pools[('avax', 'sn7', 'tao')]
+        assert sn7 == pytest.approx(self.FAMILY * ((1 - POOL_VOLUME_ALPHA) / 2 + POOL_VOLUME_ALPHA * 0.75))
+
+    def test_lane_split_is_budget_neutral(self):
+        # However volume lands on sol↔tao's two lanes, a live family still pays exactly its share.
         volume_cases = [
-            {},
-            {('sol', 'tao'): {'hk': (10**12, 1)}},  # all volume on the hub↔hub pair
+            {('sol', 'tao'): {'hk': (10**12, 1)}},
             {('btc', 'sol'): {'hk': (1, 10**12)}, ('sol', 'tao'): {'hk': (5 * 10**11, 1)}},
-            {('tao', 'eth'): {'hk': (10**9, 1)}, ('tao', 'sol'): {'hk': (1, 10**10)}},
+            {('tao', 'sol'): {'hk': (1, 10**10)}},
         ]
         for volumes in volume_cases:
-            pools = compute_direction_pools(volumes)
-            assert sum(pools.values()) == pytest.approx(MINER_POOL_SHARE), volumes
+            assert sum(compute_direction_pools(volumes).values()) == pytest.approx(self.FAMILY), volumes
 
     def test_leg_direction_within_pair_is_irrelevant(self):
         # 500 SOL cleared btc→sol vs 500 SOL cleared sol→btc: same pair volume,
@@ -573,6 +589,44 @@ class TestComputeDirectionPools:
         forward = compute_direction_pools({('btc', 'sol'): {'hk': (1, 500)}})
         reverse = compute_direction_pools({('sol', 'btc'): {'hk': (500, 1)}})
         assert forward == reverse
+
+
+class TestCollateralUnitValue:
+    class Alpha:
+        def __init__(self, rao_per_alpha):
+            self.rao_per_alpha, self.reads = rao_per_alpha, 0
+
+        def value_rao(self, amount):
+            self.reads += 1
+            if self.rao_per_alpha is None:
+                raise RuntimeError('subtensor down')
+            return amount * self.rao_per_alpha // 10**9
+
+    def test_exact_leg_is_worth_one(self):
+        v = SimpleNamespace(assets={}, alpha_prices={})
+        assert collateral_unit_value(v, 'tao', 'sn7', 'tao', 0) == 1.0
+
+    def test_declared_leg_reads_its_price_once_per_window(self):
+        sn7 = self.Alpha(TAO_TO_RAO // 100)
+        v = SimpleNamespace(assets={'sn7': sn7}, alpha_prices={})
+        assert collateral_unit_value(v, 'sn7', 'avax', 'tao', 0) == pytest.approx(0.01)
+        assert collateral_unit_value(v, 'avax', 'sn7', 'tao', SCORING_WINDOW_SECS - 1) == pytest.approx(0.01)
+        assert sn7.reads == 1
+        collateral_unit_value(v, 'sn7', 'avax', 'tao', SCORING_WINDOW_SECS)
+        assert sn7.reads == 2
+
+    def test_failed_read_keeps_the_last_price(self):
+        sn7 = self.Alpha(TAO_TO_RAO // 100)
+        v = SimpleNamespace(assets={'sn7': sn7}, alpha_prices={})
+        collateral_unit_value(v, 'sn7', 'avax', 'tao', 0)
+        sn7.rao_per_alpha = None
+        assert collateral_unit_value(v, 'sn7', 'avax', 'tao', SCORING_WINDOW_SECS) == pytest.approx(0.01)
+
+    def test_unreadable_price_leaves_the_lane_unchecked(self):
+        v = SimpleNamespace(assets={'sn7': self.Alpha(None)}, alpha_prices={})
+        assert collateral_unit_value(v, 'sol', 'sn7', 'tao', 0) is None
+        executable_check, _ = make_crown_predicates('sol', 'sn7', 1, 10, {}, 'tao', None)
+        assert executable_check(1e30)
 
 
 class TestCrownHoldersHelper:
@@ -1307,6 +1361,20 @@ class TestSnapshotCurrentCrownHolders:
 
         holders = [row[3] for row in rows[('sol', 'btc', 'sol')]]
         assert holders == ['hk_funded']
+        v.state_store.close()
+
+    def test_only_quoted_lanes_are_evaluated(self, tmp_path: Path):
+        v = make_validator(tmp_path, ['hk_funded'], collaterals={'hk_funded': 500_000_000})
+        self._seed_rate(v.state_store, 'hk_funded', 326.0)
+
+        assert list(snapshot_current_crown_holders(v, v.block)) == [('sol', 'btc', 'sol')]
+        v.state_store.close()
+
+    def test_a_quoted_lane_no_longer_declarable_is_cleared(self, tmp_path: Path):
+        v = make_validator(tmp_path, ['hk_funded'], collaterals={'hk_funded': 500_000_000})
+        self._seed_rate(v.state_store, 'hk_funded', 326.0, 'sol', 'sn7')  # a sol-backed quote from before
+
+        assert snapshot_current_crown_holders(v, v.block)[('sol', 'sn7', 'sol')] == []
         v.state_store.close()
 
     def test_boundary_squat_excluded_from_live_table(self, tmp_path: Path):
@@ -2391,11 +2459,15 @@ class TestQualityVolumeSlice:
 class TestQualifiedLaneVolumes:
     def test_reader_filters_and_keys_by_lane(self, tmp_path: Path):
         store = ValidatorStateStore(db_path=tmp_path / 'state.db')
-        store.insert_clearing_rate(9_800, 'hk_a', 'btc', 'sol', 300, 600, 'q1', backing='sol', qualified=True)
+        store.insert_clearing_rate(
+            9_800, 'hk_a', 'btc', 'sol', 300, 600, 'q1', backing='sol', qualified=True, collateral_amount=600
+        )
         store.insert_clearing_rate(9_850, 'hk_a', 'btc', 'sol', 100, 200, 'u1', backing='sol', qualified=False)
-        store.insert_clearing_rate(9_900, 'hk_b', 'sol', 'tao', 50, 5, 'q2', backing='tao', qualified=True)
+        store.insert_clearing_rate(
+            9_900, 'hk_b', 'sol', 'tao', 50, 5, 'q2', backing='tao', qualified=True, collateral_amount=5
+        )
         vols = store.get_qualified_lane_volumes(9_700, 10_000)
-        assert vols == {('btc', 'sol', 'sol'): {'hk_a': (300, 600)}, ('sol', 'tao', 'tao'): {'hk_b': (50, 5)}}
+        assert vols == {('btc', 'sol', 'sol'): {'hk_a': (300, 600, 600)}, ('sol', 'tao', 'tao'): {'hk_b': (50, 5, 5)}}
         # The all-fills reporting read still sees everything.
         assert store.get_clearing_volumes(9_700, 10_000)[('btc', 'sol')]['hk_a'] == (400, 800)
         store.close()
@@ -2403,6 +2475,10 @@ class TestQualifiedLaneVolumes:
     def test_lane_volumes_collapse_to_pair_directions(self):
         lanes = {('sol', 'tao', 'sol'): {'hk_a': (10, 1)}, ('sol', 'tao', 'tao'): {'hk_a': (5, 2), 'hk_b': (1, 1)}}
         assert lane_volumes_to_directions(lanes) == {('sol', 'tao'): {'hk_a': (15, 3), 'hk_b': (1, 1)}}
+
+    def test_an_undeclarable_lane_adds_no_volume(self):
+        lanes = {('sol', 'sn7', 'sol'): {'hk_a': (10**9, 1, 10**9)}, ('sol', 'sn7', 'tao'): {'hk_b': (1, 1, 5)}}
+        assert lane_volumes_to_directions(lanes) == {('sol', 'sn7'): {'hk_b': (1, 1, 5)}}
 
     def test_shares_use_the_hub_leg(self):
         # btc→sol: the hub (sol) is the TO leg, so shares follow to_amount.
@@ -2552,7 +2628,7 @@ class TestFillHeldCrown:
         idx.ingest(completed('pk_a', b'\x01' * 32, 9_800, 9_850), attribution)
         idx.ingest(completed('pk_b', b'\x02' * 32, 9_860, 9_900), attribution)
         vols = v.state_store.get_qualified_lane_volumes(9_700, 10_000)
-        assert vols == {('btc', 'sol', 'sol'): {'hk_a': (100_000, 200_000_000)}}
+        assert vols == {('btc', 'sol', 'sol'): {'hk_a': (100_000, 200_000_000, 200_000_000)}}
         assert {'hk_a', 'hk_b'} <= set(v.state_store.get_clearing_volumes(9_700, 10_000)[('btc', 'sol')])
         v.state_store.close()
 
@@ -2877,6 +2953,18 @@ class TestNonEarnerDiagnosis:
         )
         assert reason.startswith('competitive_but_unfilled'), reason
 
+    def test_alpha_lane_is_diagnosed_on_its_tao_lane(self):
+        from allways.validator.scoring_trace import diagnose_non_earner
+
+        reason = diagnose_non_earner(
+            'hk',
+            {('sol', 'sn7'): 90.0},
+            eligible=True,
+            ever_active={'hk'},
+            direction_traces={('sol', 'sn7', 'tao'): self._trace(100.0)},
+        )
+        assert reason.startswith('outbid'), reason
+
     def test_dead_pair_never_masks_a_live_pairs_reason(self):
         """A miner quoting a dead pair AND a live pair it lost on reads the live reason;
         dead_pair is reported only when nothing else explains the zero."""
@@ -3100,23 +3188,20 @@ class TestScoreSnapshots:
         np.testing.assert_allclose(reward, expected, atol=1e-9)
         np.testing.assert_allclose(reward, rewards[0], atol=1e-6)
 
-    def test_round_flush_writes_every_lane_pool(self, tmp_path: Path):
-        """direction_pools rows: one per lane every round, dead lanes at pool 0 / live
-        False, live lanes carrying the qualified volume the β slice paid on; the
-        pools sum to the miner pool share."""
+    def test_round_flush_writes_paid_or_live_lanes_only(self, tmp_path: Path):
+        """direction_pools rows: one per paid or live lane, carrying the qualified volume the
+        β slice paid on; a dead, unpaid lane is omitted."""
         v = self._solo_with_storage(tmp_path)
         calculate_miner_rewards(v, v.block)
         rows = v.database_storage.flush_scoring_window.call_args.kwargs['direction_pool_rows']
         by_lane = {(r[1], r[2], r[3]): r for r in rows}
-        assert set(by_lane) == set(compute_direction_pools({}))  # every lane, every round
+        assert set(by_lane) == {('btc', 'sol', 'sol'), ('sol', 'btc', 'sol')}  # the live pair only
         assert all(r[0] == v.block for r in rows)
         live = by_lane[('btc', 'sol', 'sol')]
         assert live[4] == pytest.approx(POOL_BUSY_PAIR_LEG) and live[5] == 1_000_000_000 and live[6] is True
         quiet_leg = by_lane[('sol', 'btc', 'sol')]  # no fill of its own, rides its live pair
         assert quiet_leg[5] == 0 and quiet_leg[6] is True
-        dead = by_lane[('sol', 'eth', 'sol')]
-        assert dead[4] == 0.0 and dead[5] == 0 and dead[6] is False
-        assert sum(r[4] for r in rows) == pytest.approx(MINER_POOL_SHARE)
+        assert sum(r[4] for r in rows) == pytest.approx(2 * POOL_BUSY_PAIR_LEG)  # the idle families recycle
         v.state_store.close()
 
     def test_silent_network_fallback_pays_every_lane_with_no_pair_live(self):

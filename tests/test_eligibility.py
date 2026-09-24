@@ -154,6 +154,12 @@ def test_tao_share_of_hub_hub_direction_is_zeroed_mid_settle():
     assert not direction_eligible(struck, 'sol', 'tao', 1_999, backing='tao')
 
 
+def test_an_alpha_pair_is_eligible_on_its_tao_lane_only():
+    clean = _ns_hub(50, 0)
+    assert direction_eligible(clean, 'sol', 'sn7', 1_999, backing='tao')
+    assert not direction_eligible(clean, 'sol', 'sn7', 1_999, backing='sol')
+
+
 def test_the_pre_v31_scalar_settling_shape_still_gates():
     """Mixed-version tolerance: a scalar `settling_until` (pre-v3.1 decode) reads as the global
     exclusion it always was."""

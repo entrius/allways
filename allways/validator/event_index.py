@@ -163,6 +163,7 @@ class SolanaEventIndex:
             if name == 'SwapCompleted':
                 from_chain, to_chain = self._chain(rec, 'from_chain'), self._chain(rec, 'to_chain')
                 backing = self._backing(rec, 'collateral_chain')
+                collateral_amount = int(rec.fields.get('collateral_amount', 0))
                 self.state_store.insert_clearing_rate(
                     block_time,
                     hotkey,
@@ -173,8 +174,9 @@ class SolanaEventIndex:
                     bytes(rec.fields['swap_key']).hex(),
                     backing=backing,
                     qualified=self._fill_qualified(
-                        hotkey, from_chain, to_chain, backing, int(rec.fields.get('collateral_amount', 0)), block_time
+                        hotkey, from_chain, to_chain, backing, collateral_amount, block_time
                     ),
+                    collateral_amount=collateral_amount,
                 )
             return True
         if name == 'StaleClaimClosed':

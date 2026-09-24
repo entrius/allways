@@ -22,7 +22,8 @@ from allways.constants import (
     DECLARED_COLLATERAL_BAND_BPS,
     NUMERAIRE_CHAIN,
     RATE_PRECISION,
-    family,
+    collateral_leg,
+    declarable_backings,
     hub_leg,
     required_collateral,
 )
@@ -173,11 +174,12 @@ def bounds_from_config(cfg) -> BoundsByBacking:
 
 def hub_bounds(bounds: BoundsByBacking, from_chain: str, to_chain: str) -> Tuple[int, int]:
     """The pair's HUB-leg swap bounds, in the hub's own smallest unit — what the rate-executability
-    gates (``is_executable_rate`` / selection scalars) anchor on. (0, 0) = unset/permissive for a
-    pair whose anchor is not a hub (an alpha anchor has no hub bounds — see the PR3 gate). Distinct from the per-BACKING size gate: sol↔tao is SOL-anchored here even
+    gates (``is_executable_rate`` / selection scalars) anchor on. (0, 0) = permissive when the hub leg
+    backs no quote on the pair (sol↔snN, an alpha anchor): those bounds bind a declared alpha leg's TAO
+    value, which the per-BACKING size gate prices per candidate. sol↔tao is SOL-anchored here even
     when a tao-backed quote's size is gated on the TAO bounds."""
     hub = hub_leg(from_chain, to_chain)
-    return bounds.get(hub, (0, 0)) if hub else (0, 0)
+    return bounds.get(hub, (0, 0)) if hub in declarable_backings(from_chain, to_chain) else (0, 0)
 
 
 def _bounds_for(
@@ -200,20 +202,18 @@ def leg_value(
     created_at: Optional[int] = None,
 ) -> int:
     """The exact backing leg, or a declared alpha leg valued at head or ``created_at``."""
-    if backing == from_chain:
-        return from_amount
-    if backing == to_chain:
-        return to_amount
-    for leg, amount in ((from_chain, from_amount), (to_chain, to_amount)):
-        if family(leg) != backing:
-            continue
-        provider = (providers or {}).get(leg)
-        if provider is None:
-            raise ValueError(f'{leg} leg is declared: a {leg} provider is needed to price it in {backing}')
-        if created_at is None:
-            return provider.value_rao(amount)
-        return provider.value_rao(amount, block=provider.chain.block_at(int(created_at)))
-    raise ValueError(f'{from_chain}->{to_chain}: no leg is denominated in the "{backing}" backing')
+    leg = collateral_leg(backing, from_chain, to_chain)
+    if leg is None:
+        raise ValueError(f'{from_chain}->{to_chain}: no leg is denominated in the "{backing}" backing')
+    amount = from_amount if leg == from_chain else to_amount
+    if leg == backing:
+        return amount
+    provider = (providers or {}).get(leg)
+    if provider is None:
+        raise ValueError(f'{leg} leg is declared: a {leg} provider is needed to price it in {backing}')
+    if created_at is None:
+        return provider.value_rao(amount)
+    return provider.value_rao(amount, block=provider.chain.block_at(int(created_at)))
 
 
 def collateral_matches(collateral_amount: int, value: int) -> bool:
@@ -344,10 +344,12 @@ def max_intake_from_amount(
     min_swap: int,
     max_swap: int,
     bounds_by_backing: Optional[BoundsByBacking] = None,
+    providers=None,
 ) -> int:
     """Largest source amount (smallest units) this candidate can execute right now — the depth behind
     its rate. The same gates as ``viable_intakes``, solved for size instead of checked at one: the
-    collateral requirement inverted exactly, clamped by ``max_swap``, 0 when even ``min_swap`` doesn't fit."""
+    collateral requirement inverted exactly, clamped by ``max_swap``, 0 when even ``min_swap`` doesn't fit.
+    A declared alpha leg's cap is priced at head through ``providers`` (unpriceable = 0)."""
     try:
         rate = float(candidate.rate_display)
     except (TypeError, ValueError):
@@ -361,10 +363,20 @@ def max_intake_from_amount(
         cap = min(cap, hi)
     if cap <= 0 or cap < lo:
         return 0
-    if candidate.backing == from_chain:
-        return cap  # the bounded leg IS the source
-    if candidate.backing != to_chain:
+    leg = collateral_leg(candidate.backing, from_chain, to_chain)
+    if leg is None:
         return 0
+    if leg != candidate.backing:
+        whole = 10 ** get_chain_def(leg).decimals
+        try:
+            rao_per_whole = (providers or {})[leg].value_rao(whole)
+        except (KeyError, ProviderUnreachableError):
+            return 0
+        if rao_per_whole <= 0:
+            return 0
+        cap = cap * whole // rao_per_whole  # the TAO cap in the declared leg's own units
+    if leg == from_chain:
+        return cap  # the bounded leg IS the source
     canon_from, canon_to = canonical_pair(from_chain, to_chain)
     return max_from_for_to_cap(
         cap,

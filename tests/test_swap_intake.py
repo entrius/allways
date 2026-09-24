@@ -295,6 +295,15 @@ def test_max_intake_spoke_source_inverts_to_amount_exactly():
     assert at_max.collateral_amount == 1_500_000_000  # 0.075 BTC → exactly the 1.5 SOL cap
 
 
+def test_max_intake_prices_a_declared_alpha_leg():
+    # 1.1 TAO backs a 1 TAO leg; at 0.01 TAO per sn7 that is 100 sn7 of source.
+    sn7 = SimpleNamespace(value_rao=lambda amount: amount // 100)
+    cand = MinerCandidate(miner='m', rate_display='0.15', collateral=1_100_000_000, backing='tao')
+    bounds = {'tao': (SOL // 10, 10 * SOL)}
+    assert max_intake_from_amount(cand, 'sn7', 'avax', 0, 0, bounds, {'sn7': sn7}) == 100 * SOL
+    assert max_intake_from_amount(cand, 'sn7', 'avax', 0, 0, bounds) == 0  # unpriceable
+
+
 def test_max_intake_spoke_source_respects_max_swap():
     # Deep collateral, 10 SOL max_swap: max source is the amount whose leg lands exactly on max.
     max_from = max_intake_from_amount(_cand('0.5', 100 * SOL), 'btc', 'sol', MIN, MAX)

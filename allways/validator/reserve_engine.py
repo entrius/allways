@@ -739,7 +739,7 @@ def rate_quote(validator, from_chain: str, to_chain: str, from_amount: int) -> R
     )
     depth: dict = {}
     for cand in cands:
-        cap = max_intake_from_amount(cand, from_chain, to_chain, min_swap, max_swap, bounds)
+        cap = max_intake_from_amount(cand, from_chain, to_chain, min_swap, max_swap, bounds, providers)
         if cap > 0:
             depth[cand.rate_display] = max(depth.get(cand.rate_display, 0), cap)
     # Rates are canonical 'dest per 1 canonical-source': when the taker sends the canonical
@@ -752,7 +752,9 @@ def rate_quote(validator, from_chain: str, to_chain: str, from_amount: int) -> R
             'miner_hotkey': hotkey,
             'rate_display': cand.rate_display,
             'to_amount': amts.to_amount,
-            'max_from_amount': max_intake_from_amount(cand, from_chain, to_chain, min_swap, max_swap, bounds),
+            'max_from_amount': max_intake_from_amount(
+                cand, from_chain, to_chain, min_swap, max_swap, bounds, providers
+            ),
         }
         for cand, amts, hotkey in bound
     ]

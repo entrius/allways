@@ -2,7 +2,7 @@
 
 import math
 from decimal import Decimal
-from typing import TYPE_CHECKING, Tuple
+from typing import TYPE_CHECKING, Optional, Tuple
 
 from allways.chains import canonical_pair, get_chain_def
 from allways.constants import RATE_PRECISION, RATE_SIG_FIGS, hub_leg
@@ -162,12 +162,22 @@ def apply_fee_deduction(to_amount: int, fee_divisor: int) -> int:
     return to_amount - to_amount // fee_divisor
 
 
+def bound_units_per_other_unit(rate: float, from_chain: str, to_chain: str, bounded: str, unit_value: float) -> float:
+    """Bound units per smallest unit of the pair's other leg. ``rate`` is canonical (other per 1 anchor);
+    ``unit_value`` values one smallest unit of ``bounded`` in the bounds' unit (1.0 unless a declared leg)."""
+    other = to_chain if bounded == from_chain else from_chain
+    bounded_per_other = 1.0 / rate if bounded == hub_leg(from_chain, to_chain) else rate
+    return bounded_per_other * 10 ** (get_chain_def(bounded).decimals - get_chain_def(other).decimals) * unit_value
+
+
 def is_executable_rate(
     rate: float,
     from_chain: str,
     to_chain: str,
     min_swap_hub: int,
     max_swap_hub: int,
+    bounded_chain: Optional[str] = None,
+    unit_value: float = 1.0,
 ) -> bool:
     """True iff the rate is fundably routable in its declared direction.
 
@@ -183,6 +193,9 @@ def is_executable_rate(
     overshoot ``max``, so nothing routes. hub→X: the hub leg is the source and trivially fits,
     but the symmetric spoke-side check keeps the executable spectrum bounded.
 
+    ``bounded_chain`` names the leg the bounds constrain (default: the hub leg); a declared alpha leg
+    passes its price as ``unit_value`` so the bounds stay in the backing's unit.
+
     A bound at ``0`` is the contract's "unset" sentinel and disables that side; both at 0 →
     permissive. Pairs with no hub leg have no bound to enforce → permissive.
     """
@@ -190,38 +203,26 @@ def is_executable_rate(
         return False
     if min_swap_hub <= 0 and max_swap_hub <= 0:
         return True
-    hub = hub_leg(from_chain, to_chain)
-    if hub is None:
+    bounded = bounded_chain or hub_leg(from_chain, to_chain)
+    if bounded is None:
         # No hub leg → no bounded asset to enforce against.
         return True
-
-    def _has_integer_routable_source(hub_per_source: float, src_chain: str) -> bool:
-        # For a "src → hub" leg: is there a src amount that is fundable on-chain (>= the
-        # chain's min_onchain_amount) whose hub leg lands in bounds?
-        # hub_units = source_units × hub_per_source × 10**(hub_dec - src_dec).
-        src = get_chain_def(src_chain)
-        decimal_factor = 10 ** (get_chain_def(hub).decimals - src.decimals)
-        denom = hub_per_source * decimal_factor
-        if not math.isfinite(denom) or denom <= 0:
-            return False
-        # Floor at the source chain's dust/existential minimum: a rate whose only in-bounds source is
-        # below it (e.g. 1 sat) is unfundable, so unexecutable.
-        lo = max(1, min_swap_hub) / denom
-        if not math.isfinite(lo):
-            # The rate is beyond float routing math (e.g. float-max canonical) — sentinel.
-            return False
-        min_source = max(src.min_onchain_amount, math.ceil(lo))
-        if max_swap_hub <= 0:
-            return True
-        max_source = math.floor(max_swap_hub / denom)
-        return min_source <= max_source
-
-    # Callers feed canonical spoke-per-hub; the source-side check wants hub-per-spoke — invert.
-    # (The X→SOL branch used to pass the canonical rate through uninverted: the F1 orientation
-    # defect, which made any real spoke dust floor unroutable at rate² error.)
-    if to_chain == hub:
-        return _has_integer_routable_source(1.0 / rate, from_chain)
-    return _has_integer_routable_source(1.0 / rate, to_chain)
+    # Is there an amount of the other leg, fundable on-chain (>= its min_onchain_amount), whose
+    # bounded leg lands in bounds? bound_units = other_units × denom.
+    other = get_chain_def(to_chain if bounded == from_chain else from_chain)
+    denom = bound_units_per_other_unit(rate, from_chain, to_chain, bounded, unit_value)
+    if not math.isfinite(denom) or denom <= 0:
+        return False
+    # Floor at the other chain's dust/existential minimum: a rate whose only in-bounds amount is
+    # below it (e.g. 1 sat) is unfundable, so unexecutable.
+    lo = max(1, min_swap_hub) / denom
+    if not math.isfinite(lo):
+        # The rate is beyond float routing math (e.g. float-max canonical) — sentinel.
+        return False
+    min_other = max(other.min_onchain_amount, math.ceil(lo))
+    if max_swap_hub <= 0:
+        return True
+    return min_other <= math.floor(max_swap_hub / denom)
 
 
 def min_executable_hub_leg(
@@ -230,23 +231,23 @@ def min_executable_hub_leg(
     to_chain: str,
     min_swap_hub: int,
     max_swap_hub: int,
+    bounded_chain: Optional[str] = None,
+    unit_value: float = 1.0,
 ) -> int:
-    """Smallest hub leg (hub smallest-units) the rate produces among in-band fundable swaps.
+    """Smallest bounded leg (in the bounds' unit) the rate produces among in-band fundable swaps.
 
-    Shares band math with is_executable_rate; the pair's hub leg is the bounded asset
+    Shares band math with is_executable_rate; the bounded leg is the collateral leg
     (``collateral_amount``). Returns 0 when no in-band fundable swap exists (rate unexecutable)
     — caller treats as "no constraint".
     """
-    if not is_executable_rate(rate, from_chain, to_chain, min_swap_hub, max_swap_hub):
+    if not is_executable_rate(rate, from_chain, to_chain, min_swap_hub, max_swap_hub, bounded_chain, unit_value):
         return 0
-    hub = hub_leg(from_chain, to_chain)
-    if from_chain == hub:
-        return max(get_chain_def(hub).min_onchain_amount, max(0, min_swap_hub))
-    if to_chain == hub:
+    bounded = bounded_chain or hub_leg(from_chain, to_chain)
+    if from_chain == bounded:
+        return max(math.ceil(get_chain_def(bounded).min_onchain_amount * unit_value), max(0, min_swap_hub))
+    if to_chain == bounded:
         src = get_chain_def(from_chain)
-        decimal_factor = 10 ** (get_chain_def(hub).decimals - src.decimals)
-        # Same orientation as the gate: canonical spoke-per-hub in, hub-per-spoke for the math.
-        denom = (1.0 / rate) * decimal_factor
+        denom = bound_units_per_other_unit(rate, from_chain, to_chain, bounded, unit_value)
         if not math.isfinite(denom) or denom <= 0:
             return 0
         min_source = max(src.min_onchain_amount, math.ceil(max(1, min_swap_hub) / denom))

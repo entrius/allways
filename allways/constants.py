@@ -1,4 +1,6 @@
 import re
+from collections import Counter
+from itertools import combinations
 
 from allways.classes import MinerActivity
 
@@ -107,9 +109,14 @@ HUB_CHAINS = ('sol', 'tao')
 NUMERAIRE_CHAIN = 'sol'
 
 
+def is_alpha(chain: str) -> bool:
+    """True iff ``chain`` is a subnet alpha (sn<N>)."""
+    return re.fullmatch(r'sn[0-9]+', chain) is not None
+
+
 def family(chain: str) -> str:
     """The backing family a chain settles in (twin of ``backing.rs::family``): an sn<N> alpha settles in TAO."""
-    return 'tao' if re.fullmatch(r'sn[0-9]+', chain) else chain
+    return 'tao' if is_alpha(chain) else chain
 
 
 def is_hub(chain: str) -> bool:
@@ -127,10 +134,31 @@ def hub_leg(from_chain: str, to_chain: str) -> str | None:
     return family_legs[0] if family_legs else None
 
 
+def collateral_leg(backing: str, from_chain: str, to_chain: str) -> str | None:
+    """The leg a lane's collateral binds (twin of ``backing.rs::collateral_leg_bind``): the backing's own leg,
+    else the first leg in its family (a declared alpha leg). None if the backing is outside the pair."""
+    if backing in (from_chain, to_chain):
+        return backing
+    return next((leg for leg in (from_chain, to_chain) if family(leg) == backing), None)
+
+
+ALPHA_FAMILY = 'alpha'
+
+
+def scoring_family(from_chain: str, to_chain: str) -> str | None:
+    """The emission family a pair is paid from: ``alpha`` for any pair with an alpha leg, else its hub leg."""
+    if is_alpha(from_chain) or is_alpha(to_chain):
+        return ALPHA_FAMILY
+    return hub_leg(from_chain, to_chain)
+
+
 def declarable_backings(from_chain: str, to_chain: str) -> list[str]:
-    """The pair's hub-capable legs = the backings a quote may declare = its scoring lanes (F4):
-    the hubs among the legs' families — two on sol↔tao, one on a spoke or alpha pair, none if invalid."""
-    return [hub for hub in HUB_CHAINS if hub in {family(from_chain), family(to_chain)}]
+    """The backings a quote may declare = the pair's scoring lanes (F4): its hub legs — two on sol↔tao,
+    one on a spoke pair, none if invalid. Every alpha pair is TAO-backed only, so each alpha fill's
+    collateral is its TAO value."""
+    if is_alpha(from_chain) or is_alpha(to_chain):
+        return ['tao']
+    return [hub for hub in HUB_CHAINS if hub in (from_chain, to_chain)]
 
 
 SUBNET_LIMIT = 128  # SubtensorModule::SubnetLimit — no netuid above this can exist
@@ -162,24 +190,28 @@ LAUNCH_SPOKES = (
 # it should not quote one — not a list we curate here and re-curate on every registration.
 LAUNCH_ALPHAS: tuple[str, ...] = tuple(f'sn{n}' for n in ALPHA_NETUIDS)
 # Every launch pair in canonical order: each hub against every spoke and alpha (sol↔tao lands once,
-# under SOL, because sol never appears in LAUNCH_SPOKES). Alpha↔spoke pairs are gated on the
-# emissions redesign and deliberately absent.
-LAUNCH_PAIRS: tuple[tuple[str, str], ...] = tuple(
-    (hub, spoke) for hub in HUB_CHAINS for spoke in LAUNCH_SPOKES if spoke != hub
-) + tuple((hub, alpha) for hub in HUB_CHAINS for alpha in LAUNCH_ALPHAS)
+# under SOL, because sol never appears in LAUNCH_SPOKES), then each alpha against every spoke and
+# the other alphas.
+LAUNCH_PAIRS: tuple[tuple[str, str], ...] = (
+    tuple((hub, spoke) for hub in HUB_CHAINS for spoke in LAUNCH_SPOKES if spoke != hub)
+    + tuple((hub, alpha) for hub in HUB_CHAINS for alpha in LAUNCH_ALPHAS)
+    + tuple((alpha, spoke) for alpha in LAUNCH_ALPHAS for spoke in LAUNCH_SPOKES if not is_hub(spoke))
+    + tuple(combinations(sorted(LAUNCH_ALPHAS), 2))
+)
 # Fixed burn: pools sum to MINER_POOL_SHARE instead of 1.0, so at least
 # BURN_RATE of every round recycles to RECYCLE_UID before any shortfall.
 BURN_RATE = 0.0
 MINER_POOL_SHARE = 1.0 - BURN_RATE
-# Direction registry and the equal-split fallback: one entry per hub↔spoke direction
-# (both ways). The per-round pool values are volume-weighted at pair level over LIVE pairs
-# (scoring.compute_direction_pools); these constants are what a silent network falls back to.
+FAMILY_PAIR_COUNTS: Counter = Counter(scoring_family(*pair) for pair in LAUNCH_PAIRS)
+# Direction registry and the silent-network fallback: one entry per launch direction (both ways),
+# each family an equal share split evenly over its directions. The per-round pool values are
+# volume-weighted at pair level over LIVE pairs (scoring.compute_direction_pools).
 DIRECTION_POOLS: dict[tuple[str, str], float] = {
-    pair: MINER_POOL_SHARE / (2 * len(LAUNCH_PAIRS))
-    for hub, spoke in LAUNCH_PAIRS
-    for pair in ((hub, spoke), (spoke, hub))
+    direction: MINER_POOL_SHARE / len(FAMILY_PAIR_COUNTS) / FAMILY_PAIR_COUNTS[scoring_family(a, b)] / 2
+    for a, b in LAUNCH_PAIRS
+    for direction in ((a, b), (b, a))
 }
-# Volume-weighted pools: each pair's emission share follows the QUALIFIED hub-leg notional it
+# Volume-weighted pools: each pair's emission share follows the QUALIFIED family notional it
 # cleared over the trailing window (fills reserved on a crown-holding miner — clearing_rates
 # .qualified), blended with an equal split over the family's LIVE pairs (≥1 qualified fill in
 # the window) so a small live pair never starves and a busy one is capped at α + (1−α)/live.
@@ -189,7 +221,7 @@ DIRECTION_POOLS: dict[tuple[str, str], float] = {
 POOL_VOLUME_WINDOW_SECS = 24 * 3600  # flat trailing window the pool volumes sum over
 POOL_VOLUME_ALPHA = 0.66  # blend dial: 0 = frozen equal split, 1 = pure volume share
 # Quality-volume slice: each lane pool pays (1−β) on crown time and β on qualified volume share
-# (a miner's qualified hub-leg notional over the lane's, same trailing window). A fill qualifies
+# (a miner's qualified family notional over the lane's, same trailing window). A fill qualifies
 # iff the miner held the lane's crown at reservation, judged at the fill's own size. A lane with
 # no qualified volume recycles its β slice — standing on a dead pair earns (1−β) of it.
 QUALITY_VOLUME_BETA = 0.25

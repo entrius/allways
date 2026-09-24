@@ -13,6 +13,7 @@ import numpy as np
 from allways.chains import canonical_pair, get_chain_def
 from allways.constants import (
     RECYCLE_UID,
+    declarable_backings,
     hub_leg,
 )
 from allways.utils.rate import min_executable_hub_leg
@@ -208,9 +209,10 @@ def diagnose_non_earner(
     outbid_parts: List[str] = []
     dead_parts: List[str] = []
     for (from_c, to_c), own in latest_rates.items():
-        # latest_rates carries no backing, so diagnose against the pair's hub-leg
-        # lane (its pricing anchor); the plain pair key keeps direct callers working.
-        trace = direction_traces.get((from_c, to_c, hub_leg(from_c, to_c))) or direction_traces.get((from_c, to_c))
+        # latest_rates carries no backing, so diagnose against the pair's first declarable
+        # lane; the plain pair key keeps direct callers working.
+        lane = (from_c, to_c, (declarable_backings(from_c, to_c) or [None])[0])
+        trace = direction_traces.get(lane) or direction_traces.get((from_c, to_c))
         if trace is not None and trace.pool <= 0:
             # Most of the registry is dead at any time — a live pair's real reason outranks it.
             dead_parts.append(f'{from_c}→{to_c}')
