@@ -4,6 +4,8 @@ collateral_amount must always be the SOL leg; to_amount must match calculate_to_
 the miner + validator. Concrete rates chosen so the arithmetic is hand-checkable.
 """
 
+from types import SimpleNamespace
+
 import pytest
 
 from allways.cli.swap_commands.helpers import FINITE_DECIMAL
@@ -233,6 +235,16 @@ def test_unviable_reason_sol_source_stays_exact():
     cands = [MinerCandidate(miner='m', rate_display='1.2', collateral=2 * SOL)]
     reason = unviable_reason(cands, 'sol', 'tao', SOL // 20, SOL // 10, SOL)
     assert reason == 'below min swap (0.1000 SOL)'
+
+
+def test_unviable_reason_declared_backing_bound_stays_native():
+    # sn7→sol with TAO behind the sn7 leg: the pair's rate is sn7 per SOL, so it cannot convert a
+    # TAO bound into the source — the bound reads in TAO, never a mis-scaled ≈ figure.
+    cands = [MinerCandidate(miner='m', rate_display='5', collateral=2 * SOL, backing='tao')]
+    providers = {'sn7': SimpleNamespace(value_rao=lambda amount, block=None: amount // 10)}
+    bounds = {'sol': (0, 0), 'tao': (SOL // 10, SOL)}
+    reason = unviable_reason(cands, 'sn7', 'sol', SOL // 2, 0, 0, bounds, providers)
+    assert reason == 'below min swap (0.1000 TAO)'
 
 
 def test_unviable_reason_no_direction():
