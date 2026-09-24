@@ -615,6 +615,13 @@ class TestCollateralUnitValue:
         collateral_unit_value(v, 'sn7', 'avax', 'tao', SCORING_WINDOW_SECS)
         assert sn7.reads == 2
 
+    def test_failed_read_keeps_the_last_price(self):
+        sn7 = self.Alpha(TAO_TO_RAO // 100)
+        v = SimpleNamespace(assets={'sn7': sn7}, alpha_prices={})
+        collateral_unit_value(v, 'sn7', 'avax', 'tao', 0)
+        sn7.rao_per_alpha = None
+        assert collateral_unit_value(v, 'sn7', 'avax', 'tao', SCORING_WINDOW_SECS) == pytest.approx(0.01)
+
     def test_unreadable_price_leaves_the_lane_unchecked(self):
         v = SimpleNamespace(assets={'sn7': self.Alpha(None)}, alpha_prices={})
         assert collateral_unit_value(v, 'sol', 'sn7', 'tao', 0) is None
@@ -2945,6 +2952,18 @@ class TestNonEarnerDiagnosis:
             swap_bounds={'sol': (100_000_000, 500_000_000)},
         )
         assert reason.startswith('competitive_but_unfilled'), reason
+
+    def test_alpha_lane_is_diagnosed_on_its_tao_lane(self):
+        from allways.validator.scoring_trace import diagnose_non_earner
+
+        reason = diagnose_non_earner(
+            'hk',
+            {('sol', 'sn7'): 90.0},
+            eligible=True,
+            ever_active={'hk'},
+            direction_traces={('sol', 'sn7', 'tao'): self._trace(100.0)},
+        )
+        assert reason.startswith('outbid'), reason
 
     def test_dead_pair_never_masks_a_live_pairs_reason(self):
         """A miner quoting a dead pair AND a live pair it lost on reads the live reason;

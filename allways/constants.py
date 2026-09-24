@@ -211,7 +211,7 @@ DIRECTION_POOLS: dict[tuple[str, str], float] = {
     for a, b in LAUNCH_PAIRS
     for direction in ((a, b), (b, a))
 }
-# Volume-weighted pools: each pair's emission share follows the QUALIFIED hub-leg notional it
+# Volume-weighted pools: each pair's emission share follows the QUALIFIED family notional it
 # cleared over the trailing window (fills reserved on a crown-holding miner — clearing_rates
 # .qualified), blended with an equal split over the family's LIVE pairs (≥1 qualified fill in
 # the window) so a small live pair never starves and a busy one is capped at α + (1−α)/live.
@@ -221,7 +221,7 @@ DIRECTION_POOLS: dict[tuple[str, str], float] = {
 POOL_VOLUME_WINDOW_SECS = 24 * 3600  # flat trailing window the pool volumes sum over
 POOL_VOLUME_ALPHA = 0.66  # blend dial: 0 = frozen equal split, 1 = pure volume share
 # Quality-volume slice: each lane pool pays (1−β) on crown time and β on qualified volume share
-# (a miner's qualified hub-leg notional over the lane's, same trailing window). A fill qualifies
+# (a miner's qualified family notional over the lane's, same trailing window). A fill qualifies
 # iff the miner held the lane's crown at reservation, judged at the fill's own size. A lane with
 # no qualified volume recycles its β slice — standing on a dead pair earns (1−β) of it.
 QUALITY_VOLUME_BETA = 0.25

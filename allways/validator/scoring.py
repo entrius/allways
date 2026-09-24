@@ -66,7 +66,7 @@ if TYPE_CHECKING:
 class DirectionTrace:
     pool: float = 0.0
     crown_time: Dict[str, float] = field(default_factory=dict)
-    qualified_volume: int = 0  # lane's qualified hub-leg notional over the pool window
+    qualified_volume: int = 0  # lane's qualified family notional over the pool window (family_notional)
     cap_weighted_time: Dict[str, float] = field(default_factory=dict)
     unfilled_time: int = 0
     best_rate: float = 0.0
@@ -965,7 +965,8 @@ def rewardable_by_activity(
 
 def collateral_unit_value(self: Validator, from_chain: str, to_chain: str, backing: str, now: int) -> Optional[float]:
     """Backing units per smallest unit of the lane's collateral leg: 1.0 for an exact leg, else the declared
-    alpha's price, read at most once per scoring window. None = unreadable, so executability goes unchecked."""
+    alpha's price, read at most once per scoring window. A failed read keeps the last good price; None = never
+    read, so executability goes unchecked."""
     leg = collateral_leg(backing, from_chain, to_chain)
     if leg in (None, backing):
         return 1.0
@@ -975,8 +976,7 @@ def collateral_unit_value(self: Validator, from_chain: str, to_chain: str, backi
         try:
             value = self.assets[leg].value_rao(whole) / whole
         except Exception as e:
-            bt.logging.warning(f'{leg} price read failed, its lanes skip the executability check: {e}')
-            value = None
+            bt.logging.warning(f'{leg} price read failed, keeping the last price ({value}): {e}')
         self.alpha_prices[leg] = (now, value)
     return value
 
@@ -1030,7 +1030,7 @@ def make_crown_predicates(
     scoring replay and the live snapshot, so the live crown view can never diverge
     from the rewarded ledger. Both are the shared rate utils with the lane's backing
     bounds applied to its collateral leg (``collateral_leg``), valued at ``unit_value``;
-    an unreadable value (None) leaves both permissive."""
+    an unreadable value (None) drops the bounds (executability unchecked)."""
     bounded_chain = collateral_leg(backing, from_chain, to_chain) if backing else None
     if unit_value is None:
         min_swap_hub = max_swap_hub = 0
