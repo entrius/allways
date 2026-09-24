@@ -1,4 +1,5 @@
 import re
+from collections import Counter
 from itertools import combinations
 
 from allways.classes import MinerActivity
@@ -133,6 +134,16 @@ def hub_leg(from_chain: str, to_chain: str) -> str | None:
     return family_legs[0] if family_legs else None
 
 
+ALPHA_FAMILY = 'alpha'
+
+
+def scoring_family(from_chain: str, to_chain: str) -> str | None:
+    """The emission family a pair is paid from: ``alpha`` for any pair with an alpha leg, else its hub leg."""
+    if is_alpha(from_chain) or is_alpha(to_chain):
+        return ALPHA_FAMILY
+    return hub_leg(from_chain, to_chain)
+
+
 def declarable_backings(from_chain: str, to_chain: str) -> list[str]:
     """The backings a quote may declare = the pair's scoring lanes (F4): its hub legs — two on sol↔tao,
     one on a spoke pair, none if invalid. Every alpha pair is TAO-backed only, so each alpha fill's
@@ -172,7 +183,7 @@ LAUNCH_SPOKES = (
 LAUNCH_ALPHAS: tuple[str, ...] = tuple(f'sn{n}' for n in ALPHA_NETUIDS)
 # Every launch pair in canonical order: each hub against every spoke and alpha (sol↔tao lands once,
 # under SOL, because sol never appears in LAUNCH_SPOKES), then each alpha against every spoke and
-# the other alphas — each alpha anchors its own scoring family.
+# the other alphas.
 LAUNCH_PAIRS: tuple[tuple[str, str], ...] = (
     tuple((hub, spoke) for hub in HUB_CHAINS for spoke in LAUNCH_SPOKES if spoke != hub)
     + tuple((hub, alpha) for hub in HUB_CHAINS for alpha in LAUNCH_ALPHAS)
@@ -183,13 +194,14 @@ LAUNCH_PAIRS: tuple[tuple[str, str], ...] = (
 # BURN_RATE of every round recycles to RECYCLE_UID before any shortfall.
 BURN_RATE = 0.0
 MINER_POOL_SHARE = 1.0 - BURN_RATE
-# Direction registry and the equal-split fallback: one entry per hub↔spoke direction
-# (both ways). The per-round pool values are volume-weighted at pair level over LIVE pairs
-# (scoring.compute_direction_pools); these constants are what a silent network falls back to.
+FAMILY_PAIR_COUNTS: Counter = Counter(scoring_family(*pair) for pair in LAUNCH_PAIRS)
+# Direction registry and the silent-network fallback: one entry per launch direction (both ways),
+# each family an equal share split evenly over its directions. The per-round pool values are
+# volume-weighted at pair level over LIVE pairs (scoring.compute_direction_pools).
 DIRECTION_POOLS: dict[tuple[str, str], float] = {
-    pair: MINER_POOL_SHARE / (2 * len(LAUNCH_PAIRS))
-    for hub, spoke in LAUNCH_PAIRS
-    for pair in ((hub, spoke), (spoke, hub))
+    direction: MINER_POOL_SHARE / len(FAMILY_PAIR_COUNTS) / FAMILY_PAIR_COUNTS[scoring_family(a, b)] / 2
+    for a, b in LAUNCH_PAIRS
+    for direction in ((a, b), (b, a))
 }
 # Volume-weighted pools: each pair's emission share follows the QUALIFIED hub-leg notional it
 # cleared over the trailing window (fills reserved on a crown-holding miner — clearing_rates

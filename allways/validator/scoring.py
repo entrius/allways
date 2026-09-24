@@ -25,6 +25,7 @@ from allways.chains import canonical_pair
 from allways.classes import ActivityTransition, MinerActivity, next_activity
 from allways.cli.swap_commands.swap_intake import bounds_from_config
 from allways.constants import (
+    ALPHA_FAMILY,
     CAPACITY_CURVE_EXPONENT,
     CLEARING_RETENTION_SECS,
     CROWN_RATE_BAND,
@@ -46,6 +47,7 @@ from allways.constants import (
     declarable_backings,
     hub_leg,
     required_collateral,
+    scoring_family,
 )
 from allways.eligibility import RecentFills, direction_eligible, is_eligible
 from allways.solana.pdas import BACKING_BITS
@@ -383,13 +385,19 @@ def lane_volumes_to_directions(
     return out
 
 
+def family_notional(from_chain: str, to_chain: str, sums: Tuple[int, ...]) -> int:
+    """A direction's volume in its family's one unit: the TAO collateral on an alpha pair, else the hub leg."""
+    if scoring_family(from_chain, to_chain) == ALPHA_FAMILY:
+        return sums[2]
+    return sums[0] if from_chain == hub_leg(from_chain, to_chain) else sums[1]
+
+
 def qualified_volume_shares(
-    lane_volume: Dict[str, Tuple[int, int]], from_chain: str, to_chain: str
+    lane_volume: Dict[str, Tuple[int, ...]], from_chain: str, to_chain: str
 ) -> Tuple[Dict[str, float], int]:
-    """``({hotkey: share}, total)`` of one lane's qualified hub-leg notional — the
+    """``({hotkey: share}, total)`` of one lane's qualified family notional — the
     β slice's per-miner split. Empty when nothing qualified cleared on the lane."""
-    leg = 0 if from_chain == hub_leg(from_chain, to_chain) else 1
-    notional = {hk: sums[leg] for hk, sums in lane_volume.items() if sums[leg] > 0}
+    notional = {hk: n for hk, sums in lane_volume.items() if (n := family_notional(from_chain, to_chain, sums)) > 0}
     total = sum(notional.values())
     if total <= 0:
         return {}, 0
@@ -397,29 +405,28 @@ def qualified_volume_shares(
 
 
 def compute_direction_pools(
-    clearing_volumes: Dict[Tuple[str, str], Dict[str, Tuple[int, int]]],
+    clearing_volumes: Dict[Tuple[str, str], Dict[str, Tuple[int, ...]]],
 ) -> Dict[Tuple[str, str, str], float]:
     """Volume-weighted pools from a trailing window of QUALIFIED swaps
-    (``get_clearing_volumes`` shape), keyed by lane ``(from, to, backing)``.
-    A pair is LIVE iff it cleared qualified volume in the window; only live
-    pairs are paid. Each live pair earns ``(1−α)/live_pairs_in_family + α × its
-    share of the family's hub-leg notional``, split evenly between its two
-    directions — weighting at pair level means one leg can't be inflated
-    without inflating the whole pair — then evenly again across each
-    direction's backing lanes (F4, budget-neutral: sol↔tao's pair pool splits
-    across its two lanes, spokes carry one). A dead pair's lanes are present at
-    0.0. No volume anywhere → the equal split over the whole registry (the
-    day-one / silent-network fallback). Pools sum to ``MINER_POOL_SHARE``,
-    not 1.0 — the burn lives here.
+    (``get_qualified_lane_volumes`` shape, collapsed to directions), keyed by lane
+    ``(from, to, backing)``.
 
-    Volumes are the pair's HUB-leg notional, so they are only comparable
-    within one hub's family (lamports vs rao — converting across would smuggle
-    a price oracle in). Each hub family therefore holds a share of the pool
-    proportional to its LIVE pair count — oracle-free, and a registered-but-
-    unfilled pair moves nothing — and the α-blend runs within it. So the floor
-    scales with activity, not registry size: adding dead pairs changes nobody's
-    pool, and keeping a pair funded costs one qualified fill per window. Volume
-    is never split by backing — same non-comparability argument."""
+    Every pair belongs to one family (``scoring_family``: sol, tao, or alpha for any
+    pair with an alpha leg), and every family holds an equal share of the pool —
+    so alpha pairs, however many, can never move the SOL or TAO pools. A family
+    with no live pair pays nothing and its share recycles.
+
+    A pair is LIVE iff it cleared qualified volume in the window; only live pairs
+    are paid. Each live pair earns ``(1−α)/live_pairs_in_family + α × its share of
+    the family's notional``, split evenly between its two directions — weighting at
+    pair level means one leg can't be inflated without inflating the whole pair —
+    then evenly across each direction's backing lanes (F4). No volume anywhere →
+    ``DIRECTION_POOLS``, the same equal family shares split evenly (the silent-network
+    fallback). Pools sum to at most ``MINER_POOL_SHARE``.
+
+    Notional is one unit per family (``family_notional``): the hub leg for SOL and
+    TAO, the fill's TAO collateral for alpha. Units never mix across families, so
+    no price oracle is needed."""
     pair_directions: Dict[Tuple[str, str], List[Tuple[str, str]]] = {}
     for from_chain, to_chain in DIRECTION_POOLS:
         pair_directions.setdefault(canonical_pair(from_chain, to_chain), []).append((from_chain, to_chain))
@@ -428,10 +435,10 @@ def compute_direction_pools(
     for pair, directions in pair_directions.items():
         volume = 0
         for from_chain, to_chain in directions:
-            # Hub-and-spoke: every direction has its hub on exactly one leg, so the
-            # hub side is the notional comparable across the family's pairs.
-            leg = 0 if from_chain == hub_leg(from_chain, to_chain) else 1
-            volume += sum(sums[leg] for sums in clearing_volumes.get((from_chain, to_chain), {}).values())
+            volume += sum(
+                family_notional(from_chain, to_chain, sums)
+                for sums in clearing_volumes.get((from_chain, to_chain), {}).values()
+            )
         pair_volumes[pair] = volume
 
     live_pairs = {pair for pair, volume in pair_volumes.items() if volume > 0}
@@ -444,12 +451,12 @@ def compute_direction_pools(
 
     families: Dict[str, List[Tuple[str, str]]] = {}
     for pair in pair_directions:
-        families.setdefault(hub_leg(*pair) or pair[0], []).append(pair)
+        families.setdefault(scoring_family(*pair), []).append(pair)
+    family_share = 1.0 / len(families)
 
     pools: Dict[Tuple[str, str, str], float] = {}
     for family_pairs in families.values():
         family_live = [p for p in family_pairs if p in live_pairs]
-        family_share = len(family_live) / len(live_pairs)
         family_volume = sum(pair_volumes[p] for p in family_live)
         equal_pair_share = 1.0 / len(family_live) if family_live else 0.0
         for pair in family_pairs:
