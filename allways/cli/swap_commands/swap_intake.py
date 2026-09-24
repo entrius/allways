@@ -17,8 +17,8 @@ from typing import Dict, List, Optional, Tuple
 from allways.assets.asset import ProviderUnreachableError
 from allways.chains import canonical_pair, get_chain_def
 from allways.constants import (
-    ALPHA_COVER_TOLERANCE_BPS,
     COLLATERAL_REQUIREMENT_BPS,
+    DECLARED_COLLATERAL_BAND_BPS,
     NUMERAIRE_CHAIN,
     RATE_PRECISION,
     family,
@@ -199,11 +199,34 @@ def leg_value(backing: str, from_chain: str, from_amount: int, to_chain: str, to
     raise ValueError(f'{from_chain}->{to_chain}: no leg is denominated in the "{backing}" backing')
 
 
-def covers_leg(collateral_amount: int, cover: int) -> bool:
-    """Whether a declared collateral covers its alpha leg at the current spot ``cover``, within
-    ``ALPHA_COVER_TOLERANCE_BPS`` — the one comparison the validator's attest gate and the taker's
-    pre-send screen share, so they can never disagree about a seat."""
-    return int(collateral_amount) * 10_000 >= int(cover) * (10_000 - ALPHA_COVER_TOLERANCE_BPS)
+def pinned_leg_value(
+    backing: str,
+    from_chain: str,
+    from_amount: int,
+    to_chain: str,
+    to_amount: int,
+    created_at: int,
+    providers=None,
+) -> int:
+    """The exact backing leg, or a declared alpha leg valued at the reservation's fill block."""
+    if backing == from_chain:
+        return from_amount
+    if backing == to_chain:
+        return to_amount
+    for leg, amount in ((from_chain, from_amount), (to_chain, to_amount)):
+        if family(leg) != backing:
+            continue
+        provider = (providers or {}).get(leg)
+        if provider is None:
+            raise ValueError(f'{leg} leg is declared: a {leg} provider is needed to price it in {backing}')
+        block = provider.chain.block_at(int(created_at))
+        return provider.value_rao(amount, block=block)
+    raise ValueError(f'{from_chain}->{to_chain}: no leg is denominated in the "{backing}" backing')
+
+
+def collateral_matches(collateral_amount: int, value: int) -> bool:
+    """Whether collateral is within the two-sided declared-leg band."""
+    return abs(int(collateral_amount) - int(value)) * 10_000 <= int(value) * DECLARED_COLLATERAL_BAND_BPS
 
 
 def compute_intake_amounts(

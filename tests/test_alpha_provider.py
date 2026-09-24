@@ -209,6 +209,15 @@ def test_value_rao_floors_and_raises_on_failure():
     with pytest.raises(ProviderUnreachableError):
         Alpha(CHAIN_SN7, SimpleNamespace(get_subnet_price=boom)).value_rao(1)
 
+    calls = []
+
+    def historical(netuid, block=None):
+        calls.append((netuid, block))
+        return SimpleNamespace(rao=2 * 10**9)
+
+    assert Alpha(CHAIN_SN7, SimpleNamespace(get_subnet_price=historical)).value_rao(3 * 10**9, block=42) == 6 * 10**9
+    assert calls == [(NETUID, 42)]
+
 
 # ─── delivery gates ─────────────────────────────────────────────────────────
 

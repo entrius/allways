@@ -3,10 +3,13 @@ per-instant read interface over them, on the unix-``blockTime`` axis, attributin
 bound hotkey at write time."""
 
 from pathlib import Path
+from types import SimpleNamespace
 
 from allways.classes import ActivityTransition, MinerActivity
 from allways.constants import RATE_PRECISION
 from allways.solana.events import EventRecord
+from allways.validator import forward as forward_mod
+from allways.validator import state_store as state_store_mod
 from allways.validator.event_index import SolanaEventIndex
 from allways.validator.scoring import replay_crown_time_window
 from allways.validator.state_store import ValidatorStateStore
@@ -33,6 +36,55 @@ def rec(name: str, *, miner: str = 'pk_a', block_time, slot: int = 0, **fields) 
 
 def make_store(tmp_path: Path) -> ValidatorStateStore:
     return ValidatorStateStore(db_path=tmp_path / 'state.db')
+
+
+def test_fill_ingest_pins_declared_collateral_from_reservation_created_at(tmp_path: Path, monkeypatch):
+    store = make_store(tmp_path)
+    price_calls = []
+    provider = SimpleNamespace(
+        chain=SimpleNamespace(block_at=lambda created_at: price_calls.append(('block', created_at)) or 77),
+        value_rao=lambda amount, block=None: price_calls.append(('value', amount, block)) or 10_000,
+    )
+    filled = rec(
+        'ReservationFilled',
+        miner='pk_a',
+        block_time=9_999,
+        from_chain='sol',
+        to_chain='sn7',
+        collateral_chain='tao',
+        collateral_amount=10_100,
+        from_amount=1_000,
+        to_amount=5_000,
+        reserved_until=10_500,
+    )
+    client = SimpleNamespace(get_reservation=lambda miner, backing: SimpleNamespace(created_at=1_234))
+    validator = SimpleNamespace(
+        state_store=store,
+        event_ingest=SimpleNamespace(poll=lambda cursor: ([filled], 'sig1')),
+        bond_relay=None,
+        solana_client=client,
+        assets={'sn7': provider},
+        event_index=SimpleNamespace(ingest=lambda records, attribution: len(records)),
+    )
+    monkeypatch.setattr(forward_mod, 'build_attribution', lambda client: {})
+
+    forward_mod.ingest_solana_events(validator)
+
+    assert store.collateral_verdict('pk_a', 'tao', 1_234) is True
+    assert price_calls == [('block', 1_234), ('value', 5_000, 77)]
+
+
+def test_collateral_verdicts_prune_after_one_day(tmp_path: Path, monkeypatch):
+    now = 200_000
+    store = make_store(tmp_path)
+    store.record_collateral_verdict('old', 'tao', now - 86401, True)
+    store.record_collateral_verdict('live', 'tao', now - 86400, False)
+    monkeypatch.setattr(state_store_mod.time, 'time', lambda: now)
+
+    store.prune_events_older_than(0)
+
+    assert store.collateral_verdict('old', 'tao', now - 86401) is None
+    assert store.collateral_verdict('live', 'tao', now - 86400) is False
 
 
 def make_index(store: ValidatorStateStore, ttl: int = RESERVATION_TTL) -> SolanaEventIndex:

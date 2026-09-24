@@ -88,6 +88,20 @@ def test_subtensor_get_block_time_none_on_error():
     assert p.get_block_time(1) is None
 
 
+def test_subtensor_block_at_returns_last_block_not_after_timestamp():
+    timestamps = [100, 112, 124, 137, 149, 161]
+    p = Tao.__new__(Tao)
+    p.get_current_block_height = lambda: len(timestamps) - 1
+    p.get_block_time = lambda block: timestamps[block]
+
+    assert p.block_at(136) == 2
+    assert p.block_at(137) == 3
+
+    p.get_block_time = lambda block: None
+    with pytest.raises(ProviderUnreachableError):
+        p.block_at(137)
+
+
 # ─── TAO deposit scanner (find_recent_outgoing) ─────────────────────────────
 # Substrate has no address index, so the scanner follows the head incrementally.
 

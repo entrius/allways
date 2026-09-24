@@ -22,6 +22,7 @@ from allways.validator.scoring import (
     snapshot_current_crown_holders,
     snapshot_current_miner_scores,
 )
+from allways.validator.solana_swap_loop import collateral_verdict_for
 from allways.validator.weights_vote import maybe_vote_weights
 
 if TYPE_CHECKING:
@@ -52,7 +53,7 @@ async def forward(self: Validator) -> None:
         bt.logging.info(f'forward step #{self.step}: resolved {len(resolved)} reservation pool(s)')
     if finalized:
         bt.logging.info(f'forward step #{self.step}: finalized {len(finalized)} routed seat(s)')
-    decisions = await asyncio.to_thread(self.solana_swap_loop.run_once, now)
+    decisions = await asyncio.to_thread(self.solana_swap_loop.run_once, now, self.state_store)
     bt.logging.info(
         f'forward step #{self.step} @ block {self.block}: solana swap loop processed {len(decisions)} live swap(s)'
     )
@@ -138,6 +139,33 @@ def ingest_solana_events(self: Validator) -> None:
     relay_ok = True
     if records:
         attribution = build_attribution(self.solana_client)
+        for record in records:
+            if record.name != 'ReservationFilled':
+                continue
+            fields = record.fields
+            backing = str(fields.get('collateral_chain', '') or '')
+            from_chain, to_chain = str(fields.get('from_chain', '')), str(fields.get('to_chain', ''))
+            if not backing or backing in (from_chain, to_chain):
+                continue
+            miner = fields.get('miner')
+            try:
+                reservation = self.solana_client.get_reservation(miner, backing)
+                if reservation is None:
+                    raise ValueError('reservation unavailable')
+                collateral_verdict_for(
+                    self.state_store,
+                    miner,
+                    backing,
+                    from_chain,
+                    int(fields['from_amount']),
+                    to_chain,
+                    int(fields['to_amount']),
+                    int(fields['collateral_amount']),
+                    int(reservation.created_at),
+                    self.assets,
+                )
+            except Exception as e:
+                bt.logging.warning(f'forward: could not pin declared collateral for {miner}: {e}')
         written = self.event_index.ingest(records, attribution)
         bt.logging.info(f'forward: ingested {written}/{len(records)} solana event(s)')
         # The relay reads the same stream separately: it keys by Solana pubkey and must keep
