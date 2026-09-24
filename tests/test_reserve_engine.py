@@ -502,7 +502,7 @@ def _status_validator(tmp_path, client):
     validator, store = _stage_validator(tmp_path)
     validator.solana_client = client
     validator.solana_swap_loop = SimpleNamespace(
-        providers={'btc': _gate_asset(lambda addr, amt: True)}, fee_divisor=100
+        providers={'btc': _gate_asset(lambda addr, amt: True)}, fee_divisor=100, reject_reasons={}
     )
     return validator, store
 
@@ -597,6 +597,21 @@ def test_exact_backing_leg_carries_no_collateral_verdict(tmp_path):
     validator, store = _status_validator(tmp_path, StatusClient(reservation=exact))
     store.record_collateral_verdict(str(MINER_PK), 'tao', 1_200, 10**9, False)
     assert 'collateral_ok' not in swap_status(validator, HOTKEY).detail
+    store.close()
+
+
+def test_claimed_swap_surfaces_the_loops_collateral_reject_reason(tmp_path):
+    from allways.validator.reserve_engine import swap_status
+    from allways.validator.solana_swap_loop import COLLATERAL_REJECT_REASON
+
+    key = b'\x16' * 32
+    swap = _live_swap('PendingAttestation')
+    validator, store = _status_validator(tmp_path, StatusClient(swap=swap))
+    assert 'reject_reason' not in swap_status(validator, HOTKEY, key.hex()).detail  # loop not there yet
+    validator.solana_swap_loop.reject_reasons[key.hex()] = COLLATERAL_REJECT_REASON
+    assert swap_status(validator, HOTKEY, key.hex()).detail['reject_reason'] == COLLATERAL_REJECT_REASON
+    swap.status = type('Active', (), {})()
+    assert 'reject_reason' not in swap_status(validator, HOTKEY, key.hex()).detail
     store.close()
 
 

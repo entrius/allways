@@ -909,7 +909,7 @@ def swap_status(
         detail['to_tx_hash'] = swap.to_tx_hash
     _attach_leg_confs(validator, swap_key, detail)
     stage = _swap_stage(validator, swap, swap_key)
-    _add_reject_reason(validator, swap, stage, detail)
+    _add_reject_reason(validator, swap, swap_key, stage, detail)
     return SwapStatus(stage, reservation.reserved_until, str(reservation.user), swap_key.hex(), detail)
 
 
@@ -966,17 +966,19 @@ def _swap_status_by_key(validator, swap_key_hex: str) -> SwapStatus:
         'from_tx_hash': swap.from_tx_hash,
         'to_tx_hash': swap.to_tx_hash,
     }
-    _add_reject_reason(validator, swap, stage, detail)
+    _add_reject_reason(validator, swap, swap_key, stage, detail)
     _attach_leg_confs(validator, swap_key, detail)
     return SwapStatus(stage, 0, str(swap.user), swap_key_hex, detail)
 
 
-def _add_reject_reason(validator, swap, stage: str, detail: dict) -> None:
-    """While a live claim awaits attestation, surface why the loop refuses it (absent when it doesn't)."""
+def _add_reject_reason(validator, swap, swap_key: bytes, stage: str, detail: dict) -> None:
+    """While a live claim awaits attestation, surface why the loop refuses it (absent when it doesn't):
+    the offline gates recomputed here, else what the loop published when it walked the swap (the
+    declared-collateral verdict needs the fill block, which only the loop prices)."""
     if swap is None or stage != 'claimed':
         return
     loop = validator.solana_swap_loop
-    reason = attest_reject_reason(loop.providers, swap, loop.fee_divisor)
+    reason = attest_reject_reason(loop.providers, swap, loop.fee_divisor) or loop.reject_reasons.get(swap_key.hex())
     if reason is not None:
         detail['reject_reason'] = reason
 

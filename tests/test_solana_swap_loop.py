@@ -12,6 +12,7 @@ from allways.constants import CANCEL_REASON_INVALID_DEST
 from allways.solana.client import benign_marker, swap_key_from_tx_hash
 from allways.validator.solana_swap_loop import (
     _BENIGN_RESOLVE_MARKERS,
+    COLLATERAL_REJECT_REASON,
     SolanaSwapLoop,
     SwapAction,
     SwapDecision,
@@ -318,9 +319,9 @@ def test_pending_attestation_invalid_dest_rejects_once_without_a_vote():
     action = loop.decide(swap, now=1500)
     assert action.decision == SwapDecision.REJECT
     assert action.reason == 'dest address invalid — refusing to attest'
-    assert len(loop.reject_warned) == 1
+    assert len(loop.reject_reasons) == 1
     loop.decide(swap, now=1500)
-    assert len(loop.reject_warned) == 1
+    assert len(loop.reject_reasons) == 1
     loop.run_once(now=1500)
     assert client.calls == []
 
@@ -438,6 +439,7 @@ def test_pending_attestation_saved_fail_rejects_without_repricing(tmp_path):
     assert action.decision == SwapDecision.REJECT
     assert providers['sn7'].price_calls == []
     assert providers['sol'].calls == []
+    assert loop.reject_reasons == {swap.swap_key.hex(): COLLATERAL_REJECT_REASON}  # published for the seam
 
 
 def test_pending_attestation_ignores_saved_verdict_for_different_collateral(tmp_path):

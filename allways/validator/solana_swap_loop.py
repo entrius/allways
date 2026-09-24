@@ -13,7 +13,7 @@ validator verifies the dest leg delivered `apply_fee_deduction(to_amount, FEE_DI
 import time
 from collections import OrderedDict
 from enum import Enum
-from typing import Any, Dict, List, NamedTuple, Optional, Set, Tuple
+from typing import Any, Dict, List, NamedTuple, Optional, Tuple
 
 import bittensor as bt
 from solders.pubkey import Pubkey
@@ -50,6 +50,9 @@ class SwapAction(NamedTuple):
     reason: Optional[str] = None
     reason_code: Optional[int] = None  # CANCEL_REASON_* discriminant carried by a REFUSE (cancel_swap)
 
+
+# The declared-leg verdict the loop refuses on; the seam serves it verbatim as `reject_reason`.
+COLLATERAL_REJECT_REASON = 'collateral does not match the alpha leg at fill block'
 
 # Published confirmation progress is capped so a long-lived validator cannot grow an entry per
 # swap it has ever decided; oldest-touched falls out first.
@@ -190,7 +193,9 @@ class SolanaSwapLoop:
         # (the Swap PDA closes at the verdict), and the moment to refuse an initiate.
         self.relay = relay
         self.state_store = state_store
-        self.reject_warned: Set[str] = set()  # dedupe reject warnings, one per swap key
+        # Why each refused claim can never attest, keyed by swap key hex — served by the seam's
+        # /status like `leg_confs`, and the warn-once dedupe.
+        self.reject_reasons: Dict[str, str] = {}
         # Confirmation progress per live swap leg, for the seam to SERVE — never to recompute.
         # The loop verifies both legs every pass anyway (to decide attest/extend/timeout), so
         # publishing what it already read is free. A seam that recomputed instead would spend one
@@ -417,11 +422,11 @@ class SolanaSwapLoop:
         return SwapAction(SwapDecision.TIMEOUT, reason=f'{why} + overdue — dest unverifiable, slashing')
 
     def _reject_logged(self, swap: Any, reason: str) -> None:
-        """Warn once per swap key why the claim will never attest (greppable)."""
+        """Warn once per swap key why the claim will never attest (greppable), and publish it for the seam."""
         key = _swap_key_hex(swap.swap_key)
-        if key in self.reject_warned:
+        if key in self.reject_reasons:
             return
-        self.reject_warned.add(key)
+        self.reject_reasons[key] = reason
         bt.logging.warning(f'{self._label(swap)}: REJECT — {reason} [swap_key {key}]')
         # Event name is load-bearing: the alw-utils E2E suite waits on 'd1_reject'.
         dev_signal.emit('d1_reject', swap_key=key, reason=reason)
@@ -468,7 +473,8 @@ class SolanaSwapLoop:
             except (ProviderUnreachableError, ValueError) as e:
                 return SwapAction(SwapDecision.SKIP, reason=f'alpha leg unpriceable at fill block: {e}')
             if not ok:
-                return SwapAction(SwapDecision.REJECT, reason='collateral does not match the alpha leg at fill block')
+                self._reject_logged(swap, COLLATERAL_REJECT_REASON)
+                return SwapAction(SwapDecision.REJECT, reason=COLLATERAL_REJECT_REASON)
         # Source deposit must exist, confirm, be sent BY the reserved user, AND be fresh vs the
         # Reservation before we'd attest — sender pin matches the relay's confirm_deposit check.
         s_status, info = self._fetch_leg(
