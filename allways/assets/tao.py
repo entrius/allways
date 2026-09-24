@@ -374,6 +374,45 @@ class Tao(Asset, Chain):
             bt.logging.debug(f'{LOG_SUB} block_time fetch failed for block {block_num}: {e}')
             return None
 
+    def block_at(self, unix_ts: int) -> int:
+        """Last block whose timestamp is at or before ``unix_ts``."""
+        head = self.get_current_block_height()
+        if head is None:
+            raise ProviderUnreachableError('TAO head unavailable')
+
+        def block_time(block_num: int) -> int:
+            timestamp = self.get_block_time(block_num)
+            if timestamp is None:
+                raise ProviderUnreachableError(f'TAO block time unavailable for {block_num}')
+            return timestamp
+
+        head_time = block_time(head)
+        if head_time <= unix_ts:
+            return head
+
+        estimate = max(0, head - max(1, (head_time - int(unix_ts)) // 12))
+        if block_time(estimate) <= unix_ts:
+            low, high = estimate, head
+        else:
+            high = estimate
+            step = max(1, head - estimate)
+            while high > 0:
+                low = max(0, high - step)
+                if block_time(low) <= unix_ts:
+                    break
+                high = low
+                step *= 2
+            else:
+                raise ProviderUnreachableError(f'no TAO block at or before {unix_ts}')
+
+        while low + 1 < high:
+            middle = (low + high) // 2
+            if block_time(middle) <= unix_ts:
+                low = middle
+            else:
+                high = middle
+        return low
+
     def settled_transfer(self, block_num: int, ext_idx: int, transfer: Transfer) -> Optional[Tuple[str, int]]:
         """Balances.Transfer settlement of a decoded transfer call: (sender, credited_rao) or None."""
         return self.settled_credit(block_num, ext_idx, transfer[1])

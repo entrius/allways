@@ -11,6 +11,8 @@ import time
 import types
 from unittest.mock import MagicMock, patch
 
+import pytest
+
 from allways.cli.swap_commands.helpers import live_unclaimed
 from allways.cli.swap_commands.swap import (
     _SEND_MARGIN_SECS,
@@ -18,6 +20,7 @@ from allways.cli.swap_commands.swap import (
     _deadline_lines,
     _poll_drawn,
     _poll_reservation,
+    _refuse_uncovered,
     _self_crank_resolve,
 )
 from allways.cli.swap_commands.swap_intake import MinerCandidate
@@ -161,6 +164,48 @@ def test_reservation_with_seconds_left_still_refuses_the_send():
     assert result.exit_code != 0
     assert 'too short' in result.output
     assert 'Do NOT send funds' in result.output
+
+
+def _declared_reservation(collateral_amount):
+    return types.SimpleNamespace(
+        collateral_chain='tao',
+        collateral_amount=collateral_amount,
+        from_amount=10**9,
+        to_amount=5 * 10**9,
+        created_at=1_700_000_000,
+    )
+
+
+def _declared_provider(value):
+    return types.SimpleNamespace(
+        chain=types.SimpleNamespace(block_at=lambda created_at: 123),
+        value_rao=lambda amount, block=None: value,
+    )
+
+
+def test_refuse_uncovered_allows_a_pinned_match():
+    with patch(
+        'allways.cli.swap_commands.swap.declared_leg_providers', return_value={'sn7': _declared_provider(10_000)}
+    ):
+        assert _refuse_uncovered(object(), _declared_reservation(10_100), 'sol', 'sn7') is None
+
+
+def test_refuse_uncovered_exits_on_a_pinned_mismatch(capsys):
+    with (
+        patch(
+            'allways.cli.swap_commands.swap.declared_leg_providers',
+            return_value={'sn7': _declared_provider(10_000)},
+        ),
+        pytest.raises(SystemExit),
+    ):
+        _refuse_uncovered(object(), _declared_reservation(10_101), 'sol', 'sn7')
+    assert 'Do NOT send funds' in capsys.readouterr().out
+
+
+def test_refuse_uncovered_warns_and_continues_when_fill_block_is_unreadable(capsys):
+    with patch('allways.cli.swap_commands.swap.declared_leg_providers', return_value={'sn7': None}):
+        assert _refuse_uncovered(object(), _declared_reservation(10_000), 'sol', 'sn7') is None
+    assert 'validator will enforce it' in capsys.readouterr().out
 
 
 # ── benign crank-race handling: a lost resolve_pool must not abort `swap now` ───────────────────────
