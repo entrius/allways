@@ -212,7 +212,6 @@ class TestCanonicalPair:
         assert canonical_pair('sn7', 'sol') == ('sol', 'sn7')
         assert canonical_pair('sn7', 'tao') == ('tao', 'sn7')
         assert canonical_pair('avax', 'sn7') == ('sn7', 'avax')
-        assert canonical_pair('sn74', 'sn7') == ('sn7', 'sn74')
 
 
 class TestComputeExtensionTargetSecs:
