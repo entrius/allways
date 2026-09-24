@@ -65,3 +65,14 @@ def test_override_bypasses_estimation(monkeypatch):
 
     monkeypatch.setattr(p, 'btc_api_get', forbidden)
     assert p.estimate_fee_rate(override=7) == 7
+
+
+def test_select_utxos_sizes_outputs_from_their_scripts(monkeypatch):
+    from embit.script import address_to_scriptpubkey
+
+    p = _provider(monkeypatch)
+    change = address_to_scriptpubkey('bc1qw508d6qejxtdg4y5r3zarvary0c5xw7kv8f3t4')
+    taproot = address_to_scriptpubkey('bc1p5d7rjq7g6rdk2yhzks9smlaqtedr4dekq08ge8ztwac72sfr9rusxg3297')
+    utxos = [{'value': 100_000}]
+    _, _, fee = p.select_utxos(utxos, 10_000, True, [taproot, change], fee_rate_override=1)
+    assert fee == 11 + 68 + 43 + 31  # Taproot dest is 43 vB, not the P2WPKH 31

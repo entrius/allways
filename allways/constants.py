@@ -21,7 +21,8 @@ VALIDATOR_POLL_INTERVAL_SECONDS = 12
 STALE_BLOCK_POLL_THRESHOLD = 30
 # Seconds without a completed forward step before the supervisor declares the
 # loop dead/hung and exits non-zero for the process manager to restart.
-FORWARD_STALL_THRESHOLD_SECONDS = 600
+# Above the slowest healthy step (~150s reconcile) and, with restart, under the 600s swap windows.
+FORWARD_STALL_THRESHOLD_SECONDS = 300
 
 # ─── Unit Conversions ────────────────────────────────────
 TAO_TO_RAO = 1_000_000_000
