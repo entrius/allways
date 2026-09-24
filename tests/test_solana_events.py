@@ -246,10 +246,15 @@ def test_every_contract_event_is_registered():
 
 
 class FakeRpc:
-    def __init__(self, pages):
+    def __init__(self, pages, transactions=None):
         # pages: list of batches as the RPC would return them (newest-first within a call)
         self._pages = pages
+        self.transactions = transactions or {}
         self.calls = []
+
+    def get_transaction(self, signature, commitment='confirmed'):
+        # What the listing omitted, the transaction may still carry.
+        return self.transactions.get(signature)
 
     def get_signatures_for_address(self, program_id, before=None, until=None, limit=1000):
         self.calls.append({'before': before, 'until': until})
@@ -260,9 +265,9 @@ class FakeRpc:
 
 
 class FakeClient:
-    def __init__(self, pages, logs_by_sig):
+    def __init__(self, pages, logs_by_sig, transactions=None):
         self.program_id = 'PROG'
-        self.rpc = FakeRpc(pages)
+        self.rpc = FakeRpc(pages, transactions)
         self._logs = logs_by_sig
 
     def get_event_logs(self, sig):
@@ -339,6 +344,10 @@ class PagingRpc:
     def __init__(self, sigs):
         self.sigs = sigs  # newest-first
 
+    def get_transaction(self, signature, commitment='confirmed'):
+        # What the listing omitted, the transaction may still carry.
+        return self.transactions.get(signature)
+
     def get_signatures_for_address(self, program_id, before=None, until=None, limit=1000):
         start = 0
         if before is not None:
@@ -388,6 +397,10 @@ class FlakyPagingRpc(PagingRpc):
         super().__init__(sigs)
         self._fail_before = fail_before
 
+    def get_transaction(self, signature, commitment='confirmed'):
+        # What the listing omitted, the transaction may still carry.
+        return self.transactions.get(signature)
+
     def get_signatures_for_address(self, program_id, before=None, until=None, limit=1000):
         if self._fail_before is not None and before == self._fail_before:
             self._fail_before = None  # blip once, then recover
@@ -416,16 +429,63 @@ def test_pagination_rolls_back_a_partial_page_on_a_mid_pagination_rpc_failure():
     assert cursor == 's5'
 
 
-def test_poll_abandons_ancient_unstamped_entry():
+def test_poll_abandons_an_entry_nothing_can_stamp():
     miner = Keypair().pubkey()
     ev = _encode('MinerActivated', {'miner': bytes(miner), 'at': 1})
-    # sigOld is unstamped and > UNSTAMPED_GIVE_UP_SLOTS behind the tip: this RPC
-    # will never stamp it — the cursor moves past (its events are written off).
+    # sigOld is unstamped past UNSTAMPED_GIVE_UP_SLOTS and the tx has no blockTime either:
+    # nothing can stamp it, so the cursor moves past (its events are written off).
+    pages = [
+        {'signature': 'sigTip', 'slot': 500, 'blockTime': 1_700_000_500, 'err': None},
+        {'signature': 'sigOld', 'slot': 100, 'blockTime': None, 'err': None},
+    ]
+    client = FakeClient(pages, {'sigTip': [ev], 'sigOld': [ev]}, {'sigOld': {'blockTime': None}})
+    records, cursor = SolanaEventIngest(client).poll(until_sig=None)
+    assert [r.signature for r in records] == ['sigTip']
+    assert cursor == 'sigTip'
+
+
+def test_an_entry_the_listing_left_unstamped_is_stamped_from_its_transaction():
+    """A listing without a blockTime is not a chain without one: the events are ingested, not written off."""
+    miner = Keypair().pubkey()
+    ev = _encode('MinerActivated', {'miner': bytes(miner), 'at': 1})
+    pages = [
+        {'signature': 'sigTip', 'slot': 500, 'blockTime': 1_700_000_500, 'err': None},
+        {'signature': 'sigOld', 'slot': 100, 'blockTime': None, 'err': None},
+    ]
+    client = FakeClient(pages, {'sigTip': [ev], 'sigOld': [ev]}, {'sigOld': {'blockTime': 1_700_000_100}})
+
+    records, cursor = SolanaEventIngest(client).poll(until_sig=None)
+
+    assert [r.signature for r in records] == ['sigOld', 'sigTip']
+    assert [r.block_time for r in records] == [1_700_000_100, 1_700_000_500]
+    assert cursor == 'sigTip'
+
+
+def test_a_fresh_unstamped_tip_is_not_read_off_its_transaction():
+    """The tip still holds the cursor: re-reading it once stamped costs nothing, an RPC call per pass does."""
+    miner = Keypair().pubkey()
+    ev = _encode('MinerActivated', {'miner': bytes(miner), 'at': 1})
+    pages = [
+        {'signature': 'sigB', 'slot': 20, 'blockTime': None, 'err': None},
+        {'signature': 'sigA', 'slot': 10, 'blockTime': 1_700_000_010, 'err': None},
+    ]
+    client = FakeClient(pages, {'sigA': [ev], 'sigB': [ev]}, {'sigB': {'blockTime': 1_700_000_020}})
+
+    records, cursor = SolanaEventIngest(client).poll(until_sig=None)
+
+    assert [r.signature for r in records] == ['sigA'] and cursor == 'sigA'
+
+
+def test_an_unreadable_transaction_leaves_the_entry_abandoned_not_crashing(caplog):
+    miner = Keypair().pubkey()
+    ev = _encode('MinerActivated', {'miner': bytes(miner), 'at': 1})
     pages = [
         {'signature': 'sigTip', 'slot': 500, 'blockTime': 1_700_000_500, 'err': None},
         {'signature': 'sigOld', 'slot': 100, 'blockTime': None, 'err': None},
     ]
     client = FakeClient(pages, {'sigTip': [ev], 'sigOld': [ev]})
+    client.rpc.get_transaction = lambda *a, **k: (_ for _ in ()).throw(RuntimeError('rpc down'))
+
     records, cursor = SolanaEventIngest(client).poll(until_sig=None)
-    assert [r.signature for r in records] == ['sigTip']
-    assert cursor == 'sigTip'
+
+    assert [r.signature for r in records] == ['sigTip'] and cursor == 'sigTip'

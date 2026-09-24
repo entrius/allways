@@ -6,6 +6,7 @@ validator replays these to reconstruct per-instant miner state (collateral, acti
 crown — replacing the old substrate event_watcher. Only the crown-relevant events are decoded here.
 """
 
+import logging
 from dataclasses import dataclass
 from typing import Any, List, Optional, Tuple
 
@@ -20,6 +21,8 @@ from allways.solana.layouts import EVENT_DISCRIMINATORS, EVENT_LAYOUTS, EVENT_PU
 _BY_DISC = {disc: name for name, disc in EVENT_DISCRIMINATORS.items()}
 
 PROGRAM_DATA_PREFIX = 'Program data: '
+
+logger = logging.getLogger(__name__)
 
 # Slot age at which poll() stops holding the cursor for an unstamped tx (~2 min): past this the
 # RPC is never going to backfill its blockTime, and holding would wedge ingest forever.
@@ -123,8 +126,11 @@ class SolanaEventIngest:
         """Fetch + decode all events newer than until_sig. Returns (records oldest-first, new_cursor_sig).
         The cursor advances only through stamped entries and holds at the first not-yet-stamped
         (blockTime-less) tip tx, so its events are re-read once stamped instead of skipped forever.
-        An unstamped tx older than UNSTAMPED_GIVE_UP_SLOTS is abandoned (this RPC won't stamp it;
-        holding would wedge the cursor) — the live-state reconcile backstops the loss."""
+        An unstamped tx older than UNSTAMPED_GIVE_UP_SLOTS has its blockTime read off the transaction
+        itself before anything is written off: a listing that omits one is not the same as a chain that
+        has none, and the events of a closed account cannot be recovered once the cursor is past them.
+        Only an entry the transaction cannot stamp either is abandoned (holding would wedge the cursor),
+        and that is logged rather than silent."""
         entries = self._fetch_new_signatures(until_sig)
         newest_slot = entries[-1]['slot'] if entries else 0
         records: List[EventRecord] = []
@@ -133,7 +139,27 @@ class SolanaEventIngest:
             unstamped = entry.get('blockTime') is None and entry.get('err') is None
             if unstamped and newest_slot - entry['slot'] < UNSTAMPED_GIVE_UP_SLOTS:
                 break
+            if unstamped:
+                entry['blockTime'] = self._stamp_from_tx(entry['signature'])
+                unstamped = entry['blockTime'] is None
+                if unstamped:
+                    logger.warning(
+                        'Abandoning unstamped signature=%s slot=%s — neither the listing nor the '
+                        'transaction carries a blockTime, so its events are never ingested',
+                        entry['signature'],
+                        entry['slot'],
+                    )
             if not unstamped:
                 records.extend(self._decode_signature(entry))
             new_cursor = entry['signature']
         return records, new_cursor
+
+    def _stamp_from_tx(self, signature: str) -> Optional[int]:
+        """blockTime read straight off the transaction, for an entry the signature listing left unstamped;
+        None when the RPC has none there either, or cannot be reached for it."""
+        try:
+            tx = self.client.rpc.get_transaction(signature)
+        except Exception as error:  # noqa: BLE001 - an unreadable tx is just an entry we cannot stamp yet
+            logger.warning('Stamp read failed signature=%s: %s', signature, error)
+            return None
+        return (tx or {}).get('blockTime')
