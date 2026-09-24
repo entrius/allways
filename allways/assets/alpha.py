@@ -83,10 +83,10 @@ class Alpha(Asset):
     def clear_cache(self) -> None:
         self.chain.clear_cache()
 
-    def value_rao(self, amount: int) -> int:
-        """Spot value in rao of ``amount`` alpha base units at the pool's current price, floored."""
+    def value_rao(self, amount: int, block: Optional[int] = None) -> int:
+        """Value in rao of ``amount`` alpha base units at ``block`` (or head), floored."""
         try:
-            price = self.subtensor.get_subnet_price(self.netuid)
+            price = self.subtensor.get_subnet_price(self.netuid, block=block)
             return int(amount) * int(price.rao) // 10**self.chain_def.decimals
         except Exception as e:
             raise ProviderUnreachableError(f'{self.chain_def.id} price unavailable: {e}') from e

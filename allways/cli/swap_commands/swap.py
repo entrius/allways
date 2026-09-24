@@ -45,6 +45,7 @@ from allways.cli.swap_commands.quote import GUARANTEE
 from allways.cli.swap_commands.swap_intake import (
     bounds_from_config,
     candidate_miners,
+    collateral_matches,
     compute_intake_amounts,
     hub_bounds,
     leg_value,
@@ -676,20 +677,32 @@ def _deadline_lines(reserved_until: int, want_send: bool, now: Optional[int] = N
 
 
 def _refuse_uncovered(client, resv, from_chain, to_chain, subtensor=None) -> None:
-    """Never send into a seat whose collateral does not cover a declared alpha leg at spot — that collateral is the refund."""
+    """Refuse a declared alpha leg whose collateral misses its fill-block value."""
     backing = str(getattr(resv, 'collateral_chain', '') or '')
     providers = declared_leg_providers(client, backing, from_chain, to_chain, subtensor)
     if not providers:
         return
     (leg,) = providers
     try:
-        cover = leg_value(backing, from_chain, int(resv.from_amount), to_chain, int(resv.to_amount), providers)
+        value = leg_value(
+            backing,
+            from_chain,
+            int(resv.from_amount),
+            to_chain,
+            int(resv.to_amount),
+            providers,
+            created_at=int(resv.created_at),
+        )
     except (ValueError, ProviderUnreachableError) as e:
-        fail(f'  Cannot price your {leg.upper()} leg ({e}). Do NOT send funds; re-run when the price is readable.')
-    if int(resv.collateral_amount) < cover:
+        console.print(
+            f'[yellow]  Could not verify your {leg.upper()} collateral at the fill block ({e}); '
+            'the validator will enforce it.[/yellow]'
+        )
+        return
+    if not collateral_matches(int(resv.collateral_amount), value):
         fail(
-            f'  The seat pins {int(resv.collateral_amount)} rao of collateral, under your {leg.upper()} leg at '
-            f'spot ({cover} rao). Do NOT send funds; re-run for a fresh reservation.'
+            f'  The seat pins {int(resv.collateral_amount)} rao of collateral, outside the {leg.upper()} leg '
+            f'fill-block value ({value} rao). Do NOT send funds; re-run for a fresh reservation.'
         )
 
 
