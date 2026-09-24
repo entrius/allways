@@ -69,3 +69,43 @@ def test_alpha_price_requires_tao_address():
     result = CliRunner().invoke(numeraire.quotes_command, ['--sol-address', 'SOLADDR', '--sn7-price', '2', '--dry-run'])
     assert result.exit_code != 0
     assert '--tao-address required with --sn7-price' in result.output
+
+
+def test_alpha_anchor_posts_the_alpha_against_every_priced_spoke():
+    client = MagicMock()
+    client.keypair.pubkey.return_value = 'miner-pk'
+    client.get_quote.return_value = None
+    with (
+        patch.object(numeraire, 'get_cli_context', return_value=({}, MagicMock(), None, None)),
+        patch.object(numeraire, 'get_solana_cli_context', return_value=({}, client)),
+        patch.object(numeraire, 'resolve_quote_backing', return_value='tao'),
+        patch.object(numeraire, 'write_rate_posted_flag'),
+    ):
+        result = CliRunner().invoke(
+            numeraire.quotes_command,
+            ['--hub', 'sn7', '--tao-address', 'TAOADDR', '--avax-price', '0.15', '--avax-address', 'AVAXADDR']
+            + ['--btc-price', '1e-6', '--btc-address', 'BTCADDR', '--yes'],
+        )
+    assert result.exit_code == 0, result.output
+    posted = {
+        (c.args[0], c.args[1], c.args[2], c.args[3], c.kwargs['backing']) for c in client.set_quote.call_args_list
+    }
+    assert posted == {
+        ('sn7', 'avax', 'TAOADDR', 'AVAXADDR', 'tao'),
+        ('avax', 'sn7', 'AVAXADDR', 'TAOADDR', 'tao'),
+        ('sn7', 'btc', 'TAOADDR', 'BTCADDR', 'tao'),
+        ('btc', 'sn7', 'BTCADDR', 'TAOADDR', 'tao'),
+    }
+
+
+def test_alpha_anchor_refuses_pairs_it_does_not_anchor():
+    for flags in (['--tao-price', '1'], ['--sn64-price', '1']):  # tao↔sn7 anchors on TAO; alpha↔alpha is no pair
+        result = CliRunner().invoke(
+            numeraire.quotes_command, ['--hub', 'sn7', '--tao-address', 'TAOADDR', *flags, '--dry-run']
+        )
+        assert result.exit_code != 0 and 'is not a sn7-anchored pair' in result.output
+
+
+def test_unknown_anchor_is_refused():
+    result = CliRunner().invoke(numeraire.quotes_command, ['--hub', 'btc', '--dry-run'])
+    assert result.exit_code != 0 and '--hub must be one of' in result.output

@@ -33,7 +33,15 @@ from allways.cli.swap_commands.helpers import (
     safe_read,
 )
 from allways.cli.swap_commands.pair import write_rate_posted_flag
-from allways.constants import HUB_CHAINS, LAUNCH_ALPHAS, LAUNCH_SPOKES, NUMERAIRE_CHAIN, RATE_PRECISION, family
+from allways.constants import (
+    HUB_CHAINS,
+    LAUNCH_ALPHAS,
+    LAUNCH_SPOKES,
+    NUMERAIRE_CHAIN,
+    RATE_PRECISION,
+    family,
+    hub_leg,
+)
 from allways.solana.client import SolanaClientError
 from allways.utils.rate import quantize_rate_display, quantize_rate_fixed
 
@@ -109,9 +117,8 @@ def _example() -> str:
 @click.option(
     '--hub',
     'hub',
-    type=click.Choice(HUB_CHAINS),
     default=NUMERAIRE_CHAIN,
-    help='Hub leg these pairs anchor on; prices read "X per 1 <hub>". Default sol.',
+    help='Anchor leg: sol, tao, or an alpha (sn7) for its alpha↔spoke pairs; prices read "X per 1 <hub>".',
 )
 @click.option(
     '--backing',
@@ -126,13 +133,16 @@ def quotes_command(spread_bps, hub, backing, dry_run, yes, **spoke_opts):
 
     One --<spoke>-price + --<spoke>-address pair per launch spoke; give as many or as few as you
     like. Both directions of each pair derive from that single price. --hub tao anchors the pairs
-    on TAO instead of SOL (--tao-address becomes the hub leg; run once per hub you quote).
+    on TAO instead of SOL (--tao-address becomes the hub leg; run once per hub you quote). --hub sn7
+    posts sn7 against every spoke you price (TAO-backed; --tao-address receives the alpha).
 
     \b
     Example:
         {example}
     """
-    hub_address = spoke_opts.get(_addr_kw(hub))
+    if hub not in HUB_CHAINS and hub not in LAUNCH_ALPHAS:
+        fail(f'--hub must be one of {", ".join(HUB_CHAINS)} or an alpha (sn1..sn{len(LAUNCH_ALPHAS)}).')
+    hub_address = spoke_opts.get(_addr_kw(family(hub)))  # an alpha anchor lands on the TAO coldkey
     chain_specs: Dict[str, Tuple[float, str]] = {}
     for chain in LAUNCH_SPOKES + LAUNCH_ALPHAS:
         price = spoke_opts.get(f'{chain}_price')
@@ -144,6 +154,8 @@ def quotes_command(spread_bps, hub, backing, dry_run, yes, **spoke_opts):
             continue
         if not price or price <= 0:
             continue
+        if hub_leg(hub, chain) != hub:
+            fail(f'--{chain}-price: {hub}↔{chain} is not a {hub}-anchored pair — quote it under its own anchor.')
         if not addr and uses_solana_wallet(chain):
             addr = spoke_opts.get(_addr_kw(NUMERAIRE_CHAIN))  # same wallet as the SOL leg
         if not addr:
@@ -152,7 +164,7 @@ def quotes_command(spread_bps, hub, backing, dry_run, yes, **spoke_opts):
     if not chain_specs:
         fail('Nothing to post — give at least one --<chain>-price/--<chain>-address.')
     if not hub_address:
-        fail(f'--{hub}-address is required (the hub leg).')
+        fail(f'--{family(hub)}-address is required (the {hub} leg).')
 
     _, wallet, _, _ = get_cli_context(need_client=False)
     _, client = get_solana_cli_context()
