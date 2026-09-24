@@ -425,3 +425,13 @@ def test_an_unreadable_stake_does_not_block_the_swap():
         raise ConnectionError('rpc down')
 
     assert Alpha(CHAIN_SN7, SimpleNamespace(get_stake_info_for_coldkey=boom)).send_blocker(USER, MINER, 1) is None
+
+
+def test_locked_alpha_the_sender_cannot_move_blocks_the_reservation():
+    """A send past the lock-free amount carries the lock and fails at a default recipient: refuse it up front."""
+    p, _ = _sender([_stake('big', 9 * 10**9)])
+    p.subtensor.substrate.runtime_call = lambda api, method, params: {params[0][0]: {NETUID: {'available': 4 * 10**9}}}
+    assert p.send_blocker(USER, MINER, 5 * 10**9) == (
+        'only 4 of your SN7 is free to send (the rest is locked); swap that much or less'
+    )
+    assert p.send_blocker(USER, MINER, 4 * 10**9) is None

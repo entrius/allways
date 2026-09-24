@@ -200,19 +200,36 @@ class Alpha(Asset):
             return origin, origin
         return origin, recipient[0]
 
+    def free_to_send(self, coldkey: str) -> int:
+        """Alpha ``coldkey`` can move on this netuid: stake less its conviction lock and miner collateral
+        (subtensor's own availability). Raises when unreadable."""
+        try:
+            value = self.subtensor.substrate.runtime_call(
+                'StakeInfoRuntimeApi', 'get_stake_availability_for_coldkeys', [[coldkey], [self.netuid]]
+            )
+            by_netuid = getattr(value, 'value', value).get(coldkey, {})
+            return int(by_netuid[self.netuid]['available']) if self.netuid in by_netuid else 0
+        except Exception as e:
+            raise ProviderUnreachableError(f'{self.chain_def.id} stake availability unavailable: {e}') from e
+
     def send_blocker(self, from_address: str, to_address: str, amount: int) -> Optional[str]:
-        """A transfer_stake debits ONE hotkey position, so a stake split across hotkeys cannot be sent as one leg."""
+        """A transfer_stake debits ONE hotkey position and cannot move locked alpha; fails open when unreadable."""
         try:
             largest = max((alpha for _, alpha in self.stakes(from_address)), default=0)
+            free = self.free_to_send(from_address) if largest >= amount else amount
         except ProviderUnreachableError:
             return None
-        if largest >= amount:
-            return None
         name, scale = self.chain_def.id.upper(), 10**self.chain_def.decimals
-        return (
-            f'{name} must go out as one transfer_stake from one hotkey; your largest position holds '
-            f'{largest / scale:.9g} of the {amount / scale:.9g} needed — move it onto one hotkey first'
-        )
+        if largest < amount:
+            return (
+                f'{name} must go out as one transfer_stake from one hotkey; your largest position holds '
+                f'{largest / scale:.9g} of the {amount / scale:.9g} needed — move it onto one hotkey first'
+            )
+        if free < amount:
+            return (
+                f'only {free / scale:.9g} of your {name} is free to send (the rest is locked); swap that much or less'
+            )
+        return None
 
     def subnet_flag(self, name: str) -> bool:
         """One SubtensorModule per-netuid flag, read live; raises ProviderUnreachableError on a read failure."""
