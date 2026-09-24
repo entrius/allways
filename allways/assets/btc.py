@@ -669,7 +669,14 @@ class Bitcoin(Asset, Chain):
             is_segwit = addr_type in ('p2wpkh', 'p2sh-p2wpkh')
             bt.logging.info(f'Sending from {addr_type} address: {my_address}')
 
-            coin_selection = self.select_utxos(utxos, amount, is_segwit, fee_rate_override=fee_rate_override)
+            to_script = address_to_scriptpubkey(to_address)
+            if to_script is None:
+                self._send_error(f'Could not derive scriptPubKey for destination {to_address}')
+                return None
+
+            coin_selection = self.select_utxos(
+                utxos, amount, is_segwit, [to_script, my_script], fee_rate_override=fee_rate_override
+            )
             if coin_selection is None:
                 return None
             selected, total_in, fee = coin_selection
@@ -682,10 +689,6 @@ class Bitcoin(Asset, Chain):
                 txid_bytes = bytes.fromhex(utxo['txid'])
                 tx.vin.append(TransactionInput(txid_bytes, utxo['vout']))
 
-            to_script = address_to_scriptpubkey(to_address)
-            if to_script is None:
-                self._send_error(f'Could not derive scriptPubKey for destination {to_address}')
-                return None
             tx.vout.append(TransactionOutput(amount, to_script))
             if change > 546:  # dust threshold
                 tx.vout.append(TransactionOutput(change, my_script))
@@ -796,22 +799,24 @@ class Bitcoin(Asset, Chain):
         return None
 
     def select_utxos(
-        self, utxos: list, amount: int, is_segwit: bool, fee_rate_override: Optional[int] = None
+        self, utxos: list, amount: int, is_segwit: bool, output_scripts: list, fee_rate_override: Optional[int] = None
     ) -> Optional[Tuple[list, int, int]]:
         """Greedy UTXO selection. Returns (selected, total_in, fee) or None."""
         fee_rate = self.estimate_fee_rate(override=fee_rate_override)
         input_vsize = 68 if is_segwit else 148
+        # Each output: 8-byte value + length-prefixed scriptPubKey (Taproot 43 vB, P2WPKH 31).
+        base_vsize = 11 + sum(8 + len(script.serialize()) for script in output_scripts)
         selected = []
         total_in = 0
         for utxo in sorted(utxos, key=lambda u: u['value'], reverse=True):
             selected.append(utxo)
             total_in += utxo['value']
-            est_vsize = 11 + len(selected) * input_vsize + 2 * 31
+            est_vsize = base_vsize + len(selected) * input_vsize
             fee = est_vsize * fee_rate
             if total_in >= amount + fee:
                 break
 
-        est_vsize = 11 + len(selected) * input_vsize + 2 * 31
+        est_vsize = base_vsize + len(selected) * input_vsize
         fee = est_vsize * fee_rate
         if total_in < amount + fee:
             self._send_error(f'Insufficient funds: have {total_in} sat, need {amount} + {fee} fee')
