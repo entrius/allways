@@ -21,8 +21,8 @@ from allways.cli.swap_commands.swap_intake import (
     MinerCandidate,
     bounds_from_config,
     candidate_miners,
+    collateral_matches,
     compute_intake_amounts,
-    covers_leg,
     hub_bounds,
     leg_value,
     max_intake_from_amount,
@@ -166,6 +166,21 @@ class TestTaoHubIntake:
             leg_value('tao', 'sol', SOL, 'sn7', 5 * TAO)
         with pytest.raises(ValueError, match='no leg'):
             leg_value('tao', 'sol', SOL, 'avax', 1, {'sn7': sn7})
+
+    def test_leg_value_prices_a_declared_alpha_leg_at_fill_block(self):
+        calls = []
+        chain = SimpleNamespace(block_at=lambda created_at: calls.append(('block', created_at)) or 123)
+
+        def value_rao(amount, block=None):
+            calls.append(('value', amount, block))
+            return 15 * TAO
+
+        sn7 = SimpleNamespace(chain=chain, value_rao=value_rao)
+        assert leg_value('tao', 'sol', SOL, 'sn7', 5 * TAO, {'sn7': sn7}, created_at=1_700_000_000) == 15 * TAO
+        assert calls == [('block', 1_700_000_000), ('value', 5 * TAO, 123)]
+
+    def test_leg_value_leaves_a_pinned_exact_leg_untouched(self):
+        assert leg_value('tao', 'sol', SOL, 'tao', TAO, created_at=1_700_000_000) == TAO
 
     def test_sol_to_sn7_is_sized_by_its_backing(self):
         sn7 = SimpleNamespace(value_rao=lambda amount: 7 * TAO)
@@ -340,10 +355,10 @@ class TestTaoEthAcceptance:
         assert 'max swap' in result.reason
 
 
-def test_covers_leg_allows_the_tolerance_band_and_no_more():
-    """The attest gate and the taker's pre-send screen share this; a binary compare rejected honest
-    swaps on any uptick after the fill and let a miner force one with a small buy."""
-    assert covers_leg(10_000, 10_000)
-    assert covers_leg(9_000, 10_000)
-    assert not covers_leg(8_999, 10_000)
-    assert covers_leg(0, 0)
+def test_collateral_matches_one_percent_both_directions():
+    assert collateral_matches(9_900, 10_000)
+    assert collateral_matches(10_100, 10_000)
+    assert not collateral_matches(9_899, 10_000)
+    assert not collateral_matches(10_101, 10_000)
+    assert not collateral_matches(0, 0)
+    assert not collateral_matches(-1, -1)

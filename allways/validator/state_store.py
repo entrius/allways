@@ -6,7 +6,8 @@ events via ``SolanaEventIndex`` and keyed by unix ``blockTime``),
 ``clearing_rates`` (per-swap realized legs from ``SwapCompleted``, backing the
 windowed volume read), ``swap_outcomes`` (terminal completed/timed_out
 truth per swap_key, backing the seam's stage disambiguation after the swap PDA
-closes), ``routed_requests`` (queued on-behalf reservation details awaiting
+closes), ``collateral_verdicts`` (declared alpha leg checks pinned at fill),
+``routed_requests`` (queued on-behalf reservation details awaiting
 finalize — the one table NOT rebuildable from chain),
 ``relay_swaps``/``relay_fees``/``relay_slashes``/``relay_meta`` (the W3 bond
 relay's ledger of what the vault still owes), and
@@ -582,6 +583,31 @@ class ValidatorStateStore:
         self._execute('DELETE FROM swap_outcomes WHERE block_time < ?', (cutoff_block,))
         self._execute('DELETE FROM swap_fulfillments WHERE block_time < ?', (cutoff_block,))
 
+    # ─── collateral_verdicts (declared alpha leg at fill block) ────────
+
+    def record_collateral_verdict(
+        self, miner: str, backing: str, created_at: int, collateral_amount: int, ok: bool
+    ) -> None:
+        self._execute(
+            """
+            INSERT INTO collateral_verdicts (miner, backing, created_at, collateral_amount, ok)
+            VALUES (?, ?, ?, ?, ?)
+            ON CONFLICT(miner, backing, created_at) DO UPDATE SET
+                collateral_amount = excluded.collateral_amount,
+                ok = excluded.ok
+            """,
+            (str(miner), str(backing), int(created_at), int(collateral_amount), 1 if ok else 0),
+        )
+
+    def collateral_verdict(self, miner: str, backing: str, created_at: int, collateral_amount: int) -> Optional[bool]:
+        row = self._fetchone(
+            'SELECT collateral_amount, ok FROM collateral_verdicts WHERE miner = ? AND backing = ? AND created_at = ?',
+            (str(miner), str(backing), int(created_at)),
+        )
+        if row is None or int(row['collateral_amount']) != int(collateral_amount):
+            return None
+        return bool(row['ok'])
+
     # ─── swap_fulfillments (delivery-leg hash for post-close receipts) ──
 
     def record_swap_fulfillment(self, swap_key: str, to_tx_hash: str, block_time: int) -> None:
@@ -945,7 +971,9 @@ class ValidatorStateStore:
         anchor key (F4): on a dual-backing direction each backing's lane is
         scored on its own rate stream, so keeping only the direction's newest
         row would delete the sibling backing's anchor and silently drop that
-        lane out of the crown at window start."""
+        lane out of the crown at window start.
+        Also drops declared-collateral verdicts older than the cutoff (attest lands within ~2.5h of a fill).
+        """
         self._execute(
             """
             DELETE FROM rate_events
@@ -957,6 +985,7 @@ class ValidatorStateStore:
             """,
             (cutoff_block,),
         )
+        self._execute('DELETE FROM collateral_verdicts WHERE created_at < ?', (cutoff_block,))
 
     def close(self) -> None:
         with self.lock:
@@ -1180,6 +1209,15 @@ class ValidatorStateStore:
                     swap_key    TEXT PRIMARY KEY,
                     to_tx_hash  TEXT NOT NULL,
                     block_time  INTEGER NOT NULL
+                );
+
+                CREATE TABLE IF NOT EXISTS collateral_verdicts (
+                    miner             TEXT NOT NULL,
+                    backing           TEXT NOT NULL,
+                    created_at        INTEGER NOT NULL,
+                    collateral_amount INTEGER NOT NULL,
+                    ok                INTEGER NOT NULL,
+                    PRIMARY KEY(miner, backing, created_at)
                 );
 
                 -- Routed reservation requests awaiting their draw (on-behalf flow).
