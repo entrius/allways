@@ -107,9 +107,9 @@ def make_lightweight_provider() -> Bitcoin:
     """Construct a Bitcoin in lightweight mode for sign/verify tests.
 
     Lightweight mode doesn't hit a node for sign/verify — it's pure
-    cryptographic work. BTC_MODE and BTC_PRIVATE_KEY are set via env patch.
+    cryptographic work. Env is pinned so a dev .env (e.g. BTC_NETWORK=regtest) cannot leak in.
     """
-    with patch.dict(os.environ, {'BTC_MODE': 'lightweight', 'BTC_PRIVATE_KEY': TEST_WIF}, clear=False):
+    with patch.dict(os.environ, {'BTC_MODE': 'lightweight', 'BTC_NETWORK': 'mainnet', 'BTC_PRIVATE_KEY': TEST_WIF}):
         return Bitcoin()
 
 
