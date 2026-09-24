@@ -38,6 +38,7 @@ from allways.constants import (
     LAUNCH_PAIRS,
     MINER_POOL_SHARE,
     RATE_PRECISION,
+    collateral_leg,
     declarable_backings,
     hub_leg,
     is_hub,
@@ -72,6 +73,12 @@ class TestHubSet:
         assert declarable_backings('sol', 'sn7') == ['tao']
         assert declarable_backings('sn7', 'sn74') == ['tao']
 
+    def test_collateral_leg_mirrors_the_program(self):
+        assert collateral_leg('sol', 'sol', 'tao') == 'sol' and collateral_leg('tao', 'sol', 'tao') == 'tao'
+        assert collateral_leg('tao', 'sol', 'sn7') == 'sn7'
+        assert collateral_leg('tao', 'sn64', 'sn7') == 'sn64'  # first declared leg, as leg_value
+        assert collateral_leg('sol', 'sn7', 'avax') is None
+
     def test_hub_leg_is_the_canonical_source(self):
         for a, b in (('tao', 'eth'), ('eth', 'tao'), ('sol', 'tao'), ('btc', 'sol')):
             assert canonical_pair(a, b)[0] == hub_leg(a, b)
@@ -98,6 +105,8 @@ class TestHubSet:
         # sol↔tao is SOL-anchored even though a tao-backed quote's SIZE gates on the TAO bounds.
         assert hub_bounds(bounds, 'tao', 'sol') == (5, 6)
         assert hub_bounds(bounds, 'btc', 'eth') == (0, 0)
+        assert hub_bounds(bounds, 'tao', 'sn7') == (TAO_MIN, TAO_MAX)  # the exact TAO leg
+        assert hub_bounds(bounds, 'sol', 'sn7') == (0, 0)  # TAO-backed: SOL bounds never bind it
 
     def test_bounds_from_config_carries_both_hubs(self):
         cfg = SimpleNamespace(

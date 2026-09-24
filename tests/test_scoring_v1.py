@@ -23,6 +23,8 @@ from allways.constants import (
     QUALITY_VOLUME_BETA,
     RECYCLE_UID,
     SCORING_WINDOW_BLOCKS,
+    SCORING_WINDOW_SECS,
+    TAO_TO_RAO,
     required_collateral,
     scoring_family,
 )
@@ -36,6 +38,7 @@ from allways.validator.scoring import (
     build_direction_score_rows,
     build_eligibility,
     calculate_miner_rewards,
+    collateral_unit_value,
     compute_direction_pools,
     crown_can_fund,
     crown_depth_shares,
@@ -293,6 +296,8 @@ def make_validator(
         # Live collateral mirrors the seeded event tables so the scoring-round
         # reconcile is a no-op unless a test diverges them deliberately.
         solana_client=FakeSolanaClient(miner_counters, collaterals=collaterals, settling=settling),
+        assets={},
+        alpha_prices={},
     )
 
 
@@ -584,6 +589,37 @@ class TestComputeDirectionPools:
         forward = compute_direction_pools({('btc', 'sol'): {'hk': (1, 500)}})
         reverse = compute_direction_pools({('sol', 'btc'): {'hk': (500, 1)}})
         assert forward == reverse
+
+
+class TestCollateralUnitValue:
+    class Alpha:
+        def __init__(self, rao_per_alpha):
+            self.rao_per_alpha, self.reads = rao_per_alpha, 0
+
+        def value_rao(self, amount):
+            self.reads += 1
+            if self.rao_per_alpha is None:
+                raise RuntimeError('subtensor down')
+            return amount * self.rao_per_alpha // 10**9
+
+    def test_exact_leg_is_worth_one(self):
+        v = SimpleNamespace(assets={}, alpha_prices={})
+        assert collateral_unit_value(v, 'tao', 'sn7', 'tao', 0) == 1.0
+
+    def test_declared_leg_reads_its_price_once_per_window(self):
+        sn7 = self.Alpha(TAO_TO_RAO // 100)
+        v = SimpleNamespace(assets={'sn7': sn7}, alpha_prices={})
+        assert collateral_unit_value(v, 'sn7', 'avax', 'tao', 0) == pytest.approx(0.01)
+        assert collateral_unit_value(v, 'avax', 'sn7', 'tao', SCORING_WINDOW_SECS - 1) == pytest.approx(0.01)
+        assert sn7.reads == 1
+        collateral_unit_value(v, 'sn7', 'avax', 'tao', SCORING_WINDOW_SECS)
+        assert sn7.reads == 2
+
+    def test_unreadable_price_leaves_the_lane_unchecked(self):
+        v = SimpleNamespace(assets={'sn7': self.Alpha(None)}, alpha_prices={})
+        assert collateral_unit_value(v, 'sol', 'sn7', 'tao', 0) is None
+        executable_check, _ = make_crown_predicates('sol', 'sn7', 1, 10, {}, 'tao', None)
+        assert executable_check(1e30)
 
 
 class TestCrownHoldersHelper:

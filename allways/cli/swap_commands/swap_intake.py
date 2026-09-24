@@ -22,7 +22,8 @@ from allways.constants import (
     DECLARED_COLLATERAL_BAND_BPS,
     NUMERAIRE_CHAIN,
     RATE_PRECISION,
-    family,
+    collateral_leg,
+    declarable_backings,
     hub_leg,
     required_collateral,
 )
@@ -173,11 +174,12 @@ def bounds_from_config(cfg) -> BoundsByBacking:
 
 def hub_bounds(bounds: BoundsByBacking, from_chain: str, to_chain: str) -> Tuple[int, int]:
     """The pair's HUB-leg swap bounds, in the hub's own smallest unit — what the rate-executability
-    gates (``is_executable_rate`` / selection scalars) anchor on. (0, 0) = unset/permissive for a
-    pair whose anchor is not a hub (an alpha anchor has no hub bounds — see the PR3 gate). Distinct from the per-BACKING size gate: sol↔tao is SOL-anchored here even
+    gates (``is_executable_rate`` / selection scalars) anchor on. (0, 0) = permissive when the hub leg
+    backs no quote on the pair (sol↔snN, an alpha anchor): those bounds bind a declared alpha leg's TAO
+    value, which the per-BACKING size gate prices per candidate. sol↔tao is SOL-anchored here even
     when a tao-backed quote's size is gated on the TAO bounds."""
     hub = hub_leg(from_chain, to_chain)
-    return bounds.get(hub, (0, 0)) if hub else (0, 0)
+    return bounds.get(hub, (0, 0)) if hub in declarable_backings(from_chain, to_chain) else (0, 0)
 
 
 def _bounds_for(
@@ -200,20 +202,18 @@ def leg_value(
     created_at: Optional[int] = None,
 ) -> int:
     """The exact backing leg, or a declared alpha leg valued at head or ``created_at``."""
-    if backing == from_chain:
-        return from_amount
-    if backing == to_chain:
-        return to_amount
-    for leg, amount in ((from_chain, from_amount), (to_chain, to_amount)):
-        if family(leg) != backing:
-            continue
-        provider = (providers or {}).get(leg)
-        if provider is None:
-            raise ValueError(f'{leg} leg is declared: a {leg} provider is needed to price it in {backing}')
-        if created_at is None:
-            return provider.value_rao(amount)
-        return provider.value_rao(amount, block=provider.chain.block_at(int(created_at)))
-    raise ValueError(f'{from_chain}->{to_chain}: no leg is denominated in the "{backing}" backing')
+    leg = collateral_leg(backing, from_chain, to_chain)
+    if leg is None:
+        raise ValueError(f'{from_chain}->{to_chain}: no leg is denominated in the "{backing}" backing')
+    amount = from_amount if leg == from_chain else to_amount
+    if leg == backing:
+        return amount
+    provider = (providers or {}).get(leg)
+    if provider is None:
+        raise ValueError(f'{leg} leg is declared: a {leg} provider is needed to price it in {backing}')
+    if created_at is None:
+        return provider.value_rao(amount)
+    return provider.value_rao(amount, block=provider.chain.block_at(int(created_at)))
 
 
 def collateral_matches(collateral_amount: int, value: int) -> bool:

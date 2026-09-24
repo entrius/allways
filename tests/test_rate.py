@@ -515,6 +515,16 @@ class TestIsExecutableRate:
             assert is_executable_rate(150.0, 'arbusdc', 'sol', self.MIN, self.MAX) is True
             assert is_executable_rate(150.0, 'sol', 'arbusdc', self.MIN, self.MAX) is True
 
+    def test_declared_alpha_leg_is_bounded_by_its_tao_value(self):
+        """sn7↔avax is TAO-backed: the TAO bounds apply to the sn7 leg valued at 0.01 TAO per sn7."""
+        tao_bounds = (TAO_TO_RAO // 10, 10 * TAO_TO_RAO)
+        priced = {'bounded_chain': 'sn7', 'unit_value': 0.01}
+        assert is_executable_rate(0.15, 'avax', 'sn7', *tao_bounds, **priced) is True  # AVAX per sn7
+        assert is_executable_rate(1e-30, 'avax', 'sn7', *tao_bounds, **priced) is False  # the squat
+        # sol↔sn7 is anchored on SOL but bounds its sn7 leg (rate = sn7 per SOL).
+        assert is_executable_rate(15_000.0, 'sol', 'sn7', *tao_bounds, **priced) is True
+        assert is_executable_rate(1e30, 'sol', 'sn7', *tao_bounds, **priced) is False
+
 
 class TestQuantizeRate:
     """quantize_rate_fixed floors to RATE_SIG_FIGS (=5) sig figs, mirroring the on-chain

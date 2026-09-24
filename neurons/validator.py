@@ -103,6 +103,8 @@ class Validator(BaseValidatorNeuron):
             solana_rpc_url=solana_rpc_url,
         )
         self.fee_divisor = FEE_DIVISOR
+        # Declared alpha legs' prices for crown executability: {alpha: (read_at, rao per base unit or None)}.
+        self.alpha_prices: dict[str, tuple[int, float | None]] = {}
 
         # Single store owning every validator-local table (crown event tables +
         # the Solana ingest cursor + the axon reservation pins). Created before

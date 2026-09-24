@@ -134,6 +134,14 @@ def hub_leg(from_chain: str, to_chain: str) -> str | None:
     return family_legs[0] if family_legs else None
 
 
+def collateral_leg(backing: str, from_chain: str, to_chain: str) -> str | None:
+    """The leg a lane's collateral binds (twin of ``backing.rs::collateral_leg_bind``): the backing's own leg,
+    else the first leg in its family (a declared alpha leg). None if the backing is outside the pair."""
+    if backing in (from_chain, to_chain):
+        return backing
+    return next((leg for leg in (from_chain, to_chain) if family(leg) == backing), None)
+
+
 ALPHA_FAMILY = 'alpha'
 
 

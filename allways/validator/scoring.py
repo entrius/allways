@@ -21,7 +21,7 @@ import bittensor as bt
 import numpy as np
 
 from allways import dev_signal
-from allways.chains import canonical_pair
+from allways.chains import canonical_pair, get_chain_def
 from allways.classes import ActivityTransition, MinerActivity, next_activity
 from allways.cli.swap_commands.swap_intake import bounds_from_config
 from allways.constants import (
@@ -44,6 +44,7 @@ from allways.constants import (
     SCORING_WINDOW_BLOCKS,
     SCORING_WINDOW_SECS,
     SWAP_OUTCOME_RETENTION_SECS,
+    collateral_leg,
     declarable_backings,
     hub_leg,
     required_collateral,
@@ -583,6 +584,7 @@ def calculate_miner_rewards(self: Validator, current_time: int) -> Tuple[np.ndar
             max_swap_hub=max_swap_hub,
             backing=backing,
             purse_known=direction_purse_known(backing),
+            unit_value=collateral_unit_value(self, from_chain, to_chain, backing, current_time),
         )
         total_crown_dir = sum(crown_time.values())
 
@@ -767,6 +769,7 @@ def snapshot_current_miner_scores(
             max_swap_hub=max_swap_hub,
             backing=backing,
             purse_known=direction_purse_known(backing),
+            unit_value=collateral_unit_value(self, from_chain, to_chain, backing, ts),
         )
         if not crown_time and not qvol:
             continue
@@ -955,6 +958,24 @@ def rewardable_by_activity(
     return out
 
 
+def collateral_unit_value(self: Validator, from_chain: str, to_chain: str, backing: str, now: int) -> Optional[float]:
+    """Backing units per smallest unit of the lane's collateral leg: 1.0 for an exact leg, else the declared
+    alpha's price, read at most once per scoring window. None = unreadable, so executability goes unchecked."""
+    leg = collateral_leg(backing, from_chain, to_chain)
+    if leg in (None, backing):
+        return 1.0
+    read_at, value = self.alpha_prices.get(leg, (None, None))
+    if read_at is None or now - read_at >= SCORING_WINDOW_SECS:
+        whole = 10 ** get_chain_def(leg).decimals
+        try:
+            value = self.assets[leg].value_rao(whole) / whole
+        except Exception as e:
+            bt.logging.warning(f'{leg} price read failed, its lanes skip the executability check: {e}')
+            value = None
+        self.alpha_prices[leg] = (now, value)
+    return value
+
+
 def direction_purse_known(backing: Optional[str]) -> bool:
     """Whether the crown has this lane's funding purse to gate against.
 
@@ -965,13 +986,15 @@ def direction_purse_known(backing: Optional[str]) -> bool:
     return backing in HUB_CHAINS
 
 
-def crown_can_fund(hotkey, rate, from_chain, to_chain, min_swap_hub, max_swap_hub, collaterals):
+def crown_can_fund(
+    hotkey, rate, from_chain, to_chain, min_swap_hub, max_swap_hub, collaterals, bounded_chain=None, unit_value=1.0
+):
     """Boundary-squat gate: a miner who cannot fund their own rate's smallest hub leg
     at the contract's 1.10× reserve requirement (mirroring routing's ``swap_viable``)
     is unreservable at any size and earns no crown. Unknown collateral counts as zero
     (fail closed) — the live-state reconcile seeds a baseline for every bound active
     miner, so absent means the chain doesn't know this miner either."""
-    min_leg = min_executable_hub_leg(rate, from_chain, to_chain, min_swap_hub, max_swap_hub)
+    min_leg = min_executable_hub_leg(rate, from_chain, to_chain, min_swap_hub, max_swap_hub, bounded_chain, unit_value)
     return min_leg == 0 or collaterals.get(hotkey, 0) >= required_collateral(min_leg)
 
 
@@ -995,17 +1018,26 @@ def crown_depth_shares(
     return {hk: depth / total for hk, depth in depths.items()}
 
 
-def make_crown_predicates(from_chain, to_chain, min_swap_hub, max_swap_hub, collaterals):
+def make_crown_predicates(
+    from_chain, to_chain, min_swap_hub, max_swap_hub, collaterals, backing=None, unit_value: Optional[float] = 1.0
+):
     """Crown-eligibility predicates ``(executable_check, can_fund)`` shared by the
     scoring replay and the live snapshot, so the live crown view can never diverge
-    from the rewarded ledger. Both are the shared rate utils with this direction's
-    hub-leg bounds/collateral bound in."""
+    from the rewarded ledger. Both are the shared rate utils with the lane's backing
+    bounds applied to its collateral leg (``collateral_leg``), valued at ``unit_value``;
+    an unreadable value (None) leaves both permissive."""
+    bounded_chain = collateral_leg(backing, from_chain, to_chain) if backing else None
+    if unit_value is None:
+        min_swap_hub = max_swap_hub = 0
+        unit_value = 1.0
     executable_check = partial(
         is_executable_rate,
         from_chain=from_chain,
         to_chain=to_chain,
         min_swap_hub=min_swap_hub,
         max_swap_hub=max_swap_hub,
+        bounded_chain=bounded_chain,
+        unit_value=unit_value,
     )
     can_fund = partial(
         crown_can_fund,
@@ -1013,6 +1045,8 @@ def make_crown_predicates(from_chain, to_chain, min_swap_hub, max_swap_hub, coll
         to_chain=to_chain,
         min_swap_hub=min_swap_hub,
         max_swap_hub=max_swap_hub,
+        bounded_chain=bounded_chain,
+        unit_value=unit_value,
         collaterals=collaterals,
     )
     return executable_check, can_fund
@@ -1033,6 +1067,7 @@ def replay_crown_time_window(
     rate_band: float = CROWN_RATE_BAND,
     backing: Optional[str] = None,
     purse_known: bool = True,
+    unit_value: Optional[float] = 1.0,
 ) -> Dict[str, float]:
     """Walk the merged event stream, return ``{hotkey: crown_seconds_float}``.
     Every qualified miner within ``rate_band`` of the best qualified rate holds
@@ -1054,7 +1089,8 @@ def replay_crown_time_window(
     defaults to the pair's hub leg — a spoke pair's single lane, and every pre-lane call site.
 
     ``min_swap_hub``/``max_swap_hub`` are the lane's BACKING-hub bounds (that hub's
-    smallest-units, matching the purse). Bounds at 0 disable the executability filter
+    smallest-units, matching the purse), applied to the collateral leg valued at ``unit_value``
+    (``collateral_unit_value``). Bounds at 0 disable the executability filter
     (matches the contract's "unset" sentinel); the rate-positive floor still applies.
     ``purse_known=False`` (``direction_purse_known``: no purse stream for the backing —
     spoke↔spoke only) keeps the rate gates but runs the purse-axis ones neutral:
@@ -1078,7 +1114,9 @@ def replay_crown_time_window(
     canon_from, _ = canonical_pair(from_chain, to_chain)
     lower_rate_wins = from_chain != canon_from
 
-    executable_check, can_fund = make_crown_predicates(from_chain, to_chain, min_swap_hub, max_swap_hub, collaterals)
+    executable_check, can_fund = make_crown_predicates(
+        from_chain, to_chain, min_swap_hub, max_swap_hub, collaterals, backing, unit_value
+    )
 
     crown_time: Dict[str, float] = {}
     cap_weighted_time: Dict[str, float] = {}
@@ -1240,7 +1278,13 @@ def snapshot_current_crown_holders(
             # credits a holder the ledger drops. Built per lane so each
             # closure captures the right chain pair and bounds.
             executable_check, can_fund = make_crown_predicates(
-                from_chain, to_chain, min_swap_hub, max_swap_hub, collaterals
+                from_chain,
+                to_chain,
+                min_swap_hub,
+                max_swap_hub,
+                collaterals,
+                backing,
+                collateral_unit_value(self, from_chain, to_chain, backing, ts),
             )
 
             holders = crown_holders_at_instant(
@@ -1315,7 +1359,15 @@ def fill_held_crown(
     canon_from, _ = canonical_pair(from_chain, to_chain)
     lower_rate_wins = from_chain != canon_from
     rewardable_by_state = rewardable_by_activity(activity, lane_candidates, lane_serving_hubs(backing)) | {hotkey}
-    executable_check, _ = make_crown_predicates(from_chain, to_chain, min_swap_hub, max_swap_hub, collaterals)
+    executable_check, _ = make_crown_predicates(
+        from_chain,
+        to_chain,
+        min_swap_hub,
+        max_swap_hub,
+        collaterals,
+        backing,
+        collateral_unit_value(self, from_chain, to_chain, backing, at_time),
+    )
     bounds_set = min_swap_hub > 0 or max_swap_hub > 0
     need = required_collateral(int(collateral_amount))
 
