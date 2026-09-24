@@ -67,9 +67,9 @@ class TestHubSet:
         assert hub_leg('sn7', 'avax') == 'sn7'
         assert hub_leg('sn7', 'sn74') == 'sn7'
 
-    def test_declarable_backings_follow_leg_families(self):
+    def test_declarable_backings_are_hub_legs_and_tao_for_alpha(self):
         assert declarable_backings('sn7', 'avax') == ['tao']
-        assert declarable_backings('sol', 'sn7') == ['sol', 'tao']
+        assert declarable_backings('sol', 'sn7') == ['tao']
         assert declarable_backings('sn7', 'sn74') == ['tao']
 
     def test_hub_leg_is_the_canonical_source(self):

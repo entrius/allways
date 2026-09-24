@@ -108,9 +108,14 @@ HUB_CHAINS = ('sol', 'tao')
 NUMERAIRE_CHAIN = 'sol'
 
 
+def is_alpha(chain: str) -> bool:
+    """True iff ``chain`` is a subnet alpha (sn<N>)."""
+    return re.fullmatch(r'sn[0-9]+', chain) is not None
+
+
 def family(chain: str) -> str:
     """The backing family a chain settles in (twin of ``backing.rs::family``): an sn<N> alpha settles in TAO."""
-    return 'tao' if re.fullmatch(r'sn[0-9]+', chain) else chain
+    return 'tao' if is_alpha(chain) else chain
 
 
 def is_hub(chain: str) -> bool:
@@ -129,9 +134,12 @@ def hub_leg(from_chain: str, to_chain: str) -> str | None:
 
 
 def declarable_backings(from_chain: str, to_chain: str) -> list[str]:
-    """The pair's hub-capable legs = the backings a quote may declare = its scoring lanes (F4):
-    the hubs among the legs' families — two on sol↔tao, one on a spoke or alpha pair, none if invalid."""
-    return [hub for hub in HUB_CHAINS if hub in {family(from_chain), family(to_chain)}]
+    """The backings a quote may declare = the pair's scoring lanes (F4): its hub legs — two on sol↔tao,
+    one on a spoke pair, none if invalid. Every alpha pair is TAO-backed only, so each alpha fill's
+    collateral is its TAO value."""
+    if is_alpha(from_chain) or is_alpha(to_chain):
+        return ['tao']
+    return [hub for hub in HUB_CHAINS if hub in (from_chain, to_chain)]
 
 
 SUBNET_LIMIT = 128  # SubtensorModule::SubnetLimit — no netuid above this can exist
