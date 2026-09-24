@@ -20,6 +20,11 @@ STAKE_TRANSFER_EVENTS = {
     ('SubtensorModule', 'StakeTransferred'),
     ('SubtensorModule', 'StakeAndHotkeyTransferred'),
 }
+# u64::MAX is not an amount. Subtensor (spec 469+, move_stake.rs `cap_move_all_to_live_origin`) reads it
+# as "the signer's whole live position at execution", so the call names a figure the chain never moved
+# and the event carries only the TAO-equivalent. Crediting the call's number would let a dust position
+# satisfy any pinned amount. A leg is never credited from it; every allways send names an exact amount.
+ALPHA_WHOLE_POSITION = 2**64 - 1
 
 
 def event_name(record: Any) -> Optional[Tuple[str, str]]:
@@ -78,10 +83,10 @@ class Alpha(Asset):
     def clear_cache(self) -> None:
         self.chain.clear_cache()
 
-    def value_rao(self, amount: int) -> int:
-        """Spot value in rao of ``amount`` alpha base units at the pool's current price, floored."""
+    def value_rao(self, amount: int, block: Optional[int] = None) -> int:
+        """Value in rao of ``amount`` alpha base units at ``block`` (or head), floored."""
         try:
-            price = self.subtensor.get_subnet_price(self.netuid)
+            price = self.subtensor.get_subnet_price(self.netuid, block=block)
             return int(amount) * int(price.rao) // 10**self.chain_def.decimals
         except Exception as e:
             raise ProviderUnreachableError(f'{self.chain_def.id} price unavailable: {e}') from e
@@ -107,6 +112,9 @@ class Alpha(Asset):
                 return None
             alpha = int(args['alpha_amount'])
         except (KeyError, TypeError, ValueError):
+            return None
+        if alpha >= ALPHA_WHOLE_POSITION:
+            bt.logging.debug(f'{LOG_ALPHA} whole-position sentinel in {Tao.extrinsic_hash(ext)[:16]}… — not an amount')
             return None
         # The hotkeys are deliberately unread: the destination coldkey owns the stake whichever hotkey
         # it lands on, so they change who takes a delegate cut, never ownership or the amount.

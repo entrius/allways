@@ -266,6 +266,8 @@ SWAP_OUTCOME_RETENTION_SECS = 7 * 86400
 # Collateral a miner must post to back a swap = collateral_amount × this/10_000. Mirrors the contract's
 # COLLATERAL_REQUIREMENT_BPS (constants.rs) — keep in sync. 11_000 = 1.10×.
 COLLATERAL_REQUIREMENT_BPS = 11_000
+# Allowed rounding/provider drift around a declared alpha leg's value at the reservation's fill block.
+DECLARED_COLLATERAL_BAND_BPS = 100
 
 
 def required_collateral(collateral_amount: int) -> int:

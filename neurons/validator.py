@@ -156,6 +156,7 @@ class Validator(BaseValidatorNeuron):
             fee_divisor=self.fee_divisor,
             read_only=solana_read_only,
             relay=self.bond_relay,
+            state_store=self.state_store,
         )
         # Crown-time state is sourced entirely from Solana program events (B3.6):
         # `event_ingest` polls the program's signature stream each forward step,

@@ -199,15 +199,24 @@ def test_get_balance_sums_this_netuid_across_hotkeys():
 
 
 def test_value_rao_floors_and_raises_on_failure():
-    p = Alpha(CHAIN_SN7, SimpleNamespace(get_subnet_price=lambda netuid: SimpleNamespace(rao=333_333_333)))
+    p = Alpha(CHAIN_SN7, SimpleNamespace(get_subnet_price=lambda netuid, block=None: SimpleNamespace(rao=333_333_333)))
     assert p.value_rao(3) == 0
     assert p.value_rao(3_000_000_000) == 999_999_999
 
-    def boom(netuid):
+    def boom(netuid, block=None):
         raise RuntimeError('rpc down')
 
     with pytest.raises(ProviderUnreachableError):
         Alpha(CHAIN_SN7, SimpleNamespace(get_subnet_price=boom)).value_rao(1)
+
+    calls = []
+
+    def historical(netuid, block=None):
+        calls.append((netuid, block))
+        return SimpleNamespace(rao=2 * 10**9)
+
+    assert Alpha(CHAIN_SN7, SimpleNamespace(get_subnet_price=historical)).value_rao(3 * 10**9, block=42) == 6 * 10**9
+    assert calls == [(NETUID, 42)]
 
 
 # ─── delivery gates ─────────────────────────────────────────────────────────
@@ -321,3 +330,12 @@ def test_failed_response_with_a_signed_extrinsic_keeps_its_hash():
     p, _ = _sender([_stake('hk', 9_000)], response=signed_only)
     assert p.send_amount(USER, 5_000, dedup_key='swap-1') is None
     assert p.broadcasted_txids['swap-1'][2] == TXID
+
+
+def test_whole_position_sentinel_is_not_an_amount():
+    """u64::MAX means "my whole live position" on subtensor, so the call's figure is not what moved:
+    a dust position would otherwise satisfy any pinned amount (validator and miner both credit >=)."""
+    p = Alpha(CHAIN_SN7, SimpleNamespace())
+    assert p.decode_transfer_stake(_ext(alpha=2**64 - 1), False) is None
+    assert _verify(_provider(exts=[_ext(alpha=2**64 - 1)]), amount=1) is None
+    assert _verify(_provider(exts=[_ext(alpha=2**64 - 2)]), amount=1).amount == 2**64 - 2

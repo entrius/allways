@@ -18,6 +18,7 @@ from allways.assets.asset import ProviderUnreachableError
 from allways.chains import canonical_pair, get_chain_def
 from allways.constants import (
     COLLATERAL_REQUIREMENT_BPS,
+    DECLARED_COLLATERAL_BAND_BPS,
     NUMERAIRE_CHAIN,
     RATE_PRECISION,
     family,
@@ -182,8 +183,16 @@ def _bounds_for(
     return bounds_by_backing.get(backing, (min_swap, max_swap))
 
 
-def leg_value(backing: str, from_chain: str, from_amount: int, to_chain: str, to_amount: int, providers=None) -> int:
-    """The backing leg in backing units (twin of ``backing.rs::collateral_leg_bind``): exact, or a declared alpha leg priced at spot."""
+def leg_value(
+    backing: str,
+    from_chain: str,
+    from_amount: int,
+    to_chain: str,
+    to_amount: int,
+    providers=None,
+    created_at: Optional[int] = None,
+) -> int:
+    """The exact backing leg, or a declared alpha leg valued at head or ``created_at``."""
     if backing == from_chain:
         return from_amount
     if backing == to_chain:
@@ -194,8 +203,16 @@ def leg_value(backing: str, from_chain: str, from_amount: int, to_chain: str, to
         provider = (providers or {}).get(leg)
         if provider is None:
             raise ValueError(f'{leg} leg is declared: a {leg} provider is needed to price it in {backing}')
-        return provider.value_rao(amount)
+        if created_at is None:
+            return provider.value_rao(amount)
+        return provider.value_rao(amount, block=provider.chain.block_at(int(created_at)))
     raise ValueError(f'{from_chain}->{to_chain}: no leg is denominated in the "{backing}" backing')
+
+
+def collateral_matches(collateral_amount: int, value: int) -> bool:
+    """Whether collateral is within the two-sided declared-leg band."""
+    value = int(value)
+    return value > 0 and abs(int(collateral_amount) - value) * 10_000 <= value * DECLARED_COLLATERAL_BAND_BPS
 
 
 def compute_intake_amounts(
