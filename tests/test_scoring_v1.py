@@ -2398,11 +2398,15 @@ class TestQualityVolumeSlice:
 class TestQualifiedLaneVolumes:
     def test_reader_filters_and_keys_by_lane(self, tmp_path: Path):
         store = ValidatorStateStore(db_path=tmp_path / 'state.db')
-        store.insert_clearing_rate(9_800, 'hk_a', 'btc', 'sol', 300, 600, 'q1', backing='sol', qualified=True)
+        store.insert_clearing_rate(
+            9_800, 'hk_a', 'btc', 'sol', 300, 600, 'q1', backing='sol', qualified=True, collateral_amount=600
+        )
         store.insert_clearing_rate(9_850, 'hk_a', 'btc', 'sol', 100, 200, 'u1', backing='sol', qualified=False)
-        store.insert_clearing_rate(9_900, 'hk_b', 'sol', 'tao', 50, 5, 'q2', backing='tao', qualified=True)
+        store.insert_clearing_rate(
+            9_900, 'hk_b', 'sol', 'tao', 50, 5, 'q2', backing='tao', qualified=True, collateral_amount=5
+        )
         vols = store.get_qualified_lane_volumes(9_700, 10_000)
-        assert vols == {('btc', 'sol', 'sol'): {'hk_a': (300, 600)}, ('sol', 'tao', 'tao'): {'hk_b': (50, 5)}}
+        assert vols == {('btc', 'sol', 'sol'): {'hk_a': (300, 600, 600)}, ('sol', 'tao', 'tao'): {'hk_b': (50, 5, 5)}}
         # The all-fills reporting read still sees everything.
         assert store.get_clearing_volumes(9_700, 10_000)[('btc', 'sol')]['hk_a'] == (400, 800)
         store.close()
@@ -2559,7 +2563,7 @@ class TestFillHeldCrown:
         idx.ingest(completed('pk_a', b'\x01' * 32, 9_800, 9_850), attribution)
         idx.ingest(completed('pk_b', b'\x02' * 32, 9_860, 9_900), attribution)
         vols = v.state_store.get_qualified_lane_volumes(9_700, 10_000)
-        assert vols == {('btc', 'sol', 'sol'): {'hk_a': (100_000, 200_000_000)}}
+        assert vols == {('btc', 'sol', 'sol'): {'hk_a': (100_000, 200_000_000, 200_000_000)}}
         assert {'hk_a', 'hk_b'} <= set(v.state_store.get_clearing_volumes(9_700, 10_000)[('btc', 'sol')])
         v.state_store.close()
 

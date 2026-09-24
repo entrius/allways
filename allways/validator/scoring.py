@@ -370,16 +370,16 @@ def build_direction_score_rows(
 
 
 def lane_volumes_to_directions(
-    lane_volumes: Dict[Tuple[str, str, str], Dict[str, Tuple[int, int]]],
-) -> Dict[Tuple[str, str], Dict[str, Tuple[int, int]]]:
+    lane_volumes: Dict[Tuple[str, str, str], Dict[str, Tuple[int, ...]]],
+) -> Dict[Tuple[str, str], Dict[str, Tuple[int, ...]]]:
     """Collapse the per-lane qualified volumes into the pair-direction shape
     ``compute_direction_pools`` reads — pool volume is never split by backing."""
-    out: Dict[Tuple[str, str], Dict[str, Tuple[int, int]]] = {}
+    out: Dict[Tuple[str, str], Dict[str, Tuple[int, ...]]] = {}
     for (from_chain, to_chain, _backing), by_hotkey in lane_volumes.items():
         direction = out.setdefault((from_chain, to_chain), {})
-        for hotkey, (from_sum, to_sum) in by_hotkey.items():
-            prev_from, prev_to = direction.get(hotkey, (0, 0))
-            direction[hotkey] = (prev_from + from_sum, prev_to + to_sum)
+        for hotkey, sums in by_hotkey.items():
+            prev = direction.get(hotkey, (0,) * len(sums))
+            direction[hotkey] = tuple(a + b for a, b in zip(prev, sums))
     return out
 
 
