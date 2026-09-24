@@ -200,6 +200,12 @@ class ValidatorStateStore:
         )
         return {(r['hotkey'], r['from_chain'], r['to_chain'], r['collateral_chain']): r['rate'] for r in rows}
 
+    def quoted_lanes(self) -> Set[Tuple[str, str, str]]:
+        """Every ``(from_chain, to_chain, collateral_chain)`` lane any miner ever quoted. The prune keeps
+        each lane's last rate as its anchor, so a lane outside this set has never had a crown."""
+        rows = self._fetchall('SELECT DISTINCT from_chain, to_chain, collateral_chain FROM rate_events')
+        return {(r['from_chain'], r['to_chain'], r['collateral_chain']) for r in rows}
+
     def rate_lanes_touched_in_range(self, start_block: int, end_block: int) -> Set[Tuple[str, str, str, str]]:
         """Lanes with any rate event in ``(start_block, end_block]`` — the
         reconcile's per-lane quiet-window guard reads this so a stale live

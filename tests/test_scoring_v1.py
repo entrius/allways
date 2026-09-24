@@ -1309,6 +1309,13 @@ class TestSnapshotCurrentCrownHolders:
         assert holders == ['hk_funded']
         v.state_store.close()
 
+    def test_only_quoted_lanes_are_evaluated(self, tmp_path: Path):
+        v = make_validator(tmp_path, ['hk_funded'], collaterals={'hk_funded': 500_000_000})
+        self._seed_rate(v.state_store, 'hk_funded', 326.0)
+
+        assert list(snapshot_current_crown_holders(v, v.block)) == [('sol', 'btc', 'sol')]
+        v.state_store.close()
+
     def test_boundary_squat_excluded_from_live_table(self, tmp_path: Path):
         """The squatter posts the best, executable rate but their 0.15 TAO
         collateral can't fund the ~0.45 SOL leg it forces. The live table must

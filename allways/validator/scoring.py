@@ -537,6 +537,7 @@ def calculate_miner_rewards(self: Validator, current_time: int) -> Tuple[np.ndar
     # pair-level pool weighting and each lane's β slice, so the pools it pays sum to exactly 1.
     lane_volumes = self.state_store.get_qualified_lane_volumes(current_time - POOL_VOLUME_WINDOW_SECS, current_time)
     pools = compute_direction_pools(lane_volumes_to_directions(lane_volumes))
+    quoted = self.state_store.quoted_lanes()
 
     for (from_chain, to_chain, backing), pool in pools.items():
         trace = DirectionTrace(pool=pool)
@@ -548,8 +549,8 @@ def calculate_miner_rewards(self: Validator, current_time: int) -> Tuple[np.ndar
         if storage_enabled:
             intervals = []
             intervals_by_dir[(from_chain, to_chain, backing)] = intervals
-        if pool <= 0:
-            continue  # dead pair this window — nothing to pay; the trace still lists it at pool=0
+        if pool <= 0 or (from_chain, to_chain, backing) not in quoted:
+            continue  # dead pair or never-quoted lane: nothing to pay; the trace still lists it
         min_swap_hub, max_swap_hub = swap_bounds.get(backing, (0, 0))
         # Ineligible miners are not crown candidates on this lane (see lane_eligible_hotkeys).
         lane_candidates = lane_eligible_hotkeys(
@@ -736,11 +737,12 @@ def snapshot_current_miner_scores(
     recent_fills = recent_fill_hotkeys(self.state_store, ts)
     lane_volumes = self.state_store.get_qualified_lane_volumes(ts - POOL_VOLUME_WINDOW_SECS, ts)
     pools = compute_direction_pools(lane_volumes_to_directions(lane_volumes))
+    quoted = self.state_store.quoted_lanes()
     for (from_chain, to_chain, backing), pool in pools.items():
         trace = DirectionTrace(pool=pool)
         qvol, _ = qualified_volume_shares(lane_volumes.get((from_chain, to_chain, backing), {}), from_chain, to_chain)
-        if pool <= 0:
-            continue  # dead pair this window — nothing to pay; the trace still lists it at pool=0
+        if pool <= 0 or (from_chain, to_chain, backing) not in quoted:
+            continue  # dead pair or never-quoted lane: nothing to pay; the trace still lists it
         min_swap_hub, max_swap_hub = swap_bounds.get(backing, (0, 0))
         lane_candidates = lane_eligible_hotkeys(
             live_states, rewardable_hotkeys, from_chain, to_chain, ts, backing=backing, recent_fills=recent_fills
@@ -1203,8 +1205,11 @@ def snapshot_current_crown_holders(
         swap_bounds = {}
     recent_fills = recent_fill_hotkeys(self.state_store, ts)
     rows_by_direction: Dict[Tuple[str, str, str], List[Tuple[str, str, str, str, float, float, int]]] = {}
+    quoted = self.state_store.quoted_lanes()
     for from_chain, to_chain in DIRECTION_POOLS:
         for backing in declarable_backings(from_chain, to_chain):
+            if (from_chain, to_chain, backing) not in quoted:
+                continue  # never quoted: no holder, and no rows to clear
             min_swap_hub, max_swap_hub = swap_bounds.get(backing, (0, 0))
             bounds_set = min_swap_hub > 0 or max_swap_hub > 0
             purse_known = direction_purse_known(backing)
