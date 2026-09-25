@@ -709,10 +709,11 @@ class Tao(Asset, Chain):
                 block = self.get_block(block_num)
             except Exception:
                 block = None
-            if not block or 'extrinsics' not in block:
+            is_raw = bool(block and block.get('_raw'))
+            # The raw fallback keeps only Balances transfers, so it is unreadable to any other decoder.
+            if not block or 'extrinsics' not in block or (is_raw and decode is not self.decode_transfer):
                 stuck = stuck or block_num
                 continue
-            is_raw = block.get('_raw', False)
             for position, ext in enumerate(block['extrinsics']):
                 transfer = decode(ext, is_raw)
                 if transfer is None:

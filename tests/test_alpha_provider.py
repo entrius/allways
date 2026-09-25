@@ -149,6 +149,17 @@ def test_raw_block_raises_rather_than_reading_as_absent():
         _verify(p)
 
 
+def test_deposit_scan_parks_on_a_raw_block_and_finds_the_deposit_once_it_decodes():
+    """A raw block cannot show a stake transfer: the scan must wait on it, never leap past the deposit."""
+    p = _provider()
+    decoded = p.chain.get_block
+    p.chain.get_block = lambda n: {'extrinsics': [], '_raw': True} if n == BLOCK else decoded(n)
+    assert p.find_recent_outgoing(USER, MINER, 5_000) is None
+    assert p.scan_cursors[(USER, MINER, 5_000)] == BLOCK - 1
+    p.chain.get_block = decoded
+    assert p.find_recent_outgoing(USER, MINER, 5_000) == TXID
+
+
 def test_transfer_stake_and_hotkey_settles_on_its_own_event():
     """The sibling call also changes the owning coldkey; only its settlement event differs."""
     ext = _ext(function='transfer_stake_and_hotkey')
