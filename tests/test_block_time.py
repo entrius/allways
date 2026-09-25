@@ -379,10 +379,17 @@ def test_tao_scanner_bounds_first_scan_to_lookback():
     assert seen[0] == 1000 - Tao.SCAN_LOOKBACK_BLOCKS + 1
 
 
-def test_tao_scanner_retries_an_unreadable_block_instead_of_leaping_it():
-    """A deposit in a block the node failed to serve is still found once the node serves it."""
+def test_tao_scanner_reads_past_an_unreadable_block_and_still_retries_it():
+    """A stuck block must not hide the blocks after it: a deposit in k+1 is found at once, and a
+    deposit in k itself is found once the node serves k."""
+    blocks = {101: _raw_transfer_block('0xafter', 'minerTAO', 5000, 'userTAO')}
+    p = _scan_provider(head=102, blocks=blocks, readable_default=True)
+    served = p.get_block
+    p.get_block = lambda n: None if n == 100 else served(n)
+    assert p.find_recent_outgoing('userTAO', 'minerTAO', 5000) == '0xafter'
+
     blocks = {100: _raw_transfer_block('0xdep', 'minerTAO', 5000, 'userTAO')}
-    p = _scan_provider(head=101, blocks=blocks, readable_default=True)
+    p = _scan_provider(head=102, blocks=blocks, readable_default=True)
     served = p.get_block
     p.get_block = lambda n: None if n == 100 else served(n)
     assert p.find_recent_outgoing('userTAO', 'minerTAO', 5000) is None
@@ -416,14 +423,14 @@ def test_tao_scanner_none_when_head_unreachable():
 def test_tao_scanner_ignores_transfer_that_moved_no_funds():
     """An included-but-failed transfer decodes to the right dest/amount and must still be ignored."""
     blocks = {100: _raw_transfer_block('0xdep', 'minerTAO', 5000, 'userTAO', settled=False)}
-    p = _scan_provider(head=100, blocks=blocks)
+    p = _scan_provider(head=100, blocks=blocks, readable_default=True)
     assert p.find_recent_outgoing('userTAO', 'minerTAO', 5000) is None
 
 
 def test_tao_scanner_ignores_transfer_settled_below_the_asking_amount():
     blocks = {100: _raw_transfer_block('0xdep', 'minerTAO', 5000, 'userTAO')}
     blocks[100]['_events'] = [_transfer_event('minerTAO', 4999, 'userTAO')]
-    p = _scan_provider(head=100, blocks=blocks)
+    p = _scan_provider(head=100, blocks=blocks, readable_default=True)
     assert p.find_recent_outgoing('userTAO', 'minerTAO', 5000) is None
 
 
