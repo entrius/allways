@@ -5,7 +5,6 @@ import bittensor as bt
 from allways.assets.asset import Asset, ProviderUnreachableError, SendResult, TransactionInfo
 from allways.assets.tao import Broadcasts, Decoder, Settler, Tao, Transfer
 from allways.chains import ChainDefinition
-from allways.constants import CANCEL_REASON_ALPHA_TRANSFER_DISABLED
 
 LOG_ALPHA = '[Alpha]'
 # Matched by name: SubtensorModule's indices move on runtime upgrades.
@@ -257,26 +256,9 @@ class Alpha(Asset):
             return True
 
     def delivery_refused(self, address: str, since_unix: int) -> bool:
-        """Deferral hint: transfers are off right now. Raises when unreadable, so the loop defers rather
-        than reading an RPC failure as "not refused" and slashing on it."""
+        """Deferral hint, never cancel evidence (a cancel leaves the taker's deposit with the miner).
+        Raises when unreadable so the loop defers, not slashes."""
         return not self.transfers_enabled()
-
-    def cancel_evidence(
-        self, address: str, amount: int, tx_hash: Optional[str] = None, from_address: Optional[str] = None
-    ) -> Optional[int]:
-        """No-fault only when the subnet itself is gone (pruned: its alpha was force-liquidated to TAO, so
-        there is nothing left to deliver). A TransferToggle flip is deliberately NOT cancel evidence: the
-        toggle is the subnet owner's to flip at any block, a cancel leaves the taker's deposit with the
-        miner, and an owner running a miner on its own alpha could flip it after every deposit. It stays
-        a deferral (`delivery_refused`) — the swap holds while transfers are off and, like an EVM
-        getCode hint, times out at the extension ceiling if they never return. A subnet whose owner
-        disables transfers is the miner's counterparty risk for quoting it."""
-        try:
-            if not self.subnet_flag('NetworksAdded'):
-                return CANCEL_REASON_ALPHA_TRANSFER_DISABLED
-            return None
-        except Exception:
-            return None
 
     def transfer(self, to_address: str, origin_hotkey: str, destination_hotkey: str, amount: int) -> Any:
         """A plain (never MEV-shielded) transfer_stake, or transfer_stake_and_hotkey to land on a different hotkey."""
