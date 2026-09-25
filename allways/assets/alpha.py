@@ -256,11 +256,8 @@ class Alpha(Asset):
             return True
 
     def delivery_refused(self, address: str, since_unix: int) -> bool:
-        """Deferral hint: transfers are off right now, or the subnet is gone. Never cancel evidence — a
-        no-fault cancel leaves the taker's deposit with the miner, and TransferToggle is the owner's to
-        flip at any block; the swap holds and times out at the extension ceiling (vault pays the taker).
-        Raises when unreadable, so the loop defers rather than reading an RPC failure as "not refused"
-        and slashing on it."""
+        """Deferral hint, never cancel evidence (a cancel leaves the taker's deposit with the miner).
+        Raises when unreadable so the loop defers, not slashes."""
         return not self.transfers_enabled()
 
     def transfer(self, to_address: str, origin_hotkey: str, destination_hotkey: str, amount: int) -> Any:

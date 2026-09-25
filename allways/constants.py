@@ -67,7 +67,8 @@ CANCEL_REASON_ERC20_FEE_ENABLED = 4
 CANCEL_REASON_SPL_FROZEN = 5
 # The destination fails the chain's offline format check: unpayable by construction, never the miner's fault.
 CANCEL_REASON_INVALID_DEST = 6
-# 7 (alpha transfer disabled) is reserved in constants.rs but never emitted: an alpha dest defers, never cancels.
+# 7 (alpha transfer disabled) is reserved in constants.rs but never emitted: a pruned or transfers-off alpha
+# dest defers, never cancels.
 CANCEL_REASON_OTHER = 255
 
 BTC_MIN_FEE_RATE = 5
