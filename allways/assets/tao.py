@@ -694,16 +694,23 @@ class Tao(Asset, Chain):
         """Extrinsic hash of a settled ``from_addr`` → ``to_addr`` transfer of >= ``amount`` in the blocks
         minted since this triple's cursor, else None. The subtensor sibling of the BTC/SOL deposit scanners:
         a hash-finder only — the seam's confirm re-verifies everything by hash, so a miss here just means
-        the manual rescue paths. An unretrievable block is skipped and not revisited (the cursor moves on)."""
+        the manual rescue paths. The scan reads every block to head, but the cursor parks just below the
+        lowest unreadable one so the next call retries it; the lookback floor bounds how long a permanently
+        unreadable block can hold the cursor back."""
         head = self.get_current_block_height()
         if head is None:
             return None
         key = (from_addr, to_addr, int(amount))
         floor = max(head - self.SCAN_LOOKBACK_BLOCKS, 0)
         last = cursors.get(key, floor)
+        stuck = None
         for block_num in range(max(last, floor) + 1, head + 1):
-            block = self.get_block(block_num)
+            try:
+                block = self.get_block(block_num)
+            except Exception:
+                block = None
             if not block or 'extrinsics' not in block:
+                stuck = stuck or block_num
                 continue
             is_raw = block.get('_raw', False)
             for position, ext in enumerate(block['extrinsics']):
@@ -717,15 +724,20 @@ class Tao(Asset, Chain):
                 try:
                     settled = settle(block_num, self.extrinsic_position(ext, position, is_raw), transfer)
                 except ProviderUnreachableError:
+                    stuck = stuck or block_num
                     continue
                 if settled is None or settled[1] < int(amount):
                     continue
                 cursors.pop(key, None)
                 return ext_hash
-        cursors[key] = head
-        if len(cursors) > self._MAX_SCAN_CURSORS:
-            cursors.pop(next(iter(cursors)))
+        self._set_cursor(cursors, key, head if stuck is None else stuck - 1)
         return None
+
+    @classmethod
+    def _set_cursor(cls, cursors: Dict[Tuple[str, str, int], int], key: Tuple[str, str, int], height: int) -> None:
+        cursors[key] = height
+        if len(cursors) > cls._MAX_SCAN_CURSORS:
+            cursors.pop(next(iter(cursors)))
 
     def get_current_block_height(self) -> Optional[int]:
         try:
