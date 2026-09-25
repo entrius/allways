@@ -1,13 +1,16 @@
 """`post-tx` takes btcli's `<block>-<idx>` and relays the creditable hash, a MEV shield unwrapped to its inner send."""
 
 from types import SimpleNamespace
+from unittest.mock import MagicMock, patch
 
 import pytest
+from click.testing import CliRunner
 
 from allways.assets.alpha import Alpha
 from allways.assets.asset import ProviderUnreachableError
 from allways.assets.tao import Tao
 from allways.chains import CHAIN_SN7
+from allways.cli.swap_commands import post_tx
 from allways.cli.swap_commands.post_tx import parse_extrinsic_id
 
 USER = '5ELSfSpQzLwnauZijPRWN1Zdqh5er6g5iZ8Q7vEm4Pfcnsc5'
@@ -111,3 +114,27 @@ def test_tail_block_not_minted_yet_is_retryable():
     p.chain.get_current_block_height = lambda: BLOCK
     with pytest.raises(ProviderUnreachableError, match='not minted yet, retry shortly'):
         p.locate_transfer(BLOCK, 0)
+
+
+def test_post_tx_relays_the_resolved_inner_hash_and_block():
+    inner = _transfer_stake(0xB3, nonce=9)
+    resv = SimpleNamespace(from_chain='sn7', user='taker')
+    relay = MagicMock(return_value='deadbeef')
+    provider = _alpha({BLOCK: {'extrinsics': [_shield(nonce=8), inner]}})
+
+    def run(argv, provider=provider):
+        with (
+            patch.object(post_tx, 'get_solana_cli_context', return_value=({}, MagicMock())),
+            patch.object(post_tx, 'load_pending_swap', return_value={}),
+            patch.object(post_tx, '_find_reservations', return_value=[('minerpk', 'hotkey', resv)]),
+            patch.object(post_tx, 'gate_provider', return_value=provider),
+            patch.object(post_tx, 'relay_deposit', relay),
+        ):
+            return CliRunner().invoke(post_tx.post_tx_command, argv)
+
+    assert run([f'{BLOCK}-0']).exit_code == 0
+    assert relay.call_args.args[4:6] == (_hash(inner), BLOCK)
+    assert run([f'{BLOCK}-0', '--block', '5']).exit_code == 0
+    assert relay.call_args.args[4:6] == (_hash(inner), 5)  # an explicit --block wins
+    relay.reset_mock()
+    assert run([f'{BLOCK}-0'], provider=SimpleNamespace(chain=object())).exit_code == 1 and not relay.called
