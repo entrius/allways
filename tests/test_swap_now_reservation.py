@@ -688,7 +688,8 @@ def test_send_with_uncontrolled_source_aborts_before_any_bid():
 
 def test_alpha_source_is_told_to_send_one_plain_exact_transfer_stake():
     """Only a top-level exact transfer_stake is credited. A btcli-shielded send is too (the block author
-    includes the decrypted transfer_stake itself), but under a different hash than the one btcli shows."""
+    includes the decrypted transfer_stake itself): the user posts btcli's `<block>-<idx>` or the SDK's inner hash."""
     (line,) = _alpha_send_lines('sn7')
-    assert 'plain transfer_stake for the exact amount' in line and 'inner transfer_stake' in line
+    assert 'plain transfer_stake for the exact amount' in line
+    assert '<block>-<idx>' in line and "data['signed_extrinsic_hash']" in line
     assert _alpha_send_lines('tao') == [] and _alpha_send_lines('btc') == []
