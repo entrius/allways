@@ -9,13 +9,14 @@ import threading
 import time
 from dataclasses import dataclass, field
 from itertools import islice
-from typing import Optional
+from typing import Optional, Tuple
 
 import bittensor as bt
 from bittensor import Keypair
 from solders.pubkey import Pubkey
 
 from allways.assets.asset import ProviderUnreachableError
+from allways.assets.tao import Tao, parse_extrinsic_id
 from allways.chains import SUPPORTED_CHAINS, canonical_pair, get_chain_def
 from allways.cli.swap_commands.swap_intake import (
     MinerCandidate,
@@ -503,6 +504,7 @@ class ConfirmResult:
     reason: str = ''
     swap_key: str = ''
     sig: str = ''
+    from_tx_hash: str = ''  # the hash claimed — an extrinsic id resolves to it
 
 
 # Runway submit_swap_claim needs to land after a deposit verifies. Only the claim tx remains at this
@@ -591,6 +593,22 @@ def _extend_for_claim(client, miner_pk, reservation, backing) -> None:
         bt.logging.warning(f'claim runway: extend_reservation failed ({e}); attempting the claim anyway')
 
 
+def _deposit_ref(provider, from_tx_hash: str, from_tx_block: int) -> Optional[Tuple[str, int]]:
+    """(hash, block hint) to verify against ``provider``: a hash as given; a Subtensor extrinsic id resolved
+    through the shared `locate_transfer`. None when the id names no creditable transfer on this chain."""
+    extrinsic_id = parse_extrinsic_id(from_tx_hash)
+    if extrinsic_id is None:
+        return from_tx_hash, from_tx_block
+    if not isinstance(provider.chain, Tao):
+        return None
+    try:
+        tx_hash, block = provider.locate_transfer(*extrinsic_id)
+    except ValueError as e:
+        bt.logging.info(f'extrinsic id {from_tx_hash} names no creditable transfer: {e}')
+        return None
+    return tx_hash, from_tx_block or block
+
+
 def confirm_deposit(validator, miner_hotkey: str, from_tx_hash: str, from_tx_block: int = 0) -> ConfirmResult:
     """Relay a user's source deposit into a claim: verify the tx against the pinned reservation, then
     submit_swap_claim (creating the Swap in PendingAttestation). Accepts a content-valid deposit even before
@@ -623,11 +641,15 @@ def confirm_deposit(validator, miner_hotkey: str, from_tx_hash: str, from_tx_blo
         if provider is None:
             continue
         try:
+            ref = _deposit_ref(provider, from_tx_hash, from_tx_block)
+            if ref is None:
+                continue
+            tx_hash, block_hint = ref
             candidate = provider.verify_transaction(
-                tx_hash=from_tx_hash,
+                tx_hash=tx_hash,
                 expected_recipient=resv.miner_from_addr,
                 expected_amount=int(resv.from_amount),
-                block_hint=from_tx_block,
+                block_hint=block_hint,
                 expected_sender=resv.from_addr,
             )
         except ProviderUnreachableError:
@@ -648,7 +670,7 @@ def confirm_deposit(validator, miner_hotkey: str, from_tx_hash: str, from_tx_blo
         # canonical-form from_addr wins — honest lanes commit canonical, while a case variant is the
         # source-lock dodge (V-C2) — then the oldest reservation (the one the variant was copied from).
         canonical = resv.from_addr == provider.chain.normalize_address(resv.from_addr)
-        matches.append(((0 if canonical else 1, int(resv.created_at)), resv, resv_backing, candidate))
+        matches.append(((0 if canonical else 1, int(resv.created_at)), resv, resv_backing, candidate, tx_hash))
 
     if not matches:
         if stale:
@@ -657,7 +679,7 @@ def confirm_deposit(validator, miner_hotkey: str, from_tx_hash: str, from_tx_blo
             return ConfirmResult(False, 'Source-chain provider unreachable; resend shortly')
         # No live slot matched; fast-fail (no claim) so the short TTL frees the miner.
         return ConfirmResult(False, 'Source tx not visible or does not match the reservation')
-    _, reservation, backing, tx_info = min(matches, key=lambda m: m[0])
+    _, reservation, backing, tx_info, from_tx_hash = min(matches, key=lambda m: m[0])
 
     # The taker's funds are already on the source chain and this deposit just verified against the
     # pinned reservation — but submit_swap_claim needs reserved_until >= now, and once it lapses there
@@ -666,7 +688,7 @@ def confirm_deposit(validator, miner_hotkey: str, from_tx_hash: str, from_tx_blo
 
     swap_key = swap_key_from_tx_hash(from_tx_hash)
     sig = client.submit_swap_claim(miner_pk, swap_key, from_tx_hash, tx_info.block_number or 0, backing)
-    return ConfirmResult(True, '', swap_key.hex(), sig)
+    return ConfirmResult(True, '', swap_key.hex(), sig, from_tx_hash)
 
 
 def scan_deposit(validator, miner_hotkey: str) -> Optional[str]:
