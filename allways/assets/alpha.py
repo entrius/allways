@@ -311,6 +311,9 @@ class Alpha(Asset):
     def find_recent_outgoing(self, from_addr: str, to_addr: str, amount: int) -> Optional[str]:
         return self.chain.find_outgoing(self.scan_cursors, from_addr, to_addr, amount, *self.ledger)
 
+    def locate_transfer(self, block_num: int, ext_idx: int) -> Tuple[str, int]:
+        return self.chain.locate_transfer(block_num, ext_idx, self.decode_transfer_stake)
+
     def send_amount(
         self, to_address: str, amount: int, from_address: Optional[str] = None, dedup_key: Optional[str] = None
     ) -> SendResult:
