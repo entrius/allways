@@ -503,8 +503,7 @@ def finalize_won_seats(validator, now: int) -> list:
 
 
 def pin_collateral_verdict_at_finalize(validator, miner: str, backing: str, from_chain, to_chain, fill):
-    """Pin a declared backing's verdict as soon as its seat lands; the program stamps ``created_at`` at the
-    fill, so the seat is read back once for it. A fault leaves the verdict to event ingest, never the sweep."""
+    """Pin a declared seat's verdict at its fill; a fault leaves it to event ingest."""
     try:
         resv = validator.solana_client.get_reservation(Pubkey.from_string(miner), backing)
         if resv is None or int(resv.created_at) <= 0 or int(resv.collateral_amount) != fill.collateral_amount:
