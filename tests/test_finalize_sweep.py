@@ -164,6 +164,54 @@ def test_different_source_addr_on_other_hub_finalizes(tmp_path):
     v.state_store.close()
 
 
+def _declared_seat(client, *, price_at_block):
+    """sn7→btc drawn seat with TAO behind the sn7 leg; the fill stamps ``created_at`` on the read-back."""
+    seat = _drawn_seat(client, from_chain='sn7', to_chain='btc')
+    seat.collateral_chain = 'tao'
+    seat.rate = RATE_FIXED
+    client._reservation = seat
+
+    def finalize(miner, user, src, dst, collateral_amount, from_amount, to_amount, backing='sol', *, from_chain=None):
+        client.finalized.append((str(miner), str(user), src, dst, collateral_amount, from_amount, to_amount))
+        client._reservation = SimpleNamespace(created_at=NOW, collateral_amount=collateral_amount)
+        return 'finalizesig'
+
+    client.finalize_reservation = finalize
+
+    chain = SimpleNamespace(block_at=lambda ts: 777, normalize_address=str)
+    # The sweep prices the fill at head via axon_assets; the pin prices at the fill block via assets.
+    client.axon_assets = {'sn7': SimpleNamespace(value_rao=lambda amount, block=None: amount, chain=chain)}
+    client.assets = {'sn7': SimpleNamespace(value_rao=lambda amount, block=None: price_at_block(amount), chain=chain)}
+
+
+def _declared_validator(tmp_path, client):
+    v = _validator(tmp_path, client)
+    v.axon_assets, v.assets = client.axon_assets, client.assets
+    v.state_store.upsert_routed_request(MINER, 'sn7', 'btc', 'tao', USER_A, 'src', 'dst', 10**9, NOW - 10)
+    return v
+
+
+def test_declared_seat_pins_its_collateral_verdict_at_finalize(tmp_path):
+    client = SweepClient(None)
+    _declared_seat(client, price_at_block=lambda amount: amount)
+    v = _declared_validator(tmp_path, client)
+    assert finalize_won_seats(v, NOW) == [MINER]
+    assert v.state_store.collateral_verdict(MINER, 'tao', NOW, 10**9) is True
+    v.state_store.close()
+
+
+def test_price_fault_at_finalize_leaves_verdict_to_ingest(tmp_path):
+    def unreachable(amount):
+        raise RuntimeError('price RPC down')
+
+    client = SweepClient(None)
+    _declared_seat(client, price_at_block=unreachable)
+    v = _declared_validator(tmp_path, client)
+    assert finalize_won_seats(v, NOW) == [MINER]
+    assert v.state_store.collateral_verdict(MINER, 'tao', NOW, 10**9) is None
+    v.state_store.close()
+
+
 def test_draw_pool_winner_is_fifo_stub():
     oldest = {'user_pubkey': USER_A, 'created_at': 1}
     assert draw_pool_winner([oldest, {'user_pubkey': USER_B, 'created_at': 2}]) is oldest

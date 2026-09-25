@@ -581,7 +581,7 @@ def test_reserved_seat_serves_the_pinned_collateral_verdict(tmp_path):
     from allways.validator.reserve_engine import swap_status
 
     validator, store = _status_validator(tmp_path, StatusClient(reservation=_declared_reservation(FUTURE)))
-    assert 'collateral_ok' not in swap_status(validator, HOTKEY).detail  # fill event not ingested yet
+    assert swap_status(validator, HOTKEY).detail['collateral_ok'] is None  # pending: the consumer must hold
     store.record_collateral_verdict(str(MINER_PK), 'tao', 1_200, 10**9, False)
     assert swap_status(validator, HOTKEY).detail['collateral_ok'] is False
     store.record_collateral_verdict(str(MINER_PK), 'tao', 1_200, 10**9, True)
