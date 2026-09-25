@@ -57,7 +57,7 @@ from allways.cli.swap_commands.swap_intake import (
     viable_intakes,
 )
 from allways.cli.validator_rejections import render_and_aggregate
-from allways.constants import FEE_DIVISOR, NETUID_FINNEY, NUMERAIRE_CHAIN, hub_leg
+from allways.constants import FEE_DIVISOR, NETUID_FINNEY, NUMERAIRE_CHAIN, family, hub_leg
 from allways.solana import pdas
 from allways.solana.client import benign_marker, contract_reject_reason
 from allways.solana.rpc import TransientRpcError
@@ -423,7 +423,7 @@ def swap_now_command(
     if auto_send is True and not uses_solana_wallet(from_chain):
         _pre = _source_provider(from_chain, client, config)
         if _pre is None or not _pre.can_send_from(user_from_addr):
-            hint = f" (configured TAO wallet: '{config.get('wallet', '?')}')" if from_chain == 'tao' else ''
+            hint = f" (configured TAO wallet: '{config.get('wallet', '?')}')" if family(from_chain) == 'tao' else ''
             fail(
                 f'--send: this CLI cannot send {from_chain.upper()} from {user_from_addr}{hint}. '
                 'No bid was placed and no fee was spent. Fix --from-address or the configured '
@@ -762,22 +762,22 @@ def _source_provider(from_chain: str, client, config):
         return None
 
     avail = {'solana_rpc_url': client.rpc.url, 'solana_keypair': client.keypair}
-    if from_chain == 'tao':
-        # Wallet only — do NOT unlock the coldkey here. `can_send_from` reads the public coldkeypub,
-        # so we defer the (possibly interactive) unlock until AFTER the user confirms the send.
-        _cfg, wallet, subtensor, _ = get_cli_context(need_wallet=True)
-        avail.update(subtensor=subtensor, wallet=wallet)
     try:
+        if family(from_chain) == 'tao':
+            # Wallet only — do NOT unlock the coldkey here. `can_send_from` reads the public coldkeypub,
+            # so we defer the (possibly interactive) unlock until AFTER the user confirms the send.
+            _cfg, wallet, subtensor, _ = get_cli_context(need_wallet=True)
+            avail.update(subtensor=subtensor, wallet=wallet)
         provider = spec.cls(**{k: avail[k] for k in spec.kwarg_names if k in avail})
         provider.check_connection(require_send=True)
-    except Exception as e:  # noqa: BLE001 - missing creds (e.g. no BTC_PRIVATE_KEY) → manual fallback
+    except Exception as e:  # noqa: BLE001 - missing creds or unreachable subtensor → manual fallback
         console.print(f'[dim]  Auto-send unavailable for {from_chain.upper()} ({e}); use the manual flow.[/dim]')
         return None
     return provider
 
 
 def _unlock_coldkey_for_send(wallet) -> bool:
-    """Unlock the bt coldkey to sign a TAO transfer — reading MINER_BITTENSOR_COLDKEY_PASSWORD from
+    """Unlock the bt coldkey to sign a TAO or alpha transfer — reading MINER_BITTENSOR_COLDKEY_PASSWORD from
     env first (seamless, no prompt), else prompting WITH context so the ask never reads as a bare,
     unexplained 'Enter your password:'. Returns False (→ manual fallback) if it can't unlock."""
     import os
@@ -788,13 +788,13 @@ def _unlock_coldkey_for_send(wallet) -> bool:
             wallet.coldkey_file.save_password_to_env(pw)
         else:
             console.print(
-                '  [dim]Unlock your Bittensor coldkey to sign the TAO transfer '
+                '  [dim]Unlock your Bittensor coldkey to sign the transfer '
                 '(set MINER_BITTENSOR_COLDKEY_PASSWORD to skip this):[/dim]'
             )
         wallet.unlock_coldkey()
         return True
     except Exception as e:  # noqa: BLE001 - wrong/absent password → fall back to manual send
-        console.print(f'[dim]  Could not unlock coldkey ({e}); send the TAO yourself and run post-tx.[/dim]')
+        console.print(f'[dim]  Could not unlock coldkey ({e}); send it yourself and run post-tx.[/dim]')
         return False
 
 
@@ -804,21 +804,21 @@ def _auto_send_wizard(client, config, resv, miner_pk, from_chain, to_chain, from
     provider = _source_provider(from_chain, client, config)
     if provider is None:
         return False
+    wallet_label = {
+        'tao': f'Bittensor coldkey ({config.get("wallet", "?")})',
+        'btc': 'Bitcoin WIF wallet',
+    }.get(family(from_chain), 'Solana keypair' if uses_solana_wallet(from_chain) else f'{from_chain.upper()} wallet')
     # SAFETY: the deposit MUST come from the reservation's pinned sender or the validator rejects it
     # (the exact wrong-key failure). Verify BEFORE moving any funds.
     if not provider.can_send_from(resv.from_addr):
         console.print(
-            f'[dim]  Your configured {from_chain.upper()} wallet does not control the pinned source '
+            f'[dim]  Your configured {wallet_label} does not control the pinned source '
             f'address {resv.from_addr[:12]}… — sending it yourself and running post-tx.[/dim]'
         )
         return False
 
     amount_disp = int(resv.from_amount) / 10 ** get_chain_def(from_chain).decimals
     to_addr = resv.miner_from_addr
-    wallet_label = {
-        'tao': f'Bittensor coldkey ({config.get("wallet", "?")})',
-        'btc': 'Bitcoin WIF wallet',
-    }.get(from_chain, 'Solana keypair' if uses_solana_wallet(from_chain) else f'{from_chain.upper()} wallet')
     console.print(f'  [dim]Source: your configured {wallet_label}[/dim]  [cyan]{resv.from_addr}[/cyan]')
     if not skip_confirm and not click.confirm(
         f'  Send {amount_disp:g} {from_chain.upper()} to the miner now?',
@@ -827,7 +827,7 @@ def _auto_send_wizard(client, config, resv, miner_pk, from_chain, to_chain, from
         return False  # user declined auto-send → manual instructions
 
     # TAO leaves the encrypted coldkey — unlock it only now (after the confirm), with context.
-    if from_chain == 'tao' and not _unlock_coldkey_for_send(provider.wallet):
+    if family(from_chain) == 'tao' and not _unlock_coldkey_for_send(provider.wallet):
         return False
 
     from allways.cli.swap_commands.post_tx import relay_deposit, resolve_relay_axons

@@ -17,11 +17,13 @@ from allways.cli.swap_commands.helpers import live_unclaimed
 from allways.cli.swap_commands.swap import (
     _SEND_MARGIN_SECS,
     _alpha_send_lines,
+    _auto_send_wizard,
     _deadline_lines,
     _poll_drawn,
     _poll_reservation,
     _refuse_uncovered,
     _self_crank_resolve,
+    _source_provider,
 )
 from allways.cli.swap_commands.swap_intake import MinerCandidate
 from allways.solana.rpc import TransientRpcError
@@ -684,6 +686,23 @@ def test_send_with_uncontrolled_source_aborts_before_any_bid():
     assert 'No bid was placed' in result.output
     client.open_or_request.assert_not_called()  # the money-touching call never happened
     client.get_config.assert_not_called()  # aborted before even reading chain config
+
+
+def test_alpha_source_send_signs_with_the_bittensor_coldkey(capsys):
+    """An sn<N> source settles in TAO, so `--send` hands the Alpha provider the same wallet + subtensor
+    as a TAO source (the pre-bid check passes for the coldkey) and names that coldkey on the confirm line."""
+    wallet = MagicMock()
+    wallet.coldkeypub.ss58_address = '5Coldkey'
+    with patch('allways.cli.swap_commands.swap.get_cli_context', return_value=({}, wallet, MagicMock(), None)):
+        provider = _source_provider('sn19', MagicMock(), {})
+    assert provider.wallet is wallet and provider.can_send_from('5Coldkey')
+    with patch('allways.cli.swap_commands.swap.get_cli_context', side_effect=TimeoutError('down')):
+        assert _source_provider('sn19', MagicMock(), {}) is None  # unreachable subtensor → manual flow, no traceback
+
+    resv = types.SimpleNamespace(from_addr='5Other', from_amount=10**9, miner_from_addr='5Miner')
+    with patch('allways.cli.swap_commands.swap._source_provider', return_value=provider):
+        assert _auto_send_wizard(MagicMock(), {'wallet': 'w'}, resv, 'pk', 'sn19', 'sol', 1.0, True, None) is False
+    assert 'Bittensor coldkey (w)' in capsys.readouterr().out
 
 
 def test_alpha_source_is_told_to_send_one_plain_exact_transfer_stake():
