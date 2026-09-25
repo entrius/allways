@@ -100,7 +100,7 @@ def test_alpha_anchor_posts_the_alpha_against_every_priced_spoke():
 
 
 def test_alpha_anchor_refuses_pairs_it_does_not_anchor():
-    for flags in (['--tao-price', '1'], ['--sn64-price', '1']):  # tao↔sn7 anchors on TAO; alpha↔alpha is no pair
+    for flags in (['--tao-price', '1'], ['--sn64-price', '1']):  # tao↔sn7 and alpha↔alpha are native swaps, no pair
         result = CliRunner().invoke(
             numeraire.quotes_command, ['--hub', 'sn7', '--tao-address', 'TAOADDR', *flags, '--dry-run']
         )

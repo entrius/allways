@@ -488,7 +488,7 @@ class TestComputeDirectionPools:
         return sum(v for (f, t, _b), v in pools.items() if scoring_family(f, t) == family)
 
     def test_every_alpha_pair_is_in_the_alpha_family(self):
-        for pair in (('sol', 'sn7'), ('tao', 'sn7'), ('sn7', 'avax')):
+        for pair in (('sol', 'sn7'), ('sn7', 'avax')):
             assert scoring_family(*pair) == ALPHA_FAMILY
         assert scoring_family('sol', 'btc') == 'sol' and scoring_family('sol', 'tao') == 'sol'
         assert scoring_family('tao', 'eth') == 'tao'
@@ -604,7 +604,7 @@ class TestCollateralUnitValue:
 
     def test_exact_leg_is_worth_one(self):
         v = SimpleNamespace(assets={}, alpha_prices={})
-        assert collateral_unit_value(v, 'tao', 'sn7', 'tao', 0) == 1.0
+        assert collateral_unit_value(v, 'tao', 'eth', 'tao', 0) == 1.0
 
     def test_declared_leg_reads_its_price_once_per_window(self):
         sn7 = self.Alpha(TAO_TO_RAO // 100)

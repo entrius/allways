@@ -99,7 +99,7 @@ EVENT_RETENTION_SECS = 4 * 3600
 REWARD_MINER_STATES: frozenset[MinerActivity] = frozenset({MinerActivity.AVAILABLE})
 # Hub (collateral-capable) chains, PRIORITY-ORDERED: the earlier hub anchors a hub↔hub pair, so
 # sol↔tao stays SOL-anchored (grandfathered — existing quotes keep their stored convention).
-# A pair is valid iff one leg is a hub or an alpha; hub_leg() names that anchor ('dest per 1 anchor').
+# A pair is valid iff one leg is a hub or an alpha, bar native swaps; hub_leg() names that anchor ('dest per 1 anchor').
 HUB_CHAINS = ('sol', 'tao')
 # The SOL constant — the Solana ledger's own asset (reservation fee, local collateral purse,
 # the `alw miner quotes` default hub). "Is this the pair's hub" reads go through hub_leg() instead.
@@ -116,6 +116,11 @@ def family(chain: str) -> str:
     return 'tao' if is_alpha(chain) else chain
 
 
+def is_native_swap(from_chain: str, to_chain: str) -> bool:
+    """True iff the pair stays in one family through an alpha leg (tao↔snN, snN↔snM) — subtensor swaps it natively."""
+    return (is_alpha(from_chain) or is_alpha(to_chain)) and family(from_chain) == family(to_chain)
+
+
 def is_hub(chain: str) -> bool:
     """True iff ``chain`` backs quotes with its own collateral purse (a literal hub, not an alpha)."""
     return chain in HUB_CHAINS
@@ -123,12 +128,13 @@ def is_hub(chain: str) -> bool:
 
 def hub_leg(from_chain: str, to_chain: str) -> str | None:
     """The pair's anchor — its pricing leg: the literal hub if one is a leg, else the alpha leg of an
-    alpha↔spoke pair. None = invalid pair (spoke↔spoke, alpha↔alpha)."""
+    alpha↔spoke pair. None = invalid pair (spoke↔spoke, tao↔alpha, alpha↔alpha)."""
+    if is_native_swap(from_chain, to_chain):
+        return None
     for hub in HUB_CHAINS:
         if hub in (from_chain, to_chain):
             return hub
-    alpha_legs = [chain for chain in (from_chain, to_chain) if is_alpha(chain)]
-    return alpha_legs[0] if len(alpha_legs) == 1 else None
+    return next((chain for chain in (from_chain, to_chain) if is_alpha(chain)), None)
 
 
 def collateral_leg(backing: str, from_chain: str, to_chain: str) -> str | None:
@@ -184,16 +190,16 @@ LAUNCH_SPOKES = (
     'paxg',
     'solusdc',
 )
-# Alpha tokens paired against each hub; add a subnet here to launch its pairs.
+# Alpha tokens paired against SOL and every spoke; add a subnet here to launch its pairs.
 # Every registered subnet alpha launches. A subnet whose transfers are off is the MINER's problem —
 # it should not quote one — not a list we curate here and re-curate on every registration.
 LAUNCH_ALPHAS: tuple[str, ...] = tuple(f'sn{n}' for n in ALPHA_NETUIDS)
 # Every launch pair in canonical order: each hub against every spoke and alpha (sol↔tao lands once,
 # under SOL, because sol never appears in LAUNCH_SPOKES), then each alpha against every spoke. No
-# alpha↔alpha: subtensor swaps one alpha for another natively.
+# tao↔alpha or alpha↔alpha: subtensor swaps those natively.
 LAUNCH_PAIRS: tuple[tuple[str, str], ...] = (
     tuple((hub, spoke) for hub in HUB_CHAINS for spoke in LAUNCH_SPOKES if spoke != hub)
-    + tuple((hub, alpha) for hub in HUB_CHAINS for alpha in LAUNCH_ALPHAS)
+    + tuple((hub, alpha) for hub in HUB_CHAINS for alpha in LAUNCH_ALPHAS if not is_native_swap(hub, alpha))
     + tuple((alpha, spoke) for alpha in LAUNCH_ALPHAS for spoke in LAUNCH_SPOKES if not is_hub(spoke))
 )
 # Fixed burn: pools sum to MINER_POOL_SHARE instead of 1.0, so at least

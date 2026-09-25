@@ -6,6 +6,7 @@ from allways.constants import (
     ALPHA_NETUIDS,
     EXTENSION_BUCKET_SECONDS,
     EXTENSION_PADDING_SECONDS,
+    HUB_CHAINS,
     hub_leg,
 )
 
@@ -613,10 +614,11 @@ def canonical_pair(chain_a: str, chain_b: str) -> tuple:
     Ordering rules (priority):
     1. The pair's ``hub_leg`` is the canonical SOURCE, so every pair reads 'dest per 1 anchor':
        the literal hub (TAO per SOL, ETH per TAO; ``HUB_CHAINS`` order keeps sol↔tao SOL-anchored),
-       else the family-bearing leg (AVAX per SN7).
+       else the family-bearing leg (AVAX per SN7). A literal hub still anchors a native tao↔snN pair,
+       so a legacy swap keeps its stored rate unit.
     2. Else alphabetical — deterministic fallback for spoke↔spoke (never a valid swap pair).
     """
-    anchor = hub_leg(chain_a, chain_b)
+    anchor = next((hub for hub in HUB_CHAINS if hub in (chain_a, chain_b)), None) or hub_leg(chain_a, chain_b)
     if anchor:
         return (anchor, chain_b if anchor == chain_a else chain_a)
     return (chain_a, chain_b) if chain_a < chain_b else (chain_b, chain_a)

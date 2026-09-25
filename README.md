@@ -10,7 +10,7 @@ Native cross-chain transactions for programs that hold one asset and need to pay
 
 Allways is a settlement layer built to be driven by software. An agent or application that holds SOL, TAO, BTC, or any supported asset submits a single swap and receives the destination asset natively in its own wallet — no account, no custodian, no bridge in the path. Allways creates a verification layer above independent systems: miners complete transactions, validators independently verify both legs on-chain, and a smart contract enforces outcomes through collateral and slashing.
 
-Currently live with SOL and TAO as hubs, each paired against BTC, ETH, USDC-on-Arbitrum, HYPE, BNB, AVAX, USDC-on-Base, USDC-on-Ethereum, CRO, ASTER, UNI, QNT, POL, USDC-on-Polygon, PAXG, and USDC-on-Solana — plus every Bittensor subnet alpha token (`sn1`…`sn128`), and SOL ↔ TAO itself (hub-and-spoke: every pair has a SOL or TAO leg). Designed to scale to any verifiable asset.
+Currently live with SOL and TAO as hubs, each paired against BTC, ETH, USDC-on-Arbitrum, HYPE, BNB, AVAX, USDC-on-Base, USDC-on-Ethereum, CRO, ASTER, UNI, QNT, POL, USDC-on-Polygon, PAXG, and USDC-on-Solana — plus every Bittensor subnet alpha token (`sn1`…`sn128`) against SOL and each spoke, and SOL ↔ TAO itself (hub-and-spoke: every pair has a SOL or TAO leg). Designed to scale to any verifiable asset.
 
 ## For agents
 
