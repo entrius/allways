@@ -9,7 +9,6 @@ from allways.assets.alpha import Alpha
 from allways.assets.asset import ProviderUnreachableError
 from allways.assets.tao import BETA_ESCROW, Tao
 from allways.chains import ALPHA_NETUIDS, CHAIN_SN7, CHAIN_SN74
-from allways.constants import CANCEL_REASON_ALPHA_TRANSFER_DISABLED
 
 MINER = 'minerCold'
 USER = 'userCold'
@@ -245,30 +244,29 @@ def test_transfer_toggle_off_defers_but_never_cancels():
     assert off.cancel_evidence(MINER, 1) is None
     assert off.can_deliver_to(MINER, 1) is False
     assert off.delivery_refused(MINER, 0) is True
-    assert Alpha(CHAIN_SN7, _toggles(subtoken=False)).cancel_evidence(MINER, 1) is None
-    assert Alpha(CHAIN_SN7, _toggles()).cancel_evidence(MINER, 1) is None
     assert Alpha(CHAIN_SN7, _toggles()).delivery_refused(MINER, 0) is False
 
 
-def test_a_pruned_subnet_is_not_deliverable():
+def test_a_pruned_subnet_defers_and_never_cancels():
     """SubnetLimit is full, so a registration dissolves the lowest-priced subnet and its alpha is
-    force-liquidated to coldkey TAO — the miner cannot deliver, and that is not its fault."""
-    gone = _toggles(exists=False)
-    assert Alpha(CHAIN_SN7, gone).can_deliver_to(MINER, 1) is False
-    assert Alpha(CHAIN_SN7, gone).cancel_evidence(MINER, 1) == CANCEL_REASON_ALPHA_TRANSFER_DISABLED
+    force-liquidated to coldkey TAO. A no-fault cancel would leave the taker's deposit with the miner,
+    so the swap defers and times out: the vault pays the taker, same as transfers-off."""
+    gone = Alpha(CHAIN_SN7, _toggles(exists=False))
+    assert gone.can_deliver_to(MINER, 1) is False
+    assert gone.delivery_refused(MINER, 0) is True
+    assert gone.cancel_evidence(MINER, 1) is None
 
 
 def test_unreadable_toggle_is_not_evidence_and_defers_the_slash():
-    """Reserve fails open (not a security boundary); cancel needs positive evidence; the slash gate must
-    RAISE — returning False there read an RPC failure as "not refused" and let the slash proceed, where
-    every other provider's unreadable probe defers it."""
+    """Reserve fails open (not a security boundary); the slash gate must RAISE — returning False there
+    read an RPC failure as "not refused" and let the slash proceed, where every other provider's
+    unreadable probe defers it."""
 
     def boom(*a, **k):
         raise RuntimeError('rpc down')
 
     p = Alpha(CHAIN_SN7, SimpleNamespace(substrate=SimpleNamespace(query=boom)))
     assert p.can_deliver_to(MINER, 1) is True
-    assert p.cancel_evidence(MINER, 1) is None
     with pytest.raises(ProviderUnreachableError):
         p.delivery_refused(MINER, 0)
 
