@@ -643,14 +643,14 @@ def _alpha_send_lines(from_chain: str) -> List[str]:
     """How a subnet-alpha deposit must be sent to be credited: a top-level `SubtensorModule.transfer_stake`
     for the exact amount. A batched/proxied send runs inside a wrapper and a "transfer all" names no amount,
     so neither is credited. A MEV-shielded send (btcli's default, `submit_encrypted`) IS credited: the block
-    author decrypts it and includes the signed transfer_stake itself, 1-2 blocks later, under its own hash."""
+    author includes the signed transfer_stake under its own hash, and post-tx unwraps the shield's id to it."""
     if get_chain_def(from_chain).netuid is None:
         return []
     return [
         f'  [yellow]Send it as ONE plain transfer_stake for the exact amount, from one hotkey that holds all of '
         f'it[/yellow]; a split, batched or proxied transfer, or a "transfer all", cannot be verified and those '
-        f'{from_chain.upper()} are lost to the miner. A MEV-shielded send lands 1-2 blocks later: post the inner '
-        "transfer_stake's hash, not the shield's."
+        f'{from_chain.upper()} are lost to the miner. A MEV-shielded send is fine: post what btcli prints '
+        "(`<block>-<idx>`) or the SDK's `data['signed_extrinsic_hash']`, not the shield receipt's hash."
     ]
 
 

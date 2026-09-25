@@ -18,6 +18,8 @@ import time
 
 import click
 
+from allways.assets.asset import ProviderUnreachableError
+from allways.assets.tao import Tao, parse_extrinsic_id
 from allways.cli.dendrite_lite import (
     broadcast_until_quorum,
     discover_quorum_axons,
@@ -30,6 +32,7 @@ from allways.cli.swap_commands.helpers import (
     clear_pending_swap,
     console,
     fail,
+    gate_provider,
     get_cli_context,
     get_solana_cli_context,
     hotkey_bytes_to_ss58,
@@ -50,6 +53,19 @@ from allways.synapses import SwapConfirmSynapse
 # bitcoind, so `post-tx` fired immediately after broadcast otherwise fails on the first pass.
 _RELAY_ATTEMPTS = 3
 _RELAY_WAIT_SECS = 30
+
+
+def _resolve_extrinsic_id(client, from_chain: str, block_num: int, ext_idx: int):
+    """(hash, block) of the Subtensor deposit at ``<block>-<idx>``, a MEV shield unwrapped to its inner send."""
+    provider = gate_provider(from_chain, client)
+    if provider is None:
+        fail(f'Cannot read {from_chain.upper()} to resolve extrinsic {block_num}-{ext_idx}.')
+    if not isinstance(provider.chain, Tao):
+        fail(f'`{block_num}-{ext_idx}` is a Subtensor extrinsic id; post the {from_chain.upper()} tx hash instead.')
+    try:
+        return provider.locate_transfer(block_num, ext_idx)
+    except (ValueError, ProviderUnreachableError) as e:
+        fail(f'Extrinsic {block_num}-{ext_idx} cannot be relayed: {e}')
 
 
 def _should_retry_relay(info) -> bool:
@@ -125,13 +141,17 @@ def post_tx_command(tx_hash: str, tx_block: int, miner_hint: str):
     [dim]Reservation context is read from ~/.allways/pending_swap.json (saved by `alw swap now`); if
     it's missing the CLI finds your live reservation on-chain.[/dim]
 
+    [dim]A TAO or subnet-alpha deposit may be given as the extrinsic id btcli prints, `<block>-<idx>`; a
+    MEV-shielded send is unwrapped to the transfer it carried.[/dim]
+
     [dim]Examples:
         $ alw swap post-tx 54foaURhGH...
+        $ alw swap post-tx 8083554-7                               (btcli extrinsic id)
         $ alw swap post-tx 54foaURhGH... --miner ER9Jt5...        (pick a specific reservation)
         $ alw swap post-tx 54foaURhGH... --block 371234567        (escape hatch)[/dim]
     """
     if not tx_hash:
-        tx_hash = click.prompt('Source transaction hash').strip()
+        tx_hash = click.prompt('Source transaction hash (or btcli extrinsic id <block>-<idx>)').strip()
     else:
         tx_hash = tx_hash.strip()
     if not tx_hash:
@@ -171,6 +191,11 @@ def post_tx_command(tx_hash: str, tx_block: int, miner_hint: str):
             f'Miner {miner_pk} has no verifiable hotkey binding — validators cannot resolve the '
             'reservation. The miner must `alw miner bind-hotkey` before this swap can be confirmed.'
         )
+
+    extrinsic_id = parse_extrinsic_id(tx_hash)
+    if extrinsic_id:
+        tx_hash, resolved_block = _resolve_extrinsic_id(client, resv.from_chain, *extrinsic_id)
+        tx_block = tx_block or resolved_block
 
     swap_key = relay_deposit(client, resv, miner_pk, miner_hotkey, tx_hash, tx_block, on_behalf_of=user)
     if swap_key is None:

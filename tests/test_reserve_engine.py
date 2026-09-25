@@ -1331,3 +1331,30 @@ def test_attach_leg_confs_does_no_chain_work():
     detail = {}
     _attach_leg_confs(validator, key, detail)
     assert detail['leg_confs']['source']['need'] == 2
+
+
+def test_confirm_resolves_an_extrinsic_id_through_the_source_chain_and_claims_the_inner_hash():
+    # The app relays btcli's `<block>-<idx>` unchanged; the seam resolves, claims and echoes the inner hash.
+    from allways.assets.tao import Tao
+
+    class _AlphaProvider(_FakeProvider):
+        chain = Tao(SimpleNamespace())
+        verified = None
+
+        def locate_transfer(self, block_num, ext_idx):
+            if (block_num, ext_idx) != (8083554, 7):
+                raise ValueError('no creditable transfer')
+            return '0xinner', block_num
+
+        def verify_transaction(self, **kw):
+            self.verified = kw
+            return self._tx
+
+    client = _ConfirmClient(_confirm_reservation(from_chain='sn19'))
+    provider = _AlphaProvider(_tx(confirmed=True, block_time=CONFIRM_CREATED_AT + 5, confirmations=6))
+    validator = SimpleNamespace(solana_client=client, axon_assets={'sn19': provider}, axon_lock=threading.RLock())
+    r = confirm_deposit(validator, HOTKEY, '8083554-7')
+    assert r.ok and r.from_tx_hash == '0xinner'
+    assert (provider.verified['tx_hash'], provider.verified['block_hint']) == ('0xinner', 8083554)
+    assert client.claims[0][1] == '0xinner' and client.claims[0][0] == rc.swap_key_from_tx_hash('0xinner')
+    assert not confirm_deposit(validator, HOTKEY, '8083554-6').ok  # names no transfer → not visible, no claim

@@ -1,3 +1,4 @@
+import re
 from hashlib import blake2b
 from typing import Any, Callable, Dict, Optional, Tuple
 
@@ -10,6 +11,19 @@ from allways.assets.chain import Chain
 from allways.chains import CHAIN_TAO, ChainDefinition
 
 LOG_SUB = '[Subtensor]'
+
+# btcli's default shield: the author decrypts it and includes the signer's nonce+1 call within the SDK's wait.
+MEV_SHIELD_CALL = ('MevShield', 'submit_encrypted')
+MEV_SHIELD_TAIL_BLOCKS = 3
+# The extrinsic id btcli prints for a send, `<block>-<idx>`; no tx hash has this shape.
+EXTRINSIC_ID = re.compile(r'^(\d+)-(\d+)$')
+
+
+def parse_extrinsic_id(text: str) -> Optional[Tuple[int, int]]:
+    """(block, idx) when ``text`` is a Subtensor extrinsic id, else None."""
+    match = EXTRINSIC_ID.match(text)
+    return (int(match.group(1)), int(match.group(2))) if match else None
+
 
 # (extrinsic_hash, dest, amount, sender) of one asset's transfer call, decoded from an extrinsic.
 Transfer = Tuple[str, str, int, str]
@@ -558,6 +572,51 @@ class Tao(Asset, Chain):
             raise
         except Exception as e:
             raise ProviderUnreachableError(f'TAO block scan failed: {e}') from e
+
+    def decoded_extrinsics(self, block_num: int) -> list:
+        """The block's GenericExtrinsics; raises when the block is unreadable or only the raw fallback is."""
+        try:
+            block = self.get_block(block_num)
+        except Exception as e:
+            raise ProviderUnreachableError(f'TAO block {block_num} unreadable: {e}') from e
+        if not block or block.get('_raw'):
+            head = self.get_current_block_height()
+            if head is not None and head < block_num:
+                raise ProviderUnreachableError(f'TAO block {block_num} not minted yet, retry shortly')
+            raise ProviderUnreachableError(f'TAO block {block_num} cannot be decoded')
+        return block['extrinsics']
+
+    @staticmethod
+    def call_name(ext: Any) -> Tuple[Any, Any]:
+        """(pallet, call) of a decoded extrinsic."""
+        value = ext.value if hasattr(ext, 'value') else ext
+        call = (value.get('call') or {}) if isinstance(value, dict) else {}
+        return call.get('call_module'), call.get('call_function')
+
+    def locate_transfer(self, block_num: int, ext_idx: int, decode: Optional[Decoder] = None) -> Tuple[str, int]:
+        """(hash, block) of the transfer at btcli's ``<block>-<idx>``, a MEV shield unwrapped; ValueError if none."""
+        extrinsics = self.decoded_extrinsics(block_num)
+        if not 0 <= ext_idx < len(extrinsics):
+            raise ValueError(f'block {block_num} holds {len(extrinsics)} extrinsics, none at index {ext_idx}')
+        ext = extrinsics[ext_idx]
+        if self.call_name(ext) == MEV_SHIELD_CALL:
+            ext, block_num = self.shielded_inner(ext, block_num, ext_idx)
+        transfer = (decode or self.decode_transfer)(ext, False)
+        if transfer is None:
+            module, function = self.call_name(ext)
+            raise ValueError(f'{module}.{function} is not a creditable transfer')
+        return transfer[0], block_num
+
+    def shielded_inner(self, shield: Any, block_num: int, ext_idx: int) -> Tuple[Any, int]:
+        """(extrinsic, block) revealed from ``shield``: the same signer's next nonce, after it or a few blocks on."""
+        signer, nonce = self.as_ss58(shield.value.get('address')), int(shield.value.get('nonce'))
+        start = ext_idx + 1
+        for block in range(block_num, block_num + MEV_SHIELD_TAIL_BLOCKS + 1):
+            for ext in self.decoded_extrinsics(block)[start:]:
+                if self.as_ss58(ext.value.get('address')) == signer and ext.value.get('nonce') == nonce + 1:
+                    return ext, block
+            start = 0
+        raise ValueError(f'the MEV shield at {block_num}-{ext_idx} revealed nothing by block {block}')
 
     @staticmethod
     def extrinsic_hash(ext: Any) -> str:
