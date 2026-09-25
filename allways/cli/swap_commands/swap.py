@@ -762,22 +762,22 @@ def _source_provider(from_chain: str, client, config):
         return None
 
     avail = {'solana_rpc_url': client.rpc.url, 'solana_keypair': client.keypair}
-    if family(from_chain) == 'tao':
-        # Wallet only — do NOT unlock the coldkey here. `can_send_from` reads the public coldkeypub,
-        # so we defer the (possibly interactive) unlock until AFTER the user confirms the send.
-        _cfg, wallet, subtensor, _ = get_cli_context(need_wallet=True)
-        avail.update(subtensor=subtensor, wallet=wallet)
     try:
+        if family(from_chain) == 'tao':
+            # Wallet only — do NOT unlock the coldkey here. `can_send_from` reads the public coldkeypub,
+            # so we defer the (possibly interactive) unlock until AFTER the user confirms the send.
+            _cfg, wallet, subtensor, _ = get_cli_context(need_wallet=True)
+            avail.update(subtensor=subtensor, wallet=wallet)
         provider = spec.cls(**{k: avail[k] for k in spec.kwarg_names if k in avail})
         provider.check_connection(require_send=True)
-    except Exception as e:  # noqa: BLE001 - missing creds (e.g. no BTC_PRIVATE_KEY) → manual fallback
+    except Exception as e:  # noqa: BLE001 - missing creds or unreachable subtensor → manual fallback
         console.print(f'[dim]  Auto-send unavailable for {from_chain.upper()} ({e}); use the manual flow.[/dim]')
         return None
     return provider
 
 
 def _unlock_coldkey_for_send(wallet) -> bool:
-    """Unlock the bt coldkey to sign a TAO transfer — reading MINER_BITTENSOR_COLDKEY_PASSWORD from
+    """Unlock the bt coldkey to sign a TAO or alpha transfer — reading MINER_BITTENSOR_COLDKEY_PASSWORD from
     env first (seamless, no prompt), else prompting WITH context so the ask never reads as a bare,
     unexplained 'Enter your password:'. Returns False (→ manual fallback) if it can't unlock."""
     import os

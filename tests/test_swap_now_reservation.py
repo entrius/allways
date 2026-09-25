@@ -696,6 +696,8 @@ def test_alpha_source_send_signs_with_the_bittensor_coldkey(capsys):
     with patch('allways.cli.swap_commands.swap.get_cli_context', return_value=({}, wallet, MagicMock(), None)):
         provider = _source_provider('sn19', MagicMock(), {})
     assert provider.wallet is wallet and provider.can_send_from('5Coldkey')
+    with patch('allways.cli.swap_commands.swap.get_cli_context', side_effect=TimeoutError('down')):
+        assert _source_provider('sn19', MagicMock(), {}) is None  # unreachable subtensor → manual flow, no traceback
 
     resv = types.SimpleNamespace(from_addr='5Other', from_amount=10**9, miner_from_addr='5Miner')
     with patch('allways.cli.swap_commands.swap._source_provider', return_value=provider):
