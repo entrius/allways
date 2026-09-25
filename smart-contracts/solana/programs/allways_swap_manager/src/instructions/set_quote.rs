@@ -87,6 +87,7 @@ pub fn handler(
     );
     require!(from_chain != to_chain, ErrorCode::SameChain);
     crate::validate::chain_ids_lowercase(&from_chain, &to_chain)?;
+    crate::validate::not_native_swap(&from_chain, &to_chain)?;
 
     // The backing must be a hub AND one of the legs, and the miner must already be serving that purse.
     // Leg membership is also what keeps the seed lowercase without a third casing check.

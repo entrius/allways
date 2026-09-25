@@ -110,6 +110,7 @@ pub fn handler(
         ErrorCode::StringTooLong
     );
     crate::validate::chain_ids_lowercase(&from_chain, &to_chain)?;
+    crate::validate::not_native_swap(&from_chain, &to_chain)?;
 
     let clock = Clock::get()?;
     let now = clock.unix_timestamp;

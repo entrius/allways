@@ -3,6 +3,7 @@
 
 use anchor_lang::prelude::*;
 
+use crate::backing::family;
 use crate::constants::{
     ATTEST_MAX_AGE_SECS_MAX, ATTEST_MAX_AGE_SECS_MIN, FINALIZE_WINDOW_SECS_MAX,
     FINALIZE_WINDOW_SECS_MIN, MAX_TOTAL_EXTENSION_SECS_MAX, MAX_TOTAL_EXTENSION_SECS_MIN,
@@ -19,6 +20,16 @@ use crate::error::ErrorCode;
 pub fn chain_ids_lowercase(from_chain: &str, to_chain: &str) -> Result<()> {
     let lower = |s: &str| !s.bytes().any(|b| b.is_ascii_uppercase());
     require!(lower(from_chain) && lower(to_chain), ErrorCode::ChainNotLowercase);
+    Ok(())
+}
+
+/// tao↔snN and snN↔snM swap natively on subtensor, so allways never routes them.
+pub fn not_native_swap(from_chain: &str, to_chain: &str) -> Result<()> {
+    let is_alpha = |c: &str| family(c) != c;
+    require!(
+        !((is_alpha(from_chain) || is_alpha(to_chain)) && family(from_chain) == family(to_chain)),
+        ErrorCode::NativeSwapPair
+    );
     Ok(())
 }
 
@@ -125,4 +136,19 @@ pub fn max_total_extension(secs: i64) -> Result<()> {
         ErrorCode::InvalidAmount
     );
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn native_swap_pairs_are_rejected_and_cross_family_pairs_pass() {
+        for (from, to) in [("tao", "sn7"), ("sn7", "tao"), ("sn7", "sn74")] {
+            assert!(not_native_swap(from, to).is_err(), "{from}->{to}");
+        }
+        for (from, to) in [("sol", "sn7"), ("sn7", "avax"), ("sol", "tao"), ("tao", "eth")] {
+            assert!(not_native_swap(from, to).is_ok(), "{from}->{to}");
+        }
+    }
 }
