@@ -283,6 +283,12 @@ Then point the validator at it via `.env`:
 SUBTENSOR_NETWORK=ws://127.0.0.1:9944
 ```
 
+`SUBTENSOR_NETWORK` also takes a keyed provider URL. `SUBTENSOR_FALLBACK_ENDPOINTS` and
+`SUBTENSOR_ARCHIVE_ENDPOINTS` (comma-separated, both optional) back it up: fallbacks take over
+when the current endpoint drops, and the archive serves reads at blocks a lite node has pruned
+(the collateral verdict prices alpha at the reservation's block). The neurons and `alw` both
+honour them; endpoints are logged with any key redacted. See `.env.example`.
+
 The dev environment in `alw-utils/dev-environment` provisions a local chain
 automatically — no manual lite-node step is required there.
 

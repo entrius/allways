@@ -12,6 +12,7 @@ from allways import __spec_version__ as spec_version
 from allways.constants import STALE_BLOCK_POLL_THRESHOLD
 from allways.utils.config import add_args, check_config, config
 from allways.utils.misc import ttl_get_block
+from allways.utils.subtensor import build_subtensor, describe_subtensor, redact_endpoint
 
 VALIDATOR_MODES = ('full', 'vote', 'watch')
 
@@ -85,11 +86,11 @@ class BaseNeuron(ABC):
         bt.logging.info('Setting up bittensor objects.')
 
         self.wallet = bt.Wallet(config=self.config)
-        self.subtensor = bt.Subtensor(config=self.config)
+        self.subtensor = build_subtensor(config=self.config)
         self.metagraph = self.subtensor.metagraph(self.config.netuid)
 
         bt.logging.info(f'Wallet: {self.wallet}')
-        bt.logging.info(f'Subtensor: {self.subtensor}')
+        bt.logging.info(f'Subtensor: {describe_subtensor(self.subtensor)}')
         bt.logging.info(f'Metagraph: {self.metagraph}')
 
         self.check_registered()
@@ -97,7 +98,7 @@ class BaseNeuron(ABC):
         self.uid = self.metagraph.hotkeys.index(self.wallet.hotkey.ss58_address)
         bt.logging.info(
             f'Running neuron on subnet: {self.config.netuid} with uid {self.uid} '
-            f'using network: {self.subtensor.chain_endpoint}'
+            f'using network: {redact_endpoint(self.subtensor.chain_endpoint)}'
         )
         self.step = 0
         self.last_forward_time = time.time()
@@ -129,7 +130,7 @@ class BaseNeuron(ABC):
         """Recreate subtensor connection when WebSocket goes stale."""
         bt.logging.info('Reconnecting subtensor...')
         old_subtensor = self.subtensor
-        self.subtensor = bt.Subtensor(config=self.config)
+        self.subtensor = build_subtensor(config=self.config)
         try:
             old_subtensor.close()
         except Exception:

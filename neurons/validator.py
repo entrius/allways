@@ -38,6 +38,7 @@ from allways.solana.client import AllwaysSolanaClient  # noqa: E402
 from allways.solana.events import SolanaEventIngest  # noqa: E402
 from allways.solana.program_feed import ProgramEventFeed  # noqa: E402
 from allways.solana.rpc import assert_cluster_safe, resolve_rpc_url, resolve_ws_url  # noqa: E402
+from allways.utils.subtensor import build_subtensor  # noqa: E402
 from allways.validator.axon_handlers import (  # noqa: E402
     blacklist_miner_activate,
     blacklist_swap_confirm,
@@ -206,8 +207,8 @@ class Validator(BaseValidatorNeuron):
         self.program_feed = ProgramEventFeed(resolve_ws_url(solana_rpc_url), self.solana_client.program_id)
         self.crank_scheduler = CrankScheduler(self, self.program_feed)
         self.program_feed.start()
-        self.axon_subtensor = bt.Subtensor(config=self.config)
-        axon_assets = create_assets(subtensor=bt.Subtensor(config=self.config), solana_rpc_url=solana_rpc_url)
+        self.axon_subtensor = build_subtensor(config=self.config)
+        axon_assets = create_assets(subtensor=build_subtensor(config=self.config), solana_rpc_url=solana_rpc_url)
         self.axon_assets = {chain: provider for chain, provider in axon_assets.items() if chain in self.assets}
         bt.logging.debug(f'Validator components: fee_divisor={self.fee_divisor}')
 
@@ -262,7 +263,7 @@ class Validator(BaseValidatorNeuron):
         """Rebuild the axon-side subtensor used by handler threads."""
         bt.logging.info('Reconnecting axon subtensor...')
         old = self.axon_subtensor
-        self.axon_subtensor = bt.Subtensor(config=self.config)
+        self.axon_subtensor = build_subtensor(config=self.config)
         try:
             old.close()
         except Exception:

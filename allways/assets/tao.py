@@ -9,6 +9,7 @@ from bittensor.utils import is_valid_ss58_address, ss58_encode
 from allways.assets.asset import Asset, ProviderUnreachableError, SendResult, TransactionInfo
 from allways.assets.chain import Chain
 from allways.chains import CHAIN_TAO, ChainDefinition
+from allways.utils.subtensor import redact_endpoint
 
 LOG_SUB = '[Subtensor]'
 
@@ -69,7 +70,7 @@ class Tao(Asset, Chain):
         return CHAIN_TAO
 
     def describe(self) -> str:
-        return f'Subtensor {self.subtensor.chain_endpoint}'
+        return f'Subtensor {redact_endpoint(self.subtensor.chain_endpoint)}'
 
     def can_send_from(self, address: str) -> bool:
         return self.wallet is not None and self.wallet.coldkeypub.ss58_address == address

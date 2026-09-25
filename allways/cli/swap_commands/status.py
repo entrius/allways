@@ -25,6 +25,7 @@ from allways.cli.swap_commands.helpers import (
     wallet_path,
 )
 from allways.solana.rpc import redact_rpc_url
+from allways.utils.subtensor import build_subtensor, redact_endpoint
 
 
 def _tao_identity(config):
@@ -41,7 +42,7 @@ def _tao_identity(config):
     except Exception:
         return None
     try:
-        balance = float(bt.Subtensor(network=config.get('network', 'finney')).get_balance(ss58))
+        balance = float(build_subtensor(network=config.get('network', 'finney')).get_balance(ss58))
     except Exception:
         balance = None
     return ss58, balance
@@ -116,7 +117,7 @@ def status_command(miner_pk, as_json):
 
     if as_json:
         out = {
-            'network': network,
+            'network': redact_endpoint(network),
             'solana_rpc': redact_rpc_url(client.rpc.url),
             'program_initialized': program_initialized,
             'halted': halted,
@@ -149,7 +150,7 @@ def status_command(miner_pk, as_json):
         return
 
     console.print('\n[bold]Allways Status[/bold]\n')
-    console.print(f'  Network:      {network}')
+    console.print(f'  Network:      {redact_endpoint(network)}')
     console.print(f'  Solana RPC:   {redact_rpc_url(client.rpc.url)}')
     console.print(
         f'  Program:      {"[green]initialized[/green]" if program_initialized else "[red]not initialized[/red]"}'

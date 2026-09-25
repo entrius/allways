@@ -11,6 +11,7 @@ import numpy as np
 
 from allways.constants import RECYCLE_UID, VALIDATOR_POLL_INTERVAL_SECONDS
 from allways.utils.config import add_validator_args
+from allways.utils.subtensor import redact_endpoint
 from neurons.base.neuron import BaseNeuron
 from neurons.base.utils.weight_utils import (
     convert_weights_and_uids_for_emit,
@@ -82,7 +83,7 @@ class BaseValidatorNeuron(BaseNeuron):
             self.axon.start()
             bt.logging.info(
                 f'Running validator {self.axon} on network: '
-                f'{self.config.subtensor.chain_endpoint} with netuid: {self.config.netuid}'
+                f'{redact_endpoint(self.config.subtensor.chain_endpoint)} with netuid: {self.config.netuid}'
             )
 
         except Exception as e:

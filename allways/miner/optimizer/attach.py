@@ -25,6 +25,7 @@ from allways.miner.optimizer.quote_optimizer import (
 )
 from allways.solana.client import AllwaysSolanaClient
 from allways.solana.rpc import resolve_ws_url
+from allways.utils.subtensor import build_subtensor
 
 
 def attach_optimizer(miner, config_path: Path = DEFAULT_OPTIMIZER_CONFIG_PATH) -> Optional[QuoteOptimizer]:
@@ -43,7 +44,7 @@ def attach_optimizer(miner, config_path: Path = DEFAULT_OPTIMIZER_CONFIG_PATH) -
     # threads, and a read colliding with the swap loop comes back from the miner's TAO provider as a 0 balance.
     assets = dict(miner.assets)
     if 'tao' in assets:
-        assets['tao'] = TaoBalanceReader(lambda: bt.Subtensor(config=miner.config))
+        assets['tao'] = TaoBalanceReader(lambda: build_subtensor(config=miner.config))
     # BTC balances through the provider's Esplora endpoints, but a failed read is unknown — the provider itself says 0.
     if 'btc' in assets:
         assets['btc'] = BtcBalanceReader(miner.assets['btc'])
