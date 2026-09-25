@@ -127,6 +127,8 @@ def create_assets(
     e.g. create_assets(subtensor=subtensor)
     """
     providers: Dict[str, Asset] = {}
+    # The TAO provider and every alpha (~128) ride one subtensor: check it once, not once per alpha.
+    subtensor_checks: Dict[int, Optional[Exception]] = {}
 
     for chain_id, cls, kwarg_names in ASSET_REGISTRY:
         name = getattr(cls, 'func', cls).__name__  # a partial (alpha rows) has no __name__ of its own
@@ -136,7 +138,10 @@ def create_assets(
             provider = cls(**provider_kwargs)
             provider.chain  # a missing Chain binding fails here at boot, not mid-pass
             if check:
-                provider.check_connection(require_send=require_send)
+                if isinstance(provider.chain, Tao):
+                    provider.check_connection(require_send=require_send, checked=subtensor_checks)
+                else:
+                    provider.check_connection(require_send=require_send)
             providers[chain_id] = provider
         except MissingTestnetDeployment as e:
             # A spoke with no deployment on this test network can't exist here at all, so it

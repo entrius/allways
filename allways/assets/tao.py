@@ -75,12 +75,23 @@ class Tao(Asset, Chain):
     def can_send_from(self, address: str) -> bool:
         return self.wallet is not None and self.wallet.coldkeypub.ss58_address == address
 
-    def check_connection(self, **kwargs) -> None:
+    def check_connection(self, checked: Optional[Dict[int, Optional[Exception]]] = None, **kwargs) -> None:
+        """``checked`` (id(subtensor) → its check's error, None = passed) lets every provider on one subtensor share
+        one check: the TAO provider and each alpha all ride the neuron's subtensor."""
+        if checked is not None and id(self.subtensor) in checked:
+            if checked[id(self.subtensor)] is not None:
+                raise checked[id(self.subtensor)]
+            return
         try:
             block = self.subtensor.get_current_block()
             bt.logging.success(f'{LOG_SUB} connected: block={block}')
         except Exception as e:
-            raise ConnectionError(f'Cannot reach Subtensor: {e}') from e
+            error = ConnectionError(f'Cannot reach Subtensor: {e}')
+            if checked is not None:
+                checked[id(self.subtensor)] = error
+            raise error from e
+        if checked is not None:
+            checked[id(self.subtensor)] = None
 
     def clear_cache(self) -> None:
         """Clear the block cache. Call at the start of each poll cycle."""
