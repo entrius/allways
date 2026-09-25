@@ -1,8 +1,4 @@
-"""`post-tx` takes the extrinsic id btcli prints (`<block>-<idx>`) and relays the hash the validator can credit.
-
-A MEV-shielded send (btcli's default) is a `MevShield.submit_encrypted` wrapper the block author decrypts and
-includes as the signer's next-nonce extrinsic — live testnet 8083554: shield idx 6 nonce 8, transfer_stake idx 7
-nonce 9 (S3); 8083795: idx 6 nonce 14 → idx 7 nonce 15 (S8). The shield's own hash is never credited."""
+"""`post-tx` takes btcli's `<block>-<idx>` and relays the creditable hash, a MEV shield unwrapped to its inner send."""
 
 from types import SimpleNamespace
 

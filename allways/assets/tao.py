@@ -11,9 +11,7 @@ from allways.chains import CHAIN_TAO, ChainDefinition
 
 LOG_SUB = '[Subtensor]'
 
-# btcli's default MEV shield: the user signs this wrapper, the block author decrypts it and includes the
-# inner signed call (nonce + 1) as its own extrinsic — in the shield's block, or within the blocks the SDK
-# waits for it (bittensor mev_shield.py timeout_blocks).
+# btcli's default shield: the author decrypts it and includes the signer's nonce+1 call within the SDK's wait.
 MEV_SHIELD_CALL = ('MevShield', 'submit_encrypted')
 MEV_SHIELD_TAIL_BLOCKS = 3
 
@@ -580,9 +578,7 @@ class Tao(Asset, Chain):
         return call.get('call_module'), call.get('call_function')
 
     def locate_transfer(self, block_num: int, ext_idx: int, decode: Optional[Decoder] = None) -> Tuple[str, int]:
-        """(hash, block) of the transfer at the extrinsic id btcli prints, ``<block>-<idx>``. A MEV shield
-        wrapper resolves to the inner extrinsic it carried. Raises ValueError when the id names no
-        creditable transfer, ProviderUnreachableError when the chain can't be read."""
+        """(hash, block) of the transfer at btcli's ``<block>-<idx>``, a MEV shield unwrapped; ValueError if none."""
         extrinsics = self.decoded_extrinsics(block_num)
         if not 0 <= ext_idx < len(extrinsics):
             raise ValueError(f'block {block_num} holds {len(extrinsics)} extrinsics, none at index {ext_idx}')
@@ -596,8 +592,7 @@ class Tao(Asset, Chain):
         return transfer[0], block_num
 
     def shielded_inner(self, shield: Any, block_num: int, ext_idx: int) -> Tuple[Any, int]:
-        """(extrinsic, block) the author revealed from ``shield``: the same signer's next nonce, after the
-        shield in its block or within the blocks the SDK itself waits."""
+        """(extrinsic, block) revealed from ``shield``: the same signer's next nonce, after it or a few blocks on."""
         signer, nonce = self.as_ss58(shield.value.get('address')), int(shield.value.get('nonce'))
         start = ext_idx + 1
         for block in range(block_num, block_num + MEV_SHIELD_TAIL_BLOCKS + 1):
