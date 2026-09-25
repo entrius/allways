@@ -86,7 +86,8 @@ def quote_options(f):
     ``--<spoke>-address`` for every spoke (an alpha is delivered to the TAO address). Registry-derived
     from ``LAUNCH_SPOKES`` / ``LAUNCH_ALPHAS`` — add a chain there and its flags appear here
     automatically. Every flag stays explicit, so posting quotes is fully scriptable (``--yes`` skips
-    the confirm). Under ``--hub tao`` the prices read 'X per 1 TAO' and ``--tao-address`` is the hub leg."""
+    the confirm). Under ``--hub tao`` the prices read 'X per 1 TAO' and ``--tao-address`` is the hub leg.
+    Alpha price flags are hidden from --help (one per subnet); the docstring names the pattern once."""
     for chain in reversed(LAUNCH_SPOKES + LAUNCH_ALPHAS):  # reversed: decorators stack bottom-up
         if chain in LAUNCH_SPOKES:
             f = click.option(f'--{chain}-address', default=None, help=f'Your {chain.upper()} address.')(f)
@@ -94,6 +95,7 @@ def quote_options(f):
             f'--{chain}-price',
             type=FINITE_FLOAT,
             default=None,
+            hidden=chain in LAUNCH_ALPHAS,
             help=f'{chain.upper()} per 1 hub unit (0/omit to skip {chain.upper()}).',
         )(f)
     return click.option(
@@ -107,7 +109,8 @@ def quote_options(f):
 def _example() -> str:
     """A concrete, copy-pasteable usage line built from the current registry (not hand-typed)."""
     flags = ' '.join(f'--{s}-price <{s}-per-hub> --{s}-address <{s}>' for s in LAUNCH_SPOKES)
-    flags += ' ' + ' '.join(f'--{a}-price <{a}-per-hub>' for a in LAUNCH_ALPHAS)
+    alpha = LAUNCH_ALPHAS[0]  # one alpha stands in for all 128; the docstring names the pattern
+    flags += f' --{alpha}-price <{alpha}-per-hub>'
     return f'alw miner quotes --{NUMERAIRE_CHAIN}-address <{NUMERAIRE_CHAIN}> {flags} --spread 50'
 
 
@@ -135,6 +138,9 @@ def quotes_command(spread_bps, hub, backing, dry_run, yes, **spoke_opts):
     like. Both directions of each pair derive from that single price. --hub tao anchors the pairs
     on TAO instead of SOL (--tao-address becomes the hub leg; run once per hub you quote). --hub sn7
     posts sn7 against every spoke you price (TAO-backed; --tao-address receives the alpha).
+
+    Subnet alphas: --sn<N>-price <alpha per hub> prices subnet N (e.g. --{alpha}-price 12.5). These
+    flags are not listed below.
 
     \b
     Example:
@@ -258,4 +264,4 @@ def quotes_command(spread_bps, hub, backing, dry_run, yes, **spoke_opts):
 
 
 # Interpolate the registry-derived example into the help (Click doesn't format docstrings).
-quotes_command.help = quotes_command.help.format(example=_example())
+quotes_command.help = quotes_command.help.format(alpha=LAUNCH_ALPHAS[0], example=_example())
