@@ -178,18 +178,23 @@ def _declared_seat(client, *, price_at_block):
 
     client.finalize_reservation = finalize
 
-    def value_rao(amount, block=None):
-        return amount if block is None else price_at_block(amount)
-
     chain = SimpleNamespace(block_at=lambda ts: 777, normalize_address=str)
-    return {'sn7': SimpleNamespace(value_rao=value_rao, chain=chain)}
+    # The sweep prices the fill at head via axon_assets; the pin prices at the fill block via assets.
+    client.axon_assets = {'sn7': SimpleNamespace(value_rao=lambda amount, block=None: amount, chain=chain)}
+    client.assets = {'sn7': SimpleNamespace(value_rao=lambda amount, block=None: price_at_block(amount), chain=chain)}
+
+
+def _declared_validator(tmp_path, client):
+    v = _validator(tmp_path, client)
+    v.axon_assets, v.assets = client.axon_assets, client.assets
+    v.state_store.upsert_routed_request(MINER, 'sn7', 'btc', 'tao', USER_A, 'src', 'dst', 10**9, NOW - 10)
+    return v
 
 
 def test_declared_seat_pins_its_collateral_verdict_at_finalize(tmp_path):
     client = SweepClient(None)
-    v = _validator(tmp_path, client)
-    v.axon_assets = _declared_seat(client, price_at_block=lambda amount: amount)
-    v.state_store.upsert_routed_request(MINER, 'sn7', 'btc', 'tao', USER_A, 'src', 'dst', 10**9, NOW - 10)
+    _declared_seat(client, price_at_block=lambda amount: amount)
+    v = _declared_validator(tmp_path, client)
     assert finalize_won_seats(v, NOW) == [MINER]
     assert v.state_store.collateral_verdict(MINER, 'tao', NOW, 10**9) is True
     v.state_store.close()
@@ -200,9 +205,8 @@ def test_price_fault_at_finalize_leaves_verdict_to_ingest(tmp_path):
         raise RuntimeError('price RPC down')
 
     client = SweepClient(None)
-    v = _validator(tmp_path, client)
-    v.axon_assets = _declared_seat(client, price_at_block=unreachable)
-    v.state_store.upsert_routed_request(MINER, 'sn7', 'btc', 'tao', USER_A, 'src', 'dst', 10**9, NOW - 10)
+    _declared_seat(client, price_at_block=unreachable)
+    v = _declared_validator(tmp_path, client)
     assert finalize_won_seats(v, NOW) == [MINER]
     assert v.state_store.collateral_verdict(MINER, 'tao', NOW, 10**9) is None
     v.state_store.close()

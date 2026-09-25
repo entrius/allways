@@ -494,12 +494,12 @@ def finalize_won_seats(validator, now: int) -> list:
         store.delete_routed_requests(miner, from_chain, to_chain, backing)
         finalized.append(miner)
         if backing not in (from_chain, to_chain):
-            pin_collateral_verdict_at_finalize(validator, miner, backing, from_chain, to_chain, fill, providers)
+            pin_collateral_verdict_at_finalize(validator, miner, backing, from_chain, to_chain, fill)
     store.prune_routed_requests(now - ROUTED_REQUEST_TTL_SECS)
     return finalized
 
 
-def pin_collateral_verdict_at_finalize(validator, miner: str, backing: str, from_chain, to_chain, fill, providers):
+def pin_collateral_verdict_at_finalize(validator, miner: str, backing: str, from_chain, to_chain, fill):
     """Pin a declared backing's verdict as soon as its seat lands; the program stamps ``created_at`` at the
     fill, so the seat is read back once for it. A fault leaves the verdict to event ingest, never the sweep."""
     try:
@@ -516,7 +516,7 @@ def pin_collateral_verdict_at_finalize(validator, miner: str, backing: str, from
             fill.to_amount,
             fill.collateral_amount,
             int(resv.created_at),
-            providers,
+            validator.assets,  # the ingest backstop's providers, off the axon threads' shared socket
         )
     except Exception as e:
         bt.logging.warning(f'routed sweep {miner[:8]}: collateral verdict left to event ingest: {e}')
