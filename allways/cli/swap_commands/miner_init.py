@@ -41,6 +41,7 @@ from allways.cli.swap_commands.helpers import (
 from allways.cli.swap_commands.swap_intake import bounds_from_config, floors_from_config
 from allways.constants import MIN_BALANCE_FOR_TX_RAO, TAO_HUB_VAULT_ADDRESSES, required_collateral
 from allways.solana.pdas import BACKING_CHAIN_SOL, BACKING_CHAIN_TAO
+from allways.utils.subtensor import build_subtensor, redact_endpoint
 
 COMPOSE_FILE = 'docker-compose.miner.yml'
 IMAGE_TAGS = {'testnet': 'test', 'mainnet': 'latest'}  # entrius/allways:<tag>, read by the compose file
@@ -523,8 +524,6 @@ def _check_wallet(config: dict) -> Tuple[List[Check], Optional[str]]:
 
 def _check_chain(config: dict, hotkey_ss58: Optional[str]) -> List[Check]:
     """Solana program + subtensor state. Every read is best-effort: one dead RPC yields one ✗ row."""
-    import bittensor as bt
-
     from allways.solana.rpc import assert_cluster_safe, redact_rpc_url
 
     rows: List[Check] = []
@@ -577,7 +576,7 @@ def _check_chain(config: dict, hotkey_ss58: Optional[str]) -> List[Check]:
             rows.append((st.lit, f'{st.backing} purse', 'serving' if st.lit else 'not serving'))
     if hotkey_ss58:
         try:
-            sub = bt.Subtensor(network=config.get('network', 'finney'))
+            sub = build_subtensor(network=config.get('network', 'finney'))
             uid = sub.get_uid_for_hotkey_on_subnet(hotkey_ss58, netuid)
             rows.append(
                 (uid is not None, f'registered on SN{netuid}', f'uid {uid}' if uid is not None else 'not registered')
@@ -623,7 +622,7 @@ def run_doctor(project_dir: Path, container: bool = True) -> List[Check]:
         (
             bool(config.get('netuid')),
             'alw config',
-            f'netuid {config.get("netuid", "?")} · {config.get("network", "finney")}',
+            f'netuid {config.get("netuid", "?")} · {redact_endpoint(config.get("network", "finney"))}',
         ),
     ]
     wallet_rows, hot = _check_wallet(config)
@@ -996,15 +995,13 @@ def _activate(ctx, s: Setup, client, pubkey) -> bool:
 
 
 def go_live(ctx, s: Setup) -> bool:
-    import bittensor as bt
-
     config, client = get_solana_cli_context()
     pubkey = client.keypair.pubkey()
     wallet = _bt_wallet(s.wallet, s.hotkey)
     netuid = int(config.get('netuid', 7))
     cfg = client.get_config()
     floors, bounds = floors_from_config(cfg), bounds_from_config(cfg)
-    subtensor = bt.Subtensor(network=config.get('network', 'finney'))
+    subtensor = build_subtensor(network=config.get('network', 'finney'))
 
     gather = partial(_funding_rows, s, client, subtensor, config, wallet, pubkey, netuid, floors)
     if not _fund(s, gather, bounds):

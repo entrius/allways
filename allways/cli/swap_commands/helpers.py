@@ -24,6 +24,7 @@ from allways.solana import pdas
 from allways.solana.client import PROGRAM_ERRORS, SolanaClientError, program_error_code
 from allways.solana.layouts import hub_busy_until, hub_swap_on, lock_max
 from allways.solana.rpc import SolanaRpcError, SolanaRpcUnreachable, resolve_rpc_url
+from allways.utils.subtensor import build_subtensor, redact_endpoint
 
 ALLWAYS_DIR = Path.home() / '.allways'
 CONFIG_FILE = ALLWAYS_DIR / 'config.json'
@@ -741,9 +742,11 @@ def get_cli_context(
     config = get_effective_config()
     network = config.get('network', 'finney')
     with console.status(
-        f'[cyan]Synchronizing with chain [dim]{network}[/dim]...[/cyan]', spinner='dots', spinner_style='cyan'
+        f'[cyan]Synchronizing with chain [dim]{redact_endpoint(network)}[/dim]...[/cyan]',
+        spinner='dots',
+        spinner_style='cyan',
     ):
-        subtensor = bt.Subtensor(network=network)
+        subtensor = build_subtensor(network=network)
         wallet = None
         if need_wallet:
             wallet = bt.Wallet(

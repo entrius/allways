@@ -136,6 +136,7 @@ def _effective_settings(config: dict) -> list:
     from allways.solana.program import ENV_VAR as PROGRAM_ID_ENV
     from allways.solana.program import resolve_program_id
     from allways.solana.rpc import redact_rpc_url
+    from allways.utils.subtensor import redact_endpoint
 
     def row(key, default=None):
         if key in config:
@@ -166,7 +167,11 @@ def _effective_settings(config: dict) -> list:
         return key, value, 'config' if config.get(key) else 'env' if env else 'default'
 
     return [
-        row('network', default='finney'),
+        (
+            'network',
+            redact_endpoint(str(config.get('network', 'finney'))),
+            'config' if 'network' in config else 'default',
+        ),
         row('netuid', default=NETUID_FINNEY),
         row('wallet'),
         row('hotkey'),
@@ -319,14 +324,18 @@ def config_set(key: str, value: str):
 
     CONFIG_FILE.write_text(json.dumps(config, indent=2))
 
-    display = value
+    from allways.utils.subtensor import redact_endpoint
+
+    # A keyed subtensor endpoint carries its API key in the URL: echo it redacted.
+    shown = redact_endpoint if key == 'network' else str
+    display = shown(value)
     if key == 'network' and value in KNOWN_NETWORKS:
         display = f'{value} ({KNOWN_NETWORKS[value]})'
     if keypair_pubkey is not None:
         display = f'{value} → signs as {keypair_pubkey}'
 
     if old_value is not None:
-        console.print(f'[green]Updated {key}:[/green] {old_value} -> {display}')
+        console.print(f'[green]Updated {key}:[/green] {shown(old_value)} -> {display}')
     else:
         console.print(f'[green]Set {key}:[/green] {display}')
 

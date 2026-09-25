@@ -13,6 +13,7 @@ from typing import Any, Optional
 
 import bittensor as bt
 
+from allways.utils.subtensor import build_subtensor
 from allways.validator.relay.engine import BondRelay, RelayConfig
 from allways.vault import BondVaultClient, VaultConfigError, codec
 from allways.vault.client import resolve_signer, resolve_vault_address
@@ -41,7 +42,7 @@ def build_bond_relay(validator: Any, read_only: bool = False) -> Optional[BondRe
     try:
         # Address first: an unconfigured vault must not cost a SOL-only validator a websocket.
         resolve_vault_address(config)
-        subtensor = bt.Subtensor(config=validator.config)
+        subtensor = build_subtensor(config=validator.config)
         vault = BondVaultClient.from_config(subtensor, config, keypair=resolve_signer(validator.wallet))
     except VaultConfigError as e:
         bt.logging.info(f'bond relay off — {e}')
