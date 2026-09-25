@@ -82,7 +82,7 @@ def quote_command(from_chain: str, to_chain: str, amount: Decimal, as_json: bool
     if from_chain not in SUPPORTED_CHAINS or to_chain not in SUPPORTED_CHAINS:
         fail(f'--from/--to must each be one of: {", ".join(SUPPORTED_CHAINS)}')
     if from_chain == to_chain or hub_leg(from_chain, to_chain) is None:
-        fail('A swap must have a hub leg (SOL or TAO, e.g. sol<->btc or tao<->eth) and two distinct chains.')
+        fail('A swap needs two distinct chains and a hub leg (SOL or TAO) or exactly one alpha leg (e.g. sn19<->bnb).')
     if amount <= 0:
         fail('--amount must be positive.')
 
