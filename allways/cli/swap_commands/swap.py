@@ -379,7 +379,7 @@ def swap_now_command(
     if from_chain not in SUPPORTED_CHAINS or to_chain not in SUPPORTED_CHAINS:
         fail(f'--from/--to must each be one of: {", ".join(SUPPORTED_CHAINS)}')
     if from_chain == to_chain or hub_leg(from_chain, to_chain) is None:
-        fail('A swap must have a hub leg (SOL or TAO) and two distinct chains — spoke<->spoke has no market.')
+        fail('A swap needs two distinct chains and a hub leg (SOL or TAO) or exactly one alpha leg (e.g. sn19<->bnb).')
     if amount_opt is None:
         amount_opt = _prompt_missing(None, 'Amount (source units)', '--amount', cast=Decimal)
     if amount_opt is None or amount_opt <= 0:
