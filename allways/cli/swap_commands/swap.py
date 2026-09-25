@@ -788,13 +788,13 @@ def _unlock_coldkey_for_send(wallet) -> bool:
             wallet.coldkey_file.save_password_to_env(pw)
         else:
             console.print(
-                '  [dim]Unlock your Bittensor coldkey to sign the TAO transfer '
+                '  [dim]Unlock your Bittensor coldkey to sign the transfer '
                 '(set MINER_BITTENSOR_COLDKEY_PASSWORD to skip this):[/dim]'
             )
         wallet.unlock_coldkey()
         return True
     except Exception as e:  # noqa: BLE001 - wrong/absent password → fall back to manual send
-        console.print(f'[dim]  Could not unlock coldkey ({e}); send the TAO yourself and run post-tx.[/dim]')
+        console.print(f'[dim]  Could not unlock coldkey ({e}); send it yourself and run post-tx.[/dim]')
         return False
 
 
