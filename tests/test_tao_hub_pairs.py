@@ -33,7 +33,6 @@ from allways.cli.swap_commands.swap_intake import (
 )
 from allways.constants import (
     DIRECTION_POOLS,
-    HUB_CHAINS,
     LAUNCH_ALPHAS,
     LAUNCH_PAIRS,
     MINER_POOL_SHARE,
@@ -73,6 +72,12 @@ class TestHubSet:
         assert declarable_backings('sol', 'sn7') == ['tao']
         assert declarable_backings('sn7', 'sn74') == []
 
+    def test_tao_alpha_is_a_native_swap_not_a_pair(self):
+        for pair in (('tao', 'sn7'), ('sn7', 'tao')):
+            assert hub_leg(*pair) is None and declarable_backings(*pair) == []
+        assert not any(('tao', alpha) in LAUNCH_PAIRS for alpha in LAUNCH_ALPHAS)
+        assert hub_leg('sol', 'sn7') == 'sol' and hub_leg('sn7', 'avax') == 'sn7'
+
     def test_collateral_leg_mirrors_the_program(self):
         assert collateral_leg('sol', 'sol', 'tao') == 'sol' and collateral_leg('tao', 'sol', 'tao') == 'tao'
         assert collateral_leg('tao', 'sol', 'sn7') == 'sn7'
@@ -89,7 +94,7 @@ class TestHubSet:
         assert len(LAUNCH_PAIRS) == len(set(LAUNCH_PAIRS))
         assert all(anchor == hub_leg(anchor, other) and other != anchor for anchor, other in LAUNCH_PAIRS)
         assert all(pair == canonical_pair(*pair) for pair in LAUNCH_PAIRS)
-        assert all((hub, alpha) in LAUNCH_PAIRS for hub in HUB_CHAINS for alpha in LAUNCH_ALPHAS)
+        assert all(('sol', alpha) in LAUNCH_PAIRS for alpha in LAUNCH_ALPHAS)
         assert ('sn7', 'avax') in LAUNCH_PAIRS and ('sn7', 'sn74') not in LAUNCH_PAIRS
 
     def test_direction_pools_span_both_families_and_conserve(self):
@@ -104,7 +109,6 @@ class TestHubSet:
         # sol↔tao is SOL-anchored even though a tao-backed quote's SIZE gates on the TAO bounds.
         assert hub_bounds(bounds, 'tao', 'sol') == (5, 6)
         assert hub_bounds(bounds, 'btc', 'eth') == (0, 0)
-        assert hub_bounds(bounds, 'tao', 'sn7') == (TAO_MIN, TAO_MAX)  # the exact TAO leg
         assert hub_bounds(bounds, 'sol', 'sn7') == (0, 0)  # TAO-backed: SOL bounds never bind it
 
     def test_bounds_from_config_carries_both_hubs(self):
@@ -162,7 +166,7 @@ class TestTaoHubIntake:
             compute_intake_amounts('btc', 'eth', 100, '20', backing='btc')
 
     def test_leg_value_binds_an_exact_leg_without_a_provider(self):
-        # Exact first, either side — and sn7<->tao keeps the exact TAO leg, never a spot read.
+        # Exact first, either side — and a legacy sn7<->tao swap keeps the exact TAO leg, never a spot read.
         assert leg_value('tao', 'tao', TAO, 'eth', ETH // 20) == TAO
         assert leg_value('tao', 'eth', ETH // 20, 'tao', TAO) == TAO
         assert leg_value('tao', 'sn7', 5 * TAO, 'tao', TAO) == TAO
