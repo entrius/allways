@@ -1334,8 +1334,7 @@ def test_attach_leg_confs_does_no_chain_work():
 
 
 def test_confirm_resolves_an_extrinsic_id_through_the_source_chain_and_claims_the_inner_hash():
-    # The app relays btcli's `<block>-<idx>` unchanged; the seam resolves it with the same locate_transfer
-    # post-tx uses, verifies and claims the inner hash, and echoes it so the caller stores a real hash.
+    # The app relays btcli's `<block>-<idx>` unchanged; the seam resolves, claims and echoes the inner hash.
     from allways.assets.tao import Tao
 
     class _AlphaProvider(_FakeProvider):

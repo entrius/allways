@@ -115,6 +115,16 @@ def test_tail_block_not_minted_yet_is_retryable():
         p.locate_transfer(BLOCK, 0)
 
 
+def test_unreadable_block_is_unreachable_not_a_crash():
+    def boom(_n):
+        raise RuntimeError('block number out of range')
+
+    p = _alpha({})
+    p.chain.get_block = boom
+    with pytest.raises(ProviderUnreachableError, match='unreadable'):
+        p.locate_transfer(99999999999999999999, 0)
+
+
 def test_post_tx_relays_the_resolved_inner_hash_and_block():
     inner = _transfer_stake(0xB3, nonce=9)
     resv = SimpleNamespace(from_chain='sn7', user='taker')

@@ -575,7 +575,10 @@ class Tao(Asset, Chain):
 
     def decoded_extrinsics(self, block_num: int) -> list:
         """The block's GenericExtrinsics; raises when the block is unreadable or only the raw fallback is."""
-        block = self.get_block(block_num)
+        try:
+            block = self.get_block(block_num)
+        except Exception as e:
+            raise ProviderUnreachableError(f'TAO block {block_num} unreadable: {e}') from e
         if not block or block.get('_raw'):
             head = self.get_current_block_height()
             if head is not None and head < block_num:

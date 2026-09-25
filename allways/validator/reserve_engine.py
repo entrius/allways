@@ -606,7 +606,7 @@ def _deposit_ref(provider, from_tx_hash: str, from_tx_block: int) -> Optional[Tu
     except ValueError as e:
         bt.logging.info(f'extrinsic id {from_tx_hash} names no creditable transfer: {e}')
         return None
-    return tx_hash, from_tx_block or block
+    return tx_hash, block
 
 
 def confirm_deposit(validator, miner_hotkey: str, from_tx_hash: str, from_tx_block: int = 0) -> ConfirmResult:
