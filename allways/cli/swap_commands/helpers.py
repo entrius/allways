@@ -789,8 +789,8 @@ def resolve_quote_backing(miner_state, from_chain: str, to_chain: str, explicit:
     pair = declarable_backings(from_chain, to_chain)
     if not pair:
         fail(
-            f'{from_chain}->{to_chain} has no hub leg, so no purse can back it. '
-            f'One leg must be a collateral chain ({", ".join(pdas.BACKING_BITS)}).'
+            f'{from_chain}->{to_chain} is not a pair, so no purse can back it. '
+            f'It needs a collateral chain leg ({", ".join(pdas.BACKING_BITS)}) or exactly one alpha leg.'
         )
     mask = int(getattr(miner_state, 'active_backings', 0) or 0) if miner_state is not None else 0
     active = [b for b in pair if mask & pdas.BACKING_BITS[b]]
