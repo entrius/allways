@@ -8,10 +8,9 @@ from click.testing import CliRunner
 
 from allways.assets.alpha import Alpha
 from allways.assets.asset import ProviderUnreachableError
-from allways.assets.tao import Tao
+from allways.assets.tao import Tao, parse_extrinsic_id
 from allways.chains import CHAIN_SN7
 from allways.cli.swap_commands import post_tx
-from allways.cli.swap_commands.post_tx import parse_extrinsic_id
 
 USER = '5ELSfSpQzLwnauZijPRWN1Zdqh5er6g5iZ8Q7vEm4Pfcnsc5'
 OTHER = '5H8ctmwaDk8GSThzEDWpQLqaTgLHdj62tHyxDtMNTtLEdr1M'

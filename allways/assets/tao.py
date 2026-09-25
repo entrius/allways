@@ -1,3 +1,4 @@
+import re
 from hashlib import blake2b
 from typing import Any, Callable, Dict, Optional, Tuple
 
@@ -14,6 +15,15 @@ LOG_SUB = '[Subtensor]'
 # btcli's default shield: the author decrypts it and includes the signer's nonce+1 call within the SDK's wait.
 MEV_SHIELD_CALL = ('MevShield', 'submit_encrypted')
 MEV_SHIELD_TAIL_BLOCKS = 3
+# The extrinsic id btcli prints for a send, `<block>-<idx>`; no tx hash has this shape.
+EXTRINSIC_ID = re.compile(r'^(\d+)-(\d+)$')
+
+
+def parse_extrinsic_id(text: str) -> Optional[Tuple[int, int]]:
+    """(block, idx) when ``text`` is a Subtensor extrinsic id, else None."""
+    match = EXTRINSIC_ID.match(text)
+    return (int(match.group(1)), int(match.group(2))) if match else None
+
 
 # (extrinsic_hash, dest, amount, sender) of one asset's transfer call, decoded from an extrinsic.
 Transfer = Tuple[str, str, int, str]

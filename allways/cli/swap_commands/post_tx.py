@@ -14,13 +14,12 @@ taker who won the draw, because ``Reservation.from_addr`` is pinned at reserve t
 relay the confirm, but only the winner's deposit verifies.
 """
 
-import re
 import time
 
 import click
 
 from allways.assets.asset import ProviderUnreachableError
-from allways.assets.tao import Tao
+from allways.assets.tao import Tao, parse_extrinsic_id
 from allways.cli.dendrite_lite import (
     broadcast_until_quorum,
     discover_quorum_axons,
@@ -54,14 +53,6 @@ from allways.synapses import SwapConfirmSynapse
 # bitcoind, so `post-tx` fired immediately after broadcast otherwise fails on the first pass.
 _RELAY_ATTEMPTS = 3
 _RELAY_WAIT_SECS = 30
-# The extrinsic id btcli prints for a Subtensor send, `<block>-<idx>`; no tx hash has this shape.
-_EXTRINSIC_ID = re.compile(r'^(\d+)-(\d+)$')
-
-
-def parse_extrinsic_id(text: str):
-    """(block, idx) when ``text`` is a Subtensor extrinsic id, else None."""
-    match = _EXTRINSIC_ID.match(text)
-    return (int(match.group(1)), int(match.group(2))) if match else None
 
 
 def _resolve_extrinsic_id(client, from_chain: str, block_num: int, ext_idx: int):
