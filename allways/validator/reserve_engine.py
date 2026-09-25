@@ -392,6 +392,7 @@ def finalize_won_seats(validator, now: int) -> list:
     read_only = validator.solana_swap_loop.read_only
     me = str(client.keypair.pubkey())
     finalized: list = []
+    declared_seats: list = []  # pinned after the loop: a slow price RPC never delays another seat's finalize
     for miner, from_chain, to_chain, backing in store.distinct_routed_pools():
         queue = store.pending_routed_requests(miner, from_chain, to_chain, backing)
         if not queue:
@@ -494,8 +495,10 @@ def finalize_won_seats(validator, now: int) -> list:
         store.delete_routed_requests(miner, from_chain, to_chain, backing)
         finalized.append(miner)
         if backing not in (from_chain, to_chain):
-            pin_collateral_verdict_at_finalize(validator, miner, backing, from_chain, to_chain, fill)
+            declared_seats.append((miner, backing, from_chain, to_chain, fill))
     store.prune_routed_requests(now - ROUTED_REQUEST_TTL_SECS)
+    for seat in declared_seats:
+        pin_collateral_verdict_at_finalize(validator, *seat)
     return finalized
 
 
