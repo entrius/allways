@@ -104,3 +104,10 @@ def test_only_block_dash_idx_is_an_extrinsic_id():
     assert parse_extrinsic_id('8083554-7') == (8083554, 7)
     for text in ('0xab20', '54foaURhGH', '8083554', '8083554-', '8083554-7-1'):
         assert parse_extrinsic_id(text) is None
+
+
+def test_tail_block_not_minted_yet_is_retryable():
+    p = _alpha({BLOCK: {'extrinsics': [_shield(nonce=8)]}})
+    p.chain.get_current_block_height = lambda: BLOCK
+    with pytest.raises(ProviderUnreachableError, match='not minted yet, retry shortly'):
+        p.locate_transfer(BLOCK, 0)

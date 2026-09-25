@@ -567,6 +567,9 @@ class Tao(Asset, Chain):
         """The block's GenericExtrinsics; raises when the block is unreadable or only the raw fallback is."""
         block = self.get_block(block_num)
         if not block or block.get('_raw'):
+            head = self.get_current_block_height()
+            if head is not None and head < block_num:
+                raise ProviderUnreachableError(f'TAO block {block_num} not minted yet, retry shortly')
             raise ProviderUnreachableError(f'TAO block {block_num} cannot be decoded')
         return block['extrinsics']
 
