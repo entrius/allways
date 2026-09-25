@@ -60,10 +60,10 @@ def test_alpha_price_reuses_tao_address_without_alpha_address_flag():
     assert posted_addresses == {('SOLADDR', 'TAOADDR'), ('TAOADDR', 'SOLADDR')}
 
 
-def test_help_names_alpha_price_pattern_once_and_hides_the_flags():
-    output = CliRunner().invoke(numeraire.quotes_command, ['--help']).output
-    assert '--sn<N>-price' in output
-    assert '--sn7-price' not in output and '--sn7-address' not in output
+def test_alpha_gets_a_hidden_price_flag_but_no_address_flag():
+    params = {p.name: p for p in numeraire.quotes_command.params}
+    assert 'sn7_price' in params and 'sn7_address' not in params
+    assert params['sn7_price'].hidden
 
 
 def test_alpha_price_requires_tao_address():

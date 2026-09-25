@@ -87,7 +87,7 @@ def quote_options(f):
     from ``LAUNCH_SPOKES`` / ``LAUNCH_ALPHAS`` — add a chain there and its flags appear here
     automatically. Every flag stays explicit, so posting quotes is fully scriptable (``--yes`` skips
     the confirm). Under ``--hub tao`` the prices read 'X per 1 TAO' and ``--tao-address`` is the hub leg.
-    Alpha price flags are hidden from --help (one per subnet); the docstring names the pattern once."""
+    Alpha price flags are hidden from --help (one per subnet); ``quotes_command``'s help names the pattern once."""
     for chain in reversed(LAUNCH_SPOKES + LAUNCH_ALPHAS):  # reversed: decorators stack bottom-up
         if chain in LAUNCH_SPOKES:
             f = click.option(f'--{chain}-address', default=None, help=f'Your {chain.upper()} address.')(f)
@@ -109,7 +109,7 @@ def quote_options(f):
 def _example() -> str:
     """A concrete, copy-pasteable usage line built from the current registry (not hand-typed)."""
     flags = ' '.join(f'--{s}-price <{s}-per-hub> --{s}-address <{s}>' for s in LAUNCH_SPOKES)
-    alpha = LAUNCH_ALPHAS[0]  # one alpha stands in for all 128; the docstring names the pattern
+    alpha = LAUNCH_ALPHAS[0]  # one alpha stands in for all; quotes_command's help names the pattern
     flags += f' --{alpha}-price <{alpha}-per-hub>'
     return f'alw miner quotes --{NUMERAIRE_CHAIN}-address <{NUMERAIRE_CHAIN}> {flags} --spread 50'
 
