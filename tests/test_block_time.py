@@ -347,7 +347,7 @@ def test_tao_send_backfills_an_unknown_attempt_head():
 
 def test_tao_scanner_finds_matching_transfer_in_new_blocks():
     blocks = {100: _raw_transfer_block('0xdep', 'minerTAO', 5000, 'userTAO')}
-    p = _scan_provider(head=100, blocks=blocks)
+    p = _scan_provider(head=100, blocks=blocks, readable_default=True)
     assert p.find_recent_outgoing('userTAO', 'minerTAO', 5000) == '0xdep'
     # A hit clears the cursor so a fresh reservation with the same triple rescans.
     assert p.scan_cursors == {}
@@ -358,12 +358,12 @@ def test_tao_scanner_skips_wrong_sender_and_underpay_then_advances_cursor():
         99: _raw_transfer_block('0xother', 'minerTAO', 5000, 'someoneElse'),
         100: _raw_transfer_block('0xsmall', 'minerTAO', 4999, 'userTAO'),
     }
-    p = _scan_provider(head=100, blocks=blocks)
+    p = _scan_provider(head=100, blocks=blocks, readable_default=True)
     assert p.find_recent_outgoing('userTAO', 'minerTAO', 5000) is None
     assert p.scan_cursors[('userTAO', 'minerTAO', 5000)] == 100
     # Next tick scans ONLY blocks past the cursor — the amortized-O(1) property.
     seen = []
-    p.get_block = lambda n: seen.append(n) or blocks.get(n)
+    p.get_block = lambda n: seen.append(n) or blocks.get(n, _empty_block())
     p.subtensor.get_current_block.return_value = 102
     blocks[102] = _raw_transfer_block('0xdep', 'minerTAO', 6000, 'userTAO')
     assert p.find_recent_outgoing('userTAO', 'minerTAO', 5000) == '0xdep'
@@ -373,10 +373,38 @@ def test_tao_scanner_skips_wrong_sender_and_underpay_then_advances_cursor():
 def test_tao_scanner_bounds_first_scan_to_lookback():
     p = _scan_provider(head=1000, blocks={})
     seen = []
-    p.get_block = lambda n: seen.append(n) or None
+    p.get_block = lambda n: seen.append(n) or _empty_block()
     assert p.find_recent_outgoing('userTAO', 'minerTAO', 5000) is None
     assert len(seen) == Tao.SCAN_LOOKBACK_BLOCKS
     assert seen[0] == 1000 - Tao.SCAN_LOOKBACK_BLOCKS + 1
+
+
+def test_tao_scanner_retries_an_unreadable_block_instead_of_leaping_it():
+    """A deposit in a block the node failed to serve is still found once the node serves it."""
+    blocks = {100: _raw_transfer_block('0xdep', 'minerTAO', 5000, 'userTAO')}
+    p = _scan_provider(head=101, blocks=blocks, readable_default=True)
+    served = p.get_block
+    p.get_block = lambda n: None if n == 100 else served(n)
+    assert p.find_recent_outgoing('userTAO', 'minerTAO', 5000) is None
+    assert p.scan_cursors[('userTAO', 'minerTAO', 5000)] == 99
+    p.get_block = served
+    assert p.find_recent_outgoing('userTAO', 'minerTAO', 5000) == '0xdep'
+
+
+def test_tao_scanner_retries_a_candidate_whose_events_were_unreadable():
+    """A matching call whose settlement events could not be read parks the scan on that block too."""
+    blocks = {100: _raw_transfer_block('0xdep', 'minerTAO', 5000, 'userTAO')}
+    p = _scan_provider(head=101, blocks=blocks, readable_default=True)
+    readable = p.get_block_events
+
+    def boom(_):
+        raise ProviderUnreachableError('events unavailable')
+
+    p.get_block_events = boom
+    assert p.find_recent_outgoing('userTAO', 'minerTAO', 5000) is None
+    assert p.scan_cursors[('userTAO', 'minerTAO', 5000)] == 99
+    p.get_block_events = readable
+    assert p.find_recent_outgoing('userTAO', 'minerTAO', 5000) == '0xdep'
 
 
 def test_tao_scanner_none_when_head_unreachable():
