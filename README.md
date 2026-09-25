@@ -285,9 +285,13 @@ SUBTENSOR_NETWORK=ws://127.0.0.1:9944
 
 `SUBTENSOR_NETWORK` also takes a keyed provider URL. `SUBTENSOR_FALLBACK_ENDPOINTS` and
 `SUBTENSOR_ARCHIVE_ENDPOINTS` (comma-separated, both optional) back it up: fallbacks take over
-when the current endpoint drops, and the archive serves reads at blocks a lite node has pruned
-(the collateral verdict prices alpha at the reservation's block). The neurons and `alw` both
-honour them; endpoints are logged with any key redacted. See `.env.example`.
+when the current endpoint drops or rate-limits (HTTP 429, or a rate-limit JSON-RPC error), and the
+archive serves reads at blocks a lite node has pruned (the collateral verdict prices alpha at the
+reservation's block). A connection that left the primary logs one warning, re-tries the primary
+every 5 minutes and moves back once it answers. On mainnet, pair a finney fallback with
+`SUBTENSOR_ARCHIVE_ENDPOINTS=wss://archive.chain.opentensor.ai:443` so historical reads survive a
+failover. The neurons and `alw` both honour them; endpoints are logged with any key redacted. See
+`.env.example`.
 
 The dev environment in `alw-utils/dev-environment` provisions a local chain
 automatically — no manual lite-node step is required there.
