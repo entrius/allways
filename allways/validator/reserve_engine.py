@@ -38,7 +38,7 @@ from allways.solana.client import contract_reject_reason, swap_key_from_tx_hash
 from allways.solana.pdas import BACKING_BITS
 from allways.utils.rate import max_from_for_to_cap
 from allways.validator.binding import hotkey_ss58, verify_binding
-from allways.validator.solana_swap_loop import attest_reject_reason
+from allways.validator.solana_swap_loop import attest_reject_reason, collateral_verdict_for
 
 EMPTY_SWAP_KEY = b'\x00' * 32
 
@@ -493,8 +493,33 @@ def finalize_won_seats(validator, now: int) -> list:
         bt.logging.info(f'routed sweep {miner[:8]}: finalized seat for {req["user_pubkey"][:8]} (FIFO of queue)')
         store.delete_routed_requests(miner, from_chain, to_chain, backing)
         finalized.append(miner)
+        if backing not in (from_chain, to_chain):
+            pin_collateral_verdict_at_finalize(validator, miner, backing, from_chain, to_chain, fill, providers)
     store.prune_routed_requests(now - ROUTED_REQUEST_TTL_SECS)
     return finalized
+
+
+def pin_collateral_verdict_at_finalize(validator, miner: str, backing: str, from_chain, to_chain, fill, providers):
+    """Pin a declared backing's verdict as soon as its seat lands; the program stamps ``created_at`` at the
+    fill, so the seat is read back once for it. A fault leaves the verdict to event ingest, never the sweep."""
+    try:
+        resv = validator.solana_client.get_reservation(Pubkey.from_string(miner), backing)
+        if resv is None or int(resv.created_at) <= 0 or int(resv.collateral_amount) != fill.collateral_amount:
+            return
+        collateral_verdict_for(
+            validator.state_store,
+            miner,
+            backing,
+            from_chain,
+            fill.from_amount,
+            to_chain,
+            fill.to_amount,
+            fill.collateral_amount,
+            int(resv.created_at),
+            providers,
+        )
+    except Exception as e:
+        bt.logging.warning(f'routed sweep {miner[:8]}: collateral verdict left to event ingest: {e}')
 
 
 @dataclass
@@ -916,18 +941,14 @@ def swap_status(
 
 
 def _attach_collateral_verdict(validator, miner_pk, reservation, detail: dict) -> None:
-    """``collateral_ok`` for a seat whose backing is declared (TAO behind an sn<N> leg): the verdict
-    ingest pinned at the fill block, so a consumer can hold the deposit while it is false. A read of
-    the stored verdict only — the seam never prices a leg. Absent for an exact leg, and until the
-    fill event is ingested."""
+    """``collateral_ok`` for a seat whose backing is declared (TAO behind an sn<N> leg): the stored verdict
+    pinned at the fill, ``None`` while pending. A read only — the seam never prices a leg. Absent for an exact leg."""
     backing = str(reservation.collateral_chain)
     if backing in (reservation.from_chain, reservation.to_chain):
         return
-    ok = validator.state_store.collateral_verdict(
+    detail['collateral_ok'] = validator.state_store.collateral_verdict(
         str(miner_pk), backing, int(reservation.created_at), int(reservation.collateral_amount)
     )
-    if ok is not None:
-        detail['collateral_ok'] = ok
 
 
 def _idle_status(miner_pk, from_chain: str, to_chain: str) -> SwapStatus:
