@@ -12,7 +12,7 @@ import json
 import time
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Dict, List, Optional, Set, Tuple
+from typing import Callable, Dict, List, Optional, Set, Tuple
 
 import bittensor as bt
 
@@ -58,10 +58,14 @@ class SwapFulfiller:
         sent_cache_path: Optional[Path] = None,
         my_addresses: Optional[Dict[str, str]] = None,
         fee_divisor: int = FEE_DIVISOR,
+        dest_ready: Optional[Callable[[SolanaSwap, int], bool]] = None,
     ):
         self.client = solana_client
         self.providers = assets
         self.fee_divisor = fee_divisor
+        # Some destinations must be acquired before they can be sent — a subnet alpha is bought at the
+        # moment of the fill, not held as inventory. None means every dest is ready to send.
+        self.dest_ready = dest_ready
         # Chain → miner's own deposit/fulfillment address, populated at startup from this miner's own
         # quotes and refreshed by the miner loop when a new quote is posted. Shared dict so the miner
         # neuron's reload mutates what we read here.
@@ -345,6 +349,13 @@ class SwapFulfiller:
             if shortfall is not None:
                 bt.logging.warning(f'Swap {key[:16]}: deferring send — {shortfall}')
                 dev_signal.emit('refuse', swap_key=key, reason='unfunded_obligation')
+                return False
+
+            # Acquire-before-send gate: a dest the miner has to go and get (a subnet alpha it buys at
+            # fill) is not ready on the first pass. Deferring is not a failure — the swap retries while
+            # the acquisition runs, and the safety gate above already left the timeout cushion for it.
+            if self.dest_ready is not None and not self.dest_ready(swap, user_receives_amount):
+                bt.logging.info(f'Swap {key[:16]}: {swap.to_chain} not held yet — deferring the send')
                 return False
 
             send_result = self.send_dest_funds(swap, user_receives_amount)

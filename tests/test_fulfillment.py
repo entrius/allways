@@ -268,3 +268,52 @@ class TestSendDestUsesPinnedSender:
 
 if __name__ == '__main__':
     pytest.main([__file__, '-v'])
+
+
+class TestAcquireBeforeSendGate:
+    """A dest the miner must go and get (a subnet alpha it buys at fill) is not ready on the first pass.
+    The gate defers that send without failing the swap, and never defers one it was not asked about."""
+
+    def _ready(self, gate):
+        provider = MagicMock()
+        provider.get_balance.return_value = 10**12
+        provider.send_amount.return_value = ('dest-tx', 7)
+        source = MagicMock()
+        source.verify_transaction.return_value = MagicMock(amount=1_000_000, sender='bc1q-user')
+        f = make_fulfiller(my_addresses={'tao': '5miner', 'btc': 'bc1q-miner'}, dest_ready=gate)
+        f.providers = {'tao': provider, 'btc': source}
+        swap = make_swap()
+        f.note_active_swaps([swap])
+        return f, swap, provider
+
+    def test_no_gate_sends_as_before(self, at_now):
+        f, swap, provider = self._ready(None)
+        assert f.process_swap(swap) is True
+        provider.send_amount.assert_called_once()
+
+    def test_a_ready_dest_sends(self, at_now):
+        f, swap, provider = self._ready(lambda _swap, _amount: True)
+        assert f.process_swap(swap) is True
+        provider.send_amount.assert_called_once()
+
+    def test_an_unready_dest_defers_without_sending(self, at_now):
+        f, swap, provider = self._ready(lambda _swap, _amount: False)
+        assert f.process_swap(swap) is False
+        provider.send_amount.assert_not_called()
+        # Deferring must leave no trace: the next pass has to be free to send.
+        assert swap.key_hex not in f.sent
+
+    def test_the_gate_is_asked_for_the_post_fee_amount(self, at_now):
+        seen = []
+        f, swap, _provider = self._ready(lambda _swap, amount: seen.append(amount) or True)
+        f.process_swap(swap)
+        # 99% of the pinned to_amount is what actually has to be in hand.
+        assert seen == [341_550_000]
+
+    def test_a_cached_send_never_consults_the_gate(self, at_now):
+        """Funds are already out; re-asking could defer a mark_fulfilled retry into a timeout slash."""
+        asked = []
+        f, swap, _provider = self._ready(lambda _swap, _amount: asked.append(1) or False)
+        f.sent[swap.key_hex] = SentSwap('dest-tx', 7, marked_fulfilled=False, timeout_at=swap.timeout_at)
+        assert f.process_swap(swap) is True
+        assert asked == []

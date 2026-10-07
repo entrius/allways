@@ -133,6 +133,13 @@ class Miner(BaseMinerNeuron):
 
         self.quote_optimizer = attach_optimizer(self)
 
+        # Opt-in alpha delivery (allways/miner/alpha/): buys the subnet token a fill needs at the moment of
+        # the fill, so no alpha is held. Off unless ALLWAYS_ALPHA_ENABLED=1. Attached after the optimizer so
+        # it sees the same assets dict, and it installs the fulfiller's acquire-before-send gate.
+        from allways.miner.alpha.attach import attach_alpha
+
+        self.alpha_gear = attach_alpha(self)
+
         bt.logging.info(
             f'Miner initialized: hotkey={hotkey} | pubkey={self.solana_pubkey} | addresses={self.my_addresses}'
         )
