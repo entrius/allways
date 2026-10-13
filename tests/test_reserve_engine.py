@@ -11,10 +11,11 @@ from pathlib import Path
 from types import SimpleNamespace
 
 import bittensor as bt
+import pytest
 from solders.keypair import Keypair as SolKeypair
 
 from allways.constants import MAX_FAILED_SWAPS, RATE_PRECISION
-from allways.validator.reserve_engine import reserve_on_behalf
+from allways.validator.reserve_engine import _best_offer, reserve_on_behalf
 from allways.validator.state_store import ValidatorStateStore
 
 HK = bt.Keypair.create_from_seed('0x' + '11' * 32)
@@ -40,7 +41,12 @@ class FakeClient:
             collateral=collateral,
         )
         self.quote = SimpleNamespace(
-            rate=_rate_fixed(quote_rate), from_chain='sol', to_chain='btc', collateral_chain='sol'
+            rate=_rate_fixed(quote_rate),
+            from_chain='sol',
+            to_chain='btc',
+            collateral_chain='sol',
+            miner_from_addr='minerSOLaddr',
+            miner_to_addr='minerBTCdeliver',
         )
         self._pool = pool
         self.collateral = collateral
@@ -148,7 +154,8 @@ def test_open_normalizes_the_source_address_at_intake():
         'sol': SimpleNamespace(
             transfers_enabled=lambda: True,
             send_blocker=lambda frm, to, amt: None,
-            chain=SimpleNamespace(normalize_address=lambda a: a.lower()),
+            can_deliver_to=lambda address, amount: True,
+            chain=SimpleNamespace(normalize_address=lambda a: a.lower(), is_valid_address=lambda address: True),
         )
     }
     r = reserve_on_behalf(validator, HOTKEY, 'sol', 'btc', USER_PK, 'MiXeDcAsE', 'userBTCaddr', 1_000_000_000)
@@ -205,7 +212,7 @@ def test_malformed_destination_address_rejects_before_any_bid():
     # F4: address FORMAT is screened first — offline, and a malformed dest can never deliver.
     client = FakeClient()
     validator = _validator(client)
-    validator.axon_assets = {'btc': _gate_asset(lambda addr, amt: True, valid=lambda addr: False)}
+    validator.axon_assets = {'btc': _gate_asset(lambda addr, amt: True, valid=lambda addr: addr != 'not-an-addr')}
     result = reserve_on_behalf(validator, HOTKEY, 'sol', 'btc', USER_PK, str(USER_PK), 'not-an-addr', 10**9)
     assert not result.ok
     assert 'not a valid btc address' in result.reason
@@ -219,7 +226,7 @@ def test_malformed_miner_receive_address_rejects():
     validator.axon_assets = {'sol': _gate_asset(lambda addr, amt: True, valid=lambda addr: addr != 'minerSOLaddr')}
     result = reserve_on_behalf(validator, HOTKEY, 'sol', 'btc', USER_PK, str(USER_PK), 'userBTCaddr', 10**9)
     assert not result.ok
-    assert 'miner receive address' in result.reason
+    assert 'no eligible quote' in result.reason
     assert client.calls == []
 
 
@@ -372,6 +379,52 @@ def test_no_quote_rejects():
     client.quote = None
     r, _ = _reserve(client)
     assert not r.ok and 'no eligible quote' in r.reason
+
+
+@pytest.mark.parametrize('bad_field', ['miner_from_addr', 'miner_to_addr'])
+def test_best_offer_skips_the_best_rate_with_a_bad_address(bad_field):
+    client = FakeClient()
+    best = client.quote
+    best.to_chain = 'tao'
+    best.miner_from_addr = 'from-best'
+    best.miner_to_addr = 'to-best'
+    next_best = SimpleNamespace(
+        rate=_rate_fixed(0.002),
+        from_chain='sol',
+        to_chain='tao',
+        collateral_chain='tao',
+        miner_from_addr='from-next',
+        miner_to_addr='to-next',
+    )
+    setattr(best, bad_field, 'bad')
+    client.get_quotes_for_direction = lambda *args: [best, next_best]
+    client.get_bond_attestation = lambda *args: SimpleNamespace(locked=True, effective_balance=10**12)
+    provider = SimpleNamespace(chain=SimpleNamespace(is_valid_address=lambda address: address != 'bad'))
+
+    offer, reason = _best_offer(
+        client,
+        MINER_PK,
+        client.miner_state,
+        'sol',
+        'tao',
+        10**9,
+        {'sol': (0, 0), 'tao': (0, 0)},
+        {'sol': provider, 'tao': provider},
+    )
+
+    assert reason == '' and offer == (next_best, 'tao')
+
+
+def test_joining_pool_rejects_an_unusable_pinned_quote():
+    pool = SimpleNamespace(opened_at=1, closes_at=FUTURE, from_chain='sol', to_chain='btc', rate=_rate_fixed(0.0021))
+    client = FakeClient(pool=pool)
+    client.quote.miner_to_addr = 'bad'
+    validator = _validator(client)
+    validator.axon_assets = {'btc': _gate_asset(lambda addr, amt: True, valid=lambda addr: addr != 'bad')}
+
+    result = reserve_on_behalf(validator, HOTKEY, 'sol', 'btc', USER_PK, str(USER_PK), 'userBTCaddr', 1_000_000_000)
+
+    assert not result.ok and result.reason == 'the pooled quote has an address its chain rejects'
 
 
 def test_low_collateral_rejects():

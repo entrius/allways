@@ -643,14 +643,16 @@ def test_screen_rejection_aborts_swap_now_before_any_bid():
     argv = ['--from', 'sol', '--to', 'btc', '--amount', '0.001', '--receive-address', 'userBTCaddr', '--yes']
     with (
         patch('allways.cli.swap_commands.swap.get_solana_cli_context', return_value=(None, client)),
-        patch('allways.cli.swap_commands.swap.gate_provider', return_value=_Gate(reject={'minerSOLaddr'})),
-        patch('allways.cli.swap_commands.swap.candidate_miners', return_value=[cand]),
+        patch('allways.cli.swap_commands.swap.gate_provider', return_value=_Gate(reject={'minerSOLaddr'})) as gate,
+        patch('allways.cli.swap_commands.swap.candidate_miners', return_value=[cand]) as candidates,
         patch('allways.cli.swap_commands.swap.select_best_miner', return_value=(cand, amts)),
         patch('allways.cli.swap_commands.swap._save_pending'),
     ):
         result = CliRunner().invoke(swap_now_command, argv)
     assert result.exit_code != 0
     assert 'cannot accept' in result.output
+    # Candidates are drawn through both legs' gates, so a quote with a malformed address is never offered.
+    assert candidates.call_args.args[3] == {'sol': gate.return_value, 'btc': gate.return_value}
     client.open_or_request.assert_not_called()
     client.get_reservation.assert_not_called()
 

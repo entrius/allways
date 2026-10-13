@@ -437,7 +437,9 @@ def swap_now_command(
     finalize_window = int(getattr(cfg, 'finalize_window_secs', 150)) if cfg else 150
 
     from_amount = to_smallest_units(amount_opt, from_chain)
-    candidates = candidate_miners(client, from_chain, to_chain)
+    # The gates the screens below build anyway: a quote whose address its chain rejects is never offered.
+    address_gates = {from_chain: _src_gate, to_chain: gate_provider(to_chain, client, _subtensor)}
+    candidates = candidate_miners(client, from_chain, to_chain, address_gates)
     if not candidates:
         fail(f'No miners quoting {from_chain}->{to_chain} right now.')
     providers = candidate_providers(client, candidates, from_chain, to_chain)
