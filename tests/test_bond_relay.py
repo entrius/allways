@@ -790,6 +790,28 @@ def test_the_heartbeat_is_released_once_reconcile_comes_back_clean():
     assert ('vote_attest_heartbeat',) in relay.solana.calls
 
 
+def test_the_startup_pass_is_not_repeated_in_the_same_step():
+    # The barrier's pass is a full reconcile, so the periodic one must count from it. Walking the
+    # vault twice in the boot step doubles a stall the forward loop is already waiting out.
+    relay = _relay()
+    reads = []
+    read = relay.vault.get_collateral
+    relay.vault.get_collateral = lambda hotkey: reads.append(hotkey) or read(hotkey)
+    relay.step(NOW)
+    assert relay._reconciled
+    assert sorted(reads) == sorted([HOTKEY, HOTKEY2]), 'one walk of the bound set, not two'
+    assert relay._next_reconcile == NOW + relay.cfg.reconcile_interval_secs
+
+
+def test_a_miner_with_no_bond_costs_no_settled_read():
+    # Nothing nets to zero whatever the fees say; most bound miners never bond, and the reconcile
+    # pass reads every one of them.
+    relay = _relay(vault=FakeVault(collateral={}, lock={}))
+    relay.vault.get_settled_total = lambda hotkey: pytest.fail('settled read for a miner with no bond')
+    desired = attestation_job.compute(relay, MINER, HOTKEY)
+    assert desired.is_empty
+
+
 def test_the_heartbeat_is_lazy_not_per_pass():
     relay = _relay(heartbeat_interval_secs=3600)
     relay.step(NOW)

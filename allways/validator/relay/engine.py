@@ -282,6 +282,9 @@ class BondRelay:
                     bt.logging.info('relay: startup reconcile still draining — heartbeat held down')
                     return
                 self._reconciled = True
+                # That pass WAS a full reconcile: start the periodic clock from it, or `maybe_reconcile`
+                # below repeats the whole vault walk in this same step and doubles the boot stall.
+                self._next_reconcile = now + self.cfg.reconcile_interval_secs
                 bt.logging.success('relay: startup reconcile clean — heartbeat released')
                 dev_signal.emit('relay_reconciled', backing=self.backing)
 
