@@ -91,9 +91,9 @@ def candidate_miners(client, from_chain: str, to_chain: str, providers=None) -> 
     active gate, the strike gate and the tracked collateral in a single fetch; an
     off-chain-backed offer needs one more read for the purse the contract will actually check.
 
-    ``providers`` drops a quote whose address its chain rejects (``quote_addresses_valid``). The
-    validator passes its own; the CLI has no offline validator for every chain and passes none,
-    so it judges no address and the validator's refusal is its backstop."""
+    ``providers`` drops a quote whose address its chain rejects (``quote_addresses_valid``): the
+    validator passes its own, ``swap now`` the gates it builds for its screens. A chain with no
+    provider is not judged."""
     out: List[MinerCandidate] = []
     # One state read per distinct miner: a dual-purse miner can appear twice on a direction now, and
     # its `active` flag and collateral are the same for both offers.
