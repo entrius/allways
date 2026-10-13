@@ -1,13 +1,18 @@
 """Provider startup checks: chains the miner doesn't quote degrade to a warning; quoted (required)
 chains still fail hard — a tao<->sol miner must start without BTC creds, a btc miner must not."""
 
+import threading
+from collections import Counter
 from functools import partial
 from unittest.mock import MagicMock
 
 import pytest
+import requests
 
 from allways import assets as cp
+from allways.assets import evm as evm_module
 from allways.assets import tao as tao_module
+from allways.chains import get_chain_def
 from allways.constants import HUB_CHAINS
 
 
@@ -144,3 +149,204 @@ def test_each_alpha_still_checks_its_own_send_wallet(tao_and_alphas):
     assert set(providers) == {'tao'}, 'the chain check is shared; the wallet requirement is per alpha'
     with pytest.raises(RuntimeError, match='sn7 send requires a wallet'):
         cp.create_assets(check=True, require_send=True, required_chains={'sn7'}, subtensor=subtensor)
+
+
+# ─── one EVM network, one probe ─────────────────────────────────────────────
+
+
+@pytest.fixture
+def evm_assets(monkeypatch):
+    """Every real EVM row on its mainnet defaults. Each asset builds an EvmChain of its own, so the JSON-RPC
+    transport is faked on the class: ``calls`` records (env prefix, method), a prefix in ``down`` is unreachable."""
+    rows = tuple(spec for spec in cp.ASSET_REGISTRY if issubclass(spec.asset_cls, evm_module.EvmAsset))
+    monkeypatch.setattr(cp, 'ASSET_REGISTRY', rows)
+    hosted = Counter(get_chain_def(spec.chain_id).env_prefix for spec in rows)
+    for prefix in hosted:
+        monkeypatch.setenv(f'{prefix}_NETWORK', 'mainnet')
+        monkeypatch.delenv(f'{prefix}_RPC_URLS', raising=False)
+    answers = {'eth_blockNumber': '0x10', 'eth_getCode': '0x60', 'eth_call': '0x0'}
+    calls, down = [], set()
+
+    def fake_rpc(self, method, params, timeout=15, **kw):
+        calls.append((self.env_prefix, method))
+        if self.env_prefix in down:
+            raise requests.ConnectionError('down')
+        return hex(self.chain_id) if method == 'eth_chainId' else answers[method]
+
+    monkeypatch.setattr(evm_module.EvmChain, 'eth_rpc', fake_rpc)
+    connected, warned = [], []
+    monkeypatch.setattr(evm_module.bt.logging, 'success', lambda msg, *a, **k: connected.append(msg))
+    monkeypatch.setattr(evm_module.bt.logging, 'warning', lambda msg, *a, **k: warned.append(msg))
+    return rows, hosted, calls, down, connected, warned
+
+
+def test_each_evm_network_is_probed_once_however_many_assets_it_hosts(evm_assets):
+    """Ethereum hosts five assets and was dialled five times a boot (BNB and Polygon twice): 3 calls per repeat."""
+    rows, hosted, calls, _, connected, _ = evm_assets
+    providers = cp.create_assets(check=True, require_send=False, required_chains=set())
+    assert list(providers) == [spec.chain_id for spec in rows] and hosted['ETH'] > 1
+    assert Counter(prefix for prefix, method in calls if method == 'eth_blockNumber') == dict.fromkeys(hosted, 1)
+    ladder = len(providers['eth'].chain.rpc_bases)
+    assert Counter(calls)[('ETH', 'eth_chainId')] == ladder, 'every endpoint is still probed, once'
+    assert len(connected) == len(hosted)
+    assert '[EthereumRpc] connected: network=mainnet, chain_id=1, tip=16' in connected
+    # The token probes are each asset's own and are not shared.
+    tokens = sum(1 for spec in rows if issubclass(spec.asset_cls, cp.Erc20))
+    assert sum(1 for _, method in calls if method == 'eth_getCode') == tokens
+
+
+def test_an_asset_on_a_shared_probe_ends_up_initialised_as_when_probed_alone(evm_assets):
+    """The probe only reads, so an asset that skips it must hold the state of one that ran it."""
+    rows = evm_assets[0]
+
+    def state(provider):
+        chain = {k: v for k, v in vars(provider.chain).items() if k != 'http'}  # a Session per instance
+        return {**{k: v for k, v in vars(provider).items() if k != '_chain'}, 'chain': chain}
+
+    shared = cp.create_assets(check=True, require_send=False, required_chains=set())
+    for spec in rows:
+        alone = spec.cls()
+        untouched = state(alone)
+        alone.check_connection(require_send=False)
+        assert state(alone) == untouched, f'{spec.chain_id}: the probe left state on the instance'
+        assert state(shared[spec.chain_id]) == untouched, spec.chain_id
+        assert shared[spec.chain_id].describe() == alone.describe()
+
+
+def test_a_failed_shared_probe_fails_every_asset_on_that_network_without_re_asking(evm_assets):
+    rows, _, calls, down, _, warned = evm_assets
+    down.add('ETH')
+    on_ethereum = [spec for spec in rows if get_chain_def(spec.chain_id).env_prefix == 'ETH']
+    providers = cp.create_assets(check=True, require_send=False, required_chains=set())
+    assert list(providers) == [spec.chain_id for spec in rows if spec not in on_ethereum]
+    ladder = len(evm_module.ETHEREUM.rpc_urls['mainnet'])
+    assert Counter(calls)[('ETH', 'eth_chainId')] == ladder and ('ETH', 'eth_blockNumber') not in calls
+    assert [line for line in warned if 'disabled' in line] == [
+        f'{spec.asset_cls.__name__} disabled: Cannot reach any Ethereum RPC'
+        f' — {spec.chain_id}-pair swaps cannot be fulfilled until this is fixed'
+        for spec in on_ethereum
+    ]
+    with pytest.raises(RuntimeError, match='Ether failed startup check: Cannot reach any Ethereum RPC'):
+        cp.create_assets(check=True, require_send=False, required_chains={'eth'})
+    with pytest.raises(RuntimeError, match='EthUsdc failed startup check: Cannot reach any Ethereum RPC'):
+        cp.create_assets(check=True, require_send=False, required_chains={'ethusdc'})
+
+
+# ─── checks overlap across backends, never within one ───────────────────────
+
+
+def lanes(count, check):
+    """``count`` provider classes whose check is ``check(provider)``. A lane is a chain class, so ``count`` lanes."""
+    return [
+        type(f'_Lane{i}', (_Ok,), {'check_connection': lambda self, require_send=True: check(self)})
+        for i in range(count)
+    ]
+
+
+def test_checks_on_different_backends_overlap(monkeypatch):
+    together = threading.Barrier(2, timeout=5)  # breaks, failing both required checks, if they run one at a time
+    first, second = lanes(2, lambda provider: together.wait())
+    monkeypatch.setattr(cp, 'ASSET_REGISTRY', (('btc', first, ()), ('sol', second, ())))
+    assert list(cp.create_assets(check=True)) == ['btc', 'sol']
+
+
+def test_checks_on_one_backend_run_one_at_a_time_in_registry_order(monkeypatch):
+    seen = []
+    (backend,) = lanes(1, lambda provider: seen.append((provider, threading.get_ident())))
+    monkeypatch.setattr(cp, 'ASSET_REGISTRY', tuple((chain_id, backend, ()) for chain_id in 'abcde'))
+    providers = cp.create_assets(check=True)
+    assert [provider for provider, _ in seen] == list(providers.values())
+    assert len({thread for _, thread in seen}) == 1
+
+
+def test_no_more_checks_run_at_once_than_the_cap(monkeypatch):
+    batch = cp.MAX_CHECK_LANES - 1  # the calling thread is the last lane, kept for the subtensor
+    together = threading.Barrier(batch, timeout=5)
+    lock, running, peak = threading.Lock(), [0], [0]
+
+    def check(provider):
+        with lock:
+            running[0] += 1
+            peak[0] = max(peak[0], running[0])
+        together.wait()
+        with lock:
+            running[0] -= 1
+
+    registry = tuple((f'c{i}', cls, ()) for i, cls in enumerate(lanes(2 * batch, check)))
+    monkeypatch.setattr(cp, 'ASSET_REGISTRY', registry)
+    assert len(cp.create_assets(check=True)) == 2 * batch
+    assert peak[0] == batch
+
+
+def test_tao_and_every_alpha_are_checked_on_the_calling_thread_while_other_backends_overlap(
+    tao_and_alphas, monkeypatch
+):
+    """The subtensor's keyed endpoint is rate-limited: its 129 providers stay on one lane, the neuron's own thread."""
+    rows, subtensor, _ = tao_and_alphas
+    elsewhere = []
+    (other,) = lanes(1, lambda provider: elsewhere.append(threading.get_ident()))
+    monkeypatch.setattr(cp, 'ASSET_REGISTRY', (('btc', other, ()),) + rows + (('sol', other, ()),))
+    on_subtensor = []
+    real_check = tao_module.Tao.check_connection
+
+    def recording_check(self, **kwargs):
+        on_subtensor.append(threading.get_ident())
+        return real_check(self, **kwargs)
+
+    monkeypatch.setattr(tao_module.Tao, 'check_connection', recording_check)
+    providers = cp.create_assets(check=True, require_send=False, required_chains={'tao'}, subtensor=subtensor)
+    assert list(providers) == ['btc'] + [spec.chain_id for spec in rows] + ['sol']
+    assert len(on_subtensor) == len(rows) and set(on_subtensor) == {threading.get_ident()}
+    assert len(elsewhere) == 2 and threading.get_ident() not in elsewhere
+    assert subtensor.get_current_block.call_count == 1
+
+
+def test_the_first_failure_in_registry_order_fails_the_boot_whichever_lane_fails_first(monkeypatch):
+    later_failed = threading.Event()
+
+    def check(provider):
+        if type(provider) is first:
+            assert later_failed.wait(timeout=5)  # the registry's first row is the LAST to fail
+            raise ConnectionError('first row')
+        later_failed.set()
+        raise ConnectionError('second row')
+
+    first, second = lanes(2, check)
+    monkeypatch.setattr(cp, 'ASSET_REGISTRY', (('btc', first, ()), ('sol', second, ())))
+    with pytest.raises(RuntimeError, match='_Lane0 failed startup check: first row'):
+        cp.create_assets(check=True)
+    with pytest.raises(RuntimeError, match='_Lane1 failed startup check: second row'):
+        cp.create_assets(check=True, required_chains={'sol'})
+
+
+def test_a_failed_check_outranks_a_later_rows_failed_constructor(monkeypatch):
+    def check(provider):
+        raise ConnectionError('unreachable')
+
+    (failing,) = lanes(1, check)
+    monkeypatch.setattr(cp, 'ASSET_REGISTRY', (('sol', failing, ()), ('btc', _Boom, ())))
+    with pytest.raises(RuntimeError, match='_Lane0 failed startup check: unreachable'):
+        cp.create_assets(check=True)
+    monkeypatch.setattr(cp, 'ASSET_REGISTRY', (('btc', _Boom, ()), ('sol', failing, ())))
+    with pytest.raises(RuntimeError, match='_Boom failed startup check: no creds'):
+        cp.create_assets(check=True)
+
+
+def test_providers_keep_registry_order_across_lanes(monkeypatch):
+    def check(provider):
+        if type(provider) is broken:
+            raise ConnectionError('unreachable')
+
+    one, two, broken = lanes(3, check)
+    registry = (('btc', one, ()), ('sol', two, ()), ('qnt', broken, ()), ('eth', one, ()), ('hype', two, ()))
+    monkeypatch.setattr(cp, 'ASSET_REGISTRY', registry)
+    assert list(cp.create_assets(check=True, required_chains={'sol'})) == ['btc', 'sol', 'eth', 'hype']
+
+
+def test_without_a_check_no_thread_is_started(registry, monkeypatch):
+    """The axon path builds its providers unchecked and must stay as cheap as it was."""
+    started = []
+    monkeypatch.setattr(cp, 'ThreadPoolExecutor', lambda *a, **k: started.append(k))
+    assert list(cp.create_assets()) == ['sol']
+    assert list(cp.create_assets(required_chains={'btc'})) == ['sol']
+    assert started == []
