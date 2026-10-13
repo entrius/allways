@@ -25,7 +25,8 @@ import bittensor as bt
 
 from allways import dev_signal
 from allways.classes import ActivityTransition, MinerActivity
-from allways.constants import RATE_PRECISION, RECONCILE_QUIET_SECS
+from allways.constants import ADDRESS_REFUSAL_MEMO_SIZE, RATE_PRECISION, RECONCILE_QUIET_SECS
+from allways.eligibility import quote_addresses_valid
 from allways.solana.events import EventRecord
 from allways.solana.layouts import EVENT_PUBKEY_FIELDS
 from allways.utils.rate import quantize_rate_fixed
@@ -65,12 +66,21 @@ class SolanaEventIndex:
         state_store: ValidatorStateStore,
         reservation_ttl_fn: Optional[Callable[[], int]] = None,
         fill_qualifier: Optional[Callable[[str, str, str, str, int, int], bool]] = None,
+        providers: Optional[Dict[str, object]] = None,
+        quote_reader: Optional[Callable[[str, str, str, str], Optional[object]]] = None,
     ):
         self.state_store = state_store
         self._reservation_ttl_fn = reservation_ttl_fn
         # (hotkey, from_chain, to_chain, backing, collateral_amount, reserved_at) → held crown at
         # reservation? Bound to scoring.fill_held_crown by the validator; None = every fill unqualified.
         self._fill_qualifier = fill_qualifier
+        # The validator's chain providers, judging each QuoteSet's addresses; a chain with none is unjudged.
+        self._providers = providers or {}
+        # (miner pubkey, from_chain, to_chain, backing) → the MinerQuote account, None when closed. Bound to
+        # SolanaClient.get_quote by the validator; None = every QuoteSet unjudged.
+        self._quote_reader = quote_reader
+        # (chain, address) → refused by its chain? Asked once, when a quote first names the address.
+        self._address_refusals: Dict[Tuple[str, str], bool] = {}
 
     # ─── write path ─────────────────────────────────────────────────────
 
@@ -207,14 +217,20 @@ class SolanaEventIndex:
             # post-redeploy quotes (already floored at set_quote) but closes the migration window where a
             # pre-redeploy full-precision quote could still snipe the crown.
             rate = quantize_rate_fixed(int(rec.fields['rate'])) / RATE_PRECISION
-            self.state_store.insert_rate_event(
-                hotkey,
-                self._chain(rec, 'from_chain'),
-                self._chain(rec, 'to_chain'),
-                rate,
-                block_time,
-                collateral_chain=self._backing(rec, 'collateral_chain'),
-            )
+            from_chain, to_chain = self._chain(rec, 'from_chain'), self._chain(rec, 'to_chain')
+            backing = self._backing(rec, 'collateral_chain')
+            # The addresses come off the quote's own account (program-owned state, unforgeable), not the
+            # transaction: the account is what stands NOW, so a quote re-posted since is judged by that.
+            # A quote naming an unusable address can never fill, so it is no live rate from the instant
+            # it lands: zero, exactly as QuoteRemoved. An unreadable account ingests as posted (unjudged).
+            quote = self._read_quote(self._miner_str(rec), from_chain, to_chain, backing)
+            if quote is not None and not self.quote_usable(quote):
+                rate = 0.0
+                bt.logging.warning(
+                    f'{hotkey[:8]}: {from_chain}->{to_chain} ({backing}) quote names an unusable address '
+                    f'({from_chain}:{quote.miner_from_addr} -> {to_chain}:{quote.miner_to_addr}), rate zeroed'
+                )
+            self.state_store.insert_rate_event(hotkey, from_chain, to_chain, rate, block_time, collateral_chain=backing)
             return True
         if name == 'QuoteRemoved':
             # Opt-out: a zero rate ends crown credit for this direction UNDER THIS BACKING only (F4) —
@@ -330,6 +346,44 @@ class SolanaEventIndex:
                     bt.logging.warning(
                         f'reconcile {hotkey[:8]}: event-derived tao collateral ≠ chain, corrected to {int(bond)}'
                     )
+
+    def _read_quote(self, miner: str, from_chain: str, to_chain: str, backing: str) -> Optional[object]:
+        """The lane's ``MinerQuote`` account as it stands now — one getAccountInfo. None when there is
+        no reader, the account is closed (quote since removed), or the read fails: unjudged."""
+        if self._quote_reader is None:
+            return None
+        try:
+            return self._quote_reader(miner, from_chain, to_chain, backing)
+        except Exception as e:
+            bt.logging.debug(f'MinerQuote read failed for {miner[:8]}.. {from_chain}→{to_chain} ({backing}): {e}')
+            return None
+
+    def quote_usable(self, quote) -> bool:
+        """Both addresses parse for their chains (offline), and neither is refused by its chain: an
+        issuer-frozen address, or a contract that reverts on receipt."""
+        sides = ((quote.from_chain, quote.miner_from_addr), (quote.to_chain, quote.miner_to_addr))
+        return quote_addresses_valid(quote, self._providers) and not any(
+            self.address_refused(str(chain).lower(), address) for chain, address in sides
+        )
+
+    def address_refused(self, chain: str, address: str) -> bool:
+        """The chain's probe (RPC), asked when a quote first names the address and memoised so a
+        re-quote costs nothing. Unjudged, never refused: no provider, or a failed probe."""
+        provider = self._providers.get(chain)
+        if provider is None:
+            return False
+        key = (chain, provider.chain.normalize_address(address))
+        if key not in self._address_refusals:
+            try:
+                refused = provider.address_refused(address)
+            except Exception as e:
+                # The next quote naming the address asks again.
+                bt.logging.debug(f'address_refused({chain}) unreadable: {e}')
+                return False
+            if len(self._address_refusals) >= ADDRESS_REFUSAL_MEMO_SIZE:
+                del self._address_refusals[next(iter(self._address_refusals))]  # oldest out; it is asked again if named
+            self._address_refusals[key] = refused
+        return self._address_refusals[key]
 
     def reconcile_live_quotes(self, live_quotes: Dict[Tuple[str, str, str, str], float], now: int) -> None:
         """Rate-liveness backstop, the ``reconcile_live_state`` sibling for the rate stream.

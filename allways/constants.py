@@ -250,6 +250,9 @@ assert ELIGIBILITY_FILL_WINDOW_SECS <= CLEARING_RETENTION_SECS, 'the fill window
 # active/collateral state is only corrected against the live chain read after its event
 # stream has been quiet this long, so a stale RPC read never fights an in-flight event.
 RECONCILE_QUIET_SECS = 600
+# Verdicts of the on-chain address probe (Asset.address_refused) kept so a re-quote costs no RPC.
+# Memory bound only: at the cap the oldest verdict is dropped and asked again if a quote names it.
+ADDRESS_REFUSAL_MEMO_SIZE = 10_000
 
 # ─── Validator stake weights (reservation-lottery draw) ──
 # Each validator derives the same vector — floor(alpha_stake / bucket) per whitelisted
