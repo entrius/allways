@@ -519,7 +519,11 @@ def calculate_miner_rewards(self: Validator, current_time: int) -> Tuple[np.ndar
     # lost/pruned tao anchor leaves the purse stuck at 0 and drops the miner off every tao crown.
     live_bonds = live_bond_balances(self.solana_client, self.metagraph, attribution)
     self.event_index.reconcile_live_state(live_states, now=current_time, live_bonds=live_bonds)
-    live_states = without_address_banned(self.state_store, live_states, current_time)
+    unbanned_states = without_address_banned(self.state_store, live_states, current_time)
+    if len(unbanned_states) < len(live_states):
+        banned = sorted(hk[:8] for hk in live_states.keys() - unbanned_states.keys())
+        bt.logging.warning(f'address-banned miners score zero this round: {banned}')
+    live_states = unbanned_states
     # Rate-liveness backstop: a lost QuoteRemoved would otherwise freeze a lane's crown
     # credit forever (the prune keeps the last rate as the lane's anchor). Best-effort —
     # the reconcile is a safety net, so a failed quote read never sinks the round.
