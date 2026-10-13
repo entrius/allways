@@ -799,11 +799,11 @@ def snapshot_current_miner_scores(
 
 def capacity_factor(collateral_rao: int, max_swap_amount_rao: int) -> float:
     """min(1, (collateral / required_collateral(max_swap))^k) — full credit means holding enough
-    to accept a max_swap fill at the contract's 1.10× gate. The exponent k (CAPACITY_CURVE_EXPONENT,
-    >1) makes the ramp convex: backing a rate on a sliver of the band earns less than the raw ratio,
-    so thin-parked collateral is penalised harder and depth is worth posting. Still capped at 1.0 —
-    collateral past the requirement earns nothing extra, so it never becomes pay-to-win. Fail-safe to
-    1.0 when bounds unset."""
+    to accept a max_swap fill at the contract's 1.10× gate. The exponent k (CAPACITY_CURVE_EXPONENT)
+    is 1, so the ramp is linear: a miner backing a fraction of a max_swap fill earns that fraction,
+    and every unit of depth up to the requirement is worth posting. Still capped at 1.0 — collateral
+    past the requirement earns nothing extra, so it never becomes pay-to-win. Fail-safe to 1.0 when
+    bounds unset."""
     if max_swap_amount_rao <= 0:
         return 1.0
     if collateral_rao <= 0:
