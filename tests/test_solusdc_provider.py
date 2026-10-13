@@ -313,6 +313,13 @@ class TestDeliveryGates:
         assert p.delivery_refused(reserved, 0) is True
         assert p.cancel_evidence(reserved, AMOUNT) == CANCEL_REASON_SOL_RESERVED
 
+    def test_address_refused_is_the_frozen_ata_and_raises_when_unreadable(self, monkeypatch):
+        frozen = FakeRpc(accounts={ata(USER): parsed_token_account(state='frozen')})
+        assert provider_with(frozen, monkeypatch=monkeypatch).address_refused(self.RECIP) is True
+        assert provider_with(FakeRpc(accounts={}), monkeypatch=monkeypatch).address_refused(self.RECIP) is False
+        with pytest.raises(Exception):
+            provider_with(FakeRpc(raise_conn=True), monkeypatch=monkeypatch).address_refused(self.RECIP)
+
     def test_reserve_gate_fails_open_but_slash_gate_raises(self, monkeypatch):
         p = provider_with(FakeRpc(raise_conn=True), monkeypatch=monkeypatch)
         assert p.can_deliver_to(self.RECIP, AMOUNT) is True

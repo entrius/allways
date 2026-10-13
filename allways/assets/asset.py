@@ -199,13 +199,24 @@ class Asset(ABC):
         """Why ``amount`` cannot leave ``from_address`` for ``to_address`` as ONE transfer, else None; fails open."""
         return None
 
+    def address_refused(self, address: str) -> bool:
+        """True only on positive evidence THIS address cannot hold or receive the asset: an issuer
+        freeze of the address, a receive hook that reverts, an owner that cannot be credited. Never
+        chain-wide state (a paused token, transfers switched off) — that is no address's fault.
+        Raises on RPC trouble; the caller decides."""
+        return False
+
     def can_deliver_to(self, address: str, amount: int, from_address: Optional[str] = None) -> bool:
-        """Reserve-time gate: False only on positive evidence the destination cannot receive.
+        """Reserve-time gate: False only on positive evidence the destination cannot receive —
+        ``address_refused`` plus whatever chain-wide refusal the asset knows. Fails open on RPC trouble.
 
         ``from_address`` is the committed sender the delivery would come from, when the caller
         knows it — providers that simulate delivery should simulate from it, since a hostile
         dest can accept from one sender and refuse another."""
-        return True
+        try:
+            return not self.address_refused(address)
+        except Exception:
+            return True
 
     def delivery_refused(self, address: str, since_unix: int) -> bool:
         """Slash gate: True only on positive evidence delivery was refusable since ``since_unix``."""

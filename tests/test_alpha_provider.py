@@ -258,6 +258,11 @@ def test_transfer_toggle_off_defers_but_never_cancels():
     assert Alpha(CHAIN_SN7, _toggles()).delivery_refused(MINER, 0) is False
 
 
+def test_transfers_off_is_no_address_refusal():
+    """A subnet-wide toggle is nobody's address, so it is no address refusal."""
+    assert Alpha(CHAIN_SN7, _toggles(transfer=False)).address_refused(MINER) is False
+
+
 def test_a_pruned_subnet_defers_and_never_cancels():
     """SubnetLimit is full, so a registration dissolves the lowest-priced subnet and its alpha is
     force-liquidated to coldkey TAO. A no-fault cancel would leave the taker's deposit with the miner,

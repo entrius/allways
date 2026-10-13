@@ -417,10 +417,10 @@ class Sol(Asset):
             bt.logging.error(f'SOL get_balance failed for {address}: {e}')
             return 0
 
-    def can_deliver_to(self, address: str, amount: int, from_address: Optional[str] = None) -> bool:
-        """Reserve-time gate: bounce a reserved-key destination before any funds move.
-        System-account credits are sender-agnostic, so ``from_address`` plays no part here."""
-        return address not in RESERVED_ACCOUNTS
+    def address_refused(self, address: str) -> bool:
+        """A reserved-key destination: the runtime rejects the lamport credit outright. Offline and exact;
+        system-account credits are sender-agnostic, so the reserve gate needs nothing more."""
+        return address in RESERVED_ACCOUNTS
 
     def delivery_refused(self, address: str, since_unix: int) -> bool:
         """Slash gate: a reserved-key destination is undeliverable by construction — the runtime
