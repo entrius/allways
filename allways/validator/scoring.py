@@ -25,6 +25,7 @@ from allways.chains import canonical_pair, get_chain_def
 from allways.classes import ActivityTransition, MinerActivity, next_activity
 from allways.cli.swap_commands.swap_intake import bounds_from_config
 from allways.constants import (
+    ADDRESS_BAN_SECS,
     ALPHA_FAMILY,
     CAPACITY_CURVE_EXPONENT,
     CLEARING_RETENTION_SECS,
@@ -191,6 +192,13 @@ def recent_fill_hotkeys(store: ValidatorStateStore, now: int) -> Optional[Recent
     if now - store.clearing_ledger_since(now) < ELIGIBILITY_FILL_WINDOW_SECS:
         return None
     return store.get_recent_fill_hotkeys(now - ELIGIBILITY_FILL_WINDOW_SECS, now)
+
+
+def without_address_banned(store: ValidatorStateStore, live_states: Dict[str, object], now: int) -> Dict[str, object]:
+    """``live_states`` minus the miners serving an address ban at ``now``. A hotkey with no state is
+    no crown candidate and is paid nothing, so the ban covers every lane of the miner."""
+    banned = store.address_banned_hotkeys(now - ADDRESS_BAN_SECS, now)
+    return {hk: ms for hk, ms in live_states.items() if hk not in banned}
 
 
 def lane_eligible_hotkeys(
@@ -511,6 +519,11 @@ def calculate_miner_rewards(self: Validator, current_time: int) -> Tuple[np.ndar
     # lost/pruned tao anchor leaves the purse stuck at 0 and drops the miner off every tao crown.
     live_bonds = live_bond_balances(self.solana_client, self.metagraph, attribution)
     self.event_index.reconcile_live_state(live_states, now=current_time, live_bonds=live_bonds)
+    unbanned_states = without_address_banned(self.state_store, live_states, current_time)
+    if len(unbanned_states) < len(live_states):
+        banned = sorted(hk[:8] for hk in live_states.keys() - unbanned_states.keys())
+        bt.logging.warning(f'address-banned miners score zero this round: {banned}')
+    live_states = unbanned_states
     # Rate-liveness backstop: a lost QuoteRemoved would otherwise freeze a lane's crown
     # credit forever (the prune keeps the last rate as the lane's anchor). Best-effort —
     # the reconcile is a safety net, so a failed quote read never sinks the round.
@@ -745,6 +758,7 @@ def snapshot_current_miner_scores(
     rewardable_hotkeys: Set[str] = set(self.metagraph.hotkeys)
     if live_states is None:
         live_states = live_miner_states(self.solana_client, self.metagraph)
+    live_states = without_address_banned(self.state_store, live_states, ts)
     try:
         swap_bounds = bounds_from_config(self.solana_config_cache.config())
     except Exception as e:
@@ -1248,6 +1262,7 @@ def snapshot_current_crown_holders(
     rewardable_hotkeys: Set[str] = set(self.metagraph.hotkeys)
     if live_states is None:
         live_states = live_miner_states(self.solana_client, self.metagraph)
+    live_states = without_address_banned(self.state_store, live_states, ts)
     # Match the scoring path's executability filter so the live table never
     # credits an out-of-bounds-rate holder the ledger drops. Bounds from the
     # TTL cache (no per-step RPC); empty map on failure = permissive, as before.
@@ -1343,7 +1358,9 @@ def fill_held_crown(
     if hotkey not in rewardable_hotkeys:
         return False
     try:
-        live_states = live_miner_states(self.solana_client, self.metagraph)
+        live_states = without_address_banned(
+            self.state_store, live_miner_states(self.solana_client, self.metagraph), at_time
+        )
         lane_candidates = lane_eligible_hotkeys(
             live_states,
             rewardable_hotkeys,
