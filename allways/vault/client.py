@@ -174,20 +174,39 @@ class BondVaultClient:
     def dry_read(self, data: bytes, origin: Optional[str] = None) -> Optional[bytes]:
         """Best-effort contract read. Returns the unwrapped return payload, or None when the node's
         `ContractResult` isn't decodable client-side (a known cargo-contract/runtime skew)."""
-        who = origin or (self.keypair.ss58_address if self.keypair is not None else self.address)
         try:
-            res = self.subtensor.substrate.runtime_call(
-                'ContractsApi',
-                'call',
-                {
-                    'origin': who,
-                    'dest': self.address,
-                    'value': 0,
-                    'gas_limit': None,
-                    'storage_deposit_limit': None,
-                    'input_data': '0x' + data.hex(),
-                },
+            return self._payload(self.subtensor.substrate.runtime_call('ContractsApi', 'call', self._dry(data, origin)))
+        except Exception:
+            return None
+
+    def dry_reads(self, datas: Sequence[bytes], origin: Optional[str] = None) -> List[Optional[bytes]]:
+        """``dry_read`` for several calls in ONE message, all answered at the same block — one round
+        trip instead of one per call. The node still meters each call in the batch, so this buys
+        latency, not rate-limit room. A runtime too old for batched calls falls back to one at a
+        time; any other failure is "unknown" for every call, the same None a lone read gives."""
+        try:
+            results = self.subtensor.substrate.runtime_calls(
+                [('ContractsApi', 'call', self._dry(data, origin)) for data in datas]
             )
+        except NotImplementedError:
+            return [self.dry_read(data, origin) for data in datas]
+        except Exception:
+            return [None] * len(datas)
+        return [self._payload(res) for res in results]
+
+    def _dry(self, data: bytes, origin: Optional[str]) -> dict:
+        return {
+            'origin': origin or (self.keypair.ss58_address if self.keypair is not None else self.address),
+            'dest': self.address,
+            'value': 0,
+            'gas_limit': None,
+            'storage_deposit_limit': None,
+            'input_data': '0x' + data.hex(),
+        }
+
+    @staticmethod
+    def _payload(res) -> Optional[bytes]:
+        try:
             v = res.value if hasattr(res, 'value') else res
             return codec.unwrap_lang_error(_return_bytes(v['result']['Ok']['data']))
         except Exception:
@@ -219,6 +238,23 @@ class BondVaultClient:
             return reader.boolean(), reader.uint(8)
         except codec.VaultCodecError:
             return None
+
+    def get_bond_state(self, hotkey: str) -> Tuple[Optional[int], Optional[Tuple[bool, int]]]:
+        """``(get_collateral, get_lock_state)`` in one round trip at one block — the pair every
+        attestation needs, and the bulk of the relay's audit. Either half is None when unreadable."""
+        account = codec.account_bytes(hotkey)
+        gross, lock = self.dry_reads(
+            [self.metadata.call('get_collateral', account), self.metadata.call('get_lock_state', account)]
+        )
+        try:
+            gross = codec.Reader(gross).uint(8) if gross else None
+        except codec.VaultCodecError:
+            gross = None
+        try:
+            lock = (reader := codec.Reader(lock)).boolean(), reader.uint(8)
+        except (codec.VaultCodecError, TypeError):
+            lock = None
+        return gross, lock
 
     def get_settled_total(self, hotkey: str) -> Optional[int]:
         """Cumulative protocol fees already settled onto the vault for this miner (rao)."""

@@ -26,6 +26,7 @@ from allways.constants import (
     RELAY_FEE_CADENCE_SECS,
     RELAY_HEARTBEAT_INTERVAL_SECS,
     RELAY_QUIESCENCE_GRACE_SECS,
+    RELAY_MINER_READ_INTERVAL_SECS,
     RELAY_RECONCILE_INTERVAL_SECS,
     RELAY_SWAP_RETENTION_SECS,
     VOTE_ROUND_TTL_SECS,
@@ -100,6 +101,7 @@ class BondRelay:
         clock: Optional[Callable[[], float]] = None,
         config: Optional[RelayConfig] = None,
         config_fn: Optional[Callable[[], Any]] = None,
+        sleep: Optional[Callable[[float], None]] = None,
     ):
         self.solana = solana_client
         self.vault = vault
@@ -109,6 +111,8 @@ class BondRelay:
         self.read_only = read_only
         self.clock = clock or time.time
         self.cfg = config or RelayConfig()
+        self._sleep = sleep or time.sleep
+        self._last_miner_read = 0.0
         self._config_fn = config_fn or solana_client.get_config
 
         # Miners whose attestation needs recomputing. Event-driven ONLY: an idle miner never
@@ -262,6 +266,15 @@ class BondRelay:
         except Exception as e:
             bt.logging.warning(f'relay: vault generation read failed: {e}')
             return None
+
+    def pace(self) -> None:
+        """Hold successive miners' vault reads ``RELAY_MINER_READ_INTERVAL_SECS`` apart. The audit
+        walks every bound miner and the batched read made each one a single fast round trip, so
+        unpaced it outruns the keyed subtensor's rate limit; a lone event-driven read never waits."""
+        wait = self._last_miner_read + RELAY_MINER_READ_INTERVAL_SECS - time.monotonic()
+        if wait > 0:
+            self._sleep(wait)
+        self._last_miner_read = time.monotonic()
 
     def mark_dirty(self, miner: str) -> None:
         self._dirty.add(str(miner))

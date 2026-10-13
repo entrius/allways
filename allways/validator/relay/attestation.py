@@ -74,11 +74,10 @@ def compute(relay, miner: str, hotkey: str) -> Optional[Attested]:
 
     None is "unknown", never "zero": a node that can't decode a dry-run must not be allowed to
     attest a bond away."""
-    gross = relay.vault.get_collateral(hotkey)
+    gross, lock = relay.vault.get_bond_state(hotkey)
     # No bond nets to zero whatever the fee state, so the settled counter can't change the answer:
     # skip its read. Most bound miners never bond, and the reconcile pass walks every one of them.
     settled = relay.vault.get_settled_total(hotkey) if gross else 0
-    lock = relay.vault.get_lock_state(hotkey)
     if gross is None or settled is None or lock is None:
         bt.logging.warning(f'relay: vault reads unavailable for {hotkey[:8]}… — leaving its attestation alone')
         return None
@@ -115,6 +114,7 @@ def flush(relay, now: int, reconciling: bool = False) -> bool:
             # binding can land later; the reconcile pass will pick it up then.
             relay._dirty.discard(miner)
             continue
+        relay.pace()
         try:
             outcome = _write_one(relay, miner, hotkey, now, reconciling)
         except Exception as e:

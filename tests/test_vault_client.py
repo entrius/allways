@@ -193,6 +193,49 @@ def _client(meta, payload=None, raise_on_read=False):
     return BondVaultClient(_Sub(payload, raise_on_read), ALICE, metadata=meta)
 
 
+class _BatchSub(_Sub):
+    """A node that answers a batch: one parked payload per call, in order. `batches` counts the
+    messages, `fail` is what the batch raises instead of answering."""
+
+    def __init__(self, payloads, fail=None):
+        super().__init__()
+        self.payloads = list(payloads)
+        self.fail = fail
+        self.batches = 0
+
+    def runtime_calls(self, calls, **_kw):
+        self.batches += 1
+        if self.fail is not None:
+            raise self.fail
+        return [{'result': {'Ok': {'data': _as_node_shape(p)}}} for p in self.payloads[: len(calls)]]
+
+    def runtime_call(self, *_a, **_kw):
+        return {'result': {'Ok': {'data': _as_node_shape(self.payloads.pop(0))}}}
+
+
+_BOND = b'\x00' + (10_000_000).to_bytes(8, 'little')  # Ok(()) prefix + u64
+_LOCK = b'\x00\x01' + (7).to_bytes(8, 'little')  # Ok(()) prefix + (true, 7)
+
+
+def test_the_bond_and_its_lock_are_read_in_one_message(meta):
+    sub = _BatchSub([_BOND, _LOCK])
+    assert BondVaultClient(sub, ALICE, metadata=meta).get_bond_state(BOB) == (10_000_000, (True, 7))
+    assert sub.batches == 1
+
+
+def test_a_runtime_too_old_to_batch_is_read_one_call_at_a_time(meta):
+    sub = _BatchSub([_BOND, _LOCK], fail=NotImplementedError('legacy runtime-call path'))
+    assert BondVaultClient(sub, ALICE, metadata=meta).get_bond_state(BOB) == (10_000_000, (True, 7))
+
+
+def test_a_failed_batch_is_unknown_never_zero(meta):
+    # A rate-limited or dropped batch must not be answered by firing the same calls again one by
+    # one — and must never read as "no bond", which would let the relay attest a bond away.
+    sub = _BatchSub([_BOND, _LOCK], fail=RuntimeError('Rate limit exceeded'))
+    assert BondVaultClient(sub, ALICE, metadata=meta).get_bond_state(BOB) == (None, None)
+    assert sub.payloads == [_BOND, _LOCK], 'nothing was re-read serially'
+
+
 def test_lock_state_decodes_the_locked_flag_and_the_epoch(meta):
     c = _client(meta, b'\x00' + b'\x01' + (7).to_bytes(8, 'little'))  # Ok(()) prefix + (true, 7)
     assert c.get_lock_state(BOB) == (True, 7)

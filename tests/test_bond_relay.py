@@ -12,6 +12,7 @@ from unittest.mock import patch
 
 import pytest
 
+from allways.constants import RELAY_MINER_READ_INTERVAL_SECS
 from allways.solana import pdas
 from allways.validator import forward as forward_mod
 from allways.validator.relay import attestation as attestation_job
@@ -59,6 +60,9 @@ class FakeVault:
 
     def get_lock_state(self, hotkey):
         return self.lock.get(hotkey, (False, 0)) if self.readable else None
+
+    def get_bond_state(self, hotkey):
+        return self.get_collateral(hotkey), self.get_lock_state(hotkey)
 
     def is_slashed(self, swap_ref):
         return (swap_ref in self.slashed) if self.readable else None
@@ -173,6 +177,7 @@ def _relay(vault=None, solana=None, store=None, attribution=None, **cfg):
         read_only=False,
         clock=lambda: NOW,
         config=RelayConfig(**cfg),
+        sleep=lambda _secs: None,
     )
     bindings = attribution if attribution is not None else {MINER: HOTKEY, MINER2: HOTKEY2}
     solana.attributions = dict(bindings)
@@ -801,6 +806,19 @@ def test_the_startup_pass_is_not_repeated_in_the_same_step():
     assert relay._reconciled
     assert sorted(reads) == sorted([HOTKEY, HOTKEY2]), 'one walk of the bound set, not two'
     assert relay._next_reconcile == NOW + relay.cfg.reconcile_interval_secs
+
+
+def test_successive_miners_are_read_a_rate_limit_apart_and_a_lone_one_never_waits():
+    # Each miner is one fast batched round trip, so the audit's walk of the bound set would outrun
+    # the keyed subtensor's rate limit if nothing spaced it.
+    relay = _relay()
+    waits = []
+    relay._sleep = waits.append
+    relay.mark_dirty(MINER)
+    attestation_job.flush(relay, NOW)
+    assert waits == [], 'an event-driven read of one miner is not held up'
+    relay.reconcile(NOW)
+    assert len(waits) == 2 and all(0 < w <= RELAY_MINER_READ_INTERVAL_SECS for w in waits)
 
 
 def test_a_miner_with_no_bond_costs_no_settled_read():
