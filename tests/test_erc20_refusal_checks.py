@@ -116,6 +116,12 @@ class TestNoChecksNeverTouchTheRpc:
         assert provider.can_deliver_to(RECIPIENT, amount=1) is True
         assert calls == []
 
+    def test_address_refused_is_false(self):
+        def forbidden(*_a, **_kw):
+            raise AssertionError('a token declaring no checks must not reach the RPC')
+
+        assert build(NO_CHECKS, forbidden).address_refused(RECIPIENT) is False
+
 
 class TestDeclaredChecks:
     def test_each_declared_check_is_positive_evidence(self):
@@ -156,6 +162,18 @@ class TestDeclaredChecks:
             raise ConnectionError('every endpoint is down')
 
         assert build(DECLARED, down).can_deliver_to(RECIPIENT, amount=1) is True
+
+    def test_address_refused_is_the_freeze_alone(self):
+        # A frozen address is its fault, a paused token is nobody's.
+        for selector, takes_address in Erc20(DECLARED)._checks:
+            assert build(DECLARED, answering(selector)).address_refused(RECIPIENT) is takes_address
+
+    def test_address_refused_raises_when_the_rpc_is_down(self):
+        def down(*_a, **_kw):
+            raise ConnectionError('every endpoint is down')
+
+        with pytest.raises(ConnectionError):
+            build(DECLARED, down).address_refused(RECIPIENT)
 
 
 class TestCancelEvidenceReadsTheDeclaredSurface:

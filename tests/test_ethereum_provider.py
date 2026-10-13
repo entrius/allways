@@ -13,6 +13,7 @@ from eth_account import Account
 from allways.assets.asset import ProviderUnreachableError
 from allways.assets.eth import Ether
 from allways.assets.evm import EvmRpcError
+from allways.assets.evm_coin import DUST_PROBE_WEI, SWAP_PROBE_WEI, ZERO_ADDRESS
 
 # Well-known dev key (hardhat account #0) — never funded on mainnet, deterministic address.
 TEST_KEY = '0xac0974bec39a17e36ba4a6b4d238ff944bacb478cbed5efcae784d7bf4f2ff80'
@@ -65,6 +66,15 @@ def mined_tx_responses(
         'eth_blockNumber': hex(tip),
         'eth_getBlockByNumber': {'hash': block_hash, 'timestamp': '0x64'},
     }
+
+
+def raising(error: Exception):
+    """An rpc_stub response that raises ``error``."""
+
+    def rpc(params):
+        raise error
+
+    return rpc
 
 
 def counting_rpc_stub(provider, responses: dict):
@@ -747,6 +757,53 @@ class TestDeliveryGates:
         # at 108k — the miner would refuse to pay, so the reservation must never start.
         rpc_stub(provider, {'eth_getCode': '0x6080', 'eth_estimateGas': hex(90_000)})
         assert not provider.can_deliver_to(RECIPIENT, 10**15)
+
+    def test_address_refused_eoa_false_without_simulation(self, provider):
+        calls = counting_rpc_stub(provider, {'eth_getCode': '0x'})
+        assert not provider.address_refused(RECIPIENT)
+        assert 'eth_estimateGas' not in calls
+
+    def test_address_refused_needs_a_revert_at_the_swap_value_and_at_dust(self, provider):
+        # The probe knows no swap amount or sender: it sends from address(0) at both values.
+        seen = []
+
+        def gas(params):
+            seen.append(params[0])
+            self._revert(params)
+
+        rpc_stub(provider, {'eth_getCode': '0x6080', 'eth_estimateGas': gas})
+        assert provider.address_refused(RECIPIENT)
+        assert seen == [
+            {'from': ZERO_ADDRESS, 'to': RECIPIENT, 'value': hex(v)} for v in (SWAP_PROBE_WEI, DUST_PROBE_WEI)
+        ]
+
+    def test_address_refused_dust_rejecting_receiver_false(self, provider):
+        def gas(params):
+            return '0xb000' if int(params[0]['value'], 16) == SWAP_PROBE_WEI else self._revert(params)
+
+        rpc_stub(provider, {'eth_getCode': '0x6080', 'eth_estimateGas': gas})
+        assert not provider.address_refused(RECIPIENT)
+
+    @pytest.mark.parametrize(
+        'estimate',
+        [
+            '0xb000',
+            hex(90_000),  # over MAX_TRANSFER_GAS with headroom: the reserve gate's concern, not this address's fault
+            raising(EvmRpcError('insufficient funds', {'code': -32000, 'message': 'insufficient funds'})),
+        ],
+    )
+    def test_address_refused_only_on_a_structured_revert(self, provider, estimate):
+        rpc_stub(provider, {'eth_getCode': '0x6080', 'eth_estimateGas': estimate})
+        assert not provider.address_refused(RECIPIENT)
+
+    @pytest.mark.parametrize('unreadable', ['eth_getCode', 'eth_estimateGas'])
+    def test_address_refused_raises_when_the_chain_cannot_be_read(self, provider, unreadable):
+        def down(params):
+            raise ConnectionError('down')
+
+        rpc_stub(provider, {'eth_getCode': '0x6080', 'eth_estimateGas': '0xb000', unreadable: down})
+        with pytest.raises(ConnectionError):
+            provider.address_refused(RECIPIENT)
 
     def test_delivery_refused_code_at_latest(self, provider):
         rpc_stub(

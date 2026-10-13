@@ -87,3 +87,15 @@ def direction_eligible(
     if not hubs:
         return True
     return any(hub_free(miner_state, hub, now) and purse_active(hotkey, hub, recent_fills) for hub in hubs)
+
+
+def quote_addresses_valid(quote, providers: Dict[str, object]) -> bool:
+    """Whether a quote's receive and delivery addresses parse for their chains — offline, no RPC. A
+    quote whose receive OR delivery address its chain rejects cannot be honoured (reserve refuses
+    the receive side offline; the delivery side can never be paid), so it is never a live rate. A
+    side whose chain this validator runs no provider for is unjudged (never flag it)."""
+    for chain, address in ((quote.from_chain, quote.miner_from_addr), (quote.to_chain, quote.miner_to_addr)):
+        provider = providers.get(str(chain).lower())
+        if provider is not None and not provider.chain.is_valid_address(address):
+            return False
+    return True

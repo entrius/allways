@@ -6,7 +6,7 @@ from eth_account import Account
 from eth_utils import to_checksum_address
 
 from allways.assets.asset import ProviderUnreachableError, SendResult, TransactionInfo
-from allways.assets.evm import EVM_NETWORKS, FALLBACK_PRIORITY_FEE_WEI, EvmAsset, EvmChain
+from allways.assets.evm import EVM_NETWORKS, FALLBACK_PRIORITY_FEE_WEI, EvmAsset, EvmChain, EvmRpcError
 from allways.chains import ChainDefinition
 from allways.constants import CANCEL_REASON_EVM_REVERT
 
@@ -20,6 +20,12 @@ MAX_TRANSFER_GAS = 100_000
 # miner cannot under-gas to manufacture one. A revert refunds the unused gas, so real cost << the limit.
 ETH_FULFILL_GAS_FLOOR = MAX_TRANSFER_GAS
 ZERO_ADDRESS = '0x' + '00' * 20
+# Values the address-only probe (address_refused) simulates receiving from address(0). A refusal must
+# hold at dust AND at a swap-sized value, so a receiver that rejects dust but takes a real leg is not barred.
+DUST_PROBE_WEI = 1
+# 0.001 native: 20x CHAIN_ETH's rate floor, so inside any real leg, yet small enough that address(0)'s
+# burned balance covers it on the chains we run (and a shortfall is a non-revert error: fails open).
+SWAP_PROBE_WEI = 10**15
 # Hard ceiling on the deposit scanner's block walk, independent of block time: the walk costs one
 # RPC per block, and sub-second chains would otherwise turn SCAN_LOOKBACK_BLOCKS into hundreds of
 # calls per pass (HyperEVM's public RPC allows 100/min). Never binds on ~12s chains (25 blocks).
@@ -301,15 +307,23 @@ class EvmCoin(EvmAsset):
         """Gas limit via eth_estimateGas (+20% headroom for smart-wallet receive hooks); None
         when the destination refuses or wants absurd gas. Estimator trouble falls back to the
         plain-transfer minimum rather than blocking an EOA payout."""
-        params = {'from': from_addr, 'to': to_addr, 'value': hex(amount)}
         try:
-            est = int(self.chain.eth_rpc('eth_estimateGas', [params]), 16)
+            est = self._estimate_transfer(from_addr, to_addr, amount)
         except Exception as e:
             # Structured on-chain verdict, not message-substring (which misses a code-3 revert whose
             # text omits the word "revert" → a doomed tx would broadcast). Mirrors the ERC-20 twin.
             return None if getattr(e, 'is_execution_revert', False) else TRANSFER_GAS
         gas = est + est // 5
         return None if gas > MAX_TRANSFER_GAS else gas
+
+    def _estimate_transfer(self, from_addr: str, to_addr: str, amount: int) -> int:
+        """The chain's gas estimate for the plain transfer; raises as the RPC does."""
+        return int(
+            self.chain.eth_rpc('eth_estimateGas', [{'from': from_addr, 'to': to_addr, 'value': hex(amount)}]), 16
+        )
+
+    def _has_code(self, address: str) -> bool:
+        return (self.chain.eth_rpc('eth_getCode', [address, 'latest']) or '0x') != '0x'
 
     def can_deliver_to(self, address: str, amount: int, from_address: Optional[str] = None) -> bool:
         """Reserve-time gate: an EOA can never refuse a transfer; a code-bearing dest must pass
@@ -318,11 +332,29 @@ class EvmCoin(EvmAsset):
         only for msg.sender != 0, or gas just under the cap from zero) must bounce here, not
         ride the miner to a timeout slash. Fails open on RPC trouble."""
         try:
-            if (self.chain.eth_rpc('eth_getCode', [address, 'latest']) or '0x') == '0x':
+            if not self._has_code(address):
                 return True
         except Exception:
             return True
         return self._transfer_gas(from_address or ZERO_ADDRESS, address, amount) is not None
+
+    def address_refused(self, address: str) -> bool:
+        """Code at ``address`` whose receive from address(0) reverts at a swap-sized value AND at dust.
+        An EOA is never refused (no simulation). Only a structured revert refuses: a gas figure of any
+        size or a shortfall is not this address's fault — the send path's gas cap is the reserve gate's
+        concern. Raises when the chain cannot be read."""
+        return self._has_code(address) and all(
+            self._transfer_reverts(ZERO_ADDRESS, address, value) for value in (SWAP_PROBE_WEI, DUST_PROBE_WEI)
+        )
+
+    def _transfer_reverts(self, from_addr: str, to_addr: str, amount: int) -> bool:
+        """Whether simulating the plain transfer yields a structured revert; any other endpoint answer
+        is not one. A transport failure is no answer, so it raises."""
+        try:
+            self._estimate_transfer(from_addr, to_addr, amount)
+        except EvmRpcError as e:
+            return e.is_execution_revert
+        return False
 
     def delivery_refused(self, address: str, since_unix: int) -> bool:
         """Slash gate: code at the destination — now or sampled across the window since

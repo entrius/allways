@@ -351,15 +351,10 @@ class SplToken(Asset):
         account = self.rpc.get_parsed_account(address)
         return bool(account) and account.get('owner') == str(TOKEN_PROGRAM_ID)
 
-    def can_deliver_to(self, address: str, amount: int, from_address: Optional[str] = None) -> bool:
-        """Reserve-time gate: a reserved key can't own an ATA, a frozen ATA can't be credited, and a
-        token account is not an owner. Fails open on RPC trouble (mirrors Erc20)."""
-        if address in RESERVED_ACCOUNTS:
-            return False
-        try:
-            return not (self._frozen(address) or self._is_token_account(address))
-        except Exception:
-            return True
+    def address_refused(self, address: str) -> bool:
+        """A reserved key can't own an ATA, a frozen ATA can't be credited, and a token account is not
+        an owner. Reserved is offline; the rest raise on RPC trouble (the reserve gate fails open)."""
+        return address in RESERVED_ACCOUNTS or self._frozen(address) or self._is_token_account(address)
 
     def delivery_refused(self, address: str, since_unix: int) -> bool:
         """Slash gate: a frozen destination ATA is issuer refusal — positive evidence, never slash over

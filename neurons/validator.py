@@ -177,6 +177,8 @@ class Validator(BaseValidatorNeuron):
             self.state_store,
             self.solana_config_cache.reservation_ttl_secs,
             fill_qualifier=partial(fill_held_crown, self),
+            providers=self.assets,
+            quote_reader=self.solana_client.get_quote,
         )
 
         # Forces one scoring pass per fresh process so a mid-window restart

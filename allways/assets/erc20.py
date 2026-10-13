@@ -166,7 +166,7 @@ class Erc20(EvmAsset):
                 f'{self.chain_def.id} token contract {self.token_contract} has no code on {self.chain.network}'
             )
         try:
-            if any(self._eth_call(sel) for sel, takes_address in self._checks if not takes_address):
+            if self._token_stopped():
                 bt.logging.warning(f'{self._log} token is STOPPED — transfers fail until the issuer clears it')
         except Exception as e:
             bt.logging.warning(f'{self._log} refusal probe failed: {e}')
@@ -489,12 +489,20 @@ class Erc20(EvmAsset):
         except Exception:
             return True
 
-    def _refused_at(self, address: str, block: str = 'latest') -> bool:
-        """Issuer refusal at ``block``, per the checks the row declares. No checks, no RPC."""
+    def address_refused(self, address: str, block: str = 'latest') -> bool:
+        """Issuer freeze of THIS address at ``block`` — the declared checks that take an address, never
+        the token-wide pause. No such checks, no RPC. Raises on RPC trouble."""
         return any(
-            self._eth_call(selector, address if takes_address else '', block)
-            for selector, takes_address in self._checks
+            self._eth_call(selector, address, block) for selector, takes_address in self._checks if takes_address
         )
+
+    def _token_stopped(self, block: str = 'latest') -> bool:
+        """The whole token paused at ``block`` — the declared nullary checks. No such checks, no RPC."""
+        return any(self._eth_call(selector, '', block) for selector, takes_address in self._checks if not takes_address)
+
+    def _refused_at(self, address: str, block: str = 'latest') -> bool:
+        """Issuer refusal at ``block``, per the checks the row declares: the address frozen, or the token stopped."""
+        return self.address_refused(address, block) or self._token_stopped(block)
 
     def delivery_refused(self, address: str, since_unix: int) -> bool:
         """Slash gate: issuer refusal (blacklisted dest, or token paused — both make delivery
