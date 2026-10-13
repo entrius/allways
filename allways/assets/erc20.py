@@ -1,6 +1,6 @@
 import os
 import time
-from typing import Optional, Tuple
+from typing import Dict, Optional, Tuple
 
 import bittensor as bt
 from eth_account import Account
@@ -141,8 +141,11 @@ class Erc20(EvmAsset):
         data = self._fee_selector + f'{int(amount):064x}'
         return int(self.chain.eth_rpc('eth_call', [{'to': self.token_contract, 'data': data}, block]), 16)
 
-    def check_connection(self, require_send: bool = True) -> None:
-        super().check_connection(require_send=require_send)
+    def check_connection(
+        self, require_send: bool = True, checked: Optional[Dict[tuple, Optional[Exception]]] = None
+    ) -> None:
+        # Only the network probe is shared (see EvmAsset); the contract probes below are this token's own.
+        super().check_connection(require_send=require_send, checked=checked)
         try:
             code = self.chain.eth_rpc('eth_getCode', [self.token_contract, 'latest'])
         except Exception as e:

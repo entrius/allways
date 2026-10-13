@@ -55,7 +55,7 @@ from allways.validator.bounds_cache import SolanaConfigCache  # noqa: E402
 from allways.validator.event_index import SolanaEventIndex  # noqa: E402
 from allways.validator.floor_sweep import CollateralFloorSweep  # noqa: E402
 from allways.validator.forward import forward  # noqa: E402
-from allways.validator.relay.wiring import build_bond_relay  # noqa: E402
+from allways.validator.relay.wiring import build_bond_relay, dial_vault_subtensor  # noqa: E402
 from allways.validator.reserve_engine import CrankScheduler  # noqa: E402
 from allways.validator.scoring import fill_held_crown  # noqa: E402
 from allways.validator.seam_http import maybe_start_seam  # noqa: E402
@@ -96,6 +96,9 @@ class Validator(BaseValidatorNeuron):
         # One rpc-url source of truth shared by every SOL consumer: the chain
         # providers (source-leg verification) and the solana_client below.
         solana_rpc_url = resolve_rpc_url()
+        # The bond relay's own subtensor connection takes seconds to dial; start it now so it
+        # overlaps the provider checks below. Collected where the relay is built.
+        vault_dialing = dial_vault_subtensor(self)
         self.assets = create_assets(
             check=True,
             require_send=False,
@@ -106,6 +109,7 @@ class Validator(BaseValidatorNeuron):
         self.fee_divisor = FEE_DIVISOR
         # Declared alpha legs' prices for crown executability: {alpha: (read_at, rao per base unit or None)}.
         self.alpha_prices: dict[str, tuple[int, float | None]] = {}
+        self.alpha_prices_read_at: int | None = None
 
         # Single store owning every validator-local table (crown event tables +
         # the Solana ingest cursor + the axon reservation pins). Created before
@@ -152,7 +156,7 @@ class Validator(BaseValidatorNeuron):
         self.vault_subtensor = None
         # Kept so the forward pass can retry construction when the boot-time build returns None (F3).
         self._relay_read_only = solana_read_only
-        self.bond_relay = build_bond_relay(self, read_only=solana_read_only)
+        self.bond_relay = build_bond_relay(self, read_only=solana_read_only, dialing=vault_dialing)
         self.solana_swap_loop = SolanaSwapLoop(
             self.solana_client,
             self.assets,

@@ -251,7 +251,10 @@ class DatabaseStorage:
         try:
             assert self.db_connection is not None and self.repo is not None
             self.db_connection.autocommit = False
-            count = self.repo.replace_current_crown(rows_by_direction, commit=False)
+            # One delete (and maybe an insert) per quoted lane, every forward step: pipelined, they
+            # are one network flight instead of a round trip each.
+            with self.db_connection.pipeline():
+                count = self.repo.replace_current_crown(rows_by_direction, commit=False)
             self.db_connection.commit()
             self.db_connection.autocommit = True
             result.stored_counts['current_crown_holders'] = count

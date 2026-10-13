@@ -12,6 +12,7 @@ from unittest.mock import patch
 
 import pytest
 
+from allways.constants import RELAY_MINER_READ_INTERVAL_SECS
 from allways.solana import pdas
 from allways.validator import forward as forward_mod
 from allways.validator.relay import attestation as attestation_job
@@ -59,6 +60,9 @@ class FakeVault:
 
     def get_lock_state(self, hotkey):
         return self.lock.get(hotkey, (False, 0)) if self.readable else None
+
+    def get_bond_state(self, hotkey):
+        return self.get_collateral(hotkey), self.get_lock_state(hotkey)
 
     def is_slashed(self, swap_ref):
         return (swap_ref in self.slashed) if self.readable else None
@@ -173,6 +177,7 @@ def _relay(vault=None, solana=None, store=None, attribution=None, **cfg):
         read_only=False,
         clock=lambda: NOW,
         config=RelayConfig(**cfg),
+        sleep=lambda _secs: None,
     )
     bindings = attribution if attribution is not None else {MINER: HOTKEY, MINER2: HOTKEY2}
     solana.attributions = dict(bindings)
@@ -572,6 +577,23 @@ def test_a_failed_verdict_write_holds_the_relay_cursor_until_it_lands(monkeypatc
     assert len(store.open_relay_slashes('tao')) == 1
 
 
+def test_the_vault_connection_is_dialled_ahead_only_when_a_vault_is_configured(monkeypatch):
+    # Boot dials the relay's own subtensor on a thread so the provider checks overlap it — but a
+    # SOL-only validator must still pay no websocket.
+    dialled = []
+    monkeypatch.setattr(wiring, '_file_config', lambda: {})
+    monkeypatch.setattr(wiring, 'build_subtensor', lambda config=None: dialled.append(config) or 'socket')
+    validator = SimpleNamespace(config='cfg')
+
+    monkeypatch.delenv('ALLWAYS_VAULT_ADDRESS', raising=False)
+    assert wiring.dial_vault_subtensor(validator) is None
+    assert dialled == []
+
+    monkeypatch.setenv('ALLWAYS_VAULT_ADDRESS', HOTKEY)
+    assert wiring.dial_vault_subtensor(validator).result() == 'socket'
+    assert dialled == ['cfg']
+
+
 def test_a_relay_that_failed_to_build_is_retried_on_a_later_tick(monkeypatch):
     clock = {'t': 1000.0}
     monkeypatch.setattr(wiring.time, 'monotonic', lambda: clock['t'])
@@ -788,6 +810,104 @@ def test_the_heartbeat_is_released_once_reconcile_comes_back_clean():
     relay.step(NOW)
     assert relay._reconciled
     assert ('vote_attest_heartbeat',) in relay.solana.calls
+
+
+def test_the_startup_pass_is_not_repeated_in_the_same_step():
+    # The barrier's pass is a full reconcile, so the periodic one must count from it. Walking the
+    # vault twice in the boot step doubles a stall the forward loop is already waiting out.
+    relay = _relay()
+    reads = []
+    read = relay.vault.get_collateral
+    relay.vault.get_collateral = lambda hotkey: reads.append(hotkey) or read(hotkey)
+    relay.step(NOW)
+    assert relay._reconciled
+    assert sorted(reads) == sorted([HOTKEY, HOTKEY2]), 'one walk of the bound set, not two'
+    assert relay._next_reconcile == NOW + relay.cfg.reconcile_interval_secs
+
+
+def _ring_relay(count, **cfg):
+    """A booted relay over `count` bound miners with no bond, and the list its vault reads land in."""
+    miners = {f'Miner{i:02d}': codec.account_ss58(bytes([i + 10] * 32)) for i in range(count)}
+    relay = _relay(vault=FakeVault(collateral={}, lock={}), attribution=miners, **cfg)
+    relay.step(NOW)
+    reads = []
+    read = relay.vault.get_collateral
+    relay.vault.get_collateral = lambda hotkey: reads.append(hotkey) or read(hotkey)
+    return relay, miners, reads
+
+
+def test_after_boot_the_audit_walks_the_bound_set_a_few_miners_per_step():
+    # The full walk in one step is what stalled the forward loop every interval. After the boot
+    # audit the same repair is spread over the interval: each step re-reads only the miners due.
+    relay, miners, reads = _ring_relay(10, reconcile_interval_secs=100)
+    per_step = []
+    for elapsed in range(10, 100, 10):
+        before = len(reads)
+        relay.step(NOW + elapsed)
+        per_step.append(len(reads) - before)
+    assert per_step == [1] * 9
+    relay.step(NOW + 100)
+    assert sorted(reads) == sorted(miners.values()), 'every miner re-checked once inside the interval'
+
+
+def test_a_lap_the_steps_were_too_slow_for_is_finished_at_its_boundary():
+    relay, miners, reads = _ring_relay(10, reconcile_interval_secs=100)
+    relay.step(NOW + 30)
+    assert len(reads) == 3
+    relay.step(NOW + 250)  # one long stall later, the interval is still a guarantee
+    assert sorted(reads) == sorted(miners.values())
+
+
+def test_a_miner_that_binds_mid_lap_joins_the_ring_at_the_next_lap():
+    relay, miners, reads = _ring_relay(4, reconcile_interval_secs=100)
+    late = codec.account_ss58(bytes([99] * 32))
+    relay.solana.attributions['MinerLate'] = late
+    relay.step(NOW + 50)
+    assert late not in reads, 'the ring only learns who exists when a lap opens'
+    relay.step(NOW + 100)  # closes the first lap and opens the next
+    assert late in reads, 'a newcomer is read as its lap opens, not when the walk reaches it'
+
+
+def test_a_clock_stepped_back_marks_nobody():
+    relay, miners, reads = _ring_relay(10, reconcile_interval_secs=100)
+    relay.step(NOW + 30)
+    relay.step(NOW - 20)
+    assert len(reads) == 3
+    relay.step(NOW + 40)
+    assert len(reads) == 4
+
+
+def test_an_audit_that_could_not_learn_who_exists_does_not_release_the_barrier():
+    # The bindings read failing at boot leaves an empty map, and an audit of nobody reads clean.
+    relay = _relay()
+    relay._attribution = {}
+    with patch('allways.validator.relay.engine.build_attribution', side_effect=RuntimeError('rpc down')):
+        relay.step(NOW)
+    assert not relay._reconciled
+    relay.step(NOW + 12)
+    assert relay._reconciled
+
+
+def test_successive_miners_are_read_a_rate_limit_apart_and_a_lone_one_never_waits():
+    # Each miner is one fast batched round trip, so the audit's walk of the bound set would outrun
+    # the keyed subtensor's rate limit if nothing spaced it.
+    relay = _relay()
+    waits = []
+    relay._sleep, relay._timer = waits.append, lambda: 100.0
+    relay.mark_dirty(MINER)
+    attestation_job.flush(relay, NOW)
+    assert waits == [], 'an event-driven read of one miner is not held up'
+    relay.reconcile(NOW)
+    assert waits == [RELAY_MINER_READ_INTERVAL_SECS] * 2
+
+
+def test_a_miner_with_no_bond_costs_no_settled_read():
+    # Nothing nets to zero whatever the fees say; most bound miners never bond, and the reconcile
+    # pass reads every one of them.
+    relay = _relay(vault=FakeVault(collateral={}, lock={}))
+    relay.vault.get_settled_total = lambda hotkey: pytest.fail('settled read for a miner with no bond')
+    desired = attestation_job.compute(relay, MINER, HOTKEY)
+    assert desired.is_empty
 
 
 def test_the_heartbeat_is_lazy_not_per_pass():

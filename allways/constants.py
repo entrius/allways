@@ -88,6 +88,10 @@ SCORING_WINDOW_BLOCKS = 300  # ~1 hour at 12s/block — scoring cadence and wind
 # not block numbers, so the crown replay window + interval crediting are in
 # seconds. The scoring *cadence* (due_for_scoring) stays subtensor-block-gated.
 SCORING_WINDOW_SECS = 3600  # ~1 hour — crown replay window width
+# How long a subnet alpha's price is trusted when the crown checks value a lane's alpha leg (swap
+# bounds and the miner's purse are in the hub's units). One read prices every alpha, so this can
+# track the market far closer than the scoring window it used to share.
+ALPHA_PRICE_TTL_SECS = 900
 MAX_SCORING_BACKFILL_SECS = 2 * SCORING_WINDOW_SECS  # ~2 hours — backfill cap after a stall
 # Retention of the crown event tables (rate/active/activity/collateral). Must cover the backfill
 # cap AND the longest swap life: a completed fill is judged against the crown as it stood at its
@@ -228,15 +232,15 @@ POOL_VOLUME_ALPHA = 0.66  # blend dial: 0 = frozen equal split, 1 = pure volume 
 # (a miner's qualified family notional over the lane's, same trailing window). A fill qualifies
 # iff the miner held the lane's crown at reservation, judged at the fill's own size. A lane with
 # no qualified volume recycles its β slice — standing on a dead pair earns (1−β) of it.
-QUALITY_VOLUME_BETA = 0.25
+QUALITY_VOLUME_BETA = 0.35
 # clearing_rates rows must outlive the pool volume window (plus stall headroom) — the
 # crown tables only need SCORING_WINDOW_SECS, but pools read a full day back.
 CLEARING_RETENTION_SECS = POOL_VOLUME_WINDOW_SECS + MAX_SCORING_BACKFILL_SECS
-# Capacity curve exponent (>1 = convex): capacity = min(1, (collateral / required)^k). Convex so
-# thin-parked collateral is penalised harder than linear (a miner backing the best rate on a sliver
-# earns a smaller slice than the ratio alone), pushing miners to deepen. Still capped at 1.0 — depth
-# past required earns nothing extra, so it never becomes pay-to-win.
-CAPACITY_CURVE_EXPONENT: float = 2.0
+# Capacity curve exponent: capacity = min(1, (collateral / required)^k). Linear (k=1), so a max-swap
+# raise scales every miner's crown slice by its collateral ratio instead of squaring the shortfall,
+# and each unit of depth earns the same up to required. Still capped at 1.0 — depth past required
+# earns nothing extra, so it never becomes pay-to-win. Raise above 1 to penalise thin collateral harder.
+CAPACITY_CURVE_EXPONENT: float = 1.0
 # Binary eligibility gate: at most MAX_FAILED_SWAPS lifetime timeouts (the on-chain MinerState
 # counter, never resets) AND at least one completed swap inside the trailing
 # ELIGIBILITY_FILL_WINDOW_SECS (the validator's clearing ledger), judged PER PURSE: a lane is live
@@ -283,8 +287,16 @@ RELAY_HEARTBEAT_INTERVAL_SECS = 12 * 3600
 # Time-aligned global fee true-up. Every validator fires at the same boundary and reads totals at
 # it, so the batch vector is byte-identical; a boundary with zero delta is skipped as pure postage.
 RELAY_FEE_CADENCE_SECS = 2 * 86400
-# Slow continuous vault↔attestation repair loop (crash-between-paired-writes, missed refreshes).
+# Slow continuous vault↔attestation repair loop (crash-between-paired-writes, missed refreshes):
+# after the boot audit, every bound miner is re-checked once per interval, a few per forward step.
 RELAY_RECONCILE_INTERVAL_SECS = 900
+# Floor between two miners' vault reads in an attestation flush. A miner costs three metered
+# requests (the chain head plus the batched bond + lock pair) and a bonded one a settled-fees read
+# on top, so 0.5s holds a walk of mostly unbonded miners near 6 requests/s — under a 10 requests/s
+# keyed plan — and a run of bonded ones nearer the limit, which the plan's burst allowance absorbs.
+# Measured against Dwellir: unpaced batches at ~11 calls/s were rate-limited inside ten seconds.
+# Only the flush is paced; the relay's other vault reads are not.
+RELAY_MINER_READ_INTERVAL_SECS = 0.5
 # Margin past a miner's busy/settling windows before its exit sequence calls the bond quiescent.
 RELAY_QUIESCENCE_GRACE_SECS = 60
 # Retention for the live-swap reimbursement snapshots; rows with an unapplied slash are exempt.

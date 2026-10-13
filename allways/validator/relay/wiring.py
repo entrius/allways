@@ -8,6 +8,7 @@ from __future__ import annotations
 
 import json
 import time
+from concurrent.futures import Future, ThreadPoolExecutor
 from pathlib import Path
 from typing import Any, Optional
 
@@ -34,15 +35,30 @@ def _file_config() -> dict:
         return {}
 
 
-def build_bond_relay(validator: Any, read_only: bool = False) -> Optional[BondRelay]:
+def dial_vault_subtensor(validator: Any) -> Optional[Future]:
+    """Start the relay's own subtensor connection on a thread, so boot's chain-provider checks run
+    while it dials instead of after it. None when no vault is configured — a SOL-only validator
+    still pays no websocket. A failed dial surfaces when ``build_bond_relay`` collects it."""
+    try:
+        resolve_vault_address(_file_config())
+    except VaultConfigError:
+        return None
+    pool = ThreadPoolExecutor(max_workers=1, thread_name_prefix='vault-dial')
+    dialing = pool.submit(build_subtensor, config=validator.config)
+    pool.shutdown(wait=False)
+    return dialing
+
+
+def build_bond_relay(validator: Any, read_only: bool = False, dialing: Optional[Future] = None) -> Optional[BondRelay]:
     """The relayer, or None when no vault is configured. Never raises: a misconfigured vault must
-    degrade to "no TAO relaying" (the fuse then holds TAO entry closed), not to a dead validator."""
+    degrade to "no TAO relaying" (the fuse then holds TAO entry closed), not to a dead validator.
+    ``dialing`` is a connection ``dial_vault_subtensor`` already started; without one it dials here."""
     config = _file_config()
     subtensor = None
     try:
         # Address first: an unconfigured vault must not cost a SOL-only validator a websocket.
         resolve_vault_address(config)
-        subtensor = build_subtensor(config=validator.config)
+        subtensor = dialing.result() if dialing is not None else build_subtensor(config=validator.config)
         vault = BondVaultClient.from_config(subtensor, config, keypair=resolve_signer(validator.wallet))
     except VaultConfigError as e:
         bt.logging.info(f'bond relay off — {e}')

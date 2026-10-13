@@ -2,7 +2,7 @@ import os
 import re
 from collections import OrderedDict
 from dataclasses import dataclass
-from typing import Any, Mapping, Optional, Tuple
+from typing import Any, Dict, Mapping, Optional, Tuple
 from urllib.parse import urlparse
 
 import bittensor as bt
@@ -238,6 +238,13 @@ class EvmChain(Chain):
     def _key_env(self) -> str:
         return f'{self.env_prefix}_PRIVATE_KEY'
 
+    @property
+    def probe_key(self) -> Tuple[str, str, str, Tuple[str, ...]]:
+        """Everything ``connect_network`` reads off this instance. Two instances with one key ask the same endpoints
+        the same questions and log the same lines, so one's probe answers for the other (see
+        ``EvmAsset.check_connection``)."""
+        return self.env_prefix, self.network_def.label, self.network, tuple(self.rpc_bases)
+
     def eth_rpc(
         self,
         method: str,
@@ -455,7 +462,14 @@ class EvmAsset(Asset):
         norm = self.chain.normalize_address
         return acct is not None and norm(acct.address) == norm(address)
 
-    def check_connection(self, require_send: bool = True) -> None:
+    def check_connection(
+        self, require_send: bool = True, checked: Optional[Dict[tuple, Optional[Exception]]] = None
+    ) -> None:
+        """``checked`` (``EvmChain.probe_key`` → its probe's error, None = passed) lets every asset on one network
+        share one probe, as ``Tao.check_connection`` does for a subtensor: Ethereum hosts five assets, each with an
+        ``EvmChain`` of its own dialling the same ladder. The probe only reads — ``connect_network`` leaves nothing on
+        the instance — so an asset that skips it holds exactly the state it would after running it. The signing key
+        stays checked per asset."""
         if require_send:
             key_env = self.chain._key_env
             key = os.environ.get(key_env)
@@ -465,11 +479,23 @@ class EvmAsset(Asset):
                 Account.from_key(key)
             except Exception as e:
                 raise ConnectionError(f'{key_env} is not a valid 32-byte hex key: {e}') from e
-        chain_id, tip = self.chain.connect_network()
+        probe = self.chain.probe_key
+        if checked is not None and probe in checked:
+            if checked[probe] is not None:
+                raise checked[probe]
+            return
+        try:
+            chain_id, tip = self.chain.connect_network()
+        except Exception as e:
+            if checked is not None:
+                checked[probe] = e
+            raise
         bt.logging.success(
             f'[{self.chain.network_def.label}Rpc] connected: '
             f'network={self.chain.network}, chain_id={chain_id}, tip={tip}'
         )
+        if checked is not None:
+            checked[probe] = None
 
     def _prior_broadcast(self, want: Tuple[str, int, str], head: int) -> Optional[str]:
         """Reusable tx hash from a prior own broadcast to (to, amount, dedup scope); None when a

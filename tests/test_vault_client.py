@@ -193,6 +193,51 @@ def _client(meta, payload=None, raise_on_read=False):
     return BondVaultClient(_Sub(payload, raise_on_read), ALICE, metadata=meta)
 
 
+class _BatchSub(_Sub):
+    """A node that answers a batch: one parked payload per call, in order. `batches` counts the
+    messages, `fail` is what the batch raises instead of answering."""
+
+    def __init__(self, payloads, fail=None):
+        super().__init__()
+        self.payloads = list(payloads)
+        self.fail = fail
+        self.batches = 0
+
+    def runtime_calls(self, calls, **_kw):
+        self.batches += 1
+        if self.fail is not None:
+            raise self.fail
+        return [{'result': {'Ok': {'data': _as_node_shape(p)}}} for p in self.payloads[: len(calls)]]
+
+    def runtime_call(self, *_a, **_kw):
+        return {'result': {'Ok': {'data': _as_node_shape(self.payloads.pop(0))}}}
+
+
+_BOND = b'\x00' + (10_000_000).to_bytes(8, 'little')  # Ok(()) prefix + u64
+_LOCK = b'\x00\x01' + (7).to_bytes(8, 'little')  # Ok(()) prefix + (true, 7)
+
+
+def test_the_bond_and_its_lock_are_read_in_one_message(meta):
+    sub = _BatchSub([_BOND, _LOCK])
+    assert BondVaultClient(sub, ALICE, metadata=meta).get_bond_state(BOB) == (10_000_000, (True, 7))
+    assert sub.batches == 1
+
+
+@pytest.mark.parametrize(
+    'failure',
+    [
+        NotImplementedError('legacy runtime-call path'),
+        RuntimeError('Batched requests are not supported by this server'),
+        ConnectionError('Rate limit exceeded'),
+    ],
+)
+def test_a_batch_that_fails_is_read_one_call_at_a_time(meta, failure):
+    # The lone read is the one the SDK retries and fails over. Whatever stopped the batch — an old
+    # runtime, an endpoint that refuses batches, a throttle — the audit must still get its answer.
+    sub = _BatchSub([_BOND, _LOCK], fail=failure)
+    assert BondVaultClient(sub, ALICE, metadata=meta).get_bond_state(BOB) == (10_000_000, (True, 7))
+
+
 def test_lock_state_decodes_the_locked_flag_and_the_epoch(meta):
     c = _client(meta, b'\x00' + b'\x01' + (7).to_bytes(8, 'little'))  # Ok(()) prefix + (true, 7)
     assert c.get_lock_state(BOB) == (True, 7)

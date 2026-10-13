@@ -69,9 +69,10 @@ class BaseValidatorNeuron(BaseNeuron):
             for attempt in range(3):
                 try:
                     self.subtensor.serve_axon(netuid=self.config.netuid, axon=self.axon)
-                    metagraph = self.subtensor.metagraph(self.config.netuid)
-                    uid = metagraph.hotkeys.index(self.wallet.hotkey.ss58_address)
-                    if metagraph.axons[uid].is_serving:
+                    # One neuron, not the whole metagraph: boot synced that seconds ago, and all this
+                    # needs from the chain is our own row as it stands after the serve call.
+                    neuron = self.subtensor.neuron_for_uid(uid=self.uid, netuid=self.config.netuid)
+                    if neuron.axon_info.is_serving:
                         break
                     bt.logging.warning(f'Axon serve attempt {attempt + 1}: not yet serving on chain, retrying...')
                     time.sleep(5)
@@ -96,6 +97,9 @@ class BaseValidatorNeuron(BaseNeuron):
         """
         Main loop for the validator. Runs forward pass, syncs with network.
         """
+        # The stall watchdog measures the LOOP. Start its clock here, not at construction, or
+        # everything boot does before this (dialling, provider checks) is charged to the first step.
+        self.last_forward_time = time.time()
         self.sync()
 
         bt.logging.info(f'Validator starting at block: {self.block}')
@@ -107,6 +111,9 @@ class BaseValidatorNeuron(BaseNeuron):
                 try:
                     bt.logging.info(f'step({self.step}) block({self.block})')
                     self.loop.run_until_complete(self.concurrent_forward())
+                    # A finished forward pass is progress in its own right; the resync and weight
+                    # commit below get their own stall window rather than sharing the pass's.
+                    self.last_forward_time = time.time()
                     self.sync()
                     consecutive_errors = 0
                     self.last_forward_time = time.time()

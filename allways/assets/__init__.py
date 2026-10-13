@@ -1,5 +1,6 @@
+from concurrent.futures import ThreadPoolExecutor
 from functools import partial
-from typing import Callable, Dict, NamedTuple, Optional, Set, Tuple, Type
+from typing import Callable, Dict, Hashable, List, NamedTuple, Optional, Set, Tuple, Type
 
 import bittensor as bt
 
@@ -16,6 +17,7 @@ from allways.assets.cro import Cro
 from allways.assets.erc20 import Erc20
 from allways.assets.eth import Ether
 from allways.assets.ethusdc import EthUsdc
+from allways.assets.evm import EvmChain
 from allways.assets.evm_coin import EvmCoin
 from allways.assets.hype import Hype
 from allways.assets.paxg import Paxg
@@ -104,6 +106,63 @@ ASSET_REGISTRY: Tuple[AssetSpec, ...] = (
 )
 
 
+# Startup checks in flight at once, the calling thread included. Enough that a boot stops waiting on one backend
+# after another (~15s serial on mainnet); few enough that the EVM networks one RPC vendor serves under different
+# hostnames don't add up to a burst on it.
+MAX_CHECK_LANES = 4
+
+
+def check_lane(provider: Asset) -> Hashable:
+    """The backend a provider's startup check talks to. Checks on one lane run one after another, in registry
+    order; only different lanes overlap. One lane per chain class, split per network for EVM, so no backend is
+    asked two things at once — the TAO provider and every alpha bind a ``Tao`` and so share the subtensor's lane."""
+    chain = provider.chain
+    if isinstance(chain, Tao):
+        return Tao
+    if isinstance(chain, EvmChain):
+        return EvmChain, chain.env_prefix
+    return type(chain)
+
+
+def run_checks(pending: List[Tuple[int, Asset]], require_send: bool) -> Dict[int, Exception]:
+    """Run each provider's ``check_connection``; returns the failures by registry position.
+
+    Backends are independent, so their lanes overlap. The subtensor's lane runs on the calling thread: a keyed
+    endpoint allows ~10 requests/s and a boot's burst of reads has throttled it before (see utils/subtensor.py),
+    so the neuron's subtensor keeps one caller, on the thread that built it. A failure is returned, never raised,
+    so which one fails the boot is the caller's choice and not whichever lane lost the race.
+    """
+    lanes: Dict[Hashable, List[Tuple[int, Asset]]] = {}
+    for position, provider in pending:
+        lanes.setdefault(check_lane(provider), []).append((position, provider))
+
+    def run_lane(lane: List[Tuple[int, Asset]]) -> Dict[int, Exception]:
+        # One probe per backend, shared down the lane: the TAO provider and every alpha (~128) ride one subtensor,
+        # and several assets sit on one EVM network. Owned by the lane, so no other thread touches it.
+        checked: Dict[Hashable, Optional[Exception]] = {}
+        failed: Dict[int, Exception] = {}
+        for position, provider in lane:
+            try:
+                if isinstance(provider.chain, (Tao, EvmChain)):
+                    provider.check_connection(require_send=require_send, checked=checked)
+                else:
+                    provider.check_connection(require_send=require_send)
+            except Exception as e:
+                failed[position] = e
+        return failed
+
+    own_lane = lanes.pop(Tao, [])
+    if not lanes:
+        return run_lane(own_lane)
+    workers = min(MAX_CHECK_LANES - 1, len(lanes))
+    with ThreadPoolExecutor(max_workers=workers, thread_name_prefix='asset-check') as pool:
+        futures = [pool.submit(run_lane, lane) for lane in lanes.values()]
+        failed = run_lane(own_lane)
+        for future in futures:
+            failed.update(future.result())
+    return failed
+
+
 def create_assets(
     check: bool = False,
     require_send: bool = True,
@@ -127,36 +186,50 @@ def create_assets(
     e.g. create_assets(subtensor=subtensor)
     """
     providers: Dict[str, Asset] = {}
-    # The TAO provider and every alpha (~128) ride one subtensor: check it once, not once per alpha.
-    subtensor_checks: Dict[int, Optional[Exception]] = {}
 
-    for chain_id, cls, kwarg_names in ASSET_REGISTRY:
-        name = getattr(cls, 'func', cls).__name__  # a partial (alpha rows) has no __name__ of its own
+    def admit(chain_id: str, name: str, provider: Optional[Asset], error: Optional[Exception]) -> None:
         required = required_chains is None or chain_id in required_chains
-        try:
-            provider_kwargs = {k: kwargs[k] for k in kwarg_names if k in kwargs}
-            provider = cls(**provider_kwargs)
-            provider.chain  # a missing Chain binding fails here at boot, not mid-pass
-            if check:
-                if isinstance(provider.chain, Tao):
-                    provider.check_connection(require_send=require_send, checked=subtensor_checks)
-                else:
-                    provider.check_connection(require_send=require_send)
+        if error is None:
             providers[chain_id] = provider
-        except MissingTestnetDeployment as e:
+        elif isinstance(error, MissingTestnetDeployment):
             # A spoke with no deployment on this test network can't exist here at all, so it
             # disables rather than failing the boot. A miner that quotes the pair (explicitly
             # in required_chains) still fails hard — it must not advertise what it can't serve.
             if check and required_chains is not None and chain_id in required_chains:
-                raise RuntimeError(f'{name} failed startup check: {e}') from e
-            bt.logging.warning(f'{name} disabled on this network: {e} — {chain_id} pairs are unavailable here')
-        except Exception as e:
+                raise RuntimeError(f'{name} failed startup check: {error}') from error
+            bt.logging.warning(f'{name} disabled on this network: {error} — {chain_id} pairs are unavailable here')
+        else:
             if check and required:
-                raise RuntimeError(f'{name} failed startup check: {e}') from e
+                raise RuntimeError(f'{name} failed startup check: {error}') from error
             bt.logging.warning(
-                f'{name} disabled: {e}'
+                f'{name} disabled: {error}'
                 + (f' — {chain_id}-pair swaps cannot be fulfilled until this is fixed' if check else '')
             )
+
+    # Constructors stay on the calling thread, in registry order; only the checks fan out.
+    built: List[Tuple[str, str, Optional[Asset], Optional[Exception]]] = []
+    for chain_id, cls, kwarg_names in ASSET_REGISTRY:
+        name = getattr(cls, 'func', cls).__name__  # a partial (alpha rows) has no __name__ of its own
+        provider: Optional[Asset] = None
+        error: Optional[Exception] = None
+        try:
+            provider_kwargs = {k: kwargs[k] for k in kwarg_names if k in kwargs}
+            provider = cls(**provider_kwargs)
+            provider.chain  # a missing Chain binding fails here at boot, not mid-pass
+        except Exception as e:
+            provider, error = None, e
+        if check:
+            built.append((chain_id, name, provider, error))
+        else:
+            admit(chain_id, name, provider, error)
+
+    if check:
+        failed = run_checks([(i, row[2]) for i, row in enumerate(built) if row[2] is not None], require_send)
+        # Admitted in registry order whatever order the lanes finished in: the providers dict keeps its order and,
+        # when several chains fail, the one that fails the boot is the first in the registry — as it was when the
+        # checks ran one at a time.
+        for position, (chain_id, name, provider, error) in enumerate(built):
+            admit(chain_id, name, provider, failed.get(position) if error is None else error)
 
     if check and providers:
         bt.logging.info('Chain providers ready:')

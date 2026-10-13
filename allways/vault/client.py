@@ -174,20 +174,41 @@ class BondVaultClient:
     def dry_read(self, data: bytes, origin: Optional[str] = None) -> Optional[bytes]:
         """Best-effort contract read. Returns the unwrapped return payload, or None when the node's
         `ContractResult` isn't decodable client-side (a known cargo-contract/runtime skew)."""
-        who = origin or (self.keypair.ss58_address if self.keypair is not None else self.address)
         try:
-            res = self.subtensor.substrate.runtime_call(
-                'ContractsApi',
-                'call',
-                {
-                    'origin': who,
-                    'dest': self.address,
-                    'value': 0,
-                    'gas_limit': None,
-                    'storage_deposit_limit': None,
-                    'input_data': '0x' + data.hex(),
-                },
+            return self._payload(self.subtensor.substrate.runtime_call('ContractsApi', 'call', self._dry(data, origin)))
+        except Exception:
+            return None
+
+    def dry_reads(self, datas: Sequence[bytes], origin: Optional[str] = None) -> List[Optional[bytes]]:
+        """``dry_read`` for several calls in ONE message, all answered at the same block — one round
+        trip instead of one per call. The node still meters each call in the batch, so this buys
+        latency, not rate-limit room.
+
+        A batch that fails for ANY reason is read again one call at a time. The lone read is the
+        path the SDK retries and fails over (a batched one is neither), so an endpoint that refuses
+        batches, drops the socket or rate-limits still gets an answer the way it did before
+        batching — the audit must never go blind because of how its reads were packed."""
+        try:
+            results = self.subtensor.substrate.runtime_calls(
+                [('ContractsApi', 'call', self._dry(data, origin)) for data in datas]
             )
+        except Exception:
+            return [self.dry_read(data, origin) for data in datas]
+        return [self._payload(res) for res in results]
+
+    def _dry(self, data: bytes, origin: Optional[str]) -> dict:
+        return {
+            'origin': origin or (self.keypair.ss58_address if self.keypair is not None else self.address),
+            'dest': self.address,
+            'value': 0,
+            'gas_limit': None,
+            'storage_deposit_limit': None,
+            'input_data': '0x' + data.hex(),
+        }
+
+    @staticmethod
+    def _payload(res) -> Optional[bytes]:
+        try:
             v = res.value if hasattr(res, 'value') else res
             return codec.unwrap_lang_error(_return_bytes(v['result']['Ok']['data']))
         except Exception:
@@ -198,11 +219,7 @@ class BondVaultClient:
         return codec.Reader(raw) if raw else None
 
     def _read_u64(self, label: str, *args: bytes) -> Optional[int]:
-        reader = self._read(label, *args)
-        try:
-            return reader.uint(8) if reader is not None else None
-        except codec.VaultCodecError:
-            return None
+        return _u64(self._read(label, *args))
 
     # ─── reads ───────────────────────────────────────────────────────────────
 
@@ -212,13 +229,16 @@ class BondVaultClient:
 
     def get_lock_state(self, hotkey: str) -> Optional[Tuple[bool, int]]:
         """``(locked, lock_epoch)``. The epoch is what ``vote_unlock`` must name."""
-        reader = self._read('get_lock_state', codec.account_bytes(hotkey))
-        if reader is None:
-            return None
-        try:
-            return reader.boolean(), reader.uint(8)
-        except codec.VaultCodecError:
-            return None
+        return _lock_state(self._read('get_lock_state', codec.account_bytes(hotkey)))
+
+    def get_bond_state(self, hotkey: str) -> Tuple[Optional[int], Optional[Tuple[bool, int]]]:
+        """``(get_collateral, get_lock_state)`` in one round trip at one block — the pair every
+        attestation needs, and the bulk of the relay's audit. Either half is None when unreadable."""
+        account = codec.account_bytes(hotkey)
+        gross, lock = self.dry_reads(
+            [self.metadata.call('get_collateral', account), self.metadata.call('get_lock_state', account)]
+        )
+        return _u64(codec.Reader(gross) if gross else None), _lock_state(codec.Reader(lock) if lock else None)
 
     def get_settled_total(self, hotkey: str) -> Optional[int]:
         """Cumulative protocol fees already settled onto the vault for this miner (rao)."""
@@ -451,6 +471,22 @@ class BondVaultClient:
 
 def _record_topics(record) -> List[str]:
     return list(record.get('topics') or []) if isinstance(record, dict) else []
+
+
+def _u64(reader: Optional[codec.Reader]) -> Optional[int]:
+    try:
+        return reader.uint(8) if reader is not None else None
+    except codec.VaultCodecError:
+        return None
+
+
+def _lock_state(reader: Optional[codec.Reader]) -> Optional[Tuple[bool, int]]:
+    if reader is None:
+        return None
+    try:
+        return reader.boolean(), reader.uint(8)
+    except codec.VaultCodecError:
+        return None
 
 
 def _return_bytes(payload) -> bytes:

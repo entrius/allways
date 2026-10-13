@@ -9,9 +9,11 @@ from uuid import uuid4
 import numpy as np
 import pytest
 
+from allways.chains import get_chain_def
 from allways.classes import ActivityTransition, MinerActivity
 from allways.constants import (
     ALPHA_FAMILY,
+    ALPHA_PRICE_TTL_SECS,
     DIRECTION_POOLS,
     ELIGIBILITY_FILL_WINDOW_SECS,
     FAMILY_PAIR_COUNTS,
@@ -23,7 +25,6 @@ from allways.constants import (
     QUALITY_VOLUME_BETA,
     RECYCLE_UID,
     SCORING_WINDOW_BLOCKS,
-    SCORING_WINDOW_SECS,
     TAO_TO_RAO,
     required_collateral,
     scoring_family,
@@ -610,9 +611,9 @@ class TestCollateralUnitValue:
         sn7 = self.Alpha(TAO_TO_RAO // 100)
         v = SimpleNamespace(assets={'sn7': sn7}, alpha_prices={})
         assert collateral_unit_value(v, 'sn7', 'avax', 'tao', 0) == pytest.approx(0.01)
-        assert collateral_unit_value(v, 'avax', 'sn7', 'tao', SCORING_WINDOW_SECS - 1) == pytest.approx(0.01)
+        assert collateral_unit_value(v, 'avax', 'sn7', 'tao', ALPHA_PRICE_TTL_SECS - 1) == pytest.approx(0.01)
         assert sn7.reads == 1
-        collateral_unit_value(v, 'sn7', 'avax', 'tao', SCORING_WINDOW_SECS)
+        collateral_unit_value(v, 'sn7', 'avax', 'tao', ALPHA_PRICE_TTL_SECS)
         assert sn7.reads == 2
 
     def test_failed_read_keeps_the_last_price(self):
@@ -620,7 +621,35 @@ class TestCollateralUnitValue:
         v = SimpleNamespace(assets={'sn7': sn7}, alpha_prices={})
         collateral_unit_value(v, 'sn7', 'avax', 'tao', 0)
         sn7.rao_per_alpha = None
-        assert collateral_unit_value(v, 'sn7', 'avax', 'tao', SCORING_WINDOW_SECS) == pytest.approx(0.01)
+        assert collateral_unit_value(v, 'sn7', 'avax', 'tao', ALPHA_PRICE_TTL_SECS) == pytest.approx(0.01)
+
+    def test_one_subtensor_read_prices_every_alpha(self):
+        # A cold cache used to cost one serial read per declared alpha inside a single step.
+        rao = SimpleNamespace(rao=TAO_TO_RAO // 100)
+        reads = []
+        subtensor = SimpleNamespace(get_subnet_prices=lambda: reads.append(1) or {7: rao, 54: rao})
+        alphas = {f'sn{n}': SimpleNamespace(netuid=n, chain_def=get_chain_def(f'sn{n}')) for n in (7, 54)}
+        v = SimpleNamespace(assets=alphas, alpha_prices={}, subtensor=subtensor)
+        assert collateral_unit_value(v, 'sn7', 'avax', 'tao', 0) == pytest.approx(0.01)
+        assert collateral_unit_value(v, 'sn54', 'avax', 'tao', 0) == pytest.approx(0.01)
+        assert len(reads) == 1
+        collateral_unit_value(v, 'sn7', 'avax', 'tao', ALPHA_PRICE_TTL_SECS)
+        assert len(reads) == 2, 'refreshed once the window turns over'
+
+    def test_a_failed_one_read_refresh_falls_back_to_the_leg_and_is_tried_once_per_pass(self):
+        attempts = []
+
+        def down():
+            attempts.append(1)
+            raise RuntimeError('subtensor down')
+
+        sn7, sn54 = self.Alpha(TAO_TO_RAO // 100), self.Alpha(TAO_TO_RAO // 100)
+        v = SimpleNamespace(
+            assets={'sn7': sn7, 'sn54': sn54}, alpha_prices={}, subtensor=SimpleNamespace(get_subnet_prices=down)
+        )
+        assert collateral_unit_value(v, 'sn7', 'avax', 'tao', 0) == pytest.approx(0.01)
+        assert collateral_unit_value(v, 'sn54', 'avax', 'tao', 0) == pytest.approx(0.01)
+        assert (sn7.reads, sn54.reads, len(attempts)) == (1, 1, 1)
 
     def test_unreadable_price_leaves_the_lane_unchecked(self):
         v = SimpleNamespace(assets={'sn7': self.Alpha(None)}, alpha_prices={})
@@ -1363,6 +1392,30 @@ class TestSnapshotCurrentCrownHolders:
         assert holders == ['hk_funded']
         v.state_store.close()
 
+    def test_lane_independent_state_is_read_once_for_the_whole_walk(self, tmp_path: Path):
+        # Activity and the active set are the same for every lane at one instant; reading them per
+        # lane was most of the snapshot's cost once a thousand lanes were quoted.
+        v = make_validator(tmp_path, ['hk_funded'], collaterals={'hk_funded': 500_000_000})
+        for from_chain, to_chain in (('sol', 'btc'), ('btc', 'sol'), ('sol', 'tao')):
+            self._seed_rate(v.state_store, 'hk_funded', 326.0, from_chain, to_chain)
+        reads = {'activity': 0, 'active': 0}
+        activity, active = v.event_index.get_activity_state_at, v.event_index.get_active_miners_at
+
+        def counted(name, read):
+            def wrapper(*a, **kw):
+                reads[name] += 1
+                return read(*a, **kw)
+
+            return wrapper
+
+        v.event_index.get_activity_state_at = counted('activity', activity)
+        v.event_index.get_active_miners_at = counted('active', active)
+        rows = snapshot_current_crown_holders(v, v.block)
+
+        assert len(rows) >= 3
+        assert reads == {'activity': 1, 'active': 1}
+        v.state_store.close()
+
     def test_only_quoted_lanes_are_evaluated(self, tmp_path: Path):
         v = make_validator(tmp_path, ['hk_funded'], collaterals={'hk_funded': 500_000_000})
         self._seed_rate(v.state_store, 'hk_funded', 326.0)
@@ -2025,8 +2078,8 @@ class TestHaltShortCircuit:
 class TestCapacityFactorHelper:
     """Direct unit tests for the capacity_factor pure function. Full credit requires
     backing a max_swap fill at the contract's 1.10× gate: denominator = 1.1 × max_swap.
-    The ramp below full is convex (ratio ** CAPACITY_CURVE_EXPONENT, k=2), so partial
-    depth earns less than the raw ratio."""
+    The ramp below full is linear (ratio ** CAPACITY_CURVE_EXPONENT, k=1), so partial
+    depth earns its raw ratio."""
 
     def test_at_required_collateral_is_full(self):
         from allways.validator.scoring import capacity_factor
@@ -2037,19 +2090,19 @@ class TestCapacityFactorHelper:
         """Collateral == max_swap can't actually accept a max_swap fill (needs 1.1×)."""
         from allways.validator.scoring import capacity_factor
 
-        assert capacity_factor(500_000_000, 500_000_000) == (500_000_000 / 550_000_000) ** 2
+        assert capacity_factor(500_000_000, 500_000_000) == 500_000_000 / 550_000_000
 
-    def test_half_required_is_quarter(self):
-        """Convex ramp (k=2): half the required collateral earns a quarter, not a half."""
+    def test_half_required_is_half(self):
+        """Linear ramp (k=1): half the required collateral earns half."""
         from allways.validator.scoring import capacity_factor
 
-        assert capacity_factor(275_000_000, 500_000_000) == 0.25
+        assert capacity_factor(275_000_000, 500_000_000) == 0.5
 
-    def test_quarter_required_is_sixteenth(self):
-        """Convex ramp (k=2): a quarter of required earns (1/4)^2 = 1/16."""
+    def test_quarter_required_is_quarter(self):
+        """Linear ramp (k=1): a quarter of required earns a quarter."""
         from allways.validator.scoring import capacity_factor
 
-        assert capacity_factor(137_500_000, 500_000_000) == 0.0625
+        assert capacity_factor(137_500_000, 500_000_000) == 0.25
 
     def test_above_required_caps_at_one(self):
         from allways.validator.scoring import capacity_factor
@@ -2106,9 +2159,9 @@ class TestCapacityWeighting:
         np.testing.assert_allclose(rewards[0], CROWN_SLICE * POOL_BTC_SOL, atol=1e-6)
         v.state_store.close()
 
-    def test_quarter_collateral_pays_sixteenth(self, tmp_path: Path):
-        """Collateral at 1/4 of required (1.1 x max_swap) → convex capacity (1/4)^2 =
-        1/16 reward, the rest recycles."""
+    def test_quarter_collateral_pays_quarter(self, tmp_path: Path):
+        """Collateral at 1/4 of required (1.1 x max_swap) → linear capacity 1/4 of the
+        reward, the rest recycles."""
         hotkeys = pad_hotkeys_to_cover_recycle(['hk_a'])
         v = make_validator(
             tmp_path,
@@ -2118,11 +2171,11 @@ class TestCapacityWeighting:
         )
         self.seed_sol_btc_crown(v, 'hk_a')
         rewards, _ = calculate_miner_rewards(v, v.block)
-        np.testing.assert_allclose(rewards[0], CROWN_SLICE * POOL_BTC_SOL * 0.0625, atol=1e-6)
-        # Pool conservation: hk_a got POOL_BTC_SOL*0.0625; the rest of both buckets
+        np.testing.assert_allclose(rewards[0], CROWN_SLICE * POOL_BTC_SOL * 0.25, atol=1e-6)
+        # Pool conservation: hk_a got POOL_BTC_SOL*0.25; the rest of both buckets
         # and the unallocated pool all recycle, so recycle = 1 - that share.
         recycle_uid = RECYCLE_UID if RECYCLE_UID < len(rewards) else 0
-        np.testing.assert_allclose(rewards[recycle_uid], 1.0 - CROWN_SLICE * POOL_BTC_SOL * 0.0625, atol=1e-6)
+        np.testing.assert_allclose(rewards[recycle_uid], 1.0 - CROWN_SLICE * POOL_BTC_SOL * 0.25, atol=1e-6)
         np.testing.assert_allclose(rewards.sum(), 1.0, atol=1e-6)
         v.state_store.close()
 
@@ -2159,7 +2212,7 @@ class TestCapacityWeighting:
         """Two miners tie on the best rate with unequal collateral → the crown splits in
         proportion to depth (crown_depth_shares). hk_a at full capacity for max_swap 500M
         (550M = the depth cap) takes 5/6 of the crown; hk_b's 110M takes 1/6, further
-        shrunk by its thin capacity multiplier ((110/550)^2 = 0.04)."""
+        shrunk by its thin capacity multiplier (110/550 = 0.2)."""
         hotkeys = pad_hotkeys_to_cover_recycle(['hk_a', 'hk_b'])
         v = make_validator(
             tmp_path,
@@ -2176,7 +2229,7 @@ class TestCapacityWeighting:
         conn.commit()
         rewards, _ = calculate_miner_rewards(v, v.block)
         np.testing.assert_allclose(rewards[0], CROWN_SLICE * POOL_BTC_SOL * (5 / 6), atol=1e-6)
-        np.testing.assert_allclose(rewards[1], CROWN_SLICE * POOL_BTC_SOL * (1 / 6) * 0.04, atol=1e-6)
+        np.testing.assert_allclose(rewards[1], CROWN_SLICE * POOL_BTC_SOL * (1 / 6) * 0.2, atol=1e-6)
         v.state_store.close()
 
     def test_thin_undercut_inside_band_shares_instead_of_taking_all(self, tmp_path: Path):
@@ -2200,7 +2253,7 @@ class TestCapacityWeighting:
             )
         conn.commit()
         rewards, _ = calculate_miner_rewards(v, v.block)
-        np.testing.assert_allclose(rewards[0], CROWN_SLICE * POOL_BTC_SOL * (1 / 6) * 0.04, atol=1e-6)
+        np.testing.assert_allclose(rewards[0], CROWN_SLICE * POOL_BTC_SOL * (1 / 6) * 0.2, atol=1e-6)
         np.testing.assert_allclose(rewards[1], CROWN_SLICE * POOL_BTC_SOL * (5 / 6), atol=1e-6)
         np.testing.assert_allclose(rewards[2], 0.0, atol=1e-6)
         v.state_store.close()
@@ -2667,8 +2720,8 @@ class TestCapacityVolumeInteraction:
     served-volume ledger doesn't perturb it."""
 
     def test_both_factors_compose_multiplicatively(self, tmp_path: Path):
-        """Single miner, half required collateral → convex capacity (0.5)^2 = 0.25,
-        and another miner serving the volume → reward = pool * 0.25."""
+        """Single miner, half required collateral → linear capacity 0.5, and another
+        miner serving the volume → reward = pool * 0.5."""
         hotkeys = pad_hotkeys_to_cover_recycle(['hk_a', 'hk_b'])
         v = make_validator(
             tmp_path,
@@ -2685,8 +2738,8 @@ class TestCapacityVolumeInteraction:
         # B serves all the volume; A still holds the crown and is paid on it.
         v.state_store.insert_clearing_rate(9_900, 'hk_b', 'btc', 'sol', 1_000_000_000, 1_000_000_000, 'sk12')
         rewards, _ = calculate_miner_rewards(v, v.block)
-        # A: equal-split pool (B's volume is unqualified) × crown 1.0 × eligible 1 × capacity 0.25.
-        np.testing.assert_allclose(rewards[0], CROWN_SLICE * POOL_BTC_SOL * 1.0 * 0.25, atol=1e-6)
+        # A: equal-split pool (B's volume is unqualified) × crown 1.0 × eligible 1 × capacity 0.5.
+        np.testing.assert_allclose(rewards[0], CROWN_SLICE * POOL_BTC_SOL * 1.0 * 0.5, atol=1e-6)
         v.state_store.close()
 
     def test_full_pool_conservation_with_all_factors(self, tmp_path: Path):
@@ -2850,15 +2903,14 @@ class TestHistoricalCollateralReplay:
             {'miner': 'hk_a', 'amount': 440_000_000, 'total': 550_000_000},
         )
         rewards, _ = calculate_miner_rewards(v, v.block)
-        # capacity_factor = (110M / (1.1 × 500M))^2 = 0.2^2 = 0.04.
-        np.testing.assert_allclose(rewards[0], CROWN_SLICE * POOL_BTC_SOL * 0.04, atol=1e-6)
+        # capacity_factor = 110M / (1.1 × 500M) = 0.2.
+        np.testing.assert_allclose(rewards[0], CROWN_SLICE * POOL_BTC_SOL * 0.2, atol=1e-6)
         v.state_store.close()
 
     def test_mid_window_topup_blends_capacity(self, tmp_path: Path):
         """A miner posts more collateral midway through the window. Capacity
-        is integrated per-block: half the window at convex 1/4-collateral cap
-        ((1/4)^2 = 0.0625), half at full cap (1.0) → time-weighted average
-        0.53125. Validates that the multiplier reflects collateral *during*
+        is integrated per-block: half the window at 1/4-collateral cap (0.25),
+        half at full cap (1.0) → time-weighted average 0.625. Validates that the multiplier reflects collateral *during*
         the interval, not at the end of it."""
         hotkeys = pad_hotkeys_to_cover_recycle(['hk_a'])
         v = make_validator(
@@ -2877,8 +2929,8 @@ class TestHistoricalCollateralReplay:
             {'miner': 'hk_a', 'amount': 412_500_000, 'total': 550_000_000},
         )
         rewards, _ = calculate_miner_rewards(v, v.block)
-        # First 150 blocks at cap 0.0625 ((1/4)^2), next 150 at cap 1.0 → mean cap 0.53125.
-        np.testing.assert_allclose(rewards[0], CROWN_SLICE * POOL_BTC_SOL * 0.53125, atol=1e-6)
+        # First 150 blocks at cap 0.25, next 150 at cap 1.0 → mean cap 0.625.
+        np.testing.assert_allclose(rewards[0], CROWN_SLICE * POOL_BTC_SOL * 0.625, atol=1e-6)
         v.state_store.close()
 
 
