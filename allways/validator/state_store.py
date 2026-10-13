@@ -7,6 +7,7 @@ events via ``SolanaEventIndex`` and keyed by unix ``blockTime``),
 windowed volume read), ``swap_outcomes`` (terminal completed/timed_out
 truth per swap_key, backing the seam's stage disambiguation after the swap PDA
 closes), ``collateral_verdicts`` (declared alpha leg checks pinned at fill),
+``address_bans`` (miners that posted an unusable address, judged at ingest),
 ``routed_requests`` (queued on-behalf reservation details awaiting
 finalize — the one table NOT rebuildable from chain),
 ``relay_swaps``/``relay_fees``/``relay_slashes``/``relay_meta`` (the W3 bond
@@ -482,6 +483,24 @@ class ValidatorStateStore:
         for r in rows:
             out.setdefault(r['backing'], set()).add(r['hotkey'])
         return out
+
+    # ─── address_bans (miners that posted an unusable address) ─────────
+
+    def record_address_ban(self, hotkey: str, banned_at: int) -> None:
+        self._execute(
+            """
+            INSERT INTO address_bans (hotkey, banned_at) VALUES (?, ?)
+            ON CONFLICT(hotkey) DO UPDATE SET banned_at = MAX(banned_at, excluded.banned_at)
+            """,
+            (str(hotkey), int(banned_at)),
+        )
+
+    def address_banned_hotkeys(self, start_time: int, end_time: int) -> Set[str]:
+        """Hotkeys banned in ``(start_time, end_time]``."""
+        rows = self._fetchall(
+            'SELECT hotkey FROM address_bans WHERE banned_at > ? AND banned_at <= ?', (start_time, end_time)
+        )
+        return {r['hotkey'] for r in rows}
 
     LEDGER_SINCE_KEY = 'clearing_ledger_since'
 
@@ -1227,6 +1246,12 @@ class ValidatorStateStore:
                     swap_key    TEXT PRIMARY KEY,
                     to_tx_hash  TEXT NOT NULL,
                     block_time  INTEGER NOT NULL
+                );
+
+                -- One row per hotkey ever banned (latest ban), so it needs no prune.
+                CREATE TABLE IF NOT EXISTS address_bans (
+                    hotkey    TEXT PRIMARY KEY,
+                    banned_at INTEGER NOT NULL
                 );
 
                 CREATE TABLE IF NOT EXISTS collateral_verdicts (

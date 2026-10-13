@@ -403,29 +403,30 @@ def test_an_address_is_probed_once_and_an_unreadable_probe_judges_nothing(tmp_pa
     validator.state_store.close()
 
 
-def test_the_same_miners_other_lanes_keep_earning(tmp_path, providers):
+def test_a_bad_address_bans_the_miner_on_every_lane(tmp_path, providers):
     first, second = LAUNCH_PAIRS[:2]
     quotes = first_lane_quotes(providers, first, '') + first_lane_quotes(
         providers, second, good_address(providers, second[0])
     )
     validator = make_validator(tmp_path, quotes, providers)
     post_quotes(validator, quotes)
-    assert_rewards(score(validator), lane_reward(*first_lane(second)), lane_reward(*first_lane(first)))
+    assert_rewards(score(validator), 0.0, lane_reward(*first_lane(first)) + lane_reward(*first_lane(second)))
     validator.state_store.close()
 
 
-@pytest.mark.parametrize('bad_first', [True, False], ids=['bad-then-good', 'good-then-bad'])
-def test_a_lane_earns_exactly_its_good_address_intervals(tmp_path, providers, bad_first):
+def test_a_corrected_quote_earns_only_after_the_ban_ends(tmp_path, providers, monkeypatch):
+    monkeypatch.setattr(scoring_mod, 'ADDRESS_BAN_SECS', SCORING_WINDOW_BLOCKS)
     pair = LAUNCH_PAIRS[0]
     lane = first_lane(pair)
     bad, honest = first_lane_quotes(providers, pair, '')
     good = make_quote(BAD, *lane, bad.rate / RATE_PRECISION, good_address(providers, pair[0]), bad.miner_to_addr)
-    first, second = (bad, good) if bad_first else (good, bad)
-    validator = make_validator(tmp_path, [second, honest], providers)
-    post_quotes(validator, [first, honest], at=validator.last_scored_time - 1)
-    post_quotes(validator, [second], at=validator.block - SCORING_WINDOW_BLOCKS // 4)
-    good_fraction = 0.25 if bad_first else 0.75
-    assert_rewards(score(validator), good_fraction * lane_reward(*lane), (1 - good_fraction) * lane_reward(*lane))
+    validator = make_validator(tmp_path, [good, honest], providers)
+    post_quotes(validator, [honest], at=validator.last_scored_time - 1)
+    post_quotes(validator, [bad], at=validator.last_scored_time + 1)
+    post_quotes(validator, [good], at=validator.last_scored_time + 2)
+    assert_rewards(score(validator), 0.0, lane_reward(*lane))
+    next_round(validator)
+    assert_rewards(score(validator), lane_reward(*lane), 0.0)
     validator.state_store.close()
 
 

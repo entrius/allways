@@ -253,6 +253,8 @@ RECONCILE_QUIET_SECS = 600
 # Verdicts of the on-chain address probe (Asset.address_refused) kept so a re-quote costs no RPC.
 # Memory bound only: at the cap the oldest verdict is dropped and asked again if a quote names it.
 ADDRESS_REFUSAL_MEMO_SIZE = 10_000
+# A miner that posts a quote naming an unusable address earns nothing for this long: 12 rounds.
+ADDRESS_BAN_SECS = 12 * SCORING_WINDOW_SECS
 
 # ─── Validator stake weights (reservation-lottery draw) ──
 # Each validator derives the same vector — floor(alpha_stake / bucket) per whitelisted

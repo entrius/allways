@@ -25,7 +25,7 @@ import bittensor as bt
 
 from allways import dev_signal
 from allways.classes import ActivityTransition, MinerActivity
-from allways.constants import ADDRESS_REFUSAL_MEMO_SIZE, RATE_PRECISION, RECONCILE_QUIET_SECS
+from allways.constants import ADDRESS_BAN_SECS, ADDRESS_REFUSAL_MEMO_SIZE, RATE_PRECISION, RECONCILE_QUIET_SECS
 from allways.eligibility import quote_addresses_valid
 from allways.solana.events import EventRecord
 from allways.solana.layouts import EVENT_PUBKEY_FIELDS
@@ -226,9 +226,11 @@ class SolanaEventIndex:
             quote = self._read_quote(self._miner_str(rec), from_chain, to_chain, backing)
             if quote is not None and not self.quote_usable(quote):
                 rate = 0.0
+                self.state_store.record_address_ban(hotkey, block_time)
                 bt.logging.warning(
                     f'{hotkey[:8]}: {from_chain}->{to_chain} ({backing}) quote names an unusable address '
-                    f'({from_chain}:{quote.miner_from_addr} -> {to_chain}:{quote.miner_to_addr}), rate zeroed'
+                    f'({from_chain}:{quote.miner_from_addr} -> {to_chain}:{quote.miner_to_addr}), rate zeroed '
+                    f'and the miner banned for {ADDRESS_BAN_SECS}s'
                 )
             self.state_store.insert_rate_event(hotkey, from_chain, to_chain, rate, block_time, collateral_chain=backing)
             return True
