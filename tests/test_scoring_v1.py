@@ -9,6 +9,7 @@ from uuid import uuid4
 import numpy as np
 import pytest
 
+from allways.chains import get_chain_def
 from allways.classes import ActivityTransition, MinerActivity
 from allways.constants import (
     ALPHA_FAMILY,
@@ -621,6 +622,34 @@ class TestCollateralUnitValue:
         collateral_unit_value(v, 'sn7', 'avax', 'tao', 0)
         sn7.rao_per_alpha = None
         assert collateral_unit_value(v, 'sn7', 'avax', 'tao', SCORING_WINDOW_SECS) == pytest.approx(0.01)
+
+    def test_one_subtensor_read_prices_every_alpha(self):
+        # A cold cache used to cost one serial read per declared alpha inside a single step.
+        rao = SimpleNamespace(rao=TAO_TO_RAO // 100)
+        reads = []
+        subtensor = SimpleNamespace(get_subnet_prices=lambda: reads.append(1) or {7: rao, 54: rao})
+        alphas = {f'sn{n}': SimpleNamespace(netuid=n, chain_def=get_chain_def(f'sn{n}')) for n in (7, 54)}
+        v = SimpleNamespace(assets=alphas, alpha_prices={}, subtensor=subtensor)
+        assert collateral_unit_value(v, 'sn7', 'avax', 'tao', 0) == pytest.approx(0.01)
+        assert collateral_unit_value(v, 'sn54', 'avax', 'tao', 0) == pytest.approx(0.01)
+        assert len(reads) == 1
+        collateral_unit_value(v, 'sn7', 'avax', 'tao', SCORING_WINDOW_SECS)
+        assert len(reads) == 2, 'refreshed once the window turns over'
+
+    def test_a_failed_one_read_refresh_falls_back_to_the_leg_and_is_tried_once_per_pass(self):
+        attempts = []
+
+        def down():
+            attempts.append(1)
+            raise RuntimeError('subtensor down')
+
+        sn7, sn54 = self.Alpha(TAO_TO_RAO // 100), self.Alpha(TAO_TO_RAO // 100)
+        v = SimpleNamespace(
+            assets={'sn7': sn7, 'sn54': sn54}, alpha_prices={}, subtensor=SimpleNamespace(get_subnet_prices=down)
+        )
+        assert collateral_unit_value(v, 'sn7', 'avax', 'tao', 0) == pytest.approx(0.01)
+        assert collateral_unit_value(v, 'sn54', 'avax', 'tao', 0) == pytest.approx(0.01)
+        assert (sn7.reads, sn54.reads, len(attempts)) == (1, 1, 1)
 
     def test_unreadable_price_leaves_the_lane_unchecked(self):
         v = SimpleNamespace(assets={'sn7': self.Alpha(None)}, alpha_prices={})
@@ -1361,6 +1390,30 @@ class TestSnapshotCurrentCrownHolders:
 
         holders = [row[3] for row in rows[('sol', 'btc', 'sol')]]
         assert holders == ['hk_funded']
+        v.state_store.close()
+
+    def test_lane_independent_state_is_read_once_for_the_whole_walk(self, tmp_path: Path):
+        # Activity and the active set are the same for every lane at one instant; reading them per
+        # lane was most of the snapshot's cost once a thousand lanes were quoted.
+        v = make_validator(tmp_path, ['hk_funded'], collaterals={'hk_funded': 500_000_000})
+        for from_chain, to_chain in (('sol', 'btc'), ('btc', 'sol'), ('sol', 'tao')):
+            self._seed_rate(v.state_store, 'hk_funded', 326.0, from_chain, to_chain)
+        reads = {'activity': 0, 'active': 0}
+        activity, active = v.event_index.get_activity_state_at, v.event_index.get_active_miners_at
+
+        def counted(name, read):
+            def wrapper(*a, **kw):
+                reads[name] += 1
+                return read(*a, **kw)
+
+            return wrapper
+
+        v.event_index.get_activity_state_at = counted('activity', activity)
+        v.event_index.get_active_miners_at = counted('active', active)
+        rows = snapshot_current_crown_holders(v, v.block)
+
+        assert len(rows) >= 3
+        assert reads == {'activity': 1, 'active': 1}
         v.state_store.close()
 
     def test_only_quoted_lanes_are_evaluated(self, tmp_path: Path):

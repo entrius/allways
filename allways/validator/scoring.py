@@ -873,6 +873,7 @@ def reconstruct_window_start_state(
     window_start: int,
     rewardable_hotkeys: Set[str],
     backing: Optional[str],
+    shared: Optional[dict] = None,
 ) -> Tuple[Dict[str, float], Dict[str, Dict[str, MinerActivity]], Set[str], Dict[str, int]]:
     """Snapshot rates, per-miner activity, active set, and posted collateral as
     they stood at window_start. ``activity`` is per (hotkey, hub) — v3.1 busy is
@@ -883,16 +884,30 @@ def reconstruct_window_start_state(
 
     Rates and collateral are read for the LANE's ``backing`` only (F4) — the caller
     names the lane, so sol↔tao's tao lane reads its own quotes and attested TAO bond.
-    A sibling backing never bleeds into the other."""
+    A sibling backing never bleeds into the other.
+
+    Activity and the active set don't depend on the lane at all, and collateral only on its
+    backing. A caller walking many lanes at ONE instant passes ``shared`` so those are read once
+    for the walk instead of once per lane; every lane still gets its own copy to mutate."""
+    shared = {} if shared is None else shared
+
+    def once(key, read):
+        key = (key, window_start)
+        if key not in shared:
+            shared[key] = read()
+        return shared[key]
+
     activity: Dict[str, Dict[str, MinerActivity]] = {
-        hk: dict(hubs) for hk, hubs in event_index.get_activity_state_at(window_start).items()
+        hk: dict(hubs) for hk, hubs in once('activity', lambda: event_index.get_activity_state_at(window_start)).items()
     }
-    active_set: Set[str] = set(event_index.get_active_miners_at(window_start))
+    active_set: Set[str] = set(once('active', lambda: event_index.get_active_miners_at(window_start)))
 
     all_latest = store.get_latest_rates_before(from_chain, to_chain, window_start, collateral_chain=backing)
     rates: Dict[str, float] = {hk: rate_block[0] for hk, rate_block in all_latest.items() if hk in rewardable_hotkeys}
 
-    collaterals: Dict[str, int] = dict(event_index.get_miner_collaterals_at(window_start, backing=backing))
+    collaterals: Dict[str, int] = dict(
+        once(('collateral', backing), lambda: event_index.get_miner_collaterals_at(window_start, backing=backing))
+    )
 
     return rates, activity, active_set, collaterals
 
@@ -972,6 +987,10 @@ def collateral_unit_value(self: Validator, from_chain: str, to_chain: str, backi
         return 1.0
     read_at, value = self.alpha_prices.get(leg, (None, None))
     if read_at is None or now - read_at >= SCORING_WINDOW_SECS:
+        refresh_alpha_prices(self, now)
+        read_at, value = self.alpha_prices.get(leg, (None, value))
+    if read_at is None or now - read_at >= SCORING_WINDOW_SECS:
+        # The one-read refresh didn't cover this leg (it failed, or the leg has no price in it).
         whole = 10 ** get_chain_def(leg).decimals
         try:
             value = self.assets[leg].value_rao(whole) / whole
@@ -979,6 +998,24 @@ def collateral_unit_value(self: Validator, from_chain: str, to_chain: str, backi
             bt.logging.warning(f'{leg} price read failed, keeping the last price ({value}): {e}')
         self.alpha_prices[leg] = (now, value)
     return value
+
+
+def refresh_alpha_prices(self: Validator, now: int) -> None:
+    """Price every subnet alpha with ONE subtensor read instead of one per declared leg — a cold
+    cache used to cost a serial read per alpha, about a hundred of them, inside a single forward
+    step. Tried at most once per ``now``; a failure leaves each leg to its own read as before."""
+    if getattr(self, 'alpha_prices_read_at', None) == now:
+        return
+    self.alpha_prices_read_at = now
+    try:
+        prices = self.subtensor.get_subnet_prices()
+    except Exception as e:
+        bt.logging.debug(f'alpha prices: one-read refresh unavailable, reading per leg: {e}')
+        return
+    for leg, provider in self.assets.items():
+        price = prices.get(getattr(provider, 'netuid', None))
+        if price is not None:
+            self.alpha_prices[leg] = (now, int(price.rao) / 10**provider.chain_def.decimals)
 
 
 def direction_purse_known(backing: Optional[str]) -> bool:
@@ -1259,6 +1296,7 @@ def snapshot_current_crown_holders(
     rows_by_direction: Dict[Tuple[str, str, str], List[Tuple[str, str, str, str, float, float, int]]] = {
         lane: [] for lane in quoted if lane[2] not in declarable_backings(lane[0], lane[1])
     }
+    window_start_reads: dict = {}  # every lane below is read at the same instant
     for from_chain, to_chain in DIRECTION_POOLS:
         for backing in declarable_backings(from_chain, to_chain):
             if (from_chain, to_chain, backing) not in quoted:
@@ -1277,6 +1315,7 @@ def snapshot_current_crown_holders(
                 ts,
                 lane_candidates,
                 backing,
+                shared=window_start_reads,
             )
             canon_from, _ = canonical_pair(from_chain, to_chain)
             lower_rate_wins = from_chain != canon_from

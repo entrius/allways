@@ -577,6 +577,23 @@ def test_a_failed_verdict_write_holds_the_relay_cursor_until_it_lands(monkeypatc
     assert len(store.open_relay_slashes('tao')) == 1
 
 
+def test_the_vault_connection_is_dialled_ahead_only_when_a_vault_is_configured(monkeypatch):
+    # Boot dials the relay's own subtensor on a thread so the provider checks overlap it — but a
+    # SOL-only validator must still pay no websocket.
+    dialled = []
+    monkeypatch.setattr(wiring, '_file_config', lambda: {})
+    monkeypatch.setattr(wiring, 'build_subtensor', lambda config=None: dialled.append(config) or 'socket')
+    validator = SimpleNamespace(config='cfg')
+
+    monkeypatch.delenv('ALLWAYS_VAULT_ADDRESS', raising=False)
+    assert wiring.dial_vault_subtensor(validator) is None
+    assert dialled == []
+
+    monkeypatch.setenv('ALLWAYS_VAULT_ADDRESS', HOTKEY)
+    assert wiring.dial_vault_subtensor(validator).result() == 'socket'
+    assert dialled == ['cfg']
+
+
 def test_a_relay_that_failed_to_build_is_retried_on_a_later_tick(monkeypatch):
     clock = {'t': 1000.0}
     monkeypatch.setattr(wiring.time, 'monotonic', lambda: clock['t'])
