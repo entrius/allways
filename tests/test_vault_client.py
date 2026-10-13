@@ -223,17 +223,19 @@ def test_the_bond_and_its_lock_are_read_in_one_message(meta):
     assert sub.batches == 1
 
 
-def test_a_runtime_too_old_to_batch_is_read_one_call_at_a_time(meta):
-    sub = _BatchSub([_BOND, _LOCK], fail=NotImplementedError('legacy runtime-call path'))
+@pytest.mark.parametrize(
+    'failure',
+    [
+        NotImplementedError('legacy runtime-call path'),
+        RuntimeError('Batched requests are not supported by this server'),
+        ConnectionError('Rate limit exceeded'),
+    ],
+)
+def test_a_batch_that_fails_is_read_one_call_at_a_time(meta, failure):
+    # The lone read is the one the SDK retries and fails over. Whatever stopped the batch — an old
+    # runtime, an endpoint that refuses batches, a throttle — the audit must still get its answer.
+    sub = _BatchSub([_BOND, _LOCK], fail=failure)
     assert BondVaultClient(sub, ALICE, metadata=meta).get_bond_state(BOB) == (10_000_000, (True, 7))
-
-
-def test_a_failed_batch_is_unknown_never_zero(meta):
-    # A rate-limited or dropped batch must not be answered by firing the same calls again one by
-    # one — and must never read as "no bond", which would let the relay attest a bond away.
-    sub = _BatchSub([_BOND, _LOCK], fail=RuntimeError('Rate limit exceeded'))
-    assert BondVaultClient(sub, ALICE, metadata=meta).get_bond_state(BOB) == (None, None)
-    assert sub.payloads == [_BOND, _LOCK], 'nothing was re-read serially'
 
 
 def test_lock_state_decodes_the_locked_flag_and_the_epoch(meta):

@@ -282,10 +282,11 @@ RELAY_FEE_CADENCE_SECS = 2 * 86400
 # after the boot audit, every bound miner is re-checked once per interval, a few per forward step.
 RELAY_RECONCILE_INTERVAL_SECS = 900
 # Floor between two miners' vault reads in an attestation flush. A miner costs three metered
-# requests (the chain head plus the batched bond + lock pair; a fourth, settled fees, only when it
-# has a bond), so 0.5s holds the audit near 6 requests/s — under a 10 requests/s keyed plan with
-# room left for the validator's other subtensor traffic. Measured against Dwellir: unpaced batches
-# at ~11 calls/s were rate-limited inside ten seconds. Raise it if the endpoint starts limiting.
+# requests (the chain head plus the batched bond + lock pair) and a bonded one a settled-fees read
+# on top, so 0.5s holds a walk of mostly unbonded miners near 6 requests/s — under a 10 requests/s
+# keyed plan — and a run of bonded ones nearer the limit, which the plan's burst allowance absorbs.
+# Measured against Dwellir: unpaced batches at ~11 calls/s were rate-limited inside ten seconds.
+# Only the flush is paced; the relay's other vault reads are not.
 RELAY_MINER_READ_INTERVAL_SECS = 0.5
 # Margin past a miner's busy/settling windows before its exit sequence calls the bond quiescent.
 RELAY_QUIESCENCE_GRACE_SECS = 60

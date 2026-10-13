@@ -845,10 +845,30 @@ def test_a_miner_that_binds_mid_lap_joins_the_ring_at_the_next_lap():
     relay, miners, reads = _ring_relay(4, reconcile_interval_secs=100)
     late = codec.account_ss58(bytes([99] * 32))
     relay.solana.attributions['MinerLate'] = late
-    relay.step(NOW + 100)  # closes the first lap and opens the next, which rediscovers who exists
-    assert late not in reads
-    relay.step(NOW + 200)
-    assert late in reads
+    relay.step(NOW + 50)
+    assert late not in reads, 'the ring only learns who exists when a lap opens'
+    relay.step(NOW + 100)  # closes the first lap and opens the next
+    assert late in reads, 'a newcomer is read as its lap opens, not when the walk reaches it'
+
+
+def test_a_clock_stepped_back_marks_nobody():
+    relay, miners, reads = _ring_relay(10, reconcile_interval_secs=100)
+    relay.step(NOW + 30)
+    relay.step(NOW - 20)
+    assert len(reads) == 3
+    relay.step(NOW + 40)
+    assert len(reads) == 4
+
+
+def test_an_audit_that_could_not_learn_who_exists_does_not_release_the_barrier():
+    # The bindings read failing at boot leaves an empty map, and an audit of nobody reads clean.
+    relay = _relay()
+    relay._attribution = {}
+    with patch('allways.validator.relay.engine.build_attribution', side_effect=RuntimeError('rpc down')):
+        relay.step(NOW)
+    assert not relay._reconciled
+    relay.step(NOW + 12)
+    assert relay._reconciled
 
 
 def test_successive_miners_are_read_a_rate_limit_apart_and_a_lone_one_never_waits():
@@ -856,12 +876,12 @@ def test_successive_miners_are_read_a_rate_limit_apart_and_a_lone_one_never_wait
     # the keyed subtensor's rate limit if nothing spaced it.
     relay = _relay()
     waits = []
-    relay._sleep = waits.append
+    relay._sleep, relay._timer = waits.append, lambda: 100.0
     relay.mark_dirty(MINER)
     attestation_job.flush(relay, NOW)
     assert waits == [], 'an event-driven read of one miner is not held up'
     relay.reconcile(NOW)
-    assert len(waits) == 2 and all(0 < w <= RELAY_MINER_READ_INTERVAL_SECS for w in waits)
+    assert waits == [RELAY_MINER_READ_INTERVAL_SECS] * 2
 
 
 def test_a_miner_with_no_bond_costs_no_settled_read():

@@ -102,6 +102,7 @@ class BondRelay:
         config: Optional[RelayConfig] = None,
         config_fn: Optional[Callable[[], Any]] = None,
         sleep: Optional[Callable[[float], None]] = None,
+        timer: Optional[Callable[[], float]] = None,
     ):
         self.solana = solana_client
         self.vault = vault
@@ -112,6 +113,8 @@ class BondRelay:
         self.clock = clock or time.time
         self.cfg = config or RelayConfig()
         self._sleep = sleep or time.sleep
+        # Elapsed time for pacing — monotonic, where `clock` is wall time and may be stepped.
+        self._timer = timer or time.monotonic
         self._last_miner_read = 0.0
         self._config_fn = config_fn or solana_client.get_config
 
@@ -129,6 +132,8 @@ class BondRelay:
         self._next_reconcile = 0.0
         self._attribution: Dict[str, str] = {}
         self._attribution_at = 0.0
+        # Whether the last refresh of the map succeeded (see `reconcile`).
+        self._attribution_fresh = True
         self._last_heartbeat_attempt = 0.0
         # Per-subject re-vote throttles, so an unlanded round isn't re-submitted every 12s pass.
         self._voted_at: Dict[str, float] = {}
@@ -145,7 +150,9 @@ class BondRelay:
             try:
                 self._attribution = build_attribution(self.solana)
                 self._attribution_at = now
+                self._attribution_fresh = True
             except Exception as e:
+                self._attribution_fresh = False
                 bt.logging.warning(f'relay: attribution refresh failed ({e}); using the previous map')
         return self._attribution
 
@@ -275,10 +282,10 @@ class BondRelay:
         """Hold successive miners' vault reads ``RELAY_MINER_READ_INTERVAL_SECS`` apart. The audit
         walks every bound miner and the batched read made each one a single fast round trip, so
         unpaced it outruns the keyed subtensor's rate limit; a lone event-driven read never waits."""
-        wait = self._last_miner_read + RELAY_MINER_READ_INTERVAL_SECS - time.monotonic()
+        wait = self._last_miner_read + RELAY_MINER_READ_INTERVAL_SECS - self._timer()
         if wait > 0:
             self._sleep(wait)
-        self._last_miner_read = time.monotonic()
+        self._last_miner_read = self._timer()
 
     def mark_dirty(self, miner: str) -> None:
         self._dirty.add(str(miner))
@@ -324,19 +331,30 @@ class BondRelay:
         interval = self.cfg.reconcile_interval_secs
         lap_over = now >= self._next_reconcile
         elapsed = interval - (self._next_reconcile - now)
-        due = len(self._ring) if lap_over else int(len(self._ring) * elapsed / interval)
+        # Never behind the position: a wall clock stepped back must not turn into a negative slice
+        # end, which would mark nearly the whole ring.
+        due = len(self._ring) if lap_over else max(self._ring_pos, int(len(self._ring) * elapsed / interval))
         for miner in self._ring[self._ring_pos : due]:
             self.mark_dirty(miner)
-        self._ring_pos = max(self._ring_pos, due)
+        self._ring_pos = due
         if not lap_over:
             return
-        # A new lap is when the ring learns who exists: a miner that bound mid-lap joins here, the
-        # same once-an-interval discovery the full walk used to give.
+        # A new lap is when the ring learns who exists. A miner it has not seen before is read now
+        # rather than whenever the walk reaches it, so one that bound mid-lap waits at most an
+        # interval for its first audit — the same bound the full walk gave.
+        known = set(self._ring)
         self.attribution(refresh=True)
-        self._ring, self._ring_pos = self.bonded_miners(), 0
-        self._next_reconcile = now + interval
-        self._refresh_exiting(self._ring)
+        bonded = self.bonded_miners()
+        for miner in bonded:
+            if miner not in known:
+                self.mark_dirty(miner)
+        self._open_lap(now, bonded)
+        self._refresh_exiting(bonded)
         self._prune(now)
+
+    def _open_lap(self, now: int, bonded: List[str]) -> None:
+        self._ring, self._ring_pos = bonded, 0
+        self._next_reconcile = now + self.cfg.reconcile_interval_secs
 
     def reconcile(self, now: int) -> bool:
         """Full vault↔attestation diff plus a drain of every pending obligation — the whole bound
@@ -350,10 +368,16 @@ class BondRelay:
         # below, so a cached map would hide a miner that bound since the last pass for a whole TTL
         # — including one that bound and bonded in the same minute.
         self.attribution(refresh=True)
+        # A refresh that failed leaves the previous map — at boot, an empty one — and an audit of
+        # nobody would come back "clean". Not knowing who exists is owed, not settled.
+        ok = self._attribution_fresh
         bonded = self.bonded_miners()
         for miner in bonded:
             self.mark_dirty(miner)
-        ok = attestation_job.flush(self, now, reconciling=True)
+        # This pass read everyone, so the ring's first lap starts from it instead of rediscovering
+        # the same set in the same tick.
+        self._open_lap(now, bonded)
+        ok = attestation_job.flush(self, now, reconciling=True) and ok
         slash_job.arm_verdicts(self, now)
         ok = slash_job.relay_verdicts(self, now) and ok
         self._refresh_exiting(bonded)
