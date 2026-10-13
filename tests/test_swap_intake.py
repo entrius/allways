@@ -11,6 +11,7 @@ import pytest
 from allways.cli.swap_commands.helpers import FINITE_DECIMAL
 from allways.cli.swap_commands.swap_intake import (
     MinerCandidate,
+    candidate_miners,
     compute_intake_amounts,
     max_intake_from_amount,
     rate_display_from_fixed,
@@ -179,7 +180,9 @@ def test_candidate_miners_excludes_inactive():
     from allways.cli.swap_commands.swap_intake import candidate_miners
 
     def q(m):
-        return SimpleNamespace(miner=m, from_chain='tao', to_chain='sol', rate=15 * 10**17)
+        return SimpleNamespace(
+            miner=m, from_chain='tao', to_chain='sol', rate=15 * 10**17, miner_from_addr='from', miner_to_addr='to'
+        )
 
     client = _FakeCandClient(
         quotes=[q('active-m'), q('inactive-m'), q('no-state-m')],
@@ -194,6 +197,46 @@ def test_candidate_miners_excludes_inactive():
     assert out[0].collateral == 976_466_670  # tracked field, not vault lamports
 
 
+@pytest.mark.parametrize('bad_field', ['miner_from_addr', 'miner_to_addr'])
+def test_candidate_miners_skips_bad_quote_addresses_and_keeps_next_best(bad_field):
+    quotes = [
+        SimpleNamespace(
+            miner=miner,
+            from_chain='sol',
+            to_chain='btc',
+            rate=rate,
+            miner_from_addr=f'from-{miner}',
+            miner_to_addr=f'to-{miner}',
+        )
+        for miner, rate in [('best', 2 * 10**18), ('next', 10**18)]
+    ]
+    setattr(quotes[0], bad_field, 'bad')
+    states = {miner: SimpleNamespace(active=True, failed_swaps=0, collateral=2 * SOL) for miner in ('best', 'next')}
+    provider = SimpleNamespace(chain=SimpleNamespace(is_valid_address=lambda address: address != 'bad'))
+
+    assert [
+        c.miner
+        for c in candidate_miners(_FakeCandClient(quotes, states), 'sol', 'btc', {'sol': provider, 'btc': provider})
+    ] == ['next']
+
+
+def test_candidate_miners_does_not_judge_an_address_without_its_provider():
+    quote = SimpleNamespace(
+        miner='best',
+        from_chain='sol',
+        to_chain='btc',
+        rate=2 * 10**18,
+        miner_from_addr='valid',
+        miner_to_addr='bad',
+    )
+    state = SimpleNamespace(active=True, failed_swaps=0, collateral=2 * SOL)
+    provider = SimpleNamespace(chain=SimpleNamespace(is_valid_address=lambda address: address != 'bad'))
+
+    assert (
+        candidate_miners(_FakeCandClient([quote], {'best': state}), 'sol', 'btc', {'sol': provider})[0].miner == 'best'
+    )
+
+
 def test_candidate_miners_excludes_struck_and_settling():
     # The scorer's own gate: at the strike cap still quotes, one past it does not, nor does a
     # miner whose sol purse is mid-settle — the contract would refuse the reserve anyway. A settle
@@ -204,7 +247,9 @@ def test_candidate_miners_excludes_struck_and_settling():
     from allways.constants import MAX_FAILED_SWAPS
 
     def q(m):
-        return SimpleNamespace(miner=m, from_chain='tao', to_chain='sol', rate=15 * 10**17)
+        return SimpleNamespace(
+            miner=m, from_chain='tao', to_chain='sol', rate=15 * 10**17, miner_from_addr='from', miner_to_addr='to'
+        )
 
     far = 2**40
     client = _FakeCandClient(
@@ -319,7 +364,9 @@ def test_candidate_purse_is_net_of_in_flight_reservations():
 
     from allways.cli.swap_commands.swap_intake import candidate_miners
 
-    q = SimpleNamespace(miner='m', from_chain='tao', to_chain='sol', rate=15 * 10**17)
+    q = SimpleNamespace(
+        miner='m', from_chain='tao', to_chain='sol', rate=15 * 10**17, miner_from_addr='from', miner_to_addr='to'
+    )
     busy = SimpleNamespace(active=True, failed_swaps=0, collateral=3 * SOL, reserved_collateral=[2 * SOL, 7 * SOL])
     out = candidate_miners(_FakeCandClient(quotes=[q], states={'m': busy}), 'tao', 'sol')
     assert out[0].collateral == SOL  # sol hub is slot 0; the tao slot's obligation does not count
@@ -330,7 +377,9 @@ def test_candidate_purse_floors_at_zero_and_tolerates_a_pre_v33_state():
 
     from allways.cli.swap_commands.swap_intake import candidate_miners
 
-    q = SimpleNamespace(miner='m', from_chain='tao', to_chain='sol', rate=15 * 10**17)
+    q = SimpleNamespace(
+        miner='m', from_chain='tao', to_chain='sol', rate=15 * 10**17, miner_from_addr='from', miner_to_addr='to'
+    )
     over = SimpleNamespace(active=True, failed_swaps=0, collateral=SOL, reserved_collateral=[2 * SOL])
     old = SimpleNamespace(active=True, failed_swaps=0, collateral=SOL)
     assert candidate_miners(_FakeCandClient([q], {'m': over}), 'tao', 'sol')[0].collateral == 0

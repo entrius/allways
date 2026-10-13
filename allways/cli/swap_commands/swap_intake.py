@@ -27,7 +27,7 @@ from allways.constants import (
     hub_leg,
     required_collateral,
 )
-from allways.eligibility import direction_eligible
+from allways.eligibility import direction_eligible, quote_addresses_valid
 from allways.solana.layouts import hub_reserved_collateral
 from allways.solana.pdas import BACKING_BITS
 from allways.utils.rate import (
@@ -78,7 +78,7 @@ def rate_display_from_fixed(rate_fixed: int) -> str:
     return normalize_rate(quantize_rate_fixed(rate_fixed) / RATE_PRECISION)
 
 
-def candidate_miners(client, from_chain: str, to_chain: str) -> List[MinerCandidate]:
+def candidate_miners(client, from_chain: str, to_chain: str, providers=None) -> List[MinerCandidate]:
     """Active, emission-eligible miners with a posted quote for this exact direction, purse
     attached. Shared by the CLI taker path and the validator reserve engine so "who is
     quotable" can never diverge between what a taker sees and what reserves.
@@ -89,7 +89,11 @@ def candidate_miners(client, from_chain: str, to_chain: str) -> List[MinerCandid
     own on-chain reading): a miner that earns nothing has no reason to deliver, so a cheap
     quote from one is bait, not a rate. One MinerState read per quoted miner gives the
     active gate, the strike gate and the tracked collateral in a single fetch; an
-    off-chain-backed offer needs one more read for the purse the contract will actually check."""
+    off-chain-backed offer needs one more read for the purse the contract will actually check.
+
+    ``providers`` drops a quote whose address its chain rejects (``quote_addresses_valid``). The
+    validator passes its own; the CLI has no offline validator for every chain and passes none,
+    so it judges no address and the validator's refusal is its backstop."""
     out: List[MinerCandidate] = []
     # One state read per distinct miner: a dual-purse miner can appear twice on a direction now, and
     # its `active` flag and collateral are the same for both offers.
@@ -98,6 +102,8 @@ def candidate_miners(client, from_chain: str, to_chain: str) -> List[MinerCandid
     for _pk, q in client.get_all('MinerQuote'):
         if q.from_chain != from_chain or q.to_chain != to_chain:
             continue
+        if not quote_addresses_valid(q, providers or {}):
+            continue  # an address its chain rejects can never be reserved or delivered from
         key = str(q.miner)
         if key not in states:
             states[key] = client.get_miner_state(q.miner)

@@ -6,6 +6,7 @@ from decimal import Decimal
 from types import SimpleNamespace
 from unittest.mock import patch
 
+import pytest
 from solders.keypair import Keypair as SolKeypair
 
 from allways.chains import get_chain_def
@@ -575,6 +576,8 @@ class TestRateQuoteCandidates:
                 to_chain=to_chain,
                 rate=int(Decimal(rate) * RATE_PRECISION),
                 collateral_chain='sol',
+                miner_from_addr='from',
+                miner_to_addr='to',
             )
             for pk, rate in zip(miners, rates)
         ]
@@ -604,6 +607,37 @@ class TestRateQuoteCandidates:
         }
         assert rq.candidates[1]['to_amount'] == 55_000_000
         assert rq.min_from_amount == self.MIN  # hub source: min_swap as-is
+
+    @pytest.mark.parametrize('bad_field', ['miner_from_addr', 'miner_to_addr'])
+    def test_bad_best_address_is_absent_from_quote_levels_depth_and_candidates(self, bad_field):
+        validator, hotkeys = self._validator('sol', 'btc', ['0.6', '0.5'])
+        quotes = [q for _key, q in validator.solana_client.get_all('MinerQuote')]
+        for index, quote in enumerate(quotes):
+            quote.miner_from_addr = f'from-{index}'
+            quote.miner_to_addr = f'to-{index}'
+        setattr(quotes[0], bad_field, 'bad')
+        provider = SimpleNamespace(chain=SimpleNamespace(is_valid_address=lambda address: address != 'bad'))
+        validator.axon_assets = {'sol': provider, 'btc': provider}
+
+        rq = rate_quote(validator, 'sol', 'btc', self.SOL)
+
+        assert rq.quote.miner_hotkey == hotkeys[1]
+        assert rq.levels == [{'rate_display': '0.5', 'max_from_amount': self.MAX}]
+        assert rq.max_from_amount == self.MAX
+        assert [candidate['rate_display'] for candidate in rq.candidates] == ['0.5']
+
+    def test_all_bad_addresses_leave_a_truthful_empty_rate(self):
+        validator, _ = self._validator('sol', 'btc', ['0.6'])
+        quote = validator.solana_client.get_all('MinerQuote')[0][1]
+        quote.miner_from_addr = 'bad'
+        quote.miner_to_addr = 'valid'
+        provider = SimpleNamespace(chain=SimpleNamespace(is_valid_address=lambda address: address != 'bad'))
+        validator.axon_assets = {'sol': provider}
+
+        rq = rate_quote(validator, 'sol', 'btc', self.SOL)
+
+        assert rq.quote is None and rq.reason == 'no miner offers this direction'
+        assert rq.levels == [] and rq.max_from_amount == 0 and rq.min_from_amount == self.MIN and rq.candidates == []
 
     def test_miss_carries_min_and_no_candidates(self):
         validator, _ = self._validator('sol', 'btc', ['0.5'])

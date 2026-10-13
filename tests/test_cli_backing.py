@@ -19,6 +19,8 @@ from allways.cli.swap_commands.pair import post_pair
 from allways.constants import TAO_TO_RAO
 from allways.solana.pdas import BACKING_BIT_SOL, BACKING_BIT_TAO
 
+ADDRS = {'miner_from_addr': '', 'miner_to_addr': ''}  # MinerQuote always carries both
+
 
 def _state(mask):
     return SimpleNamespace(active_backings=mask, active=mask != 0, failed_swaps=0)
@@ -244,8 +246,12 @@ class _TwoQuoteClient:
 
     def __init__(self):
         self.quotes = [
-            SimpleNamespace(miner='m1', from_chain='sol', to_chain='tao', rate=10 * 10**18, collateral_chain='sol'),
-            SimpleNamespace(miner='m1', from_chain='sol', to_chain='tao', rate=11 * 10**18, collateral_chain='tao'),
+            SimpleNamespace(
+                miner='m1', from_chain='sol', to_chain='tao', rate=10 * 10**18, collateral_chain='sol', **ADDRS
+            ),
+            SimpleNamespace(
+                miner='m1', from_chain='sol', to_chain='tao', rate=11 * 10**18, collateral_chain='tao', **ADDRS
+            ),
         ]
         self.state_reads = 0
 
@@ -318,6 +324,7 @@ class _RoutingClient:
                 rate=sol_rate,
                 collateral_chain='sol',
                 miner_from_addr='',
+                miner_to_addr='',
             ),
             'tao': SimpleNamespace(
                 miner='m1',
@@ -326,6 +333,7 @@ class _RoutingClient:
                 rate=tao_rate,
                 collateral_chain='tao',
                 miner_from_addr='',
+                miner_to_addr='',
             ),
         }
         self.tao_purse = tao_purse

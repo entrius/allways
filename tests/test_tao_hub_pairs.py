@@ -282,6 +282,7 @@ class TaoHubClient:
             to_chain='eth',
             collateral_chain='tao',
             miner_from_addr='minerTAOaddr',
+            miner_to_addr='minerETHaddr',
         )
         self.miner_state = SimpleNamespace(active=True, failed_swaps=0, has_active_swap=False, collateral=0)
         self.attestation = SimpleNamespace(locked=True, effective_balance=required_collateral(TAO))
@@ -340,7 +341,11 @@ class TestTaoEthAcceptance:
     def test_routed_offer_prices_a_declared_alpha_leg_through_the_validator_providers(self):
         client = TaoHubClient()
         client.quote.from_chain, client.quote.to_chain = 'sol', 'sn7'
-        sn7 = SimpleNamespace(value_rao=lambda amount: TAO // 2)  # inside the fixture's TAO bounds
+        client.quote.miner_from_addr, client.quote.miner_to_addr = 'from', 'to'
+        sn7 = SimpleNamespace(
+            value_rao=lambda amount: TAO // 2,
+            chain=SimpleNamespace(is_valid_address=lambda address: True),
+        )  # inside the fixture's TAO bounds
         bounds = bounds_from_config(client.get_config())
         offer, _ = _best_offer(client, MINER_PK, client.miner_state, 'sol', 'sn7', SOL, bounds, {'sn7': sn7})
         assert offer == (client.quote, 'tao')

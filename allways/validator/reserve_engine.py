@@ -34,7 +34,7 @@ from allways.cli.swap_commands.swap_intake import (
     viable_intakes,
 )
 from allways.constants import NUMERAIRE_CHAIN, hub_leg
-from allways.eligibility import direction_eligible
+from allways.eligibility import direction_eligible, quote_addresses_valid
 from allways.solana.client import contract_reject_reason, swap_key_from_tx_hash
 from allways.solana.pdas import BACKING_BITS
 from allways.utils.rate import max_from_for_to_cap
@@ -74,6 +74,8 @@ def _best_offer(client, miner_pk, miner_state, from_chain, to_chain, from_amount
     for q in client.get_quotes_for_direction(miner_pk, from_chain, to_chain) or []:
         if q is None:
             continue
+        if not quote_addresses_valid(q, providers or {}):
+            continue  # an address its chain rejects can never be reserved or delivered from
         backing = str(getattr(q, 'collateral_chain', NUMERAIRE_CHAIN) or NUMERAIRE_CHAIN)
         if not direction_eligible(miner_state, from_chain, to_chain, now, backing):
             continue  # struck or mid-settle: candidate_miners never lists it, so a route must not land on it
@@ -194,6 +196,8 @@ def reserve_on_behalf(
             return ReserveResult(False, f'miner is no longer eligible on the {backing} hub')
         rate_fixed = pool.rate  # pinned at open — joiners must quote against it
         quote = client.get_quote(miner_pk, from_chain, to_chain, backing)
+        if quote is not None and not quote_addresses_valid(quote, providers):
+            return ReserveResult(False, 'the pooled quote has an address its chain rejects')
     else:
         offer, why = _best_offer(client, miner_pk, miner_state, from_chain, to_chain, from_amount, bounds, providers)
         if offer is None:
@@ -778,8 +782,8 @@ def rate_quote(validator, from_chain: str, to_chain: str, from_amount: int) -> R
     cfg = client.get_config()
     bounds = bounds_from_config(cfg)
     min_swap, max_swap = hub_bounds(bounds, from_chain, to_chain)
-    cands = candidate_miners(client, from_chain, to_chain)
     providers = getattr(validator, 'axon_assets', None) or {}
+    cands = candidate_miners(client, from_chain, to_chain, providers)
     ranked = _ranked_intakes(cands, from_chain, to_chain, from_amount, min_swap, max_swap, bounds, providers)
     bound = list(islice(_bound_intakes(validator, ranked), RATE_LEVELS_LIMIT))
     bq = _best_quote(*bound[0]) if bound else None
