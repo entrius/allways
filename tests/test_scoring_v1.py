@@ -13,6 +13,7 @@ from allways.chains import get_chain_def
 from allways.classes import ActivityTransition, MinerActivity
 from allways.constants import (
     ALPHA_FAMILY,
+    ALPHA_PRICE_TTL_SECS,
     DIRECTION_POOLS,
     ELIGIBILITY_FILL_WINDOW_SECS,
     FAMILY_PAIR_COUNTS,
@@ -24,7 +25,6 @@ from allways.constants import (
     QUALITY_VOLUME_BETA,
     RECYCLE_UID,
     SCORING_WINDOW_BLOCKS,
-    SCORING_WINDOW_SECS,
     TAO_TO_RAO,
     required_collateral,
     scoring_family,
@@ -611,9 +611,9 @@ class TestCollateralUnitValue:
         sn7 = self.Alpha(TAO_TO_RAO // 100)
         v = SimpleNamespace(assets={'sn7': sn7}, alpha_prices={})
         assert collateral_unit_value(v, 'sn7', 'avax', 'tao', 0) == pytest.approx(0.01)
-        assert collateral_unit_value(v, 'avax', 'sn7', 'tao', SCORING_WINDOW_SECS - 1) == pytest.approx(0.01)
+        assert collateral_unit_value(v, 'avax', 'sn7', 'tao', ALPHA_PRICE_TTL_SECS - 1) == pytest.approx(0.01)
         assert sn7.reads == 1
-        collateral_unit_value(v, 'sn7', 'avax', 'tao', SCORING_WINDOW_SECS)
+        collateral_unit_value(v, 'sn7', 'avax', 'tao', ALPHA_PRICE_TTL_SECS)
         assert sn7.reads == 2
 
     def test_failed_read_keeps_the_last_price(self):
@@ -621,7 +621,7 @@ class TestCollateralUnitValue:
         v = SimpleNamespace(assets={'sn7': sn7}, alpha_prices={})
         collateral_unit_value(v, 'sn7', 'avax', 'tao', 0)
         sn7.rao_per_alpha = None
-        assert collateral_unit_value(v, 'sn7', 'avax', 'tao', SCORING_WINDOW_SECS) == pytest.approx(0.01)
+        assert collateral_unit_value(v, 'sn7', 'avax', 'tao', ALPHA_PRICE_TTL_SECS) == pytest.approx(0.01)
 
     def test_one_subtensor_read_prices_every_alpha(self):
         # A cold cache used to cost one serial read per declared alpha inside a single step.
@@ -633,7 +633,7 @@ class TestCollateralUnitValue:
         assert collateral_unit_value(v, 'sn7', 'avax', 'tao', 0) == pytest.approx(0.01)
         assert collateral_unit_value(v, 'sn54', 'avax', 'tao', 0) == pytest.approx(0.01)
         assert len(reads) == 1
-        collateral_unit_value(v, 'sn7', 'avax', 'tao', SCORING_WINDOW_SECS)
+        collateral_unit_value(v, 'sn7', 'avax', 'tao', ALPHA_PRICE_TTL_SECS)
         assert len(reads) == 2, 'refreshed once the window turns over'
 
     def test_a_failed_one_read_refresh_falls_back_to_the_leg_and_is_tried_once_per_pass(self):

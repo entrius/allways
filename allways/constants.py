@@ -88,6 +88,10 @@ SCORING_WINDOW_BLOCKS = 300  # ~1 hour at 12s/block — scoring cadence and wind
 # not block numbers, so the crown replay window + interval crediting are in
 # seconds. The scoring *cadence* (due_for_scoring) stays subtensor-block-gated.
 SCORING_WINDOW_SECS = 3600  # ~1 hour — crown replay window width
+# How long a subnet alpha's price is trusted when the crown checks value a lane's alpha leg (swap
+# bounds and the miner's purse are in the hub's units). One read prices every alpha, so this can
+# track the market far closer than the scoring window it used to share.
+ALPHA_PRICE_TTL_SECS = 900
 MAX_SCORING_BACKFILL_SECS = 2 * SCORING_WINDOW_SECS  # ~2 hours — backfill cap after a stall
 # Retention of the crown event tables (rate/active/activity/collateral). Must cover the backfill
 # cap AND the longest swap life: a completed fill is judged against the crown as it stood at its

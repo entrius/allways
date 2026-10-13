@@ -26,6 +26,7 @@ from allways.classes import ActivityTransition, MinerActivity, next_activity
 from allways.cli.swap_commands.swap_intake import bounds_from_config
 from allways.constants import (
     ALPHA_FAMILY,
+    ALPHA_PRICE_TTL_SECS,
     CAPACITY_CURVE_EXPONENT,
     CLEARING_RETENTION_SECS,
     CROWN_RATE_BAND,
@@ -980,16 +981,16 @@ def rewardable_by_activity(
 
 def collateral_unit_value(self: Validator, from_chain: str, to_chain: str, backing: str, now: int) -> Optional[float]:
     """Backing units per smallest unit of the lane's collateral leg: 1.0 for an exact leg, else the declared
-    alpha's price, read at most once per scoring window. A failed read keeps the last good price; None = never
+    alpha's price, read at most once per ``ALPHA_PRICE_TTL_SECS``. A failed read keeps the last good price; None = never
     read, so executability goes unchecked."""
     leg = collateral_leg(backing, from_chain, to_chain)
     if leg in (None, backing):
         return 1.0
     read_at, value = self.alpha_prices.get(leg, (None, None))
-    if read_at is None or now - read_at >= SCORING_WINDOW_SECS:
+    if read_at is None or now - read_at >= ALPHA_PRICE_TTL_SECS:
         refresh_alpha_prices(self, now)
         read_at, value = self.alpha_prices.get(leg, (None, value))
-    if read_at is None or now - read_at >= SCORING_WINDOW_SECS:
+    if read_at is None or now - read_at >= ALPHA_PRICE_TTL_SECS:
         # The one-read refresh didn't cover this leg (it failed, or the leg has no price in it).
         whole = 10 ** get_chain_def(leg).decimals
         try:
