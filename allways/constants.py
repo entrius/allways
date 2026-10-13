@@ -278,7 +278,8 @@ RELAY_HEARTBEAT_INTERVAL_SECS = 12 * 3600
 # Time-aligned global fee true-up. Every validator fires at the same boundary and reads totals at
 # it, so the batch vector is byte-identical; a boundary with zero delta is skipped as pure postage.
 RELAY_FEE_CADENCE_SECS = 2 * 86400
-# Slow continuous vault↔attestation repair loop (crash-between-paired-writes, missed refreshes).
+# Slow continuous vault↔attestation repair loop (crash-between-paired-writes, missed refreshes):
+# after the boot audit, every bound miner is re-checked once per interval, a few per forward step.
 RELAY_RECONCILE_INTERVAL_SECS = 900
 # Floor between two miners' vault reads in an attestation flush. A miner costs three metered
 # requests (the chain head plus the batched bond + lock pair; a fourth, settled fees, only when it

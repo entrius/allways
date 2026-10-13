@@ -808,6 +808,49 @@ def test_the_startup_pass_is_not_repeated_in_the_same_step():
     assert relay._next_reconcile == NOW + relay.cfg.reconcile_interval_secs
 
 
+def _ring_relay(count, **cfg):
+    """A booted relay over `count` bound miners with no bond, and the list its vault reads land in."""
+    miners = {f'Miner{i:02d}': codec.account_ss58(bytes([i + 10] * 32)) for i in range(count)}
+    relay = _relay(vault=FakeVault(collateral={}, lock={}), attribution=miners, **cfg)
+    relay.step(NOW)
+    reads = []
+    read = relay.vault.get_collateral
+    relay.vault.get_collateral = lambda hotkey: reads.append(hotkey) or read(hotkey)
+    return relay, miners, reads
+
+
+def test_after_boot_the_audit_walks_the_bound_set_a_few_miners_per_step():
+    # The full walk in one step is what stalled the forward loop every interval. After the boot
+    # audit the same repair is spread over the interval: each step re-reads only the miners due.
+    relay, miners, reads = _ring_relay(10, reconcile_interval_secs=100)
+    per_step = []
+    for elapsed in range(10, 100, 10):
+        before = len(reads)
+        relay.step(NOW + elapsed)
+        per_step.append(len(reads) - before)
+    assert per_step == [1] * 9
+    relay.step(NOW + 100)
+    assert sorted(reads) == sorted(miners.values()), 'every miner re-checked once inside the interval'
+
+
+def test_a_lap_the_steps_were_too_slow_for_is_finished_at_its_boundary():
+    relay, miners, reads = _ring_relay(10, reconcile_interval_secs=100)
+    relay.step(NOW + 30)
+    assert len(reads) == 3
+    relay.step(NOW + 250)  # one long stall later, the interval is still a guarantee
+    assert sorted(reads) == sorted(miners.values())
+
+
+def test_a_miner_that_binds_mid_lap_joins_the_ring_at_the_next_lap():
+    relay, miners, reads = _ring_relay(4, reconcile_interval_secs=100)
+    late = codec.account_ss58(bytes([99] * 32))
+    relay.solana.attributions['MinerLate'] = late
+    relay.step(NOW + 100)  # closes the first lap and opens the next, which rediscovers who exists
+    assert late not in reads
+    relay.step(NOW + 200)
+    assert late in reads
+
+
 def test_successive_miners_are_read_a_rate_limit_apart_and_a_lone_one_never_waits():
     # Each miner is one fast batched round trip, so the audit's walk of the bound set would outrun
     # the keyed subtensor's rate limit if nothing spaced it.

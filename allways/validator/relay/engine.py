@@ -122,6 +122,10 @@ class BondRelay:
         # (and persisted — see arm_exit), never inferred from the bit being down.
         self._exiting: Set[str] = set()
         self._reconciled = False
+        # The post-boot audit ring: the bound set as of this lap's start, how far into it the walk
+        # has got, and when the lap ends (see `audit_ring`).
+        self._ring: List[str] = []
+        self._ring_pos = 0
         self._next_reconcile = 0.0
         self._attribution: Dict[str, str] = {}
         self._attribution_at = 0.0
@@ -295,31 +299,49 @@ class BondRelay:
                     bt.logging.info('relay: startup reconcile still draining — heartbeat held down')
                     return
                 self._reconciled = True
-                # That pass WAS a full reconcile: start the periodic clock from it, or `maybe_reconcile`
-                # below repeats the whole vault walk in this same step and doubles the boot stall.
-                self._next_reconcile = now + self.cfg.reconcile_interval_secs
                 bt.logging.success('relay: startup reconcile clean — heartbeat released')
                 dev_signal.emit('relay_reconciled', backing=self.backing)
 
             self.poll_vault_events()
+            self.audit_ring(now)
             slash_job.arm_verdicts(self, now)
             attestation_job.flush(self, now)
             slash_job.relay_verdicts(self, now)
             exit_relay.run_exits(self, now)
             exit_relay.maybe_cadence_settle(self, now)
             self.maybe_heartbeat(now)
-            self.maybe_reconcile(now)
         except Exception as e:
             bt.logging.warning(f'relay: step failed: {e}')
 
-    def maybe_reconcile(self, now: int) -> None:
-        if now < self._next_reconcile:
+    def audit_ring(self, now: int) -> None:
+        """The slow vault↔attestation repair after boot, a few miners per tick instead of all at once.
+
+        The bound set is laid out as a ring and walked once per ``reconcile_interval_secs``: each
+        tick marks dirty the miners the clock says are due by now, and the tick's own flush re-reads
+        them. Every miner is still re-checked once an interval, but no forward step carries the
+        whole walk — which is ~0.5s of paced vault reads per bound miner. A lap that ticks came too
+        slowly to finish is finished at its boundary, so the interval stays a guarantee."""
+        interval = self.cfg.reconcile_interval_secs
+        lap_over = now >= self._next_reconcile
+        elapsed = interval - (self._next_reconcile - now)
+        due = len(self._ring) if lap_over else int(len(self._ring) * elapsed / interval)
+        for miner in self._ring[self._ring_pos : due]:
+            self.mark_dirty(miner)
+        self._ring_pos = max(self._ring_pos, due)
+        if not lap_over:
             return
-        self._next_reconcile = now + self.cfg.reconcile_interval_secs
-        self.reconcile(now)
+        # A new lap is when the ring learns who exists: a miner that bound mid-lap joins here, the
+        # same once-an-interval discovery the full walk used to give.
+        self.attribution(refresh=True)
+        self._ring, self._ring_pos = self.bonded_miners(), 0
+        self._next_reconcile = now + interval
+        self._refresh_exiting(self._ring)
+        self._prune(now)
 
     def reconcile(self, now: int) -> bool:
-        """Full vault↔attestation diff plus a drain of every pending obligation.
+        """Full vault↔attestation diff plus a drain of every pending obligation — the whole bound
+        set in one pass. This is the startup barrier's audit; after it, ``audit_ring`` keeps the
+        same repair going a slice at a time.
 
         Returns True when nothing was left undone — the condition the startup barrier waits on.
         Repairs the one hole the event path structurally can't cover: a crash BETWEEN paired
@@ -336,11 +358,14 @@ class BondRelay:
         ok = slash_job.relay_verdicts(self, now) and ok
         self._refresh_exiting(bonded)
         ok = exit_relay.run_exits(self, now) and ok
+        self._prune(now)
+        return ok
+
+    def _prune(self, now: int) -> None:
         try:
             self.store.prune_relay_swaps(now - self.cfg.swap_retention_secs)
         except Exception as e:
             bt.logging.warning(f'relay: prune failed: {e}')
-        return ok
 
     def bonded_miners(self) -> List[str]:
         """Every miner the relay could owe a write for.
