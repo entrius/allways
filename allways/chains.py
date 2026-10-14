@@ -193,6 +193,35 @@ CHAIN_HYPE = ChainDefinition(
     replay_grace_secs=60,
 )
 
+CHAIN_HYPEUSDC = ChainDefinition(
+    id='hypeusdc',
+    name='USDC (HyperEVM)',
+    native_unit='µUSDC',
+    decimals=6,
+    # Hyperliquid's prefix, shared with CHAIN_HYPE: one HYPE_NETWORK / HYPE_RPC_URLS /
+    # HYPE_PRIVATE_KEY serves both assets, so they can never disagree about which HyperEVM.
+    env_prefix='HYPE',
+    host_chain='hyperliquid',
+    # CHAIN_HYPE already declares the HYPE_NETWORK names; a second declaration would render a
+    # duplicate CLI row writing the same var.
+    networks=(),
+    # CHAIN_HYPE's clock and finality, deliberately identical (pinned by test). A ~63k-gas token
+    # transfer fits HyperEVM's 1s small blocks, so the 60s big-block lane never applies.
+    seconds_per_block=1,
+    min_confirmations=2,
+    # 5 USDC, matching the other USDC spokes: this doubles as the crown-eligibility floor in
+    # is_executable_rate. Gas is no constraint: a cold-recipient FiatToken transfer (62,989 gas
+    # measured) costs ~$0.0006 at today's 0.12 gwei and stays under 5 USDC up to ~980 gwei.
+    min_onchain_amount=5_000_000,
+    # CHAIN_HYPE's clock, for the same reason its finality is: two assets on one chain must not
+    # disagree about its hub-vs-spoke skew.
+    replay_grace_secs=60,
+    # Circle-verified native USDC on HyperEVM (developers.circle.com, 2026-10-14) — NOT Circle's
+    # CoreDepositWallet at 0x6b9e773128f453f5c2c60935ee2de2cbc5390a24, a HyperCore bridge, not an ERC-20.
+    asset_locator='0xb88339CB7199b77E23DB6E890353E22632Ba630f',
+    refusal_checks=('isBlacklisted(address)', 'paused()'),
+)
+
 CHAIN_BNB = ChainDefinition(
     id='bnb',
     name='BNB Smart Chain',
@@ -239,6 +268,35 @@ CHAIN_AVAX = ChainDefinition(
     min_onchain_amount=1_000_000_000_000_000,
     # Consensus-stamped timestamps vs the hub clock — modest skew allowance, as on Arbitrum.
     replay_grace_secs=60,
+)
+
+CHAIN_AVAXUSDC = ChainDefinition(
+    id='avaxusdc',
+    name='USDC (Avalanche)',
+    native_unit='µUSDC',
+    decimals=6,
+    # Avalanche's prefix, shared with CHAIN_AVAX: one AVAX_NETWORK / AVAX_RPC_URLS / AVAX_PRIVATE_KEY
+    # serves both assets, so they can never disagree about which Avalanche they are on.
+    env_prefix='AVAX',
+    host_chain='avalanche',
+    # CHAIN_AVAX already declares the AVAX_NETWORK names; a second declaration would render a
+    # duplicate CLI row writing the same var.
+    networks=(),
+    # CHAIN_AVAX's clock and finality, deliberately identical (pinned by test). 2 confs ≈ 2-3s
+    # real, far inside the program's 600s default fulfillment grace.
+    seconds_per_block=1,
+    min_confirmations=2,
+    # 5 USDC, matching the other USDC spokes: this doubles as the crown-eligibility floor in
+    # is_executable_rate. Gas is no constraint: a cold-recipient FiatToken transfer (62,989 gas
+    # measured) costs ~$0.003 at today's 5 gwei and stays under 5 USDC up to ~7,900 gwei.
+    min_onchain_amount=5_000_000,
+    # CHAIN_AVAX's clock, for the same reason its finality is: two assets on one chain must not
+    # disagree about its hub-vs-spoke skew.
+    replay_grace_secs=60,
+    # Circle-verified native USDC on Avalanche C-Chain (developers.circle.com, 2026-10-14) — NOT
+    # the bridged USDC.e at 0xA7D7079b0FEaD91F3e65f86E8915Cb59c1a4C664, which shares name() 'USD Coin'.
+    asset_locator='0xB97EF9Ef8734C71904D8002F8b6Bc66Dd9c48a6E',
+    refusal_checks=('isBlacklisted(address)', 'paused()'),
 )
 
 CHAIN_BASEUSDC = ChainDefinition(
@@ -559,8 +617,10 @@ SUPPORTED_CHAINS = {
     'eth': CHAIN_ETH,
     'arbusdc': CHAIN_ARBUSDC,
     'hype': CHAIN_HYPE,
+    'hypeusdc': CHAIN_HYPEUSDC,
     'bnb': CHAIN_BNB,
     'avax': CHAIN_AVAX,
+    'avaxusdc': CHAIN_AVAXUSDC,
     'baseusdc': CHAIN_BASEUSDC,
     'ethusdc': CHAIN_ETHUSDC,
     'cro': CHAIN_CRO,
