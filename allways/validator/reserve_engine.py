@@ -954,6 +954,8 @@ def swap_status(
         'from_amount': int(reservation.from_amount),
         'to_amount': int(reservation.to_amount),
         'miner_from_addr': reservation.miner_from_addr,
+        # One taker pubkey can front many payers; the source address tells their seats apart.
+        'user_from_addr': reservation.from_addr,
     }
     if swap_key == EMPTY_SWAP_KEY:
         _attach_collateral_verdict(validator, miner_pk, reservation, detail)
@@ -1014,6 +1016,7 @@ def _swap_status_by_key(validator, swap_key_hex: str) -> SwapStatus:
         'from_amount': int(swap.from_amount),
         'to_amount': int(swap.to_amount),
         'miner_from_addr': swap.miner_from_addr,
+        'user_from_addr': swap.user_from_addr,
         'from_tx_hash': swap.from_tx_hash,
         'to_tx_hash': swap.to_tx_hash,
     }

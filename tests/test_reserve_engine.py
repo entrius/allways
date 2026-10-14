@@ -544,6 +544,7 @@ def _live_swap(variant: str):
         to_amount=210_000,
         miner_from_addr='minerSOLaddr',
         miner_to_addr='minerBTCaddr',
+        user_from_addr='userSOLaddr',
         user_to_addr='userBTCaddr',
         rate='0.0021',
         from_tx_hash='srcTxHash',
@@ -570,6 +571,7 @@ def _unclaimed_reservation(reserved_until: int):
         from_amount=10_000,
         to_amount=47_000_000,
         miner_from_addr='tb1qminer',
+        from_addr='tb1quser',
         collateral_chain='sol',
     )
 
@@ -611,6 +613,7 @@ def test_live_unclaimed_reservation_reports_reserved(tmp_path):
     validator, _ = _status_validator(tmp_path, client)
     s = swap_status(validator, HOTKEY)
     assert s.stage == 'reserved' and s.user == 'staleUserSOLpk'
+    assert s.detail['user_from_addr'] == 'tb1quser'
 
 
 def _declared_reservation(reserved_until: int):
@@ -624,6 +627,7 @@ def _declared_reservation(reserved_until: int):
         from_amount=5_000_000_000,
         to_amount=5_000_000,
         miner_from_addr='minerColdkey',
+        from_addr='userColdkey',
         collateral_chain='tao',
         collateral_amount=10**9,
         created_at=1_200,
@@ -679,6 +683,7 @@ def test_initiated_swap_resolves_by_key_after_reservation_consumed(tmp_path):
     s = swap_status(validator, HOTKEY, key.hex())
     assert s.stage == 'active' and s.swap_key == key.hex() and s.reserved_until == 0
     assert s.detail['from_chain'] == 'sol' and s.detail['to_amount'] == 210_000
+    assert s.detail['user_from_addr'] == 'userSOLaddr'
     assert client.swap_keys_queried == [key]
     store.close()
 
@@ -696,6 +701,7 @@ def test_reject_reason_only_surfaces_for_invalid_pending_attestation(tmp_path):
         from_amount=1_000_000_000,
         to_amount=210_000,
         miner_from_addr='minerSOLaddr',
+        from_addr='userSOLaddr',
     )
     swap = _live_swap('PendingAttestation')
     validator, store = _status_validator(tmp_path, StatusClient(swap=swap, reservation=reservation))
