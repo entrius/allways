@@ -11,7 +11,7 @@ pub struct AdminConfig<'info> {
     pub admin: Signer<'info>,
 
     #[account(mut, seeds = [CONFIG_SEED], bump = config.bump, has_one = admin)]
-    pub config: Account<'info, Config>,
+    pub config: Box<Account<'info, Config>>,
 }
 
 pub fn add_validator(ctx: Context<AdminConfig>, validator: Pubkey, weight: u64) -> Result<()> {
@@ -115,26 +115,46 @@ pub fn set_tao_min_collateral(ctx: Context<AdminConfig>, amount: u64) -> Result<
     Ok(())
 }
 
-/// Dead-man fuse: how stale the global attestation heartbeat may get before non-local backings are
-/// refused at entry. Sized off the heartbeat cadence, not the swap lifecycle.
-pub fn set_attest_max_age(ctx: Context<AdminConfig>, secs: i64) -> Result<()> {
-    crate::validate::attest_max_age(secs)?;
-    ctx.accounts.config.attest_max_age_secs = secs;
-    msg!("attest_max_age_secs = {}", secs);
+// The Base USDC hub's twins of the TAO setters above, in µUSDC — same validators, same rules.
+
+pub fn set_usdc_min_swap_amount(ctx: Context<AdminConfig>, amount: u64) -> Result<()> {
+    crate::validate::min_swap_amount(amount)?;
+    crate::validate::swap_bounds(amount, ctx.accounts.config.usdc_max_swap_amount)?;
+    ctx.accounts.config.usdc_min_swap_amount = amount;
+    msg!("usdc_min_swap_amount = {}", amount);
     Ok(())
 }
 
-/// Retire the current bond vault's epoch namespace. Call once per vault replacement, BEFORE relayers
-/// point at the new vault: they compose this into the attestation epoch's high half, so the new
-/// vault's epochs outrank everything the retired one could produce. Increment-only — a decrement
-/// would let a stale round from a retired vault satisfy the monotonic guard again.
-pub fn bump_vault_generation(ctx: Context<AdminConfig>) -> Result<()> {
-    let config = &mut ctx.accounts.config;
-    config.vault_generation = config
-        .vault_generation
-        .checked_add(1)
-        .ok_or(ErrorCode::Overflow)?;
-    msg!("vault_generation = {}", config.vault_generation);
+pub fn set_usdc_max_swap_amount(ctx: Context<AdminConfig>, amount: u64) -> Result<()> {
+    crate::validate::swap_bounds(ctx.accounts.config.usdc_min_swap_amount, amount)?;
+    ctx.accounts.config.usdc_max_swap_amount = amount;
+    msg!("usdc_max_swap_amount = {}", amount);
+    Ok(())
+}
+
+pub fn set_usdc_min_collateral(ctx: Context<AdminConfig>, amount: u64) -> Result<()> {
+    crate::validate::remote_min_collateral(amount)?;
+    ctx.accounts.config.usdc_min_collateral = amount;
+    msg!("usdc_min_collateral = {}", amount);
+    Ok(())
+}
+
+/// Dead-man fuse: how stale ONE hub's heartbeat may get before that hub's entry is refused. Sized
+/// off the heartbeat cadence, not the swap lifecycle.
+pub fn set_attest_max_age(ctx: Context<AdminConfig>, hub: String, secs: i64) -> Result<()> {
+    crate::validate::attest_max_age(secs)?;
+    *crate::backing::max_age_mut(&mut ctx.accounts.config, &hub)? = secs;
+    msg!("attest_max_age_secs[{}] = {}", hub, secs);
+    Ok(())
+}
+
+/// Retire ONE hub's bond-vault epoch namespace. Call once per vault replacement, BEFORE relayers
+/// point at the new vault. Increment-only — a decrement would let a stale round from a retired vault
+/// satisfy the monotonic guard again.
+pub fn bump_vault_generation(ctx: Context<AdminConfig>, hub: String) -> Result<()> {
+    let generation = crate::backing::generation_mut(&mut ctx.accounts.config, &hub)?;
+    *generation = generation.checked_add(1).ok_or(ErrorCode::Overflow)?;
+    msg!("vault_generation[{}] = {}", hub, generation);
     Ok(())
 }
 

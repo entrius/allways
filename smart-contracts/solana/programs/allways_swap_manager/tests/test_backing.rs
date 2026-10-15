@@ -95,6 +95,9 @@ fn swap_pda(key: &[u8; 32]) -> Pubkey {
 fn bind_pda(m: &Pubkey) -> Pubkey {
     Pubkey::find_program_address(&[b"bind", m.as_ref()], &pid()).0
 }
+fn evm_bind_pda(m: &Pubkey) -> Pubkey {
+    Pubkey::find_program_address(&[b"evmbind", m.as_ref()], &pid()).0
+}
 fn hkbind_pda(hotkey: &[u8; 32]) -> Pubkey {
     Pubkey::find_program_address(&[b"hkbind", hotkey], &pid()).0
 }
@@ -367,6 +370,7 @@ fn initiate_ix(validator: &Pubkey, miner: &Pubkey, from_tx_hash: &str, from_chai
             swap: swap_pda(&key),
             attestation: None,
             binding: bind_pda(miner),
+            evm_binding: evm_bind_pda(miner),
             system_program: SYSTEM_PROGRAM,
         }
         .to_account_metas(None),
@@ -721,18 +725,18 @@ fn test_timeout_verdict_carries_the_hotkey_pinned_at_initiate() {
     let initiated_at = now_ts(&svm);
     do_initiate(&mut svm, &vals, &miner.pubkey(), "srctx1", SPOKE_FROM);
     let key = swap_key("srctx1");
-    assert_eq!(swap_acct(&svm, &key).hotkey, hotkey, "hotkey pinned onto the swap at initiate");
+    assert_eq!(swap_acct(&svm, &key).bond_key, hotkey, "hotkey pinned onto the swap at initiate");
     set_swap_backing(&mut svm, &key, "tao");
 
     // The dodge attempt: rebinding to a fresh hotkey mid-swap must revert (set-once binding).
     let res = send(&mut svm, bind_ix(&miner.pubkey(), [8u8; 32], [2u8; 64]), &miner.pubkey(), &miner);
     assert!(res.is_err(), "a mid-swap hotkey change must be refused");
-    assert_eq!(swap_acct(&svm, &key).hotkey, hotkey, "the pinned target did not move");
+    assert_eq!(swap_acct(&svm, &key).bond_key, hotkey, "the pinned target did not move");
 
     set_clock(&mut svm, initiated_at + TIMEOUT_SECS + 1);
     send(&mut svm, timeout_ix(&vals[0].pubkey(), &miner.pubkey(), &LOTTERY_USER, "srctx1"), &vals[0].pubkey(), &vals[0]).expect("t0");
     let logs = send_meta(&mut svm, timeout_ix(&vals[1].pubkey(), &miner.pubkey(), &LOTTERY_USER, "srctx1"), &vals[1].pubkey(), &vals[1]).expect("t1");
-    assert_eq!(timed_out_event(&logs).hotkey, hotkey, "the verdict names the pinned hotkey");
+    assert_eq!(timed_out_event(&logs).bond_key, hotkey, "the verdict names the pinned hotkey");
 }
 
 #[test]
@@ -743,12 +747,12 @@ fn test_unbound_miner_swap_pins_a_zeroed_hotkey() {
     reserve_spoke(&mut svm, &vals[0], &miner.pubkey());
     let initiated_at = now_ts(&svm);
     do_initiate(&mut svm, &vals, &miner.pubkey(), "srctx1", SPOKE_FROM);
-    assert_eq!(swap_acct(&svm, &swap_key("srctx1")).hotkey, [0u8; 32]);
+    assert_eq!(swap_acct(&svm, &swap_key("srctx1")).bond_key, [0u8; 32]);
 
     set_clock(&mut svm, initiated_at + TIMEOUT_SECS + 1);
     send(&mut svm, timeout_ix(&vals[0].pubkey(), &miner.pubkey(), &LOTTERY_USER, "srctx1"), &vals[0].pubkey(), &vals[0]).expect("t0");
     let logs = send_meta(&mut svm, timeout_ix(&vals[1].pubkey(), &miner.pubkey(), &LOTTERY_USER, "srctx1"), &vals[1].pubkey(), &vals[1]).expect("t1");
-    assert_eq!(timed_out_event(&logs).hotkey, [0u8; 32]);
+    assert_eq!(timed_out_event(&logs).bond_key, [0u8; 32]);
 }
 
 #[test]

@@ -21,7 +21,7 @@ pub struct ConfirmSwap<'info> {
     pub validator: Signer<'info>,
 
     #[account(seeds = [CONFIG_SEED], bump = config.bump)]
-    pub config: Account<'info, Config>,
+    pub config: Box<Account<'info, Config>>,
 
     /// CHECK: bound via miner_state seeds + the swap `has_one`.
     pub miner: UncheckedAccount<'info>,

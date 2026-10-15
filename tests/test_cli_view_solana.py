@@ -67,10 +67,42 @@ def test_view_config_renders_the_tao_hub_bounds(monkeypatch):
     result = CliRunner().invoke(view.view_group, ['config'])
 
     assert result.exit_code == 0, result.output
-    for label in ('TAO min collateral:', 'TAO min swap:', 'TAO max swap:', 'Settlement grace:', 'Attest max age:'):
+    for label in (
+        'TAO min collateral:',
+        'TAO min swap:',
+        'TAO max swap:',
+        'Settlement grace:',
+        'Attest max age (tao):',
+    ):
         assert label in result.output
     assert '0.2500' in result.output  # tao_min_collateral in TAO
     assert '1.0000' in result.output  # tao_max_swap in TAO
+
+
+def test_view_config_shows_each_hub_fuse_and_a_closed_base_hub(monkeypatch):
+    client = MagicMock()
+    client.get_config.return_value = _config(
+        attest_max_age_secs=86_400,
+        last_attest_heartbeat=1_700_000_000,
+        usdc_attest_max_age_secs=0,
+        usdc_last_attest_heartbeat=0,
+        usdc_min_swap_amount=0,
+        usdc_max_swap_amount=0,
+        usdc_min_collateral=0,
+    )
+    _patch_client(monkeypatch, client)
+
+    result = CliRunner().invoke(view.view_group, ['config'])
+    assert result.exit_code == 0, result.output
+    assert 'Attest max age (baseusdc):' in result.output
+    assert 'unset (fused)' in result.output
+    assert 'unset (hub closed)' in result.output
+
+    payload = __import__('json').loads(CliRunner().invoke(view.view_group, ['config', '--json']).output)
+    assert payload['attest_max_age_secs'] == 86_400  # the TAO value existing readers expect
+    assert payload['attest_max_age_secs_by_hub'] == {'tao': 86_400, 'baseusdc': 0}
+    assert payload['last_attest_heartbeat_by_hub'] == {'tao': 1_700_000_000, 'baseusdc': 0}
+    assert payload['usdc_min_swap_amount'] == 0
 
 
 def test_view_config_json_carries_the_tao_hub_bounds(monkeypatch):

@@ -12,6 +12,7 @@ import hashlib
 
 import pytest
 from solders.keypair import Keypair
+from solders.pubkey import Pubkey
 
 from allways.solana import layouts, pdas
 from allways.solana.client import SYSTEM_PROGRAM, AllwaysSolanaClient
@@ -224,16 +225,81 @@ def test_vote_set_attestation_builds_the_round_and_the_pda(client):
     ]
 
 
-def test_vote_attest_heartbeat_is_a_global_round_keyed_by_config(client):
-    client.vote_attest_heartbeat()
+@pytest.mark.parametrize('hub', ['tao', 'baseusdc'])
+def test_vote_attest_heartbeat_is_one_round_per_hub(client, hub):
+    client.vote_attest_heartbeat(hub)
     ix = _ix(client)
-    assert _body(ix) == b''
+    assert _body(ix) == layouts.IX_HUB_ARGS.build({'hub': hub})
+    round_pda = Pubkey.find_program_address(
+        [b'vote', bytes([pdas.REQ_ATTEST_HEARTBEAT]), bytes(pdas.config_pda(PID)), hub.encode()], PID
+    )[0]
     assert _metas(ix) == [
         (client.keypair.pubkey(), True, True),
-        (pdas.config_pda(PID), False, True),  # writable: quorum advances last_attest_heartbeat
-        (pdas.vote_round_pda(pdas.REQ_ATTEST_HEARTBEAT, pdas.config_pda(PID), PID), False, True),
+        (pdas.config_pda(PID), False, True),  # writable: quorum advances that hub's heartbeat slot
+        (round_pda, False, True),
         (SYSTEM_PROGRAM, False, False),
     ]
+
+
+def test_heartbeat_rounds_never_share_an_address():
+    assert pdas.heartbeat_round_pda('tao', PID) != pdas.heartbeat_round_pda('baseusdc', PID)
+    # Nor the pre-per-hub global round, so a half-cast legacy round can't co-count.
+    assert pdas.heartbeat_round_pda('tao', PID) != pdas.vote_round_pda(
+        pdas.REQ_ATTEST_HEARTBEAT, pdas.config_pda(PID), PID
+    )
+
+
+@pytest.mark.parametrize(
+    'method, args, name, body',
+    [
+        (
+            'set_attest_max_age',
+            ('baseusdc', 43_200),
+            'set_attest_max_age',
+            layouts.IX_HUB_I64_ARGS.build({'hub': 'baseusdc', 'secs': 43_200}),
+        ),
+        ('bump_vault_generation', ('tao',), 'bump_vault_generation', layouts.IX_HUB_ARGS.build({'hub': 'tao'})),
+        (
+            'set_usdc_min_swap_amount',
+            (1_000_000,),
+            'set_usdc_min_swap_amount',
+            layouts.IX_AMOUNT_ARGS.build({'amount': 1_000_000}),
+        ),
+        ('set_usdc_max_swap_amount', (0,), 'set_usdc_max_swap_amount', layouts.IX_AMOUNT_ARGS.build({'amount': 0})),
+        (
+            'set_usdc_min_collateral',
+            (25_000_000,),
+            'set_usdc_min_collateral',
+            layouts.IX_AMOUNT_ARGS.build({'amount': 25_000_000}),
+        ),
+    ],
+)
+def test_per_hub_admin_setters(client, method, args, name, body):
+    getattr(client, method)(*args)
+    ix = _ix(client)
+    assert ix.data[:8] == layouts.IX_DISCRIMINATORS[name]
+    assert _body(ix) == body
+    assert _metas(ix) == [(client.keypair.pubkey(), True, False), (pdas.config_pda(PID), False, True)]
+
+
+def test_bind_evm_address_claims_both_markers(client):
+    client.get_miner_state = lambda miner: object()  # a registered miner rides its MinerState
+    addr = bytes([0xAB] * 20)
+    client.bind_evm_address(addr)
+    ix = _ix(client)
+    miner = client.keypair.pubkey()
+    assert ix.data[:8] == layouts.IX_DISCRIMINATORS['bind_evm_address']
+    assert _body(ix) == addr
+    assert _metas(ix) == [
+        (miner, True, True),
+        (pdas.config_pda(PID), False, False),
+        (pdas.miner_state_pda(miner, PID), False, False),
+        (pdas.evm_binding_pda(miner, PID), False, True),
+        (pdas.evm_address_binding_pda(addr, PID), False, True),
+        (SYSTEM_PROGRAM, False, False),
+    ]
+    with pytest.raises(ValueError):
+        client.bind_evm_address(bytes(32))
 
 
 # --- split-collateral setters -------------------------------------------------------------------
@@ -246,7 +312,6 @@ def test_vote_attest_heartbeat_is_a_global_round_keyed_by_config(client):
         ('set_tao_max_swap_amount', 'set_tao_max_swap_amount', 0, 'IX_AMOUNT_ARGS'),
         ('set_tao_min_collateral', 'set_tao_min_collateral', 5_000_000_000, 'IX_AMOUNT_ARGS'),
         ('set_settlement_grace', 'set_settlement_grace', 900, 'IX_I64_ARGS'),
-        ('set_attest_max_age', 'set_attest_max_age', 86_400, 'IX_I64_ARGS'),
     ],
 )
 def test_split_collateral_setters(client, method, name, arg, layout):

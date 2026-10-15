@@ -8,6 +8,9 @@ Seeds mirror smart-contracts/solana/.../constants.rs. Composite seeds:
   hkbind        : [b"hkbind", hotkey]   (hotkey = 32-byte sr25519 pubkey)
   attest        : [b"attest", miner, chain_id]
   attest round  : [b"vote", [REQ_SET_ATTESTATION], miner, chain_id]  (composite target)
+  heartbeat     : [b"vote", [REQ_ATTEST_HEARTBEAT], config, hub]  (one round per hub)
+  evmbind       : [b"evmbind", miner]
+  evmaddr       : [b"evmaddr", evm_address]  (20-byte address)
 """
 
 from typing import Optional
@@ -30,11 +33,16 @@ REQ_CANCEL = 11  # no-fault cancel_swap terminal (mirrors constants.rs)
 # Per-backing activation bits on MinerState.active_backings (constants.rs).
 BACKING_BIT_SOL = 1 << 0
 BACKING_BIT_TAO = 1 << 1
+BACKING_BIT_BASEUSDC = 1 << 2
 
 # Backing (collateral) chain ids and their bits — the registry `backing.rs` matches on.
 BACKING_CHAIN_SOL = 'sol'
 BACKING_CHAIN_TAO = 'tao'
+BACKING_CHAIN_BASEUSDC = 'baseusdc'
 BACKING_BITS = {BACKING_CHAIN_SOL: BACKING_BIT_SOL, BACKING_CHAIN_TAO: BACKING_BIT_TAO}
+# Every backing the PROGRAM knows. BACKING_BITS above stays the set validators and miners serve, so
+# the Base hub changes no scoring or quoting until its relay and family land.
+PROGRAM_BACKING_BITS = {**BACKING_BITS, BACKING_CHAIN_BASEUSDC: BACKING_BIT_BASEUSDC}
 
 
 def _pk_bytes(p) -> bytes:
@@ -72,6 +80,19 @@ def binding_pda(miner, program_id: Optional[Pubkey] = None) -> Pubkey:
 
 def hotkey_binding_pda(hotkey: bytes, program_id: Optional[Pubkey] = None) -> Pubkey:
     return _derive([b'hkbind', bytes(hotkey)], program_id)
+
+
+def evm_binding_pda(miner, program_id: Optional[Pubkey] = None) -> Pubkey:
+    return _derive([b'evmbind', _pk_bytes(miner)], program_id)
+
+
+def evm_address_binding_pda(evm_address: bytes, program_id: Optional[Pubkey] = None) -> Pubkey:
+    return _derive([b'evmaddr', bytes(evm_address)], program_id)
+
+
+def heartbeat_round_pda(hub: str, program_id: Optional[Pubkey] = None) -> Pubkey:
+    """The hub's own heartbeat round, so a Base round never co-counts with a TAO one."""
+    return _derive([b'vote', bytes([REQ_ATTEST_HEARTBEAT]), bytes(config_pda(program_id)), hub.encode()], program_id)
 
 
 def bond_attestation_pda(miner, chain: str, program_id: Optional[Pubkey] = None) -> Pubkey:

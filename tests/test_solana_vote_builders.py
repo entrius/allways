@@ -107,6 +107,7 @@ def test_vote_initiate_ix(client):
         (pdas.swap_pda(SK, PID), False, True),
         (PID, False, False),  # absent optional BondAttestation — a "sol"-backed swap has no bond
         (pdas.binding_pda(miner, PID), False, False),  # V-M1: hotkey pinned onto the swap at quorum
+        (pdas.evm_binding_pda(miner, PID), False, False),  # ...or the EVM bond address, for baseusdc
         (SYSTEM_PROGRAM, False, False),
     ]
 

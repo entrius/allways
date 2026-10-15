@@ -32,7 +32,7 @@ from allways.constants import (
     VOTE_ROUND_TTL_SECS,
     family,
 )
-from allways.solana import pdas
+from allways.solana import layouts, pdas
 from allways.validator.binding import build_attribution
 from allways.validator.relay import attestation as attestation_job
 from allways.validator.relay import exit_relay
@@ -303,11 +303,11 @@ class BondRelay:
                 self.arm_exit(miner)
 
     def vault_generation(self) -> Optional[int]:
-        """The config's attestation-epoch namespace. None when unreadable: composing against a
+        """This hub's attestation-epoch namespace. None when unreadable: composing against a
         guessed generation would either land in a retired namespace or be refused as stale, and
         "unknown" must never be spelled as 0 — same contract as an unreadable vault read."""
         try:
-            return int(getattr(self._config_fn(), 'vault_generation', 0) or 0)
+            return layouts.vault_generation(self._config_fn(), self.backing)
         except Exception as e:
             bt.logging.warning(f'relay: vault generation read failed: {e}')
             return None
@@ -482,15 +482,15 @@ class BondRelay:
     # ─── heartbeat ───────────────────────────────────────────────────────────
 
     def maybe_heartbeat(self, now: int) -> None:
-        """Bump the GLOBAL liveness heartbeat on a lazy cadence. Liveness is one question about
-        the whole relay, not fifty questions about individual miners — so one round, and quiet
+        """Bump THIS hub's liveness heartbeat on a lazy cadence. Liveness is one question about the
+        hub's relay, not fifty questions about individual miners — so one round per hub, and quiet
         miners can never false-positive a staleness fuse."""
         if not self._ingest_healthy:
             bt.logging.info('relay: a verdict write is still dirty — heartbeat held down')
             return
         try:
             cfg = self._config_fn()
-            last = int(getattr(cfg, 'last_attest_heartbeat', 0) or 0)
+            last = layouts.attest_heartbeat(cfg, self.backing)
         except Exception as e:
             bt.logging.warning(f'relay: heartbeat config read failed: {e}')
             return
@@ -501,10 +501,10 @@ class BondRelay:
             self._last_heartbeat_attempt = now
             return
         try:
-            if self.solana.has_voted(pdas.REQ_ATTEST_HEARTBEAT, pdas.config_pda(self.solana.program_id), self.me()):
+            if self.solana.has_voted_heartbeat(self.backing, self.me()):
                 self._last_heartbeat_attempt = now
                 return
-            sig = self.solana.vote_attest_heartbeat()
+            sig = self.solana.vote_attest_heartbeat(self.backing)
         except Exception as e:
             bt.logging.warning(f'relay: heartbeat vote failed: {e}')
             return

@@ -12,7 +12,8 @@ pub struct ValidatorInfo {
 }
 
 /// Singleton config PDA (`seeds = [CONFIG_SEED]`). Amounts are in the named asset's smallest unit
-/// (lamports unless the field says otherwise), durations in seconds.
+/// (lamports unless the field says otherwise), durations in seconds. Append-only: un-upgraded clients
+/// decode a prefix, so no field may move. Always boxed in Accounts structs, off the 4 KB BPF frame.
 #[account]
 #[derive(InitSpace)]
 pub struct Config {
@@ -40,11 +41,10 @@ pub struct Config {
     /// Seconds a miner stays busy after a non-locally-backed timeout, while the penalty settles on the
     /// backing chain (busy-until-settled). Unused by the "sol" path, which settles atomically.
     pub settlement_grace_secs: i64,
-    /// Unix timestamp of the last `vote_attest_heartbeat` quorum (0 = never). Liveness is a GLOBAL
-    /// question, so the fuse reads this one value rather than each attestation's own age — a quiet
-    /// miner's old-but-correct attestation is not staleness.
+    /// The TAO hub's last `vote_attest_heartbeat` quorum (0 = never). Each remote hub has its own
+    /// fuse (read through `backing::heartbeat`); liveness is per relay, never per miner.
     pub last_attest_heartbeat: i64,
-    /// How stale the heartbeat may get before non-locally-backed entry (finalize/initiate) is refused.
+    /// How stale the TAO heartbeat may get before TAO-backed entry is refused (`backing::max_age`).
     pub attest_max_age_secs: i64,
     /// How long a reservation holds a miner exclusive, in seconds.
     pub reservation_ttl_secs: i64,
@@ -71,10 +71,17 @@ pub struct Config {
     pub max_total_extension_secs: i64,
     /// Stored PDA bump.
     pub bump: u8,
-    /// Which bond vault the attested epochs belong to. Bumped when the vault is replaced: relayers
-    /// compose it into the high half of the attestation epoch, so a new vault's epochs outrank every
-    /// epoch the retired one could produce and the monotonic guard keeps working across the swap.
+    /// Which TAO bond vault the attested epochs belong to. Bumped when the vault is replaced: relayers
+    /// compose it into the epoch's high half, so a new vault's epochs outrank the retired one's.
     pub vault_generation: u64,
+    /// v17, appended: the Base USDC hub's bounds and bond floor (µUSDC), and its own fuse and vault
+    /// generation. 0 min or 0 floor = hub closed (`backing::require_configured`).
+    pub usdc_min_swap_amount: u64,
+    pub usdc_max_swap_amount: u64,
+    pub usdc_min_collateral: u64,
+    pub usdc_last_attest_heartbeat: i64,
+    pub usdc_attest_max_age_secs: i64,
+    pub usdc_vault_generation: u64,
 }
 
 /// Per-miner native-SOL collateral vault PDA (`seeds = [COLLATERAL_SEED, miner]`), program-owned.
@@ -420,9 +427,10 @@ pub struct Swap {
     pub max_extend_at: i64,
     pub fulfilled_at: i64,
     pub bump: u8,
-    /// Bittensor hotkey pinned from the miner's Binding at initiate ([0;32] = never bound), so the
-    /// timeout verdict names the bonded hotkey itself (V-M1). Appended last (Config precedent).
-    pub hotkey: [u8; 32],
+    /// The miner's bond identity on the swap's backing, pinned at initiate ([0;32] = never bound) so
+    /// the timeout verdict names the bond itself (V-M1): the Bittensor hotkey, or for "baseusdc" the
+    /// EVM bond address left-padded to 32 bytes. Appended last (Config precedent).
+    pub bond_key: [u8; 32],
 }
 
 // (Removed: the permanent `TxMarker` source-replay marker — A4. Source replay is now blocked by a
@@ -527,6 +535,29 @@ pub struct HotkeyBinding {
     /// The pubkey that first claimed this hotkey (== the `Binding.miner`); also a reverse lookup.
     pub miner: Pubkey,
     /// Stored PDA bump.
+    pub bump: u8,
+}
+
+/// Per-miner EVM bond-address binding (`seeds = [EVM_BIND_SEED, miner]`): the Solana half of the
+/// two-way link whose Base half is the vault's `lockBond(solanaPubkey)`; validators attest a Base bond
+/// only when both name each other. Set-once for the same reason as `Binding.hotkey` (V-M1).
+#[account]
+#[derive(InitSpace)]
+pub struct EvmBinding {
+    /// The miner's Solana pubkey (== seed; stored for `getProgramAccounts` convenience).
+    pub miner: Pubkey,
+    /// The 20-byte EVM address that holds this miner's Base bond.
+    pub evm_address: [u8; 20],
+    pub bound_at: i64,
+    pub bump: u8,
+}
+
+/// Set-once EVM address→pubkey reverse marker (`seeds = [EVM_ADDR_BIND_SEED, evm_address]`): the first
+/// pubkey to bind an address owns it, so one Base bond can never back two Solana miners.
+#[account]
+#[derive(InitSpace)]
+pub struct EvmAddressBinding {
+    pub miner: Pubkey,
     pub bump: u8,
 }
 

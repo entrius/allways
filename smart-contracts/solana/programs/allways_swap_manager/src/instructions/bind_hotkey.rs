@@ -30,7 +30,7 @@ pub struct BindHotkey<'info> {
     pub miner: Signer<'info>,
 
     #[account(seeds = [CONFIG_SEED], bump = config.bump)]
-    pub config: Account<'info, Config>,
+    pub config: Box<Account<'info, Config>>,
 
     /// Present on the miner path (created by `post_collateral`); whitelisted validators have none
     /// and pass the program id in its place (anchor's optional-account None).

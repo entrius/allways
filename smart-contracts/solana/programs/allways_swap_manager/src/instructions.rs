@@ -1,4 +1,5 @@
 pub mod admin;
+pub mod bind_evm_address;
 pub mod bind_hotkey;
 pub mod cancel_swap;
 pub mod close_legacy_quote;
@@ -34,6 +35,7 @@ pub mod withdraw_treasury;
 // (Emits a benign "ambiguous glob re-exports" warning for the shared `handler` name;
 // handlers are always called fully-qualified, e.g. `initialize::handler`.)
 pub use admin::*;
+pub use bind_evm_address::*;
 pub use bind_hotkey::*;
 pub use cancel_swap::*;
 pub use close_legacy_quote::*;

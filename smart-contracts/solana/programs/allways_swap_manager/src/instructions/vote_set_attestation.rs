@@ -22,7 +22,7 @@ pub struct VoteSetAttestation<'info> {
     pub validator: Signer<'info>,
 
     #[account(seeds = [CONFIG_SEED], bump = config.bump)]
-    pub config: Account<'info, Config>,
+    pub config: Box<Account<'info, Config>>,
 
     /// CHECK: identified by address only; bound via the attestation/round PDA seeds.
     pub miner: UncheckedAccount<'info>,

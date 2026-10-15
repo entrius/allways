@@ -14,7 +14,7 @@ from construct import Bytes as _Raw
 
 # `Config.version` the deployed program writes (constants.rs CONFIG_VERSION). Mirrored here so a schema
 # bump is one edit on each side rather than a literal buried in a test.
-CONFIG_VERSION = 16
+CONFIG_VERSION = 17
 
 # Width of MinerState's per-hub transient arrays (constants.rs MAX_BACKING_SLOTS) — one slot per
 # `active_backings` bit, indexed by bit position.
@@ -66,6 +66,37 @@ def hub_busy_until(state, bit: int) -> int:
     return int(arr or 0)
 
 
+# Each remote hub's (heartbeat, max age, vault generation) Config fields. The original scalars are
+# the TAO hub's; v17 appended Base's. "sol" settles locally and has no fuse.
+_HUB_FUSE_FIELDS = {
+    'tao': ('last_attest_heartbeat', 'attest_max_age_secs', 'vault_generation'),
+    'baseusdc': ('usdc_last_attest_heartbeat', 'usdc_attest_max_age_secs', 'usdc_vault_generation'),
+}
+
+
+def _hub_fuse_field(config, hub: str, index: int) -> int:
+    fields = _HUB_FUSE_FIELDS.get(hub)
+    if fields is None:
+        raise ValueError(f'no attestation fuse for hub {hub!r}')
+    # A pre-v17 Config carries no Base fields: that hub reads as never beaten, i.e. closed.
+    return int(getattr(config, fields[index], 0) or 0)
+
+
+def attest_heartbeat(config, hub: str) -> int:
+    """The hub's last heartbeat quorum (0 = never)."""
+    return _hub_fuse_field(config, hub, 0)
+
+
+def attest_max_age(config, hub: str) -> int:
+    """How stale the hub's heartbeat may get before its entry is fused off."""
+    return _hub_fuse_field(config, hub, 1)
+
+
+def vault_generation(config, hub: str) -> int:
+    """The hub's bond-vault generation (the high half of its attestation epochs)."""
+    return _hub_fuse_field(config, hub, 2)
+
+
 def hub_reserved_collateral(state, bit: int) -> int:
     """ONE hub's collateral already obligated to in-flight swaps (contract ``MinerState::reserved``), in
     the backing's own units. A pre-v3.3 shape carries no array — nothing is reserved."""
@@ -77,6 +108,7 @@ def hub_reserved_collateral(state, bit: int) -> int:
 Pubkey32 = _Raw(32)
 Hash32 = _Raw(32)
 Sig64 = _Raw(64)
+EvmAddr20 = _Raw(20)
 
 # 8-byte account discriminators (IDL `accounts[].discriminator`).
 DISCRIMINATORS = {
@@ -84,6 +116,8 @@ DISCRIMINATORS = {
     'BondAttestation': bytes([131, 10, 27, 174, 69, 97, 217, 188]),
     'CollateralVault': bytes([19, 189, 95, 155, 100, 9, 159, 145]),
     'Config': bytes([155, 12, 170, 224, 30, 250, 204, 130]),
+    'EvmAddressBinding': bytes([111, 65, 36, 171, 205, 21, 222, 144]),
+    'EvmBinding': bytes([237, 15, 122, 221, 66, 60, 37, 104]),
     'HotkeyBinding': bytes([225, 14, 96, 246, 60, 210, 97, 210]),
     'MinerDirectionStats': bytes([109, 39, 104, 238, 244, 223, 118, 88]),
     'MinerQuote': bytes([205, 197, 49, 135, 73, 161, 154, 230]),
@@ -115,6 +149,10 @@ Binding = CStruct(
 )
 
 HotkeyBinding = CStruct('miner' / Pubkey32, 'bump' / U8)
+
+# The Solana half of the Base bond identity link; the vault's lockBond(solanaPubkey) is the other.
+EvmBinding = CStruct('miner' / Pubkey32, 'evm_address' / EvmAddr20, 'bound_at' / I64, 'bump' / U8)
+EvmAddressBinding = CStruct('miner' / Pubkey32, 'bump' / U8)
 
 CollateralVault = CStruct('bump' / U8)
 
@@ -221,8 +259,9 @@ Swap = CStruct(
     'max_extend_at' / I64,
     'fulfilled_at' / I64,
     'bump' / U8,
-    # V-M1 — hotkey pinned from the Binding at initiate ([0]*32 = never bound); appended last.
-    'hotkey' / Hash32,
+    # V-M1 — the bond identity pinned at initiate ([0]*32 = never bound); appended last. The hotkey,
+    # or for a "baseusdc" swap the EVM bond address left-padded to 32 bytes.
+    'bond_key' / Hash32,
 )
 
 Pool = CStruct(
@@ -259,7 +298,7 @@ Config = CStruct(
     # TAO-backed bounds (rao) + the busy-until-settled grace — W1 split-collateral seam.
     'tao_min_swap_amount' / U64,
     'tao_max_swap_amount' / U64,
-    # W2 — the TAO activation floor (rao) and the dead-man fuse's two fields.
+    # W2 — the TAO activation floor (rao) and the dead-man fuse's two fields (the TAO hub's).
     'tao_min_collateral' / U64,
     'settlement_grace_secs' / I64,
     'last_attest_heartbeat' / I64,
@@ -276,6 +315,14 @@ Config = CStruct(
     'max_total_extension_secs' / I64,
     'bump' / U8,
     'vault_generation' / U64,
+    # v17, appended so pre-v17 decoders (which stop here) still read every field above: the Base
+    # USDC hub's bounds and floor (µUSDC) and its own fuse + generation. All 0 = closed.
+    'usdc_min_swap_amount' / U64,
+    'usdc_max_swap_amount' / U64,
+    'usdc_min_collateral' / U64,
+    'usdc_last_attest_heartbeat' / I64,
+    'usdc_attest_max_age_secs' / I64,
+    'usdc_vault_generation' / U64,
 )
 
 # Top-level pubkey fields per account (decoded bytes -> solders Pubkey by the client). Hash/id byte
@@ -285,6 +332,8 @@ ACCOUNT_PUBKEY_FIELDS = {
     'BondAttestation': ['miner'],
     'HotkeyBinding': ['miner'],
     'Config': ['admin'],
+    'EvmAddressBinding': ['miner'],
+    'EvmBinding': ['miner'],
     'MinerState': ['miner'],
     'MinerDirectionStats': ['miner'],
     'MinerQuote': ['miner'],
@@ -304,6 +353,7 @@ EVENT_DISCRIMINATORS = {
     'BondAttested': bytes([65, 162, 178, 67, 21, 45, 162, 255]),
     'CollateralPosted': bytes([133, 193, 58, 199, 229, 183, 154, 206]),
     'CollateralWithdrawn': bytes([51, 224, 133, 106, 74, 173, 72, 82]),
+    'EvmAddressBound': bytes([157, 127, 194, 188, 250, 193, 158, 74]),
     'FulfillmentGraceApplied': bytes([201, 98, 85, 62, 191, 162, 4, 22]),
     'HaltSet': bytes([72, 72, 136, 23, 166, 26, 205, 223]),
     'HotkeyBound': bytes([168, 26, 136, 137, 160, 137, 120, 133]),
@@ -333,7 +383,7 @@ EVENT_DISCRIMINATORS = {
 }
 
 EVENT_LAYOUTS = {
-    'AttestHeartbeat': CStruct('at' / I64),
+    'AttestHeartbeat': CStruct('at' / I64, 'hub' / String),
     'BondAttested': CStruct(
         'miner' / Pubkey32,
         'chain' / String,
@@ -344,6 +394,7 @@ EVENT_LAYOUTS = {
     ),
     'CollateralPosted': CStruct('miner' / Pubkey32, 'amount' / U64, 'total' / U64),
     'CollateralWithdrawn': CStruct('miner' / Pubkey32, 'amount' / U64, 'total' / U64),
+    'EvmAddressBound': CStruct('miner' / Pubkey32, 'evm_address' / EvmAddr20, 'bound_at' / I64),
     'FulfillmentGraceApplied': CStruct('swap_key' / Hash32, 'miner' / Pubkey32, 'timeout_at' / I64),
     'HaltSet': CStruct('halted' / Bool),
     'HotkeyBound': CStruct('miner' / Pubkey32, 'hotkey' / Hash32, 'bound_at' / I64),
@@ -453,9 +504,9 @@ EVENT_LAYOUTS = {
         'penalty' / U64,
         'reimbursement' / U64,
         'payee' / String,
-        # V-M1 — the hotkey the swap pinned at initiate ([0]*32 = never bound): the bond the vault
+        # V-M1 — the bond key the swap pinned at initiate ([0]*32 = never bound): the bond the vault
         # seizure targets, carried in the verdict so no reconciler ever consults the live binding.
-        'hotkey' / Hash32,
+        'bond_key' / Hash32,
     ),
     'SwapCancelled': CStruct(
         'swap_key' / Hash32,
@@ -475,6 +526,7 @@ EVENT_PUBKEY_FIELDS = {
     'BondAttested': ['miner'],
     'CollateralPosted': ['miner'],
     'CollateralWithdrawn': ['miner'],
+    'EvmAddressBound': ['miner'],
     'FulfillmentGraceApplied': ['miner'],
     'HaltSet': [],
     'HotkeyBound': ['miner'],
@@ -552,15 +604,20 @@ IX_DISCRIMINATORS = {
     'vote_set_weights': bytes([4, 215, 218, 143, 103, 219, 125, 6]),
     # W2 — bond attestation + the dead-man heartbeat.
     'vote_set_attestation': bytes([14, 69, 181, 205, 39, 28, 39, 227]),
-    'vote_attest_heartbeat': bytes([185, 84, 69, 54, 219, 168, 179, 220]),  # no args (empty body)
+    'vote_attest_heartbeat': bytes([185, 84, 69, 54, 219, 168, 179, 220]),  # IX_HUB_ARGS
     # W1/W2 admin setters (IX_AMOUNT_ARGS u64 / IX_I64_ARGS i64), unreachable from the CLI until W2b.
     'set_tao_min_swap_amount': bytes([130, 16, 219, 134, 175, 148, 90, 215]),
     'set_tao_max_swap_amount': bytes([95, 86, 247, 165, 68, 131, 85, 197]),
     'set_tao_min_collateral': bytes([154, 196, 157, 5, 232, 196, 250, 217]),
     'set_settlement_grace': bytes([151, 0, 169, 67, 242, 17, 56, 40]),
-    'set_attest_max_age': bytes([160, 215, 211, 57, 62, 246, 30, 80]),
-    # Retires the current vault's attestation-epoch namespace (see compose_attestation_epoch).
+    'set_attest_max_age': bytes([160, 215, 211, 57, 62, 246, 30, 80]),  # IX_HUB_I64_ARGS
+    # Retires one hub's attestation-epoch namespace (see compose_attestation_epoch). IX_HUB_ARGS.
     'bump_vault_generation': bytes([93, 192, 10, 149, 230, 255, 251, 27]),
+    # Base USDC hub — its bounds and floor (IX_AMOUNT_ARGS, µUSDC) and the EVM bond-address binding.
+    'set_usdc_min_swap_amount': bytes([8, 217, 191, 107, 149, 225, 76, 4]),
+    'set_usdc_max_swap_amount': bytes([134, 36, 238, 178, 85, 224, 51, 212]),
+    'set_usdc_min_collateral': bytes([76, 39, 71, 214, 152, 82, 192, 134]),
+    'bind_evm_address': bytes([82, 152, 60, 101, 46, 10, 133, 156]),
     # W2b — reap a quote stranded at the pre-W2b four-seed derivation (no args).
     'close_legacy_quote': bytes([174, 62, 107, 15, 91, 39, 82, 249]),
     # v3 — reap the reused per-miner slots the upgrade left unreadable (no args each). Unlike the
@@ -633,6 +690,10 @@ IX_SET_ATTESTATION_ARGS = CStruct(
     'locked' / Bool,
     'epoch' / U64,
 )
+# v17 per-hub levers: the hub id rides first, as in the handler signatures.
+IX_HUB_ARGS = CStruct('hub' / String)  # vote_attest_heartbeat, bump_vault_generation
+IX_HUB_I64_ARGS = CStruct('hub' / String, 'secs' / I64)  # set_attest_max_age
+IX_EVM_ADDRESS_ARGS = CStruct('evm_address' / EvmAddr20)  # bind_evm_address
 IX_PUBKEY_ARGS = CStruct('value' / Pubkey32)  # remove_validator
 IX_U8_ARGS = CStruct('value' / U8)  # set_consensus_threshold
 IX_I64_ARGS = CStruct('value' / I64)  # set_fulfillment_timeout
@@ -645,6 +706,8 @@ ACCOUNT_LAYOUTS = {
     'BondAttestation': BondAttestation,
     'CollateralVault': CollateralVault,
     'Config': Config,
+    'EvmAddressBinding': EvmAddressBinding,
+    'EvmBinding': EvmBinding,
     'HotkeyBinding': HotkeyBinding,
     'MinerDirectionStats': MinerDirectionStats,
     'MinerQuote': MinerQuote,

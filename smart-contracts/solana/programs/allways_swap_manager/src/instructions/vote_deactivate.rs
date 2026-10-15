@@ -17,7 +17,7 @@ pub struct VoteDeactivate<'info> {
     pub validator: Signer<'info>,
 
     #[account(seeds = [CONFIG_SEED], bump = config.bump)]
-    pub config: Account<'info, Config>,
+    pub config: Box<Account<'info, Config>>,
 
     /// CHECK: identified by address only; bound via PDA seeds + the miner_state constraint.
     pub miner: UncheckedAccount<'info>,

@@ -23,7 +23,7 @@ pub struct Initialize<'info> {
         seeds = [CONFIG_SEED],
         bump,
     )]
-    pub config: Account<'info, Config>,
+    pub config: Box<Account<'info, Config>>,
 
     #[account(
         init,
@@ -78,10 +78,18 @@ pub fn handler(
     config.tao_max_swap_amount = TAO_MAX_SWAP_AMOUNT_RAO;
     config.tao_min_collateral = TAO_MIN_COLLATERAL_RAO;
     config.settlement_grace_secs = SETTLEMENT_GRACE_SECS;
-    // 0 = never beaten. The fuse is closed until the relayers prove they're alive, so a fresh deploy
-    // can't route a TAO-backed swap before anyone is attesting.
+    // 0 = never beaten. Each hub's fuse is closed until its relayers prove they're alive, so a fresh
+    // deploy can't route a remotely-backed swap before anyone is attesting.
     config.last_attest_heartbeat = 0;
     config.attest_max_age_secs = ATTEST_MAX_AGE_SECS;
+    config.vault_generation = 0;
+    // Base USDC hub: fully closed (no bounds, floor, heartbeat or max age), as `migrate_config` leaves it.
+    config.usdc_min_swap_amount = 0;
+    config.usdc_max_swap_amount = 0;
+    config.usdc_min_collateral = 0;
+    config.usdc_last_attest_heartbeat = 0;
+    config.usdc_attest_max_age_secs = 0;
+    config.usdc_vault_generation = 0;
     config.bump = ctx.bumps.config;
 
     let treasury = &mut ctx.accounts.treasury;

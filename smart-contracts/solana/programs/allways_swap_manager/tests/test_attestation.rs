@@ -123,6 +123,9 @@ fn swap_pda(key: &[u8; 32]) -> Pubkey {
 fn bind_pda(m: &Pubkey) -> Pubkey {
     Pubkey::find_program_address(&[b"bind", m.as_ref()], &pid()).0
 }
+fn evm_bind_pda(m: &Pubkey) -> Pubkey {
+    Pubkey::find_program_address(&[b"evmbind", m.as_ref()], &pid()).0
+}
 fn swap_key(from_tx_hash: &str) -> [u8; 32] {
     hashv(&[from_tx_hash.as_bytes()]).to_bytes()
 }
@@ -279,13 +282,23 @@ fn attest_ix(
     )
 }
 fn heartbeat_ix(validator: &Pubkey) -> Instruction {
+    heartbeat_hub_ix(validator, TAO)
+}
+fn heartbeat_round_pda(hub: &str) -> Pubkey {
+    Pubkey::find_program_address(
+        &[b"vote", &[REQ_ATTEST_HEARTBEAT], config_pda().as_ref(), hub.as_bytes()],
+        &pid(),
+    )
+    .0
+}
+fn heartbeat_hub_ix(validator: &Pubkey, hub: &str) -> Instruction {
     Instruction::new_with_bytes(
         pid(),
-        &allways_swap_manager::instruction::VoteAttestHeartbeat {}.data(),
+        &allways_swap_manager::instruction::VoteAttestHeartbeat { hub: hub.to_string() }.data(),
         allways_swap_manager::accounts::VoteAttestHeartbeat {
             validator: *validator,
             config: config_pda(),
-            vote_round: vote_pda(REQ_ATTEST_HEARTBEAT, config_pda().as_ref()),
+            vote_round: heartbeat_round_pda(hub),
             system_program: SYSTEM_PROGRAM,
         }
         .to_account_metas(None),
@@ -459,6 +472,7 @@ fn initiate_ix_b(
             swap: swap_pda(&key),
             attestation,
             binding: bind_pda(miner),
+            evm_binding: evm_bind_pda(miner),
             system_program: SYSTEM_PROGRAM,
         }
         .to_account_metas(None),
@@ -1722,43 +1736,155 @@ fn test_migrate_miner_state_refuses_a_v13_account_with_a_live_swap() {
     assert!(err.contains("MigrationSwapNotDrained"), "{err}");
 }
 
-#[test]
-fn test_migrate_config_stamps_a_v13_config_to_v14_in_place() {
-    let (mut svm, admin, _vals, _miner) = setup();
-    // A v13 Config is the LIVE layout with an older version stamp — no mirror needed.
-    let mut cfg = config_acct(&svm);
-    cfg.version = 13;
-    cfg.tao_min_collateral = 777; // sentinel: the stamp path must not re-seed W1/W2 fields
-    let mut buf = Vec::new();
-    cfg.try_serialize(&mut buf).unwrap();
-    overwrite(&mut svm, config_pda(), buf);
+/// The v14 image of the live config: every field the v14 program wrote.
+fn v14_image(live: &Config, version: u32) -> ConfigV14 {
+    ConfigV14 {
+        admin: live.admin,
+        version,
+        min_collateral: live.min_collateral,
+        max_collateral: live.max_collateral,
+        fulfillment_timeout_secs: live.fulfillment_timeout_secs,
+        min_swap_amount: live.min_swap_amount,
+        max_swap_amount: live.max_swap_amount,
+        tao_min_swap_amount: live.tao_min_swap_amount,
+        tao_max_swap_amount: live.tao_max_swap_amount,
+        tao_min_collateral: live.tao_min_collateral,
+        settlement_grace_secs: live.settlement_grace_secs,
+        last_attest_heartbeat: live.last_attest_heartbeat,
+        attest_max_age_secs: live.attest_max_age_secs,
+        reservation_ttl_secs: live.reservation_ttl_secs,
+        consensus_threshold_percent: live.consensus_threshold_percent,
+        validators: live.validators.clone(),
+        last_weights_update: live.last_weights_update,
+        halted: live.halted,
+        reservation_fee_lamports: live.reservation_fee_lamports,
+        pool_window_secs: live.pool_window_secs,
+        finalize_window_secs: live.finalize_window_secs,
+        weights_update_min_interval_secs: live.weights_update_min_interval_secs,
+        max_total_extension_secs: live.max_total_extension_secs,
+        bump: live.bump,
+    }
+}
 
-    send(&mut svm, migrate_config_ix(&admin.pubkey()), &admin.pubkey(), &admin).expect("migrate");
-    let cfg = config_acct(&svm);
-    assert_eq!(cfg.version, CONFIG_VERSION);
-    assert_eq!(cfg.tao_min_collateral, 777, "v13 path stamps the version and touches nothing else");
+/// The v16 image: the v14 body plus the trailing scalar generation.
+fn v16_image(live: &Config, version: u32, vault_generation: u64) -> Vec<u8> {
+    let mut body = Vec::new();
+    v14_image(live, version).serialize(&mut body).unwrap();
+    vault_generation.serialize(&mut body).unwrap();
+    body
 }
 
 #[test]
-fn test_migrate_config_stamps_a_v15_config_to_v16_in_place() {
+fn test_migrate_config_carries_a_v13_config_across() {
     let (mut svm, admin, _vals, _miner) = setup();
-    // v15 and v16 share a layout (the fee-discount shape is compile-time constants), so the crank
-    // is a pure version stamp. Unlike the v13/v14 arm it must NOT re-seed `vault_generation` —
-    // a retired vault's epoch namespace stays retired across the upgrade.
-    let mut cfg = config_acct(&svm);
-    cfg.version = 15;
-    cfg.vault_generation = 5; // sentinel: the stamp path must carry it verbatim
-    let mut buf = Vec::new();
-    cfg.try_serialize(&mut buf).unwrap();
-    overwrite(&mut svm, config_pda(), buf);
+    let mut live = config_acct(&svm);
+    live.tao_min_collateral = 777; // sentinel: the v13 path must not re-seed W1/W2 fields
+    let mut body = Vec::new();
+    v14_image(&live, 13).serialize(&mut body).unwrap();
+    downgrade(&mut svm, config_pda(), &Config::DISCRIMINATOR, body);
 
     send(&mut svm, migrate_config_ix(&admin.pubkey()), &admin.pubkey(), &admin).expect("migrate");
     let cfg = config_acct(&svm);
     assert_eq!(cfg.version, CONFIG_VERSION);
-    assert_eq!(cfg.vault_generation, 5, "v15 path stamps the version and touches nothing else");
+    assert_eq!(cfg.tao_min_collateral, 777, "v13 fields carried verbatim");
+}
+
+#[test]
+fn test_migrate_config_carries_a_v15_generation_across() {
+    let (mut svm, admin, _vals, _miner) = setup();
+    // v15 and v16 share a layout. Unlike the v13/v14 arm it must NOT re-seed `vault_generation` —
+    // a retired vault's epoch namespace stays retired across the upgrade.
+    let live = config_acct(&svm);
+    downgrade(&mut svm, config_pda(), &Config::DISCRIMINATOR, v16_image(&live, 15, 5));
+
+    send(&mut svm, migrate_config_ix(&admin.pubkey()), &admin.pubkey(), &admin).expect("migrate");
+    let cfg = config_acct(&svm);
+    assert_eq!(cfg.version, CONFIG_VERSION);
+    assert_eq!(cfg.vault_generation, 5, "the retired namespace stays retired");
 
     send(&mut svm, migrate_config_ix(&admin.pubkey()), &admin.pubkey(), &admin).expect("again");
     assert_eq!(config_acct(&svm).vault_generation, 5, "idempotent re-run");
+}
+
+/// The v16 allocation reserves room for 16 validators, so a live v16 Config is zero-padded on chain.
+fn padded_v16_image(live: &Config, vault_generation: u64) -> Vec<u8> {
+    let mut body = v16_image(live, 16, vault_generation);
+    body.resize(Config::INIT_SPACE - 6 * 8, 0);
+    body
+}
+
+/// Append-only means the window between the program upgrade and `migrate_config` is harmless: the new
+/// program reads an unmigrated v16 Config with every old field in place and the Base tail as zeros.
+#[test]
+fn test_an_unmigrated_v16_config_reads_correctly_and_keeps_base_closed() {
+    let (mut svm, admin, vals, _miner) = setup();
+    let mut live = config_acct(&svm);
+    live.vault_generation = 4;
+    downgrade(&mut svm, config_pda(), &Config::DISCRIMINATOR, padded_v16_image(&live, 4));
+    let cfg = config_acct(&svm);
+    assert_eq!((cfg.version, cfg.vault_generation, cfg.validators.len()), (16, 4, vals.len()));
+    assert_eq!(cfg.attest_max_age_secs, live.attest_max_age_secs);
+    assert_eq!((cfg.usdc_min_swap_amount, cfg.usdc_attest_max_age_secs, cfg.usdc_last_attest_heartbeat), (0, 0, 0));
+
+    // TAO keeps beating; the Base hub stays fused shut.
+    beat_heartbeat(&mut svm, &vals);
+    assert_eq!(config_acct(&svm).last_attest_heartbeat, now_ts(&svm));
+    send(&mut svm, migrate_config_ix(&admin.pubkey()), &admin.pubkey(), &admin).expect("crank");
+    let cfg = config_acct(&svm);
+    assert_eq!((cfg.version, cfg.vault_generation), (CONFIG_VERSION, 4));
+    assert_eq!(cfg.last_attest_heartbeat, now_ts(&svm), "the beat landed before the crank survives it");
+}
+
+/// v16 -> v17 on a byte image of the deployed layout: every field survives at its offset, and the
+/// Base hub's six fields are appended at 0 — closed and fused shut.
+#[test]
+fn test_migrate_config_v16_to_v17_appends_a_closed_base_hub() {
+    let (mut svm, admin, vals, miner) = setup();
+    let m = miner.pubkey();
+    let mut live = config_acct(&svm);
+    live.last_attest_heartbeat = now_ts(&svm) - 60;
+    live.attest_max_age_secs = 43_200;
+    live.last_weights_update = 99;
+    live.tao_min_collateral = 777;
+    let body = v16_image(&live, 16, 3);
+    let v16_len = 8 + body.len();
+    downgrade(&mut svm, config_pda(), &Config::DISCRIMINATOR, body.clone());
+
+    send(&mut svm, migrate_config_ix(&admin.pubkey()), &admin.pubkey(), &admin).expect("migrate");
+    let cfg = config_acct(&svm);
+    assert_eq!(cfg.version, CONFIG_VERSION);
+    let data = svm.get_account(&config_pda()).unwrap().data;
+    assert_eq!(data.len(), 8 + Config::INIT_SPACE);
+    // The image carries only the live validators; the allocation reserves room for the full set.
+    let validator_slack = (allways_swap_manager::constants::MAX_VALIDATORS - vals.len()) * (32 + 8);
+    assert_eq!(8 + Config::INIT_SPACE - v16_len - validator_slack, 6 * 8, "six u64/i64 appended");
+    // Every v16 byte is where it was, bar the version stamp at offset 40.
+    assert_eq!(data[8..40], body[..32]);
+    assert_eq!(data[44..v16_len], body[36..]);
+
+    assert_eq!(cfg.last_attest_heartbeat, live.last_attest_heartbeat);
+    assert_eq!(cfg.attest_max_age_secs, 43_200);
+    assert_eq!(cfg.vault_generation, 3);
+    assert_eq!(cfg.tao_min_collateral, 777);
+    assert_eq!(cfg.last_weights_update, 99);
+    assert_eq!(cfg.bump, live.bump);
+    let base = (
+        cfg.usdc_min_swap_amount,
+        cfg.usdc_max_swap_amount,
+        cfg.usdc_min_collateral,
+        cfg.usdc_last_attest_heartbeat,
+        cfg.usdc_attest_max_age_secs,
+        cfg.usdc_vault_generation,
+    );
+    assert_eq!(base, (0, 0, 0, 0, 0, 0));
+
+    // The TAO fuse is exactly as open as before the upgrade: a TAO pool opens with no new heartbeat.
+    light_tao_purse_no_beat(&mut svm, &vals, &miner, TAO_AMOUNT as u64);
+    send(&mut svm, open_backed_ix(&vals[0].pubkey(), &m, HUB_FROM, HUB_TO, TAO), &vals[0].pubkey(), &vals[0])
+        .expect("TAO entry unaffected by the migration");
+
+    send(&mut svm, migrate_config_ix(&admin.pubkey()), &admin.pubkey(), &admin).expect("again");
+    assert_eq!(config_acct(&svm).vault_generation, 3, "idempotent re-run");
 }
 
 #[test]
@@ -1838,9 +1964,13 @@ fn test_migration_cranks_are_admin_only() {
 /// Light the miner's TAO purse (heartbeat + attestation + activation quorum) and post a TAO-backed
 /// quote on the hub↔hub pair. `bond` is the attested effective balance.
 fn light_tao_purse(svm: &mut LiteSVM, vals: &[Keypair], miner: &Keypair, bond: u64) {
+    beat_heartbeat(svm, vals);
+    light_tao_purse_no_beat(svm, vals, miner, bond);
+}
+/// As `light_tao_purse`, on whatever TAO heartbeat the config already holds.
+fn light_tao_purse_no_beat(svm: &mut LiteSVM, vals: &[Keypair], miner: &Keypair, bond: u64) {
     let m = miner.pubkey();
     let attest_key = Some(attest_pda(&m, TAO));
-    beat_heartbeat(svm, vals);
     attest(svm, vals, &m, bond, true, 1);
     send(svm, activate_ix(&vals[0].pubkey(), &m, TAO, attest_key), &vals[0].pubkey(), &vals[0]).expect("t0");
     send(svm, activate_ix(&vals[1].pubkey(), &m, TAO, attest_key), &vals[1].pubkey(), &vals[1]).expect("t1");
@@ -2600,7 +2730,7 @@ fn test_close_legacy_swap_refuses_a_current_layout_swap() {
         max_extend_at: BASE_TS + 7_200,
         fulfilled_at: 0,
         bump: 255,
-        hotkey: [0u8; 32],
+        bond_key: [0u8; 32],
     };
     // Padded to the real current-layout allocation (longer than a v10 Swap by exactly collateral_chain),
     // so the length gate rejects it — the whole point being the closer only ever reaps a v10-length PDA.
@@ -2676,7 +2806,7 @@ fn test_vault_generation_bump_unblocks_a_replacement_vault() {
 
     send(
         &mut svm,
-        admin_ix(&admin.pubkey(), allways_swap_manager::instruction::BumpVaultGeneration {}.data()),
+        admin_ix(&admin.pubkey(), allways_swap_manager::instruction::BumpVaultGeneration { hub: TAO.to_string() }.data()),
         &admin.pubkey(),
         &admin,
     )
@@ -2695,7 +2825,7 @@ fn test_vault_generation_bump_is_admin_only_and_increment_only() {
     let (mut svm, admin, vals, _m) = setup();
     let err = send(
         &mut svm,
-        admin_ix(&vals[0].pubkey(), allways_swap_manager::instruction::BumpVaultGeneration {}.data()),
+        admin_ix(&vals[0].pubkey(), allways_swap_manager::instruction::BumpVaultGeneration { hub: TAO.to_string() }.data()),
         &vals[0].pubkey(),
         &vals[0],
     )
@@ -2705,7 +2835,7 @@ fn test_vault_generation_bump_is_admin_only_and_increment_only() {
     for expected in 1..=3u64 {
         send(
             &mut svm,
-            admin_ix(&admin.pubkey(), allways_swap_manager::instruction::BumpVaultGeneration {}.data()),
+            admin_ix(&admin.pubkey(), allways_swap_manager::instruction::BumpVaultGeneration { hub: TAO.to_string() }.data()),
             &admin.pubkey(),
             &admin,
         )

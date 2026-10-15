@@ -25,16 +25,16 @@ from allways.vault import codec
 def record_verdict(relay, fields: Dict[str, Any], block_time: int) -> None:
     """Persist a ``SwapTimedOut`` verdict as an obligation. The payee and hotkey come from the
     snapshot the swap loop took while the swap was live; failing that, from the verdict itself
-    (W3.1 payee, V-M1 hotkey), which is what lets a validator relay a swap it never saw."""
+    (W3.1 payee, V-M1 bond key), which is what lets a validator relay a swap it never saw."""
     swap_key = bytes(fields['swap_key']).hex()
     miner = str(fields['miner'])
     snapshot = relay.store.get_relay_swap(swap_key)
     user_addr = _payable(snapshot['user_addr']) if snapshot else ''
     hotkey = (snapshot.get('hotkey') if snapshot else None) or None
     if hotkey is None:
-        # V-M1: the verdict carries the hotkey the swap pinned at initiate, so a validator with no
-        # snapshot still seizes the right bond. All-zeros = pre-pin swap / never-bound miner.
-        raw = bytes(fields.get('hotkey') or b'')
+        # V-M1: the verdict carries the bond key (the hotkey, for TAO) the swap pinned at initiate,
+        # so a validator with no snapshot still seizes the right bond. All-zeros = never bound.
+        raw = bytes(fields.get('bond_key') or b'')
         if any(raw):
             hotkey = hotkey_ss58(raw)
     if not user_addr:

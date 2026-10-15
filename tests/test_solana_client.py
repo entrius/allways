@@ -6,6 +6,7 @@ local solana-test-validator) is gated behind @pytest.mark.integration.
 """
 
 import hashlib
+from types import SimpleNamespace
 
 from solders.pubkey import Pubkey
 
@@ -103,11 +104,11 @@ def test_swap_roundtrip_enum_status():
         'max_extend_at': 0,
         'fulfilled_at': 0,
         'bump': 1,
-        'hotkey': bytes(range(32)),
+        'bond_key': bytes(range(32)),
     }
     p = _roundtrip(layouts.Swap, v)
     assert p.from_tx_hash == 'deadbeef' and type(p.status).__name__ == 'PendingAttestation'
-    assert bytes(p.hotkey) == bytes(range(32))  # V-M1 pin stays raw bytes
+    assert bytes(p.bond_key) == bytes(range(32))  # V-M1 pin stays raw bytes
 
 
 def test_pool_roundtrip_vec_of_request():
@@ -143,7 +144,7 @@ def test_config_roundtrip_vec_of_validatorinfo():
         'tao_max_swap_amount': 0,
         'tao_min_collateral': 100_000_000,
         'settlement_grace_secs': 900,
-        'last_attest_heartbeat': 0,
+        'last_attest_heartbeat': 1_700_000_000,
         'attest_max_age_secs': 86_400,
         'reservation_ttl_secs': 1800,
         'consensus_threshold_percent': 66,
@@ -157,10 +158,30 @@ def test_config_roundtrip_vec_of_validatorinfo():
         'max_total_extension_secs': 5400,
         'bump': 1,
         'vault_generation': 3,
+        'usdc_min_swap_amount': 0,
+        'usdc_max_swap_amount': 0,
+        'usdc_min_collateral': 0,
+        'usdc_last_attest_heartbeat': 0,
+        'usdc_attest_max_age_secs': 0,
+        'usdc_vault_generation': 9,
     }
     p = _roundtrip(layouts.Config, v)
     assert p.version == 12 and len(p.validators) == 1 and p.validators[0].weight == 7
-    assert p.vault_generation == 3
+    assert layouts.vault_generation(p, 'tao') == 3
+    assert layouts.vault_generation(p, 'baseusdc') == 9
+    assert layouts.attest_max_age(p, 'tao') == 86_400
+    assert layouts.attest_heartbeat(p, 'baseusdc') == 0
+
+
+def test_hub_fuse_accessors_refuse_sol_and_unknown_hubs_and_read_a_pre_v17_config_as_base_closed():
+    import pytest
+
+    old = SimpleNamespace(last_attest_heartbeat=5, attest_max_age_secs=6, vault_generation=7)
+    assert (layouts.attest_heartbeat(old, 'tao'), layouts.attest_max_age(old, 'tao')) == (5, 6)
+    assert layouts.vault_generation(old, 'baseusdc') == 0
+    for hub in ('sol', 'btc'):
+        with pytest.raises(ValueError):
+            layouts.attest_heartbeat(old, hub)
 
 
 def test_bond_attestation_roundtrip():

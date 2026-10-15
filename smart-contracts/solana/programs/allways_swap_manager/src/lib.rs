@@ -104,13 +104,23 @@ pub mod allways_swap_manager {
     pub fn set_tao_min_collateral(ctx: Context<AdminConfig>, amount: u64) -> Result<()> {
         admin::set_tao_min_collateral(ctx, amount)
     }
-    /// How stale the global attestation heartbeat may get before non-local backings fuse off at entry.
-    pub fn set_attest_max_age(ctx: Context<AdminConfig>, secs: i64) -> Result<()> {
-        admin::set_attest_max_age(ctx, secs)
+    pub fn set_usdc_min_swap_amount(ctx: Context<AdminConfig>, amount: u64) -> Result<()> {
+        admin::set_usdc_min_swap_amount(ctx, amount)
     }
-    /// Retire the current vault's attestation-epoch namespace when the bond vault is replaced.
-    pub fn bump_vault_generation(ctx: Context<AdminConfig>) -> Result<()> {
-        admin::bump_vault_generation(ctx)
+    pub fn set_usdc_max_swap_amount(ctx: Context<AdminConfig>, amount: u64) -> Result<()> {
+        admin::set_usdc_max_swap_amount(ctx, amount)
+    }
+    pub fn set_usdc_min_collateral(ctx: Context<AdminConfig>, amount: u64) -> Result<()> {
+        admin::set_usdc_min_collateral(ctx, amount)
+    }
+
+    /// How stale one hub's attestation heartbeat may get before that hub fuses off at entry.
+    pub fn set_attest_max_age(ctx: Context<AdminConfig>, hub: String, secs: i64) -> Result<()> {
+        admin::set_attest_max_age(ctx, hub, secs)
+    }
+    /// Retire one hub's attestation-epoch namespace when that hub's bond vault is replaced.
+    pub fn bump_vault_generation(ctx: Context<AdminConfig>, hub: String) -> Result<()> {
+        admin::bump_vault_generation(ctx, hub)
     }
     pub fn set_reservation_ttl(ctx: Context<AdminConfig>, secs: i64) -> Result<()> {
         admin::set_reservation_ttl(ctx, secs)
@@ -164,10 +174,10 @@ pub mod allways_swap_manager {
     ) -> Result<()> {
         vote_set_attestation::handler(ctx, chain, effective_balance, locked, epoch)
     }
-    /// A validator bumps the global attestation heartbeat; on quorum it advances to the chain's clock.
-    /// While it is stale, entry into any non-locally-backed swap is fused off.
-    pub fn vote_attest_heartbeat(ctx: Context<VoteAttestHeartbeat>) -> Result<()> {
-        vote_attest_heartbeat::handler(ctx)
+    /// A validator bumps one hub's attestation heartbeat; on quorum it advances to the chain's clock.
+    /// While it is stale, entry into swaps backed by that hub is fused off; other hubs are untouched.
+    pub fn vote_attest_heartbeat(ctx: Context<VoteAttestHeartbeat>, hub: String) -> Result<()> {
+        vote_attest_heartbeat::handler(ctx, hub)
     }
     /// Miner self-deactivation (no consensus). `backing = Some(chain)` drops that purse only; `None`
     /// drops every purse (the full exit).
@@ -366,6 +376,11 @@ pub mod allways_swap_manager {
         hotkey_sig: [u8; 64],
     ) -> Result<()> {
         bind_hotkey::handler(ctx, hotkey, hotkey_sig)
+    }
+    /// A miner names the 20-byte EVM address holding its Base bond. Set-once; the vault's
+    /// `lockBond(solanaPubkey)` names it back, and validators attest only when the two agree.
+    pub fn bind_evm_address(ctx: Context<BindEvmAddress>, evm_address: [u8; 20]) -> Result<()> {
+        bind_evm_address::handler(ctx, evm_address)
     }
 
     // --- v3 upgrade cranks (admin, idempotent; run migrate_config first) ---
