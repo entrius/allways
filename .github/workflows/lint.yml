@@ -2,7 +2,7 @@ name: Lint
 
 on:
   pull_request:
-    branches: [main, test]
+    branches: [main, test, dev]
 
 jobs:
   # if PR is same repo, auto commit lint fixes

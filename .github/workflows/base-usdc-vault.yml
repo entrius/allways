@@ -2,7 +2,7 @@ name: Base USDC vault
 
 on:
   pull_request:
-    branches: [main, test]
+    branches: [main, test, dev]
     paths:
       - "smart-contracts/base-usdc-vault/**"
       - ".github/workflows/base-usdc-vault.yml"
