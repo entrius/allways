@@ -61,8 +61,8 @@ class RecordingClient:
         return self.accounts[name]
 
 
-def _validator(client, held_states, hotkeys=(HOTKEY,)):
-    cfg = SimpleNamespace(min_swap_amount=0, max_swap_amount=0)
+def _validator(client, held_states, hotkeys=(HOTKEY,), **config):
+    cfg = SimpleNamespace(min_swap_amount=0, max_swap_amount=0, **config)
     return SimpleNamespace(
         solana_client=client,
         held_states=held_states,
@@ -155,17 +155,33 @@ def test_alpha_price_memo_reads_once_per_ttl_across_threads():
     assert priced['sn7'].value_rao(10**9, block=42) == 250_000_000 and alpha.reads[-1] == 42  # dated reads stay live
 
 
-def test_rate_quote_prices_alpha_legs_off_the_shared_memo(quote_memo, monkeypatch):
+def _alpha_validator(quote_memo, monkeypatch, **config):
+    """One miner quoting sol→sn7 at 2 sn7 per SOL, TAO-backed: the sn7 leg is declared, so sizing it
+    prices the alpha (which judges the address)."""
     alpha = CountingAlpha()
     monkeypatch.setattr(reserve_engine, '_alpha_prices', AlphaPriceMemo())
-    # sol→sn7 is TAO-backed: the sn7 leg is declared, so sizing it prices the alpha (which judges the address).
     alpha_quote = _quote('2', 'sn7', 'tao', bt.Keypair.create_from_seed('0x' + '11' * 32).ss58_address)
     bond = SimpleNamespace(miner=MINER, chain='tao', locked=True, effective_balance=10**13)
     quote_memo.accounts(RecordingClient([(MINER, alpha_quote)], [(MINER, bond)]))
     held = (time.time(), {HOTKEY: _state(collateral=0, active_backings=0b11)})
-    validator = _validator(StrictClient(), held)
+    validator = _validator(StrictClient(), held, **config)
     validator.axon_assets = {'sn7': alpha}
+    return validator, alpha
 
+
+def test_rate_quote_prices_alpha_legs_off_the_shared_memo(quote_memo, monkeypatch):
+    validator, alpha = _alpha_validator(quote_memo, monkeypatch)
     for _ in range(3):
         rq = rate_quote(validator, 'sol', 'sn7', SOL)
     assert rq.quote.collateral_amount == 500_000_000 and alpha.reads == [None]  # three quotes, one price read
+
+
+def test_rate_quote_floors_an_alpha_pair_in_source_units(quote_memo, monkeypatch):
+    # The TAO floor binds the declared sn7 leg: 0.1 TAO at 0.25 TAO per sn7 is 0.4 sn7, 0.2 SOL at 2 sn7 per SOL.
+    validator, _ = _alpha_validator(
+        quote_memo, monkeypatch, tao_min_swap_amount=SOL // 10, tao_max_swap_amount=10 * SOL
+    )
+    floor = rate_quote(validator, 'sol', 'sn7', SOL).min_from_amount
+    assert floor == 2 * SOL // 10
+    assert rate_quote(validator, 'sol', 'sn7', floor).quote is not None
+    assert 'below min swap' in rate_quote(validator, 'sol', 'sn7', floor - 1).reason

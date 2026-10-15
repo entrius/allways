@@ -649,7 +649,7 @@ class TestRateQuoteCandidates:
         rq = rate_quote(validator, 'sol', 'btc', self.SOL)
 
         assert rq.quote is None and rq.reason == 'no miner offers this direction'
-        assert rq.levels == [] and rq.max_from_amount == 0 and rq.min_from_amount == self.MIN and rq.candidates == []
+        assert rq.levels == [] and rq.max_from_amount == 0 and rq.min_from_amount == 0 and rq.candidates == []
 
     def test_miss_carries_min_and_no_candidates(self):
         validator, _ = self._validator('sol', 'btc', ['0.5'])
@@ -684,6 +684,11 @@ class TestRateQuoteCandidates:
         rq = rate_quote(validator, 'btc', 'sol', 2_500_000 - 1)
         assert rq.quote is None and 'below min swap' in rq.reason
         assert rq.min_from_amount == 2_500_000 and rq.candidates == []
+
+    def test_hub_pair_min_is_the_hub_floor(self):
+        # sol→tao stays SOL-anchored: a sol-backed quote's floor is min_swap itself.
+        validator, _ = self._validator('sol', 'tao', ['0.5'])
+        assert rate_quote(validator, 'sol', 'tao', self.SOL).min_from_amount == self.MIN
 
     def test_spoke_source_min_is_zero_without_depth(self):
         validator, _ = self._validator('btc', 'sol', [])

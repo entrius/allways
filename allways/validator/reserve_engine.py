@@ -17,7 +17,7 @@ from solders.pubkey import Pubkey
 
 from allways.assets.asset import ProviderUnreachableError
 from allways.assets.tao import Tao, parse_extrinsic_id
-from allways.chains import SUPPORTED_CHAINS, canonical_pair, get_chain_def
+from allways.chains import SUPPORTED_CHAINS, canonical_pair
 from allways.cli.swap_commands.swap_intake import (
     MinerCandidate,
     bounds_from_config,
@@ -26,6 +26,7 @@ from allways.cli.swap_commands.swap_intake import (
     free_purse,
     hub_bounds,
     max_intake_from_amount,
+    min_intake_from_amount,
     rate_display_from_fixed,
     select_best_miner,
     swap_viable,
@@ -33,11 +34,10 @@ from allways.cli.swap_commands.swap_intake import (
     unviable_reason,
     viable_intakes,
 )
-from allways.constants import NUMERAIRE_CHAIN, hub_leg
+from allways.constants import NUMERAIRE_CHAIN
 from allways.eligibility import direction_eligible, quote_addresses_valid
 from allways.solana.client import contract_reject_reason, swap_key_from_tx_hash
 from allways.solana.pdas import BACKING_BITS
-from allways.utils.rate import max_from_for_to_cap
 from allways.validator.binding import verify_binding
 from allways.validator.market import MARKET_TTL_SECS, AlphaPriceMemo, Market, QuoteMemo, memo_priced
 from allways.validator.scoring import live_miner_states
@@ -773,7 +773,7 @@ class RateQuote:
     reason: str  # why quote is None ('' on a hit)
     levels: list  # top rate rungs [{rate_display, max_from_amount}], best first
     max_from_amount: int  # largest executable source amount across ALL quotes, not just shown rungs
-    min_from_amount: int  # the pair's hub minimum in source units; 0 = unset or unpriceable
+    min_from_amount: int  # smallest source amount a fillable quote admits; 0 = unset, unpriceable or no depth
     candidates: list  # top bound intakes for the asked size, selector order — a tolerance band in one scan
 
 
@@ -797,10 +797,12 @@ def rate_quote(validator, from_chain: str, to_chain: str, from_amount: int) -> R
         '' if bq else unviable_reason(cands, from_chain, to_chain, from_amount, min_swap, max_swap, bounds, providers)
     )
     depth: dict = {}
+    floors: list = []
     for cand in cands:
         cap = max_intake_from_amount(cand, from_chain, to_chain, min_swap, max_swap, bounds, providers)
         if cap > 0:
             depth[cand.rate_display] = max(depth.get(cand.rate_display, 0), cap)
+            floors.append(min_intake_from_amount(cand, from_chain, to_chain, min_swap, max_swap, bounds, providers))
     # Rates are canonical 'dest per 1 canonical-source': when the taker sends the canonical
     # source (the hub leg), higher is better; sending the spoke side, lower is better.
     from_is_canon = from_chain == canonical_pair(from_chain, to_chain)[0]
@@ -817,8 +819,7 @@ def rate_quote(validator, from_chain: str, to_chain: str, from_amount: int) -> R
         }
         for cand, amts, hotkey in bound
     ]
-    min_from = _min_from_amount(min_swap, best_first[0][0] if best_first else None, from_chain, to_chain)
-    return RateQuote(bq, reason, levels, max(depth.values(), default=0), min_from, candidates)
+    return RateQuote(bq, reason, levels, max(depth.values(), default=0), min(floors, default=0), candidates)
 
 
 def _quote_market(validator) -> Market:
@@ -845,24 +846,6 @@ def _bound_intakes(attribution: dict, ranked):
         hotkey = attribution.get(str(cand.miner))
         if hotkey:
             yield cand, amts, hotkey
-
-
-def _min_from_amount(min_swap: int, best_rate: Optional[str], from_chain: str, to_chain: str) -> int:
-    """The hub minimum in source units: as-is on the hub leg, else inverted at the best level rate (0 if no depth)."""
-    if min_swap <= 0 or from_chain == hub_leg(from_chain, to_chain):
-        return min_swap
-    if best_rate is None:
-        return 0
-    canon_from, canon_to = canonical_pair(from_chain, to_chain)
-    # One past the largest source whose hub leg still falls short of the minimum.
-    under = max_from_for_to_cap(
-        min_swap - 1,
-        best_rate,
-        from_chain != canon_from,
-        get_chain_def(canon_to).decimals,
-        get_chain_def(canon_from).decimals,
-    )
-    return under + 1
 
 
 def _best_quote(cand: MinerCandidate, amts, hotkey: str) -> BestQuote:
