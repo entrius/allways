@@ -193,6 +193,8 @@ LAUNCH_SPOKES = (
     'polusdc',
     'paxg',
     'solusdc',
+    'avaxusdc',
+    'hypeusdc',
 )
 # Alpha tokens paired against SOL and every spoke; add a subnet here to launch its pairs.
 # Every registered subnet alpha launches. A subnet whose transfers are off is the MINER's problem —
