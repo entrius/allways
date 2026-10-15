@@ -1,12 +1,12 @@
 use anchor_lang::prelude::*;
 
 use crate::constants::{
-    ATTEST_MAX_AGE_SECS, CONFIG_SEED, CONFIG_VERSION, FINALIZE_WINDOW_SECS,
+    ATTEST_MAX_AGE_SECS, BACKING_BIT_TAO, CONFIG_SEED, MAX_BACKING_SLOTS, CONFIG_VERSION, FINALIZE_WINDOW_SECS,
     MAX_TOTAL_EXTENSION_SECS, POOL_WINDOW_SECS, RESERVATION_FEE_LAMPORTS, SETTLEMENT_GRACE_SECS,
     TAO_MAX_SWAP_AMOUNT_RAO, TAO_MIN_COLLATERAL_RAO, TAO_MIN_SWAP_AMOUNT_RAO, TREASURY_SEED,
     WEIGHTS_UPDATE_MIN_INTERVAL_SECS,
 };
-use crate::state::{Config, Treasury};
+use crate::state::{Config, MinerState, Treasury};
 
 /// Create the singleton Config + subnet-revenue Treasury PDAs. Records admin, collateral bounds,
 /// fulfillment timeout (seconds), and the consensus threshold. Validator set starts empty
@@ -23,7 +23,7 @@ pub struct Initialize<'info> {
         seeds = [CONFIG_SEED],
         bump,
     )]
-    pub config: Account<'info, Config>,
+    pub config: Box<Account<'info, Config>>,
 
     #[account(
         init,
@@ -78,10 +78,17 @@ pub fn handler(
     config.tao_max_swap_amount = TAO_MAX_SWAP_AMOUNT_RAO;
     config.tao_min_collateral = TAO_MIN_COLLATERAL_RAO;
     config.settlement_grace_secs = SETTLEMENT_GRACE_SECS;
-    // 0 = never beaten. The fuse is closed until the relayers prove they're alive, so a fresh deploy
-    // can't route a TAO-backed swap before anyone is attesting.
-    config.last_attest_heartbeat = 0;
-    config.attest_max_age_secs = ATTEST_MAX_AGE_SECS;
+    // Base USDC hub: unset (closed) until the admin sets its bounds and floor.
+    config.usdc_min_swap_amount = 0;
+    config.usdc_max_swap_amount = 0;
+    config.usdc_min_collateral = 0;
+    // 0 = never beaten. Each hub's fuse is closed until its relayers prove they're alive, so a fresh
+    // deploy can't route a remotely-backed swap before anyone is attesting. Only TAO gets a seeded
+    // max age, matching what `migrate_config` produces; Base starts fully closed.
+    config.last_attest_heartbeat = [0; MAX_BACKING_SLOTS];
+    config.attest_max_age_secs = [0; MAX_BACKING_SLOTS];
+    config.attest_max_age_secs[MinerState::backing_slot(BACKING_BIT_TAO)] = ATTEST_MAX_AGE_SECS;
+    config.vault_generation = [0; MAX_BACKING_SLOTS];
     config.bump = ctx.bumps.config;
 
     let treasury = &mut ctx.accounts.treasury;

@@ -20,7 +20,7 @@ pub struct VoteSetWeights<'info> {
     pub validator: Signer<'info>,
 
     #[account(mut, seeds = [CONFIG_SEED], bump = config.bump)]
-    pub config: Account<'info, Config>,
+    pub config: Box<Account<'info, Config>>,
 
     #[account(
         init_if_needed,

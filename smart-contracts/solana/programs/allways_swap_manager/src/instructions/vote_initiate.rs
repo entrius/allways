@@ -3,12 +3,15 @@ use solana_keccak_hasher::hashv;
 
 use crate::consensus::{record_vote, swap_request_hash};
 use crate::constants::{
-    ATTEST_SEED, BIND_SEED, CONFIG_SEED, MINER_SEED, REQ_INITIATE, RESV_SEED, SRCLOCK_SEED, SWAP_SEED, VOTE_SEED,
+    ATTEST_SEED, BACKING_CHAIN_BASEUSDC, BIND_SEED, CONFIG_SEED, EVM_BIND_SEED, MINER_SEED, REQ_INITIATE,
+    RESV_SEED, SRCLOCK_SEED, SWAP_SEED, VOTE_SEED,
 };
 use crate::error::ErrorCode;
 use crate::events::SwapInitiated;
+use crate::instructions::bind_evm_address::evm_bond_key;
 use crate::state::{
-    Binding, BondAttestation, Config, MinerState, Reservation, SourceLock, Swap, SwapStatus, VoteRound,
+    Binding, BondAttestation, Config, EvmBinding, MinerState, Reservation, SourceLock, Swap, SwapStatus,
+    VoteRound,
 };
 
 /// Validators attest a `PendingAttestation` claim: confirm the source-chain deposit is real and, on
@@ -22,7 +25,7 @@ pub struct VoteInitiate<'info> {
     pub validator: Signer<'info>,
 
     #[account(seeds = [CONFIG_SEED], bump = config.bump)]
-    pub config: Account<'info, Config>,
+    pub config: Box<Account<'info, Config>>,
 
     /// CHECK: identified by address only; bound via seeds + miner_state constraint + swap `has_one`.
     pub miner: UncheckedAccount<'info>,
@@ -83,6 +86,11 @@ pub struct VoteInitiate<'info> {
     /// the swap pins a zeroed hotkey). Read at quorum so the verdict names the bonded hotkey (V-M1).
     #[account(seeds = [BIND_SEED, miner.key().as_ref()], bump)]
     pub binding: UncheckedAccount<'info>,
+
+    /// CHECK: the miner's EvmBinding PDA, seeds-checked; may be uninitialized. Read at quorum only for
+    /// a "baseusdc" swap, whose bond is keyed by EVM address rather than hotkey.
+    #[account(seeds = [EVM_BIND_SEED, miner.key().as_ref()], bump)]
+    pub evm_binding: UncheckedAccount<'info>,
 
     pub system_program: Program<'info, System>,
 }
@@ -164,9 +172,15 @@ pub fn handler(ctx: Context<VoteInitiate>, swap_key: [u8; 32], from_addr_hash: [
         let to_amount = ctx.accounts.swap.to_amount;
         let collateral_chain = ctx.accounts.swap.collateral_chain.clone();
 
-        // V-M1: pin the bonded hotkey the moment the obligation binds. The binding is set-once, so
-        // this equals every validator's view and a later rebind can never move the seizure.
-        let pinned_hotkey = {
+        // V-M1: pin the bond identity the moment the obligation binds. Both bindings are set-once, so
+        // this equals every validator's view and a later rebind can never move the seizure. Every
+        // backing but "baseusdc" pins the hotkey, exactly as before.
+        let bond_key = if collateral_chain == BACKING_CHAIN_BASEUSDC {
+            let data = ctx.accounts.evm_binding.try_borrow_data()?;
+            EvmBinding::try_deserialize(&mut &data[..])
+                .map(|b| evm_bond_key(&b.evm_address))
+                .unwrap_or_default()
+        } else {
             let data = ctx.accounts.binding.try_borrow_data()?;
             Binding::try_deserialize(&mut &data[..]).map(|b| b.hotkey).unwrap_or_default()
         };
@@ -176,7 +190,7 @@ pub fn handler(ctx: Context<VoteInitiate>, swap_key: [u8; 32], from_addr_hash: [
         swap.initiated_at = now;
         swap.timeout_at = timeout_at;
         swap.max_extend_at = max_extend_at;
-        swap.hotkey = pinned_hotkey;
+        swap.bond_key = bond_key;
 
         let bit = crate::backing::backing_bit(&ctx.accounts.swap.collateral_chain)?;
         ctx.accounts.miner_state.set_swap(bit, true);

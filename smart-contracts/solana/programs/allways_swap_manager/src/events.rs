@@ -107,10 +107,10 @@ pub struct SwapTimedOut {
     /// the seizure can be relayed from this event alone. Empty when the backing settles locally —
     /// that refund already moved, to `Swap::user`.
     pub payee: String,
-    /// Bittensor hotkey the swap pinned at initiate ([0;32] = never bound) — the bond the vault
-    /// seizure targets, so a rebind can never redirect it (V-M1). Appended last; prefix decoders
-    /// keep working.
-    pub hotkey: [u8; 32],
+    /// Bond identity the swap pinned at initiate ([0;32] = never bound) — the bond the vault seizure
+    /// targets, so a rebind can never redirect it (V-M1). The hotkey for "tao" (and "sol", as before),
+    /// the left-padded EVM bond address for "baseusdc". Same bytes and position as the old `hotkey`.
+    pub bond_key: [u8; 32],
 }
 
 /// The no-fault cancel verdict: the destination provably could not receive the payout, so the swap is
@@ -251,10 +251,21 @@ pub struct BondAttested {
     pub attested_at: i64,
 }
 
-/// The global attestation heartbeat advanced (the dead-man fuse's liveness signal).
+/// One hub's attestation heartbeat advanced (that hub's dead-man fuse liveness signal).
 #[event]
 pub struct AttestHeartbeat {
     pub at: i64,
+    /// The hub whose relay proved alive. Appended last; prefix decoders keep working.
+    pub hub: String,
+}
+
+/// A miner bound the EVM address holding its Base bond (set-once). The vault's `lockBond` names the
+/// pubkey back; validators attest only when both halves agree.
+#[event]
+pub struct EvmAddressBound {
+    pub miner: Pubkey,
+    pub evm_address: [u8; 20],
+    pub bound_at: i64,
 }
 
 // --- Phase 9: reservation lottery (pool keyed per miner) ---

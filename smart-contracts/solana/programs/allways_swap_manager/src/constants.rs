@@ -70,12 +70,22 @@ pub const TREASURY_SEED: &[u8] = b"treasury";
 #[constant]
 pub const ATTEST_SEED: &[u8] = b"attest";
 
-/// On-chain schema/version for upgrade tracking, bumped as phases land. v16: stake-scaled
+/// PDA seed prefix for a miner's EVM bond-address binding (`seeds = [EVM_BIND_SEED, miner_pubkey]`).
+#[constant]
+pub const EVM_BIND_SEED: &[u8] = b"evmbind";
+
+/// PDA seed prefix for the set-once EVM address→pubkey reverse marker
+/// (`seeds = [EVM_ADDR_BIND_SEED, evm_address]`), the EVM twin of `HOTKEY_BIND_SEED`.
+#[constant]
+pub const EVM_ADDR_BIND_SEED: &[u8] = b"evmaddr";
+
+/// On-chain schema/version for upgrade tracking, bumped as phases land. v17: per-hub heartbeat, max age
+/// and vault generation, plus the Base USDC hub's bounds and floor. v16: stake-scaled
 /// reservation-fee discount (fee semantics + entry-event `fee_paid`; layout unchanged from v15).
 /// v15 appends `vault_generation`; v14: v3.1 per-hub swap concurrency — per-hub transient state on
 /// MinerState, per-hub Pool/Reservation seeds. v13 = W2b quote-level backing; v12 = W2 bond
 /// attestation; v11 = W1 seam; v10 = A4 freshness replay.
-pub const CONFIG_VERSION: u32 = 16;
+pub const CONFIG_VERSION: u32 = 17;
 
 /// Max validators in the whitelist (bounds the Config `validators` Vec and a round's voters).
 pub const MAX_VALIDATORS: usize = 16;
@@ -93,7 +103,7 @@ pub const REQ_TIMEOUT: u8 = 7;
 pub const REQ_SET_WEIGHTS: u8 = 8;
 /// Per-(miner, backing chain) round writing a `BondAttestation`.
 pub const REQ_SET_ATTESTATION: u8 = 9;
-/// Global round bumping `Config.last_attest_heartbeat` (the dead-man fuse's liveness signal).
+/// Per-hub round bumping one slot of `Config.last_attest_heartbeat` (that hub's fuse liveness signal).
 pub const REQ_ATTEST_HEARTBEAT: u8 = 10;
 /// Per-swap round for the no-fault cancel terminal (destination provably cannot receive the payout).
 /// Distinct from REQ_TIMEOUT so the two terminals accrue votes in separate rounds; the first to reach
@@ -136,23 +146,26 @@ pub const MAX_TX_LEN: usize = 128;
 pub const NUMERAIRE_CHAIN: &str = "sol";
 
 /// Backing (collateral) chain ids, lowercase like every other chain id at intake. "sol" is the local
-/// per-miner vault this program custodies; "tao" is the Bittensor bond vault, whose purse read lands
-/// in W2 — until then `backing::backing_purse` refuses it. A new hub is a new id, never a new branch.
+/// per-miner vault this program custodies; "tao" and "baseusdc" are attested bond vaults on Bittensor
+/// and Base. A new hub is a new id, never a new branch.
 pub const BACKING_CHAIN_SOL: &str = NUMERAIRE_CHAIN;
 pub const BACKING_CHAIN_TAO: &str = "tao";
+pub const BACKING_CHAIN_BASEUSDC: &str = "baseusdc";
 
 /// One bit per backing in `MinerState.active_backings` — a miner activates each purse separately, so a
 /// deficient bond disables only its own quotes. 8 hubs before a program upgrade (realistic ceiling ~4).
 /// The legacy `active` bool is the OR of these bits; see `MinerState::set_backing`.
 pub const BACKING_BIT_SOL: u8 = 1 << 0;
 pub const BACKING_BIT_TAO: u8 = 1 << 1;
+pub const BACKING_BIT_BASEUSDC: u8 = 1 << 2;
 
 /// Every known backing as `(bit, chain id)` — the one enumeration of the registry, for the rare code
 /// that must walk the whole mask rather than answer about one backing (a full self-exit emitting one
 /// event per purse). A new hub is a new row here and a new match arm in `backing.rs`; nothing else.
-pub const BACKINGS: [(u8, &str); 2] = [
+pub const BACKINGS: [(u8, &str); 3] = [
     (BACKING_BIT_SOL, BACKING_CHAIN_SOL),
     (BACKING_BIT_TAO, BACKING_CHAIN_TAO),
+    (BACKING_BIT_BASEUSDC, BACKING_CHAIN_BASEUSDC),
 ];
 
 /// Width of the per-hub transient arrays on `MinerState` (busy/settling/reserved) — one slot per
@@ -373,8 +386,8 @@ const _: () = assert!(
 /// bond that can serve one min swap: 1.1 × TAO_MIN_SWAP_AMOUNT_RAO = 0.11 τ, floored up to 0.25 τ.
 pub const TAO_MIN_COLLATERAL_RAO: u64 = 250_000_000; // 0.25 τ
 
-/// Initial `Config.attest_max_age_secs` — the dead-man fuse: TAO-backed entry (finalize/initiate) is
-/// refused once the global attestation heartbeat is older than this. A circuit breaker, not a cadence,
+/// Initial TAO slot of `Config.attest_max_age_secs` — the dead-man fuse: a hub's backed entry is
+/// refused once that hub's attestation heartbeat is older than this. A circuit breaker, not a cadence,
 /// so it sits at ≥2× the 12–24 h heartbeat interval. Runtime-tunable within [MIN, MAX].
 pub const ATTEST_MAX_AGE_SECS: i64 = 86_400; // 24 h
 pub const ATTEST_MAX_AGE_SECS_MIN: i64 = 3_600; // 1 h — below one heartbeat interval it fuses constantly

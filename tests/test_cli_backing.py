@@ -189,7 +189,14 @@ def _admin_client(**cfg):
         tao_max_swap_amount=0,
         tao_min_collateral=100_000_000,
         settlement_grace_secs=900,
-        attest_max_age_secs=86_400,
+        attest_max_age_secs=[0, 86_400, 0, 0, 0, 0, 0, 0],
+        vault_generation=[0] * 8,
+        min_collateral=1_000_000_000,
+        min_swap_amount=1_000,
+        max_swap_amount=0,
+        usdc_min_swap_amount=0,
+        usdc_max_swap_amount=0,
+        usdc_min_collateral=0,
     )
     base.update(cfg)
     c = MagicMock()
@@ -207,17 +214,42 @@ def _admin(argv):
 @pytest.mark.parametrize(
     'argv, method, expected',
     [
-        (['set-tao-min-swap', '0.5'], 'set_tao_min_swap_amount', int(0.5 * TAO_TO_RAO)),
-        (['set-tao-max-swap', '25'], 'set_tao_max_swap_amount', 25 * TAO_TO_RAO),
-        (['set-tao-min-collateral', '5'], 'set_tao_min_collateral', 5 * TAO_TO_RAO),
-        (['set-settlement-grace', '900'], 'set_settlement_grace', 900),
-        (['set-attest-max-age', '86400'], 'set_attest_max_age', 86_400),
+        # The pre-`--hub` TAO commands keep working, as `--hub tao`.
+        (['set-tao-min-swap', '0.5'], 'set_tao_min_swap_amount', (int(0.5 * TAO_TO_RAO),)),
+        (['set-tao-max-swap', '25'], 'set_tao_max_swap_amount', (25 * TAO_TO_RAO,)),
+        (['set-tao-min-collateral', '5'], 'set_tao_min_collateral', (5 * TAO_TO_RAO,)),
+        (['set-settlement-grace', '900'], 'set_settlement_grace', (900,)),
+        # No --hub = the hub each command always acted on.
+        (['set-attest-max-age', '86400'], 'set_attest_max_age', ('tao', 86_400)),
+        (['bump-vault-generation'], 'bump_vault_generation', ('tao',)),
+        (['set-min-swap', '1'], 'set_min_swap_amount', (1_000_000_000,)),
+        (['set-max-swap', '50'], 'set_max_swap_amount', (50_000_000_000,)),
+        (['set-min-collateral', '2'], 'set_min_collateral', (2_000_000_000,)),
+        # --hub routes each lever to that hub's field, in that hub's units.
+        (['set-min-swap', '0.5', '--hub', 'tao'], 'set_tao_min_swap_amount', (int(0.5 * TAO_TO_RAO),)),
+        (['set-max-swap', '25', '--hub', 'tao'], 'set_tao_max_swap_amount', (25 * TAO_TO_RAO,)),
+        (['set-min-collateral', '5', '--hub', 'tao'], 'set_tao_min_collateral', (5 * TAO_TO_RAO,)),
+        (['set-min-swap', '10', '--hub', 'baseusdc'], 'set_usdc_min_swap_amount', (10_000_000,)),
+        (['set-max-swap', '2500.5', '--hub', 'baseusdc'], 'set_usdc_max_swap_amount', (2_500_500_000,)),
+        (['set-min-collateral', '25', '--hub', 'baseusdc'], 'set_usdc_min_collateral', (25_000_000,)),
+        (['set-attest-max-age', '43200', '--hub', 'baseusdc'], 'set_attest_max_age', ('baseusdc', 43_200)),
+        (['bump-vault-generation', '--hub', 'baseusdc'], 'bump_vault_generation', ('baseusdc',)),
     ],
 )
 def test_admin_setters_reach_the_split_collateral_fields(argv, method, expected):
     c, res = _admin(argv)
     assert res.exit_code == 0, res.output
-    getattr(c, method).assert_called_once_with(expected)
+    getattr(c, method).assert_called_once_with(*expected)
+
+
+@pytest.mark.parametrize(
+    'argv', [['set-attest-max-age', '86400', '--hub', 'sol'], ['bump-vault-generation', '--hub', 'sol']]
+)
+def test_sol_has_no_fuse_or_vault_to_set(argv):
+    c, res = _admin(argv)
+    assert res.exit_code != 0
+    c.set_attest_max_age.assert_not_called()
+    c.bump_vault_generation.assert_not_called()
 
 
 @pytest.mark.parametrize(

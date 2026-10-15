@@ -17,7 +17,7 @@ from dataclasses import dataclass
 
 from allways.cli.swap_commands.swap_intake import floors_from_config
 from allways.solana import pdas
-from allways.solana.layouts import split_attestation_epoch
+from allways.solana.layouts import hub_config, split_attestation_epoch
 from allways.validator.relay.wiring import axon_vault_client
 
 
@@ -71,8 +71,8 @@ def check(validator, miner_hotkey: str, miner_pk, miner_state, backing: str, now
 def _attested(validator, miner_hotkey: str, miner_pk, backing: str, floor: int, config, now: int) -> Eligibility:
     """The off-chain-backing gate, in the order `vote_activate` applies it: fuse, then attestation."""
     unit = backing.upper()
-    age = now - int(getattr(config, 'last_attest_heartbeat', 0) or 0)
-    max_age = int(getattr(config, 'attest_max_age_secs', 0) or 0)
+    age = now - hub_config(getattr(config, 'last_attest_heartbeat', 0), backing)
+    max_age = hub_config(getattr(config, 'attest_max_age_secs', 0), backing)
     if age > max_age:
         return _no(
             f'Bond attestation is fused off — the {unit} heartbeat is {age}s old (max {max_age}s). '
@@ -115,7 +115,7 @@ def _vault(validator, miner_hotkey: str, backing: str, attestation, floor: int, 
     # and require the CURRENT generation, or an attestation mirrored from a retired vault could
     # authorise activation whenever its lock epoch happened to collide with the live vault's.
     attested_generation, attested_epoch = split_attestation_epoch(attestation.epoch)
-    generation = int(getattr(config, 'vault_generation', 0) or 0)
+    generation = hub_config(getattr(config, 'vault_generation', 0), backing)
     if attested_generation != generation:
         return _no(
             f'Bond attestation was mirrored from a retired {unit} vault (generation {attested_generation}, '

@@ -21,7 +21,7 @@ pub struct VoteActivate<'info> {
     pub validator: Signer<'info>,
 
     #[account(seeds = [CONFIG_SEED], bump = config.bump)]
-    pub config: Account<'info, Config>,
+    pub config: Box<Account<'info, Config>>,
 
     /// CHECK: identified by address only; bound via PDA seeds + the miner_state constraint.
     pub miner: UncheckedAccount<'info>,
@@ -69,7 +69,8 @@ pub fn handler(ctx: Context<VoteActivate>, backing: String) -> Result<()> {
 
     // Same purse read every collateral guard uses, against this backing's own floor in its own units.
     if !backing::settles_locally(&backing) {
-        backing::require_fresh_heartbeat(cfg, now)?;
+        backing::require_configured(cfg, &backing)?;
+        backing::require_fresh_heartbeat(cfg, &backing, now)?;
     }
     let purse = backing::backing_purse(&backing, &ctx.accounts.miner_state, attestation)?;
     let floor = backing::activation_floor(cfg, &backing)?;

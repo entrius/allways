@@ -15,7 +15,7 @@ pub struct WithdrawCollateral<'info> {
     pub miner: Signer<'info>,
 
     #[account(seeds = [CONFIG_SEED], bump = config.bump)]
-    pub config: Account<'info, Config>,
+    pub config: Box<Account<'info, Config>>,
 
     #[account(
         mut,

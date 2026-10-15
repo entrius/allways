@@ -13,7 +13,7 @@ pub struct WithdrawTreasury<'info> {
     pub admin: Signer<'info>,
 
     #[account(seeds = [CONFIG_SEED], bump = config.bump, has_one = admin)]
-    pub config: Account<'info, Config>,
+    pub config: Box<Account<'info, Config>>,
 
     #[account(mut, seeds = [TREASURY_SEED], bump = treasury.bump)]
     pub treasury: Account<'info, Treasury>,

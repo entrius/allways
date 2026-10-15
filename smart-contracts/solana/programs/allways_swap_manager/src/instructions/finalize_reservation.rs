@@ -30,7 +30,7 @@ pub struct FinalizeReservation<'info> {
     pub router: Signer<'info>,
 
     #[account(seeds = [CONFIG_SEED], bump = config.bump)]
-    pub config: Account<'info, Config>,
+    pub config: Box<Account<'info, Config>>,
 
     /// CHECK: identified by address only; bound via the reservation/miner_state PDA seeds.
     pub miner: UncheckedAccount<'info>,

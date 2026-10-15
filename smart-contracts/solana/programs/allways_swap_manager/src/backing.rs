@@ -5,7 +5,8 @@
 use anchor_lang::prelude::*;
 
 use crate::constants::{
-    BACKING_BIT_SOL, BACKING_BIT_TAO, BACKING_CHAIN_SOL, BACKING_CHAIN_TAO,
+    BACKING_BIT_BASEUSDC, BACKING_BIT_SOL, BACKING_BIT_TAO, BACKING_CHAIN_BASEUSDC, BACKING_CHAIN_SOL,
+    BACKING_CHAIN_TAO,
 };
 use crate::error::ErrorCode;
 use crate::state::{BondAttestation, Config, MinerState};
@@ -68,6 +69,7 @@ pub fn swap_bounds(config: &Config, collateral_chain: &str) -> Result<(u64, u64)
     match collateral_chain {
         BACKING_CHAIN_SOL => Ok((config.min_swap_amount, config.max_swap_amount)),
         BACKING_CHAIN_TAO => Ok((config.tao_min_swap_amount, config.tao_max_swap_amount)),
+        BACKING_CHAIN_BASEUSDC => Ok((config.usdc_min_swap_amount, config.usdc_max_swap_amount)),
         _ => err!(ErrorCode::BackingNotSupported),
     }
 }
@@ -78,6 +80,7 @@ pub fn backing_bit(collateral_chain: &str) -> Result<u8> {
     match collateral_chain {
         BACKING_CHAIN_SOL => Ok(BACKING_BIT_SOL),
         BACKING_CHAIN_TAO => Ok(BACKING_BIT_TAO),
+        BACKING_CHAIN_BASEUSDC => Ok(BACKING_BIT_BASEUSDC),
         _ => err!(ErrorCode::BackingNotSupported),
     }
 }
@@ -96,11 +99,12 @@ pub fn declarable_bit(collateral_chain: &str, from_chain: &str, to_chain: &str) 
 }
 
 /// The purse a miner must hold to activate this backing, in that asset's own smallest unit — lamports
-/// for "sol", rao for "tao". Never converted through a rate; each hub carries its own floor.
+/// for "sol", rao for "tao", µUSDC for "baseusdc". Never converted through a rate; each hub has its own.
 pub fn activation_floor(config: &Config, collateral_chain: &str) -> Result<u64> {
     match collateral_chain {
         BACKING_CHAIN_SOL => Ok(config.min_collateral),
         BACKING_CHAIN_TAO => Ok(config.tao_min_collateral),
+        BACKING_CHAIN_BASEUSDC => Ok(config.usdc_min_collateral),
         _ => err!(ErrorCode::BackingNotSupported),
     }
 }
@@ -116,7 +120,7 @@ pub fn backing_purse(
 ) -> Result<u64> {
     match collateral_chain {
         BACKING_CHAIN_SOL => Ok(miner_state.collateral),
-        BACKING_CHAIN_TAO => attested_purse(attestation),
+        BACKING_CHAIN_TAO | BACKING_CHAIN_BASEUSDC => attested_purse(attestation),
         _ => err!(ErrorCode::BackingNotSupported),
     }
 }
@@ -134,13 +138,28 @@ pub fn settles_locally(collateral_chain: &str) -> bool {
     collateral_chain == BACKING_CHAIN_SOL
 }
 
-/// The dead-man fuse: refuse non-local backings once the global attestation heartbeat goes stale.
-/// A never-set heartbeat (0) is stale by construction, so a fresh deployment fuses closed until the
-/// relayers prove they are alive.
-pub fn require_fresh_heartbeat(config: &Config, now: i64) -> Result<()> {
+/// The dead-man fuse: refuse a non-local backing once ITS hub's heartbeat goes stale, so one stalled
+/// relay never fuses another hub. A never-set heartbeat (0) is stale by construction, so a hub fuses
+/// closed until its relayers prove they are alive.
+pub fn require_fresh_heartbeat(config: &Config, collateral_chain: &str, now: i64) -> Result<()> {
+    let slot = MinerState::backing_slot(backing_bit(collateral_chain)?);
     require!(
-        now.saturating_sub(config.last_attest_heartbeat) <= config.attest_max_age_secs,
+        now.saturating_sub(config.last_attest_heartbeat[slot]) <= config.attest_max_age_secs[slot],
         ErrorCode::AttestationStale
+    );
+    Ok(())
+}
+
+/// A remote hub whose size floor or bond floor was never set is closed, not unbounded: the upgrade
+/// that adds a hub must change nothing live until the admin opens it. The 0-max escape is untouched.
+pub fn require_configured(config: &Config, collateral_chain: &str) -> Result<()> {
+    if settles_locally(collateral_chain) {
+        return Ok(());
+    }
+    let (min_swap, _) = swap_bounds(config, collateral_chain)?;
+    require!(
+        min_swap != 0 && activation_floor(config, collateral_chain)? != 0,
+        ErrorCode::BackingNotConfigured
     );
     Ok(())
 }
@@ -165,14 +184,15 @@ pub fn check_entry_gates(
     if settles_locally(collateral_chain) {
         return Ok(());
     }
-    require_fresh_heartbeat(config, now)?;
+    require_configured(config, collateral_chain)?;
+    require_fresh_heartbeat(config, collateral_chain, now)?;
     Ok(())
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::constants::ATTEST_MAX_AGE_SECS;
+    use crate::constants::{ATTEST_MAX_AGE_SECS, MAX_BACKING_SLOTS};
 
     fn miner_with(collateral: u64) -> MinerState {
         MinerState {
@@ -192,7 +212,14 @@ mod tests {
         }
     }
 
+    /// Both remote hubs configured and sharing one fuse reading — the per-hub tests then move one slot.
     fn config_with(last_attest_heartbeat: i64, attest_max_age_secs: i64) -> Config {
+        let mut slots = [0; MAX_BACKING_SLOTS];
+        let mut ages = [0; MAX_BACKING_SLOTS];
+        for bit in [BACKING_BIT_TAO, BACKING_BIT_BASEUSDC] {
+            slots[MinerState::backing_slot(bit)] = last_attest_heartbeat;
+            ages[MinerState::backing_slot(bit)] = attest_max_age_secs;
+        }
         Config {
             admin: Pubkey::default(),
             version: 0,
@@ -201,12 +228,15 @@ mod tests {
             fulfillment_timeout_secs: 0,
             min_swap_amount: 0,
             max_swap_amount: 0,
-            tao_min_swap_amount: 0,
+            tao_min_swap_amount: 100_000_000,
             tao_max_swap_amount: 0,
-            tao_min_collateral: 0,
+            tao_min_collateral: 250_000_000,
+            usdc_min_swap_amount: 1_000_000,
+            usdc_max_swap_amount: 0,
+            usdc_min_collateral: 25_000_000,
             settlement_grace_secs: 0,
-            last_attest_heartbeat,
-            attest_max_age_secs,
+            last_attest_heartbeat: slots,
+            attest_max_age_secs: ages,
             reservation_ttl_secs: 0,
             consensus_threshold_percent: 100,
             validators: vec![],
@@ -218,8 +248,12 @@ mod tests {
             weights_update_min_interval_secs: 0,
             max_total_extension_secs: 0,
             bump: 255,
-            vault_generation: 0,
+            vault_generation: [0; MAX_BACKING_SLOTS],
         }
+    }
+
+    fn slot(chain: &str) -> usize {
+        MinerState::backing_slot(backing_bit(chain).unwrap())
     }
 
     fn attestation(effective_balance: u64, locked: bool) -> BondAttestation {
@@ -303,6 +337,9 @@ mod tests {
         let a = attestation(42, true);
         assert_eq!(backing_purse("sol", &miner_with(7), Some(&a)).unwrap(), 7);
         assert_eq!(backing_purse("tao", &miner_with(7), Some(&a)).unwrap(), 42);
+        assert_eq!(backing_purse("baseusdc", &miner_with(7), Some(&a)).unwrap(), 42);
+        assert!(backing_purse("baseusdc", &miner_with(7), None).is_err());
+        assert!(backing_purse("baseusdc", &miner_with(7), Some(&attestation(42, false))).is_err());
         assert!(backing_purse("btc", &miner_with(7), Some(&a)).is_err());
     }
 
@@ -316,14 +353,84 @@ mod tests {
     fn only_sol_settles_locally() {
         assert!(settles_locally("sol"));
         assert!(!settles_locally("tao"));
+        assert!(!settles_locally("baseusdc"));
     }
 
     #[test]
     fn every_known_backing_has_a_distinct_bit() {
         assert_eq!(backing_bit("sol").unwrap(), BACKING_BIT_SOL);
         assert_eq!(backing_bit("tao").unwrap(), BACKING_BIT_TAO);
-        assert_ne!(BACKING_BIT_SOL, BACKING_BIT_TAO);
-        assert!(backing_bit("btc").is_err());
+        assert_eq!(backing_bit("baseusdc").unwrap(), BACKING_BIT_BASEUSDC);
+        assert_eq!(BACKING_BIT_BASEUSDC, 1 << 2);
+        let bits = crate::constants::BACKINGS.map(|(bit, _)| bit);
+        assert_eq!(bits.iter().fold(0u8, |m, b| m | b).count_ones() as usize, bits.len());
+        for (bit, chain) in crate::constants::BACKINGS {
+            assert_eq!(backing_bit(chain).unwrap(), bit, "{chain}: registry row and match arm agree");
+        }
+        // Other USDC chains are spokes, never hubs.
+        for chain in ["btc", "arbusdc", "solusdc", "usdc"] {
+            assert!(backing_bit(chain).is_err());
+        }
+    }
+
+    #[test]
+    fn each_hub_reads_its_own_bounds_and_floor() {
+        let cfg = config_with(0, ATTEST_MAX_AGE_SECS);
+        assert_eq!(swap_bounds(&cfg, "tao").unwrap(), (100_000_000, 0));
+        assert_eq!(swap_bounds(&cfg, "baseusdc").unwrap(), (1_000_000, 0));
+        assert_eq!(activation_floor(&cfg, "tao").unwrap(), 250_000_000);
+        assert_eq!(activation_floor(&cfg, "baseusdc").unwrap(), 25_000_000);
+    }
+
+    #[test]
+    fn a_stale_base_heartbeat_never_fuses_tao_and_the_other_way_round() {
+        let mut cfg = config_with(NOW, ATTEST_MAX_AGE_SECS);
+        cfg.last_attest_heartbeat[slot("baseusdc")] = 0;
+        assert!(check_entry_gates(&cfg, &miner_with(7), "tao", NOW).is_ok());
+        assert!(check_entry_gates(&cfg, &miner_with(7), "baseusdc", NOW).is_err());
+
+        let mut cfg = config_with(NOW, ATTEST_MAX_AGE_SECS);
+        cfg.last_attest_heartbeat[slot("tao")] = 0;
+        assert!(check_entry_gates(&cfg, &miner_with(7), "tao", NOW).is_err());
+        assert!(check_entry_gates(&cfg, &miner_with(7), "baseusdc", NOW).is_ok());
+    }
+
+    #[test]
+    fn each_hub_ages_against_its_own_max_age() {
+        let mut cfg = config_with(NOW - 7_200, 3_600);
+        cfg.attest_max_age_secs[slot("baseusdc")] = 10_800;
+        assert!(require_fresh_heartbeat(&cfg, "tao", NOW).is_err());
+        assert!(require_fresh_heartbeat(&cfg, "baseusdc", NOW).is_ok());
+    }
+
+    #[test]
+    fn sol_stays_exempt_from_every_fuse_slot() {
+        // Every heartbeat dead, every max age zero, even the unused "sol" slot: SOL entry is untouched.
+        let mut cfg = config_with(0, 0);
+        cfg.usdc_min_swap_amount = 0;
+        cfg.usdc_min_collateral = 0;
+        assert!(check_entry_gates(&cfg, &miner_with(7), "sol", NOW).is_ok());
+    }
+
+    #[test]
+    fn an_unconfigured_base_hub_is_closed_even_with_a_live_heartbeat() {
+        // The post-upgrade state: usdc_* are 0. A heartbeat alone must not open the hub.
+        let mut cfg = config_with(NOW, ATTEST_MAX_AGE_SECS);
+        cfg.usdc_min_swap_amount = 0;
+        assert!(check_entry_gates(&cfg, &miner_with(7), "baseusdc", NOW).is_err());
+        let mut cfg = config_with(NOW, ATTEST_MAX_AGE_SECS);
+        cfg.usdc_min_collateral = 0;
+        assert!(check_entry_gates(&cfg, &miner_with(7), "baseusdc", NOW).is_err());
+        assert!(check_entry_gates(&cfg, &miner_with(7), "tao", NOW).is_ok(), "TAO is unaffected");
+    }
+
+    #[test]
+    fn a_never_beaten_base_slot_is_fused_shut() {
+        // Fresh upgrade: Base slot heartbeat 0 and max age 0, everything else configured and live.
+        let mut cfg = config_with(NOW, ATTEST_MAX_AGE_SECS);
+        cfg.last_attest_heartbeat[slot("baseusdc")] = 0;
+        cfg.attest_max_age_secs[slot("baseusdc")] = 0;
+        assert!(check_entry_gates(&cfg, &miner_with(7), "baseusdc", NOW).is_err());
     }
 
     // A plausible wall-clock `now`. The zero-heartbeat case is only stale because a real unix
@@ -334,7 +441,7 @@ mod tests {
     fn a_deployment_that_has_never_heard_from_a_relayer_is_fused_shut() {
         // heartbeat 0 is not "no opinion", it is stale — TAO entry stays shut until the relay fleet
         // proves it is alive. The migration leaves it at 0 precisely so the door starts closed.
-        assert!(require_fresh_heartbeat(&config_with(0, ATTEST_MAX_AGE_SECS), NOW).is_err());
+        assert!(require_fresh_heartbeat(&config_with(0, ATTEST_MAX_AGE_SECS), "tao", NOW).is_err());
     }
 
     #[test]
@@ -342,8 +449,8 @@ mod tests {
         // Exactly at the limit is still alive; one second more is not. Unreachable end-to-end —
         // `validate::attest_max_age` floors the age at an hour — so this is where it gets proven.
         let cfg = config_with(1_000, 3_600);
-        assert!(require_fresh_heartbeat(&cfg, 4_600).is_ok());
-        assert!(require_fresh_heartbeat(&cfg, 4_601).is_err());
+        assert!(require_fresh_heartbeat(&cfg, "tao", 4_600).is_ok());
+        assert!(require_fresh_heartbeat(&cfg, "tao", 4_601).is_err());
     }
 
     #[test]
@@ -392,5 +499,39 @@ mod tests {
     fn a_hub_to_hub_pair_can_declare_either_leg() {
         assert_eq!(declarable_bit("sol", "sol", "tao").unwrap(), BACKING_BIT_SOL);
         assert_eq!(declarable_bit("tao", "sol", "tao").unwrap(), BACKING_BIT_TAO);
+        for (a, b) in [("sol", "baseusdc"), ("tao", "baseusdc"), ("baseusdc", "sol"), ("baseusdc", "tao")] {
+            assert!(declarable_bit(a, a, b).is_ok());
+            assert!(declarable_bit(b, a, b).is_ok());
+        }
+    }
+
+    #[test]
+    fn baseusdc_backs_only_pairs_it_is_a_leg_of() {
+        assert_eq!(declarable_bit("baseusdc", "baseusdc", "btc").unwrap(), BACKING_BIT_BASEUSDC);
+        assert_eq!(declarable_bit("baseusdc", "eth", "baseusdc").unwrap(), BACKING_BIT_BASEUSDC);
+        assert_eq!(declarable_bit("baseusdc", "baseusdc", "sn7").unwrap(), BACKING_BIT_BASEUSDC);
+        // Never a declared family backing: other USDC spokes and alpha pairs it is not a leg of.
+        for (from, to) in [("arbusdc", "btc"), ("btc", "solusdc"), ("sol", "sn7"), ("sn7", "tao"), ("tao", "btc")] {
+            assert!(declarable_bit("baseusdc", from, to).is_err(), "{from}->{to}");
+        }
+    }
+
+    #[test]
+    fn baseusdc_always_binds_to_an_exact_leg() {
+        assert_eq!(collateral_leg_bind("baseusdc", "baseusdc", 7, "sn7", 11).unwrap(), LegBind::Exact(7));
+        assert_eq!(collateral_leg_bind("baseusdc", "btc", 7, "baseusdc", 11).unwrap(), LegBind::Exact(11));
+        assert!(collateral_leg_bind("baseusdc", "arbusdc", 7, "btc", 11).is_err());
+        assert_eq!(collateral_leg_user_addr("baseusdc", "btc", "u_src", "baseusdc", "u_dst"), "u_dst");
+    }
+
+    #[test]
+    fn sol_to_alpha_backing_is_unchanged_by_the_base_hub() {
+        // TAO via the alpha family, as before. The program also still accepts "sol" here because sol
+        // is a leg; keeping sol↔snN TAO-only is the validator's quote policy, not this function's.
+        assert_eq!(declarable_bit("tao", "sol", "sn7").unwrap(), BACKING_BIT_TAO);
+        assert_eq!(declarable_bit("sol", "sol", "sn7").unwrap(), BACKING_BIT_SOL);
+        assert!(declarable_bit("baseusdc", "sol", "sn7").is_err());
+        // baseusdc↔snN: the program allows either; USDC-only on that lane is also validator policy.
+        assert_eq!(declarable_bit("tao", "baseusdc", "sn7").unwrap(), BACKING_BIT_TAO);
     }
 }

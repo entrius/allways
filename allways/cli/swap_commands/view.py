@@ -39,7 +39,9 @@ from allways.cli.swap_commands.helpers import (
 )
 from allways.cli.swap_commands.swap_intake import free_purse, rate_display_from_fixed
 from allways.constants import FEE_DIVISOR
+from allways.solana import pdas
 from allways.solana.client import swap_from_solana
+from allways.solana.layouts import hub_config
 from allways.utils.rate import apply_fee_deduction, directional_rate
 
 MINER_SORT_FIELDS = ['uid', 'rate', 'capacity', 'status']
@@ -459,6 +461,14 @@ def _tao_or(rao: int, zero_label: str) -> str:
     return f'{from_rao(rao):.4f} τ' + (f' ({zero_label})' if rao == 0 else '')
 
 
+def _usdc_or(micro: int, zero_label: str) -> str:
+    return f'{micro / 10 ** get_chain_def("baseusdc").decimals:.2f} USDC' + (f' ({zero_label})' if micro == 0 else '')
+
+
+# The hubs with a relay, and so a fuse: every program backing but the local one.
+_REMOTE_HUBS = tuple(h for h in pdas.PROGRAM_BACKING_BITS if h != pdas.BACKING_CHAIN_SOL)
+
+
 def _threshold_line(cfg) -> str:
     return f'{cfg.consensus_threshold_percent}% ({votes_needed(cfg)} of {len(cfg.validators)} validator votes)'
 
@@ -492,7 +502,17 @@ def view_config(as_json):
                 'tao_min_swap_amount_tao': from_rao(int(getattr(cfg, 'tao_min_swap_amount', 0) or 0)),
                 'tao_max_swap_amount_tao': from_rao(int(getattr(cfg, 'tao_max_swap_amount', 0) or 0)),
                 'settlement_grace_secs': int(getattr(cfg, 'settlement_grace_secs', 0) or 0),
-                'attest_max_age_secs': int(getattr(cfg, 'attest_max_age_secs', 0) or 0),
+                'usdc_min_collateral': int(getattr(cfg, 'usdc_min_collateral', 0) or 0),
+                'usdc_min_swap_amount': int(getattr(cfg, 'usdc_min_swap_amount', 0) or 0),
+                'usdc_max_swap_amount': int(getattr(cfg, 'usdc_max_swap_amount', 0) or 0),
+                # Kept as the TAO hub's value so existing readers see what they always did.
+                'attest_max_age_secs': hub_config(getattr(cfg, 'attest_max_age_secs', 0), 'tao'),
+                'attest_max_age_secs_by_hub': {
+                    h: hub_config(getattr(cfg, 'attest_max_age_secs', 0), h) for h in _REMOTE_HUBS
+                },
+                'last_attest_heartbeat_by_hub': {
+                    h: hub_config(getattr(cfg, 'last_attest_heartbeat', 0), h) for h in _REMOTE_HUBS
+                },
                 'fulfillment_timeout_secs': cfg.fulfillment_timeout_secs,
                 'reservation_ttl_secs': cfg.reservation_ttl_secs,
                 'pool_window_secs': cfg.pool_window_secs,
@@ -516,7 +536,18 @@ def view_config(as_json):
     console.print(f'  TAO min swap:         {_tao_or(int(getattr(cfg, "tao_min_swap_amount", 0) or 0), "no minimum")}')
     console.print(f'  TAO max swap:         {_tao_or(int(getattr(cfg, "tao_max_swap_amount", 0) or 0), "no maximum")}')
     console.print(f'  Settlement grace:     {secs_str(int(getattr(cfg, "settlement_grace_secs", 0) or 0))}')
-    console.print(f'  Attest max age:       {secs_str(int(getattr(cfg, "attest_max_age_secs", 0) or 0))}')
+    console.print(
+        f'  USDC min collateral:  {_usdc_or(int(getattr(cfg, "usdc_min_collateral", 0) or 0), "unset (hub closed)")}'
+    )
+    console.print(
+        f'  USDC min swap:        {_usdc_or(int(getattr(cfg, "usdc_min_swap_amount", 0) or 0), "unset (hub closed)")}'
+    )
+    console.print(
+        f'  USDC max swap:        {_usdc_or(int(getattr(cfg, "usdc_max_swap_amount", 0) or 0), "no maximum")}'
+    )
+    for hub in _REMOTE_HUBS:
+        age = hub_config(getattr(cfg, 'attest_max_age_secs', 0), hub)
+        console.print(f'  Attest max age ({hub}):{" " * (8 - len(hub))}{secs_str(age) if age else "unset (fused)"}')
     console.print(f'  Fulfillment timeout:  {secs_str(cfg.fulfillment_timeout_secs)}')
     console.print(f'  Reservation TTL:      {secs_str(cfg.reservation_ttl_secs)}')
     console.print(f'  Pool window:          {secs_str(cfg.pool_window_secs)}')

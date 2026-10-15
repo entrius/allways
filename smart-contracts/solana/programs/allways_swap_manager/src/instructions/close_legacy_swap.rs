@@ -69,7 +69,7 @@ pub struct CloseLegacySwap<'info> {
     pub admin: Signer<'info>,
 
     #[account(seeds = [CONFIG_SEED], bump = config.bump, has_one = admin)]
-    pub config: Account<'info, Config>,
+    pub config: Box<Account<'info, Config>>,
 
     /// CHECK: the decoded swap's `user`; also the rent-refund destination (the wronged party).
     #[account(mut)]

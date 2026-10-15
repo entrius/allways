@@ -229,6 +229,12 @@ class AllwaysSolanaClient:
     def get_hotkey_binding(self, hotkey: bytes):
         return self._get('HotkeyBinding', pdas.hotkey_binding_pda(hotkey, self.program_id))
 
+    def get_evm_binding(self, miner):
+        return self._get('EvmBinding', pdas.evm_binding_pda(miner, self.program_id))
+
+    def get_evm_address_binding(self, evm_address: bytes):
+        return self._get('EvmAddressBinding', pdas.evm_address_binding_pda(evm_address, self.program_id))
+
     def get_reservation(self, miner, backing: str = 'sol'):
         return self._get('Reservation', pdas.reservation_pda(miner, backing, self.program_id))
 
@@ -279,7 +285,10 @@ class AllwaysSolanaClient:
         reopenable and prior voters may legally vote again, so a stale-round vote must not gate a
         retry — a first pass that missed quorum would otherwise strand the target forever, with
         every prior voter skipping on each recheck."""
-        vr = self.get_vote_round(req_type, target)
+        return self._has_voted_round(self.get_vote_round(req_type, target), voter, now)
+
+    @staticmethod
+    def _has_voted_round(vr, voter, now: Optional[int] = None) -> bool:
         if vr is None or not vr.voters:
             return False
         age = (now if now is not None else int(time.time())) - int(vr.created_at)
@@ -409,10 +418,10 @@ class AllwaysSolanaClient:
     def set_halted(self, halted: bool) -> str:
         return self._admin_config('set_halted', layouts.IX_BOOL_ARGS.build({'value': halted}))
 
-    def bump_vault_generation(self) -> str:
-        """Retire the current vault's attestation-epoch namespace — run once per vault replacement,
-        BEFORE relayers are pointed at the new vault."""
-        return self._admin_config('bump_vault_generation', b'')
+    def bump_vault_generation(self, hub: str) -> str:
+        """Retire one hub's attestation-epoch namespace — run once per vault replacement, BEFORE
+        relayers are pointed at the new vault."""
+        return self._admin_config('bump_vault_generation', layouts.IX_HUB_ARGS.build({'hub': hub}))
 
     def set_min_collateral(self, amount: int) -> str:
         return self._admin_config('set_min_collateral', layouts.IX_AMOUNT_ARGS.build({'amount': amount}))
@@ -434,11 +443,21 @@ class AllwaysSolanaClient:
     def set_tao_min_collateral(self, amount: int) -> str:
         return self._admin_config('set_tao_min_collateral', layouts.IX_AMOUNT_ARGS.build({'amount': amount}))
 
+    # The Base USDC hub's twins, in µUSDC (6 dp).
+    def set_usdc_min_swap_amount(self, amount: int) -> str:
+        return self._admin_config('set_usdc_min_swap_amount', layouts.IX_AMOUNT_ARGS.build({'amount': amount}))
+
+    def set_usdc_max_swap_amount(self, amount: int) -> str:
+        return self._admin_config('set_usdc_max_swap_amount', layouts.IX_AMOUNT_ARGS.build({'amount': amount}))
+
+    def set_usdc_min_collateral(self, amount: int) -> str:
+        return self._admin_config('set_usdc_min_collateral', layouts.IX_AMOUNT_ARGS.build({'amount': amount}))
+
     def set_settlement_grace(self, secs: int) -> str:
         return self._admin_config('set_settlement_grace', layouts.IX_I64_ARGS.build({'value': secs}))
 
-    def set_attest_max_age(self, secs: int) -> str:
-        return self._admin_config('set_attest_max_age', layouts.IX_I64_ARGS.build({'value': secs}))
+    def set_attest_max_age(self, hub: str, secs: int) -> str:
+        return self._admin_config('set_attest_max_age', layouts.IX_HUB_I64_ARGS.build({'hub': hub, 'secs': secs}))
 
     def set_max_swap_amount(self, amount: int) -> str:
         return self._admin_config('set_max_swap_amount', layouts.IX_AMOUNT_ARGS.build({'amount': amount}))
@@ -491,6 +510,27 @@ class AllwaysSolanaClient:
             AccountMeta(SYSTEM_PROGRAM, False, False),
         ]
         return self._send([self._ix('bind_hotkey', bytes(hotkey) + bytes(hotkey_sig), metas)])
+
+    def bind_evm_address(self, evm_address: bytes) -> str:
+        """Name the 20-byte EVM address holding this miner's Base bond. Set-once, gated like
+        `bind_hotkey`; the vault's lockBond(solanaPubkey) names this pubkey back."""
+        evm_address = bytes(evm_address)
+        if len(evm_address) != 20:
+            raise ValueError(f'EVM address must be 20 bytes, got {len(evm_address)}')
+        miner = self.keypair.pubkey()
+        miner_state = pdas.miner_state_pda(miner, self.program_id)
+        if self.get_miner_state(miner) is None:
+            miner_state = self.program_id
+        metas = [
+            AccountMeta(miner, True, True),
+            AccountMeta(pdas.config_pda(self.program_id), False, False),
+            AccountMeta(miner_state, False, False),
+            AccountMeta(pdas.evm_binding_pda(miner, self.program_id), False, True),
+            AccountMeta(pdas.evm_address_binding_pda(evm_address, self.program_id), False, True),
+            AccountMeta(SYSTEM_PROGRAM, False, False),
+        ]
+        args = layouts.IX_EVM_ADDRESS_ARGS.build({'evm_address': evm_address})
+        return self._send([self._ix('bind_evm_address', args, metas)])
 
     def set_quote(
         self,
@@ -657,9 +697,10 @@ class AllwaysSolanaClient:
             AccountMeta(pdas.vote_round_pda(pdas.REQ_INITIATE, swap_key, self.program_id), False, True),
             AccountMeta(pdas.swap_pda(swap_key, self.program_id), False, True),
             AccountMeta(self._attestation_meta(m, backing), False, False),
-            # The Binding PDA is always passed; the program tolerates it uninitialized (never-bound
-            # miner) and pins the bonded hotkey onto the Swap at quorum (V-M1).
+            # Both bindings are always passed; the program tolerates either uninitialized and pins the
+            # backing's bond key (hotkey, or the EVM address for "baseusdc") onto the Swap (V-M1).
             AccountMeta(pdas.binding_pda(m, self.program_id), False, False),
+            AccountMeta(pdas.evm_binding_pda(m, self.program_id), False, False),
             AccountMeta(SYSTEM_PROGRAM, False, False),
         ]
         args = layouts.IX_VOTE_INITIATE_ARGS.build({'swap_key': swap_key, 'from_addr_hash': from_addr_hash})
@@ -801,21 +842,21 @@ class AllwaysSolanaClient:
         )
         return self._send([self._ix('vote_set_attestation', args, metas)])
 
-    def vote_attest_heartbeat(self) -> str:
-        """Bump the global attestation heartbeat; on quorum it advances to the chain's clock. While it
-        is stale, entry into any non-locally-backed swap is fused off."""
+    def vote_attest_heartbeat(self, hub: str) -> str:
+        """Bump ONE hub's attestation heartbeat; on quorum it advances to the chain's clock. While it
+        is stale, entry into swaps backed by that hub is fused off — other hubs are untouched."""
         validator = self.keypair.pubkey()
         metas = [
             AccountMeta(validator, True, True),
             AccountMeta(pdas.config_pda(self.program_id), False, True),
-            AccountMeta(
-                pdas.vote_round_pda(pdas.REQ_ATTEST_HEARTBEAT, pdas.config_pda(self.program_id), self.program_id),
-                False,
-                True,
-            ),
+            AccountMeta(pdas.heartbeat_round_pda(hub, self.program_id), False, True),
             AccountMeta(SYSTEM_PROGRAM, False, False),
         ]
-        return self._send([self._ix('vote_attest_heartbeat', b'', metas)])
+        return self._send([self._ix('vote_attest_heartbeat', layouts.IX_HUB_ARGS.build({'hub': hub}), metas)])
+
+    def has_voted_heartbeat(self, hub: str, voter, now: Optional[int] = None) -> bool:
+        """`has_voted` for the hub's heartbeat round, whose seeds carry the hub beside the config."""
+        return self._has_voted_round(self._get('VoteRound', pdas.heartbeat_round_pda(hub, self.program_id)), voter, now)
 
     def vote_set_weights(self, weights: List[int], validator_keys: List[bytes]) -> str:
         """Vote the validator draw-weight vector (index-aligned to Config.validators); on quorum it applies.

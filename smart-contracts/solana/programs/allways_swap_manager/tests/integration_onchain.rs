@@ -364,6 +364,7 @@ fn initiate_ix(validator: &Pubkey, miner: &Pubkey, from_tx_hash: &str) -> Instru
             swap: swap_pda(&key),
             attestation: None,
             binding: bind_pda(miner),
+            evm_binding: evm_bind_pda(miner),
             system_program: SYSTEM_PROGRAM,
         }
         .to_account_metas(None),
@@ -950,6 +951,9 @@ fn quote_pda(m: &Pubkey, from_chain: &str, to_chain: &str, backing: &str) -> Pub
 }
 fn bind_pda(m: &Pubkey) -> Pubkey {
     Pubkey::find_program_address(&[b"bind", m.as_ref()], &pid()).0
+}
+fn evm_bind_pda(m: &Pubkey) -> Pubkey {
+    Pubkey::find_program_address(&[b"evmbind", m.as_ref()], &pid()).0
 }
 fn hkbind_pda(hotkey: &[u8; 32]) -> Pubkey {
     Pubkey::find_program_address(&[b"hkbind", hotkey], &pid()).0

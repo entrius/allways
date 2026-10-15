@@ -103,11 +103,11 @@ def test_swap_roundtrip_enum_status():
         'max_extend_at': 0,
         'fulfilled_at': 0,
         'bump': 1,
-        'hotkey': bytes(range(32)),
+        'bond_key': bytes(range(32)),
     }
     p = _roundtrip(layouts.Swap, v)
     assert p.from_tx_hash == 'deadbeef' and type(p.status).__name__ == 'PendingAttestation'
-    assert bytes(p.hotkey) == bytes(range(32))  # V-M1 pin stays raw bytes
+    assert bytes(p.bond_key) == bytes(range(32))  # V-M1 pin stays raw bytes
 
 
 def test_pool_roundtrip_vec_of_request():
@@ -142,9 +142,12 @@ def test_config_roundtrip_vec_of_validatorinfo():
         'tao_min_swap_amount': 1_000,
         'tao_max_swap_amount': 0,
         'tao_min_collateral': 100_000_000,
+        'usdc_min_swap_amount': 0,
+        'usdc_max_swap_amount': 0,
+        'usdc_min_collateral': 0,
         'settlement_grace_secs': 900,
-        'last_attest_heartbeat': 0,
-        'attest_max_age_secs': 86_400,
+        'last_attest_heartbeat': [0, 1_700_000_000, 0, 0, 0, 0, 0, 0],
+        'attest_max_age_secs': [0, 86_400, 0, 0, 0, 0, 0, 0],
         'reservation_ttl_secs': 1800,
         'consensus_threshold_percent': 66,
         'validators': [{'key': bytes(range(32)), 'weight': 7}],
@@ -156,11 +159,13 @@ def test_config_roundtrip_vec_of_validatorinfo():
         'weights_update_min_interval_secs': 0,
         'max_total_extension_secs': 5400,
         'bump': 1,
-        'vault_generation': 3,
+        'vault_generation': [0, 3, 0, 0, 0, 0, 0, 0],
     }
     p = _roundtrip(layouts.Config, v)
     assert p.version == 12 and len(p.validators) == 1 and p.validators[0].weight == 7
-    assert p.vault_generation == 3
+    assert layouts.hub_config(p.vault_generation, 'tao') == 3
+    assert layouts.hub_config(p.attest_max_age_secs, 'tao') == 86_400
+    assert layouts.hub_config(p.last_attest_heartbeat, 'baseusdc') == 0
 
 
 def test_bond_attestation_roundtrip():

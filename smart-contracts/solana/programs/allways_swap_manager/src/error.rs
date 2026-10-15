@@ -177,4 +177,14 @@ pub enum ErrorCode {
     // --- V-M1: hotkey-binding freeze ---
     #[msg("Hotkey binding is set-once; a bound pubkey cannot change its hotkey")]
     HotkeyChangeForbidden,
+
+    // --- Base USDC hub ---
+    #[msg("This backing hub has no swap or bond floor set yet, so it is closed")]
+    BackingNotConfigured,
+    #[msg("EVM bond address is already bound to another miner")]
+    EvmAddressAlreadyBound,
+    #[msg("EVM bond binding is set-once; a bound pubkey cannot change its address")]
+    EvmAddressChangeForbidden,
+    #[msg("EVM bond address must not be the zero address")]
+    EvmAddressZero,
 }

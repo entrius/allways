@@ -5,6 +5,7 @@ import os
 import click
 from solders.pubkey import Pubkey
 
+from allways.chains import get_chain_def
 from allways.cli.help import StyledGroup
 from allways.cli.swap_commands.helpers import (
     FINITE_FLOAT,
@@ -17,7 +18,9 @@ from allways.cli.swap_commands.helpers import (
     to_lamports,
 )
 from allways.constants import TAO_TO_RAO
+from allways.solana import pdas
 from allways.solana.client import SolanaClientError
+from allways.solana.layouts import hub_config
 
 
 def _parse_pubkey(s: str):
@@ -54,6 +57,73 @@ def _run_setter(title, getter, setter, noun, format_current, new_display, succes
         console.print(f'[green]{success_msg}[/green]\n')
     except SolanaClientError as e:
         fail(f'Failed to set {noun}: {e}')
+
+
+def _fmt_tao(rao: int) -> str:
+    return f'{rao / TAO_TO_RAO:.9f} TAO'
+
+
+_USDC_UNIT = 10 ** get_chain_def(pdas.BACKING_CHAIN_BASEUSDC).decimals
+
+# Per hub: (to base units, format base units). Each backing is bounded in its own asset, never
+# converted through a rate — that is what keeps a price oracle out of the guards.
+_HUB_UNITS = {
+    pdas.BACKING_CHAIN_SOL: (to_lamports, lambda v: f'{from_lamports(v):.4f} SOL'),
+    pdas.BACKING_CHAIN_TAO: (lambda x: int(x * TAO_TO_RAO), _fmt_tao),
+    pdas.BACKING_CHAIN_BASEUSDC: (lambda x: int(round(x * _USDC_UNIT)), lambda v: f'{v / _USDC_UNIT:.6f} USDC'),
+}
+
+# (Config field, client setter) per hub, for each per-hub amount lever.
+_HUB_AMOUNT_LEVERS = {
+    'min_swap': {
+        'sol': ('min_swap_amount', 'set_min_swap_amount'),
+        'tao': ('tao_min_swap_amount', 'set_tao_min_swap_amount'),
+        'baseusdc': ('usdc_min_swap_amount', 'set_usdc_min_swap_amount'),
+    },
+    'max_swap': {
+        'sol': ('max_swap_amount', 'set_max_swap_amount'),
+        'tao': ('tao_max_swap_amount', 'set_tao_max_swap_amount'),
+        'baseusdc': ('usdc_max_swap_amount', 'set_usdc_max_swap_amount'),
+    },
+    'min_collateral': {
+        'sol': ('min_collateral', 'set_min_collateral'),
+        'tao': ('tao_min_collateral', 'set_tao_min_collateral'),
+        'baseusdc': ('usdc_min_collateral', 'set_usdc_min_collateral'),
+    },
+}
+_LEVER_NOUNS = {
+    'min_swap': ('minimum swap amount', ' (no minimum)'),
+    'max_swap': ('maximum swap amount', ' (no maximum)'),
+    'min_collateral': ('collateral floor', ' (unset)'),
+}
+
+
+def _hub_option(default: str, remote_only: bool = False):
+    """`--hub`, defaulting to the hub the command always acted on so old invocations are unchanged."""
+    hubs = [h for h in _HUB_UNITS if not (remote_only and h == pdas.BACKING_CHAIN_SOL)]
+    return click.option(
+        '--hub',
+        type=click.Choice(hubs),
+        default=default,
+        show_default=True,
+        help='Backing hub the setting applies to.',
+    )
+
+
+def _set_hub_amount(lever: str, hub: str, amount: float):
+    field, setter_name = _HUB_AMOUNT_LEVERS[lever][hub]
+    to_base, fmt = _HUB_UNITS[hub]
+    noun, zero = _LEVER_NOUNS[lever]
+    base = to_base(amount)
+    _run_setter(
+        title=f'Set {hub} {noun}',
+        getter=lambda c: int(getattr(c.get_config(), field)),
+        setter=lambda c: getattr(c, setter_name)(base),
+        noun=f'{hub} {noun}',
+        format_current=lambda v: fmt(v) + (zero if v == 0 else ''),
+        new_display=fmt(base) + (zero if base == 0 else ''),
+        success_msg=f'{hub} {noun} set to {fmt(base)}',
+    )
 
 
 @click.group('admin', cls=StyledGroup, show_disclaimer=True)
@@ -220,25 +290,22 @@ def set_max_extension(secs: int):
 
 
 @admin_group.command('set-min-collateral', show_disclaimer=True)
-@click.argument('amount_sol', type=FINITE_FLOAT)
-def set_min_collateral(amount_sol: float):
-    """Set the minimum collateral amount (in SOL).
+@click.argument('amount', type=FINITE_FLOAT)
+@_hub_option(default='sol')
+def set_min_collateral(amount: float, hub: str):
+    """Set a hub's activation floor, in that hub's asset (SOL, TAO or USDC).
+
+    [dim]For "sol" it is the local collateral a miner must post; for "tao" and "baseusdc" it is the
+    ATTESTED effective bond — net of accrued fees and voted slashes — not the vault's gross counter.[/dim]
 
     [dim]Examples:
-        $ alw admin set-min-collateral 2.0[/dim]
+        $ alw admin set-min-collateral 2.0
+        $ alw admin set-min-collateral 5 --hub tao
+        $ alw admin set-min-collateral 25 --hub baseusdc[/dim]
     """
-    if amount_sol <= 0:
-        fail('Amount must be positive')
-    lamports = to_lamports(amount_sol)
-    _run_setter(
-        title='Set Minimum Collateral',
-        getter=lambda c: c.get_config().min_collateral,
-        setter=lambda c: c.set_min_collateral(lamports),
-        noun='minimum collateral',
-        format_current=lambda v: f'{from_lamports(v):.4f} SOL',
-        new_display=f'{amount_sol:.4f} SOL',
-        success_msg=f'Minimum collateral set to {amount_sol:.4f} SOL',
-    )
+    if amount <= 0:
+        fail('Amount must be positive (a dust bond must not activate a purse the guards then trust)')
+    _set_hub_amount('min_collateral', hub, amount)
 
 
 @admin_group.command('set-max-collateral', show_disclaimer=True)
@@ -265,49 +332,38 @@ def set_max_collateral(amount_sol: float):
 
 
 @admin_group.command('set-min-swap', show_disclaimer=True)
-@click.argument('amount_sol', type=FINITE_FLOAT)
-def set_min_swap(amount_sol: float):
-    """Set the minimum swap amount in SOL (SOL-denominated swap size). Use 0 to remove.
+@click.argument('amount', type=FINITE_FLOAT)
+@_hub_option(default='sol')
+def set_min_swap(amount: float, hub: str):
+    """Set a hub's minimum swap size, in that hub's asset (SOL, TAO or USDC).
+
+    [dim]Only bounds swaps whose quote declared that backing, compared in its own units and never
+    converted through the rate. A remote hub (tao, baseusdc) stays closed while its minimum is 0.[/dim]
 
     [dim]Examples:
         $ alw admin set-min-swap 1.0
-        $ alw admin set-min-swap 0[/dim]
+        $ alw admin set-min-swap 0.5 --hub tao
+        $ alw admin set-min-swap 10 --hub baseusdc[/dim]
     """
-    if amount_sol < 0:
+    if amount < 0:
         fail('Amount must be non-negative')
-    lamports = to_lamports(amount_sol)
-    _run_setter(
-        title='Set Minimum Swap Amount',
-        getter=lambda c: c.get_config().min_swap_amount,
-        setter=lambda c: c.set_min_swap_amount(lamports),
-        noun='minimum swap amount',
-        format_current=lambda v: f'{from_lamports(v):.4f} SOL{" (no minimum)" if v == 0 else ""}',
-        new_display=f'{amount_sol:.4f} SOL{" (no minimum)" if lamports == 0 else ""}',
-        success_msg=f'Minimum swap amount set to {amount_sol:.4f} SOL',
-    )
+    _set_hub_amount('min_swap', hub, amount)
 
 
 @admin_group.command('set-max-swap', show_disclaimer=True)
-@click.argument('amount_sol', type=FINITE_FLOAT)
-def set_max_swap(amount_sol: float):
-    """Set the maximum swap amount in SOL (SOL-denominated swap size). Use 0 to remove.
+@click.argument('amount', type=FINITE_FLOAT)
+@_hub_option(default='sol')
+def set_max_swap(amount: float, hub: str):
+    """Set a hub's maximum swap size, in that hub's asset. Use 0 to remove the cap.
 
     [dim]Examples:
         $ alw admin set-max-swap 50.0
-        $ alw admin set-max-swap 0[/dim]
+        $ alw admin set-max-swap 25 --hub tao
+        $ alw admin set-max-swap 0 --hub baseusdc[/dim]
     """
-    if amount_sol < 0:
+    if amount < 0:
         fail('Amount must be non-negative')
-    lamports = to_lamports(amount_sol)
-    _run_setter(
-        title='Set Maximum Swap Amount',
-        getter=lambda c: c.get_config().max_swap_amount,
-        setter=lambda c: c.set_max_swap_amount(lamports),
-        noun='maximum swap amount',
-        format_current=lambda v: f'{from_lamports(v):.4f} SOL{" (no maximum)" if v == 0 else ""}',
-        new_display=f'{amount_sol:.4f} SOL{" (no maximum)" if lamports == 0 else ""}',
-        success_msg=f'Maximum swap amount set to {amount_sol:.4f} SOL',
-    )
+    _set_hub_amount('max_swap', hub, amount)
 
 
 @admin_group.command('set-threshold', show_disclaimer=True)
@@ -522,87 +578,34 @@ def resume_system():
         fail(f'Failed to resume system: {e}')
 
 
-# --- Split-collateral levers (W1/W2). TAO amounts are RAO, never converted through the rate: each
-# backing is bounded in its own asset's units, which is what keeps a price oracle out of the guards.
+# --- The pre-`--hub` TAO commands, kept so existing scripts keep working; each is the `--hub tao` form.
 
 
-def _fmt_tao(rao: int) -> str:
-    return f'{rao / TAO_TO_RAO:.9f} TAO'
-
-
-@admin_group.command('set-tao-min-swap', show_disclaimer=True)
+@admin_group.command('set-tao-min-swap', hidden=True)
 @click.argument('amount_tao', type=FINITE_FLOAT)
 def set_tao_min_swap(amount_tao: float):
-    """Set the minimum TAO-backed swap size, in TAO.
-
-    [dim]Only bounds swaps whose quote declared the "tao" backing; the SOL pair is set-min-swap.
-    Must clear the fee-meaningfulness floor: a 1% fee on the minimum should dwarf the ~0.0002 TAO
-    settlement postage, so ~0.1 TAO is the practical lower bound.[/dim]
-
-    [dim]Examples:
-        $ alw admin set-tao-min-swap 0.5[/dim]
-    """
+    """Alias of `set-min-swap --hub tao`."""
     if amount_tao < 0:
         fail('Amount must be non-negative')
-    rao = int(amount_tao * TAO_TO_RAO)
-    _run_setter(
-        title='Set Minimum TAO-Backed Swap Amount',
-        getter=lambda c: c.get_config().tao_min_swap_amount,
-        setter=lambda c: c.set_tao_min_swap_amount(rao),
-        noun='minimum TAO swap amount',
-        format_current=_fmt_tao,
-        new_display=_fmt_tao(rao),
-        success_msg=f'Minimum TAO swap amount set to {_fmt_tao(rao)}',
-    )
+    _set_hub_amount('min_swap', 'tao', amount_tao)
 
 
-@admin_group.command('set-tao-max-swap', show_disclaimer=True)
+@admin_group.command('set-tao-max-swap', hidden=True)
 @click.argument('amount_tao', type=FINITE_FLOAT)
 def set_tao_max_swap(amount_tao: float):
-    """Set the maximum TAO-backed swap size, in TAO. Use 0 to remove the cap.
-
-    [dim]Examples:
-        $ alw admin set-tao-max-swap 25
-        $ alw admin set-tao-max-swap 0[/dim]
-    """
+    """Alias of `set-max-swap --hub tao`."""
     if amount_tao < 0:
         fail('Amount must be non-negative')
-    rao = int(amount_tao * TAO_TO_RAO)
-    _run_setter(
-        title='Set Maximum TAO-Backed Swap Amount',
-        getter=lambda c: c.get_config().tao_max_swap_amount,
-        setter=lambda c: c.set_tao_max_swap_amount(rao),
-        noun='maximum TAO swap amount',
-        format_current=lambda v: f'{_fmt_tao(v)}{" (no maximum)" if v == 0 else ""}',
-        new_display=f'{_fmt_tao(rao)}{" (no maximum)" if rao == 0 else ""}',
-        success_msg=f'Maximum TAO swap amount set to {_fmt_tao(rao)}',
-    )
+    _set_hub_amount('max_swap', 'tao', amount_tao)
 
 
-@admin_group.command('set-tao-min-collateral', show_disclaimer=True)
+@admin_group.command('set-tao-min-collateral', hidden=True)
 @click.argument('amount_tao', type=FINITE_FLOAT)
 def set_tao_min_collateral(amount_tao: float):
-    """Set the attested bond (TAO) a miner needs to activate its TAO backing.
-
-    [dim]The rao twin of set-min-collateral. Compared against the ATTESTED effective bond — already
-    net of accrued fees and voted slashes — not the vault's gross counter. Ships at a placeholder
-    0.1 TAO; set the real policy figure before the first TAO-backed quote.[/dim]
-
-    [dim]Examples:
-        $ alw admin set-tao-min-collateral 5[/dim]
-    """
+    """Alias of `set-min-collateral --hub tao`."""
     if amount_tao <= 0:
         fail('Amount must be positive (a dust bond must not activate a purse the guards then trust)')
-    rao = int(amount_tao * TAO_TO_RAO)
-    _run_setter(
-        title='Set TAO Activation Bond Floor',
-        getter=lambda c: c.get_config().tao_min_collateral,
-        setter=lambda c: c.set_tao_min_collateral(rao),
-        noun='TAO collateral floor',
-        format_current=_fmt_tao,
-        new_display=_fmt_tao(rao),
-        success_msg=f'TAO collateral floor set to {_fmt_tao(rao)}',
-    )
+    _set_hub_amount('min_collateral', 'tao', amount_tao)
 
 
 @admin_group.command('set-settlement-grace', show_disclaimer=True)
@@ -632,48 +635,51 @@ def set_settlement_grace(seconds: int):
 
 @admin_group.command('set-attest-max-age', show_disclaimer=True)
 @click.argument('seconds', type=int)
-def set_attest_max_age(seconds: int):
-    """Set the attestation dead-man fuse: max heartbeat age before TAO-backed entry stops (3600-172800s).
+@_hub_option(default='tao', remote_only=True)
+def set_attest_max_age(seconds: int, hub: str):
+    """Set one hub's attestation dead-man fuse: max heartbeat age before its entry stops (3600-172800s).
 
     [dim]A circuit breaker, not a cadence — size it at >=2x the relayer heartbeat interval (12-24 h).
-    While the global heartbeat is older than this, no TAO-backed pool, fill or attestation can open;
-    exits and in-flight swaps are unaffected.[/dim]
+    While THAT hub's heartbeat is older than this, no pool, fill or activation backed by it can open;
+    other hubs, exits and in-flight swaps are unaffected. A hub left at 0 stays fused shut.[/dim]
 
     [dim]Examples:
-        $ alw admin set-attest-max-age 86400[/dim]
+        $ alw admin set-attest-max-age 86400
+        $ alw admin set-attest-max-age 86400 --hub baseusdc[/dim]
     """
     if not 3_600 <= seconds <= 172_800:
         fail('Attestation max age must be 3600-172800 seconds (1 h - 48 h)')
     _run_setter(
-        title='Set Attestation Fuse Max Age',
-        getter=lambda c: c.get_config().attest_max_age_secs,
-        setter=lambda c: c.set_attest_max_age(seconds),
-        noun='attestation max age',
-        format_current=secs_str,
+        title=f'Set Attestation Fuse Max Age ({hub})',
+        getter=lambda c: hub_config(c.get_config().attest_max_age_secs, hub),
+        setter=lambda c: c.set_attest_max_age(hub, seconds),
+        noun=f'{hub} attestation max age',
+        format_current=lambda v: secs_str(v) if v else 'unset (fused)',
         new_display=secs_str(seconds),
-        success_msg=f'Attestation max age set to {secs_str(seconds)}',
+        success_msg=f'{hub} attestation max age set to {secs_str(seconds)}',
     )
 
 
 @admin_group.command('bump-vault-generation', show_disclaimer=True)
-def bump_vault_generation():
-    """Retire the current bond vault's attestation-epoch namespace after replacing the vault.
+@_hub_option(default='tao', remote_only=True)
+def bump_vault_generation(hub: str):
+    """Retire one hub's bond-vault attestation-epoch namespace after replacing that vault.
 
     [dim]A replacement vault restarts its lock epochs at 0, which the on-chain monotonic guard would
     reject as stale forever — miners could never re-attest. Bumping the generation makes the new
-    vault's epochs outrank every epoch the retired one could produce.[/dim]
+    vault's epochs outrank every epoch the retired one could produce. Other hubs are untouched.[/dim]
 
-    [dim]Run this AFTER instantiating the new vault and BEFORE pointing relayers at it
-    (ALLWAYS_VAULT_ADDRESS). Increment-only.[/dim]
+    [dim]Run this AFTER deploying the new vault and BEFORE pointing that hub's relayers at it.
+    Increment-only.[/dim]
     """
     _run_setter(
-        title='Bump Vault Generation',
-        getter=lambda c: c.get_config().vault_generation,
-        setter=lambda c: c.bump_vault_generation(),
-        noun='vault generation',
+        title=f'Bump Vault Generation ({hub})',
+        getter=lambda c: hub_config(c.get_config().vault_generation, hub),
+        setter=lambda c: c.bump_vault_generation(hub),
+        noun=f'{hub} vault generation',
         format_current=str,
         new_display='next',
-        success_msg='Vault generation bumped — relayers may now attest against the new vault',
+        success_msg=f'{hub} vault generation bumped — its relayers may now attest against the new vault',
     )
 
 

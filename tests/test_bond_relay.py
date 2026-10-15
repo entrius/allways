@@ -138,8 +138,11 @@ class FakeSolana:
         )
         return 'sig-attest'
 
-    def vote_attest_heartbeat(self):
-        self.calls.append(('vote_attest_heartbeat',))
+    def has_voted_heartbeat(self, hub, voter):
+        return (pdas.REQ_ATTEST_HEARTBEAT, hub) in self.voted
+
+    def vote_attest_heartbeat(self, hub):
+        self.calls.append(('vote_attest_heartbeat', hub))
         return 'sig-heartbeat'
 
 
@@ -199,10 +202,10 @@ def _timeout_event(
         'reimbursement': reimbursement,
         'payee': payee,
     }
-    # V-M1: the verdict carries the initiate-pinned hotkey (raw bytes). None = a pre-upgrade event
-    # without the field, which the relay must keep tolerating.
+    # V-M1: the verdict carries the initiate-pinned bond key (the hotkey's raw bytes, for TAO). None =
+    # a pre-upgrade event without the field, which the relay must keep tolerating.
     if hotkey is not None:
-        fields['hotkey'] = hotkey
+        fields['bond_key'] = hotkey
     return SimpleNamespace(name='SwapTimedOut', block_time=NOW, fields=fields)
 
 
@@ -809,7 +812,7 @@ def test_the_heartbeat_is_released_once_reconcile_comes_back_clean():
     relay = _relay(heartbeat_interval_secs=1)
     relay.step(NOW)
     assert relay._reconciled
-    assert ('vote_attest_heartbeat',) in relay.solana.calls
+    assert ('vote_attest_heartbeat', 'tao') in relay.solana.calls
 
 
 def test_the_startup_pass_is_not_repeated_in_the_same_step():
@@ -914,7 +917,7 @@ def test_the_heartbeat_is_lazy_not_per_pass():
     relay = _relay(heartbeat_interval_secs=3600)
     relay.step(NOW)
     relay.step(NOW + 10)
-    assert [c for c in relay.solana.calls if c[0] == 'vote_attest_heartbeat'] == [('vote_attest_heartbeat',)]
+    assert [c for c in relay.solana.calls if c[0] == 'vote_attest_heartbeat'] == [('vote_attest_heartbeat', 'tao')]
 
 
 def test_a_fresh_on_chain_heartbeat_needs_no_vote_from_us():
@@ -927,9 +930,34 @@ def test_a_fresh_on_chain_heartbeat_needs_no_vote_from_us():
     assert not [c for c in solana.calls if c[0] == 'vote_attest_heartbeat']
 
 
+def _v17_config(tao_heartbeat=0, base_heartbeat=0, tao_generation=0, base_generation=0):
+    """A v17 Config: the fuse and generation are per-hub arrays indexed by backing-bit position."""
+    slots = lambda tao, base: [0, tao, base, 0, 0, 0, 0, 0]  # noqa: E731
+    return SimpleNamespace(
+        last_attest_heartbeat=slots(tao_heartbeat, base_heartbeat),
+        vault_generation=slots(tao_generation, base_generation),
+    )
+
+
+def test_the_tao_relay_reads_and_beats_only_the_tao_slot():
+    # Parity across the per-hub upgrade: a fresh TAO slot means no vote, whatever Base says...
+    solana = FakeSolana(miner_states={MINER: _miner_state()}, config=_v17_config(tao_heartbeat=NOW - 5))
+    _relay(solana=solana, heartbeat_interval_secs=3600).step(NOW)
+    assert not [c for c in solana.calls if c[0] == 'vote_attest_heartbeat']
+    # ...and a stale one is beaten as "tao", even when the Base slot happens to be fresh.
+    solana = FakeSolana(miner_states={MINER: _miner_state()}, config=_v17_config(base_heartbeat=NOW - 5))
+    _relay(solana=solana, heartbeat_interval_secs=3600).step(NOW)
+    assert [c for c in solana.calls if c[0] == 'vote_attest_heartbeat'] == [('vote_attest_heartbeat', 'tao')]
+
+
+def test_the_tao_relay_composes_epochs_with_the_tao_generation():
+    solana = FakeSolana(config=_v17_config(tao_generation=3, base_generation=9))
+    assert _relay(solana=solana).vault_generation() == 3
+
+
 def test_a_vote_already_in_the_live_round_is_not_cast_twice():
     solana = FakeSolana(miner_states={MINER: _miner_state()})
-    solana.voted.add((pdas.REQ_ATTEST_HEARTBEAT, str(pdas.config_pda(None))))
+    solana.voted.add((pdas.REQ_ATTEST_HEARTBEAT, 'tao'))
     relay = _relay(solana=solana, heartbeat_interval_secs=1)
     relay.step(NOW)
     assert not [c for c in solana.calls if c[0] == 'vote_attest_heartbeat']
