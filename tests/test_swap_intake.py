@@ -197,6 +197,29 @@ def test_candidate_miners_excludes_inactive():
     assert out[0].collateral == 976_466_670  # tracked field, not vault lamports
 
 
+def test_candidate_miners_excludes_offer_on_dropped_purse():
+    """A miner that dropped its SOL purse still reads `active` (TAO lit); its SOL-backed offer
+    must go, or the reserve fails on-chain with MinerNotActive."""
+    from types import SimpleNamespace
+
+    from allways.cli.swap_commands.swap_intake import candidate_miners
+    from allways.solana.pdas import BACKING_BITS
+
+    def q(m):
+        return SimpleNamespace(
+            miner=m, from_chain='tao', to_chain='sol', rate=15 * 10**17, miner_from_addr='from', miner_to_addr='to'
+        )
+
+    def state(bits):
+        return SimpleNamespace(active=True, active_backings=bits, failed_swaps=0, collateral=SOL)
+
+    client = _FakeCandClient(
+        quotes=[q('sol-lit'), q('tao-only')],
+        states={'sol-lit': state(BACKING_BITS['sol']), 'tao-only': state(BACKING_BITS['tao'])},
+    )
+    assert [c.miner for c in candidate_miners(client, 'tao', 'sol')] == ['sol-lit']
+
+
 @pytest.mark.parametrize('bad_field', ['miner_from_addr', 'miner_to_addr'])
 def test_candidate_miners_skips_bad_quote_addresses_and_keeps_next_best(bad_field):
     quotes = [
