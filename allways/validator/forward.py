@@ -174,7 +174,7 @@ def ingest_solana_events(self: Validator) -> None:
     crown cursor drives, exactly as before. A transient RPC failure re-reads the same window."""
     relay = getattr(self, 'bond_relay', None)
     if relay is not None:
-        cursor = self.state_store.get_relay_event_cursor()
+        cursor = relay.event_cursor()
         if cursor is None:
             cursor = self.state_store.get_solana_event_cursor()  # inherit position on first run
     else:
@@ -199,6 +199,6 @@ def ingest_solana_events(self: Validator) -> None:
     if relay is None:
         self.state_store.set_solana_event_cursor(new_cursor)
     elif relay_ok:
-        self.state_store.set_relay_event_cursor(new_cursor)
+        relay.set_event_cursor(new_cursor)
         self.state_store.set_solana_event_cursor(new_cursor)
     # else: a loss-relevant verdict write failed — hold BOTH cursors and re-read next step.

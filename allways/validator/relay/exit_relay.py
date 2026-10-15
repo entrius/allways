@@ -33,7 +33,7 @@ from allways.vault import codec
 # needs more than one chunk still produces identical vectors.
 MAX_BATCH = 256
 
-_CADENCE_KEY = 'fee_cadence_boundary'
+CADENCE_KEY = 'fee_cadence_boundary'
 
 
 # ─── exit sequence ───────────────────────────────────────────────────────────
@@ -155,7 +155,7 @@ def maybe_cadence_settle(relay, now: int) -> None:
     cadence = relay.cfg.fee_cadence_secs
     boundary = (now // cadence) * cadence
     try:
-        last = int(relay.store.get_relay_meta(_CADENCE_KEY) or 0)
+        last = int(relay.store.get_relay_meta(relay.meta_key(CADENCE_KEY)) or 0)
     except ValueError:
         last = 0
     if boundary <= last:
@@ -163,19 +163,19 @@ def maybe_cadence_settle(relay, now: int) -> None:
 
     entries = cadence_entries(relay, boundary)
     if not entries:
-        relay.store.set_relay_meta(_CADENCE_KEY, boundary)
+        relay.store.set_relay_meta(relay.meta_key(CADENCE_KEY), boundary)
         return
     delta = _has_delta(relay, entries)
     if delta is None:
         return  # vault unreadable — retry at the next tick, still inside this boundary
     if not delta:
         bt.logging.debug(f'relay: fee cadence boundary {boundary} has zero delta — skipping the round')
-        relay.store.set_relay_meta(_CADENCE_KEY, boundary)
+        relay.store.set_relay_meta(relay.meta_key(CADENCE_KEY), boundary)
         return
 
     if relay.read_only:
         bt.logging.info(f'relay: WOULD settle {len(entries)} fee entr(ies) at boundary {boundary} (read-only)')
-        relay.store.set_relay_meta(_CADENCE_KEY, boundary)
+        relay.store.set_relay_meta(relay.meta_key(CADENCE_KEY), boundary)
         return
     for chunk in _chunks(entries, MAX_BATCH):
         result = relay.vault.vote_collect_fees_batch(chunk)
@@ -184,7 +184,7 @@ def maybe_cadence_settle(relay, now: int) -> None:
             return  # boundary stays unmarked so the next tick retries the whole round
     bt.logging.info(f'relay: fee true-up voted for {len(entries)} miner(s) at boundary {boundary}')
     dev_signal.emit('relay_fee_cadence', boundary=boundary, entries=len(entries))
-    relay.store.set_relay_meta(_CADENCE_KEY, boundary)
+    relay.store.set_relay_meta(relay.meta_key(CADENCE_KEY), boundary)
 
 
 def cadence_entries(relay, boundary: int) -> List[Tuple[str, int]]:
