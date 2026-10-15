@@ -92,7 +92,7 @@ def serialize_subtensor(subtensor):
 
         return call
 
-    for name in ('_make_rpc_request', '_make_batch_rpc_request', 'init_runtime'):
+    for name in ('_make_rpc_request', '_make_batch_rpc_request', 'init_runtime', '_reinstantiate_substrate'):
         method = getattr(substrate, name, None)
         if callable(method):
             setattr(substrate, name, locked(method))
