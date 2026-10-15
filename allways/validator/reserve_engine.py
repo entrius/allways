@@ -38,7 +38,8 @@ from allways.eligibility import direction_eligible, quote_addresses_valid
 from allways.solana.client import contract_reject_reason, swap_key_from_tx_hash
 from allways.solana.pdas import BACKING_BITS
 from allways.utils.rate import max_from_for_to_cap
-from allways.validator.binding import hotkey_ss58, verify_binding
+from allways.validator.binding import verify_binding
+from allways.validator.market import MarketSnapshot
 from allways.validator.solana_swap_loop import attest_reject_reason, collateral_verdict_for
 
 EMPTY_SWAP_KEY = b'\x00' * 32
@@ -777,15 +778,18 @@ def rate_quote(validator, from_chain: str, to_chain: str, from_amount: int) -> R
     ``from_amount`` (source smallest-units; mirrors ``select_best_miner`` so the displayed rate ==
     the reservable rate), the runners-up for that size, and the depth behind them. Rung order
     matches the selector's ranking (most dest per source); same-rate quotes collapse to the deepest.
-    Capacities are per-rung maxima, never cumulative — a swap fills against a single miner."""
-    client = validator.solana_client
-    cfg = client.get_config()
-    bounds = bounds_from_config(cfg)
+    Capacities are per-rung maxima, never cumulative — a swap fills against a single miner.
+    Reads the market the forward step holds, so a quote is math on held data; a missing or stale
+    market (forward stalled) is read live instead."""
+    market = getattr(validator, 'market', None)
+    if market is None or market.stale(time.time()):
+        market = MarketSnapshot.read(validator.solana_client)
+    bounds = bounds_from_config(validator.solana_config_cache.config())
     min_swap, max_swap = hub_bounds(bounds, from_chain, to_chain)
     providers = getattr(validator, 'axon_assets', None) or {}
-    cands = candidate_miners(client, from_chain, to_chain, providers)
+    cands = candidate_miners(market, from_chain, to_chain, providers)
     ranked = _ranked_intakes(cands, from_chain, to_chain, from_amount, min_swap, max_swap, bounds, providers)
-    bound = list(islice(_bound_intakes(validator, ranked), RATE_LEVELS_LIMIT))
+    bound = list(islice(_bound_intakes(market.attribution, ranked), RATE_LEVELS_LIMIT))
     bq = _best_quote(*bound[0]) if bound else None
     reason = (
         '' if bq else unviable_reason(cands, from_chain, to_chain, from_amount, min_swap, max_swap, bounds, providers)
@@ -824,10 +828,10 @@ def _ranked_intakes(
     return sorted(viable, key=lambda p: (p[1].to_amount, p[0].backing == NUMERAIRE_CHAIN), reverse=True)
 
 
-def _bound_intakes(validator, ranked):
+def _bound_intakes(attribution: dict, ranked):
     """``ranked`` with each miner's hotkey; an unbound miner cannot be reserved through the seam, so it is skipped."""
     for cand, amts in ranked:
-        hotkey = _miner_hotkey_for(validator, cand.miner)
+        hotkey = attribution.get(str(cand.miner))
         if hotkey:
             yield cand, amts, hotkey
 
@@ -860,14 +864,6 @@ def _best_quote(cand: MinerCandidate, amts, hotkey: str) -> BestQuote:
         amts.to_amount,
         cand.backing,
     )
-
-
-def _miner_hotkey_for(validator, miner_pk) -> Optional[str]:
-    """Reverse a miner's Solana pubkey → its bound Bittensor hotkey (ss58) via the Binding PDA."""
-    binding = validator.solana_client.get_binding(miner_pk)
-    if binding is None:
-        return None
-    return hotkey_ss58(bytes(binding.hotkey))
 
 
 @dataclass

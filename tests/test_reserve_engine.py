@@ -15,6 +15,7 @@ import pytest
 from solders.keypair import Keypair as SolKeypair
 
 from allways.constants import MAX_FAILED_SWAPS, RATE_PRECISION
+from allways.validator.market import MarketSnapshot
 from allways.validator.reserve_engine import _best_offer, reserve_on_behalf
 from allways.validator.state_store import ValidatorStateStore
 
@@ -117,6 +118,14 @@ def test_reserve_refuses_a_fill_the_in_flight_obligations_leave_uncovered():
     client.miner_state.reserved_collateral = [10**12 - 10**9, 0]
     r, _ = _reserve(client)
     assert not r.ok and 'collateral too low' in r.reason
+
+
+def test_reserve_reads_the_chain_not_the_held_market():
+    # The held market (what /rate quotes off) knows no miner at all; a reserve still reads live.
+    client = FakeClient()
+    validator = _validator(client)
+    validator.market = MarketSnapshot(time.time(), {'MinerQuote': [], 'MinerState': [], 'BondAttestation': []}, {})
+    assert reserve_on_behalf(validator, HOTKEY, 'sol', 'btc', USER_PK, USER_PK, 'userBTCaddr', 10**9).ok
 
 
 def test_a_new_request_clears_the_pool_rejection_verdict():
