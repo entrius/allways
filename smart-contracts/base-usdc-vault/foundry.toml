@@ -1,0 +1,42 @@
+[profile.default]
+src = "src"
+test = "test"
+script = "script"
+out = "out"
+libs = ["lib"]
+solc_version = "0.8.30"
+# Base runs Cancun since Ecotone (EIP-1153 listed in specs.optimism.io/protocol/ecotone/overview.html).
+evm_version = "cancun"
+optimizer = true
+optimizer_runs = 200
+bytecode_hash = "ipfs"
+remappings = [
+    "@openzeppelin/contracts/=lib/openzeppelin-contracts/contracts/",
+    "forge-std/=lib/forge-std/src/",
+]
+fs_permissions = [{ access = "read-write", path = "./test/vectors" }]
+# Per-call gas files are written only by the isolated `gas` profile, so a plain run never overwrites them.
+gas_snapshot_emit = false
+
+[fuzz]
+runs = 1000
+seed = "0x5eed"
+
+[invariant]
+runs = 256
+depth = 500
+fail_on_revert = false
+
+[profile.ci.invariant]
+runs = 64
+depth = 200
+
+[fmt]
+line_length = 110
+
+[lint]
+lint_on_build = false
+
+[profile.gas]
+isolate = true
+gas_snapshot_emit = true

@@ -1,0 +1,11 @@
+{
+  "lockBond_first": "54000",
+  "postCollateralWithPermit": "108561",
+  "postCollateral_first": "118614",
+  "votePayLot_open": "198718",
+  "votePayLot_quorum_paid": "147276",
+  "voteSlash_open": "130045",
+  "voteSlash_quorum_pushed": "200744",
+  "voteUnlock_quorum": "72711",
+  "withdrawCollateral": "55911"
+}

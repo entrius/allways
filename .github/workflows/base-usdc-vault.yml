@@ -1,0 +1,30 @@
+name: Base USDC vault
+
+on:
+  pull_request:
+    branches: [main, test]
+    paths:
+      - "smart-contracts/base-usdc-vault/**"
+      - ".github/workflows/base-usdc-vault.yml"
+
+jobs:
+  forge:
+    runs-on: ubuntu-latest
+    defaults:
+      run:
+        working-directory: smart-contracts/base-usdc-vault
+    env:
+      FOUNDRY_PROFILE: ci
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          submodules: recursive
+
+      - uses: foundry-rs/foundry-toolchain@v1
+        with:
+          version: v1.8.5
+
+      - run: forge fmt --check
+      - run: forge build --sizes
+      # Fork tests skip themselves without BASE_SEPOLIA_RPC_URL.
+      - run: forge test
