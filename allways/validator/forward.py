@@ -90,6 +90,7 @@ async def forward(self: Validator) -> None:
     # eligibility now gates crown CANDIDACY (lane_eligible_hotkeys), so the live
     # crown needs the same strike/settle view the round scorer applies.
     live_states = live_miner_states(self.solana_client, self.metagraph)
+    self.held_states = (time.time(), live_states)  # /rate quotes off this read until it ages out
     crown_snapshot = snapshot_current_crown_holders(self, live_states=live_states)
     log_crown_winners(self.metagraph, self.block, crown_snapshot)
     dev_signal.emit('crown_snapshot', holders={f'{k[0]}-{k[1]}-{k[2]}': v for k, v in crown_snapshot.items()})

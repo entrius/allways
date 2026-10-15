@@ -1,6 +1,7 @@
 """Tests for allways.utils.rate — to_amount calculation and fee deduction math — and the
 seam's ``rate_quote`` candidates built on top of it."""
 
+import time
 from dataclasses import replace
 from decimal import Decimal
 from types import SimpleNamespace
@@ -21,7 +22,9 @@ from allways.utils.rate import (
     quantize_rate_display,
     quantize_rate_fixed,
 )
+from allways.validator import reserve_engine
 from allways.validator.binding import hotkey_ss58
+from allways.validator.market import QuoteMemo
 from allways.validator.reserve_engine import RATE_LEVELS_LIMIT, rate_quote
 
 # Chain decimals
@@ -565,10 +568,15 @@ class TestRateQuoteCandidates:
     MAX = 5_000_000_000
     SOL = 1_000_000_000
 
+    @pytest.fixture(autouse=True)
+    def cold_quote_memo(self, monkeypatch):
+        monkeypatch.setattr(reserve_engine, '_quote_memo', QuoteMemo())
+
     def _validator(self, from_chain, to_chain, rates, unbound=()):
-        """One sol-backed miner per rate, in that order; ``unbound`` indexes have no Binding PDA."""
+        """One sol-backed miner per rate, in that order: states held by the validator, quotes read by the
+        memo; ``unbound`` indexes have no attribution (no Binding PDA)."""
         miners = [SolKeypair().pubkey() for _ in rates]
-        hotkeys = {str(pk): bytes([i + 1]) * 32 for i, pk in enumerate(miners) if i not in unbound}
+        hotkeys = [hotkey_ss58(bytes([i + 1]) * 32) if i not in unbound else None for i in range(len(miners))]
         quotes = [
             SimpleNamespace(
                 miner=pk,
@@ -581,15 +589,19 @@ class TestRateQuoteCandidates:
             )
             for pk, rate in zip(miners, rates)
         ]
-        client = SimpleNamespace(
-            get_config=lambda: SimpleNamespace(min_swap_amount=self.MIN, max_swap_amount=self.MAX),
-            get_all=lambda kind: [(q.miner, q) for q in quotes],
-            get_miner_state=lambda pk: SimpleNamespace(active=True, failed_swaps=0, collateral=100 * self.SOL),
-            get_binding=lambda pk: SimpleNamespace(hotkey=hotkeys[str(pk)]) if str(pk) in hotkeys else None,
+        live_states = {
+            hk: SimpleNamespace(miner=pk, active=True, failed_swaps=0, collateral=100 * self.SOL)
+            for pk, hk in zip(miners, hotkeys)
+            if hk
+        }
+        accounts = {'MinerQuote': [(q.miner, q) for q in quotes], 'BondAttestation': []}
+        cfg = SimpleNamespace(min_swap_amount=self.MIN, max_swap_amount=self.MAX)
+        validator = SimpleNamespace(
+            solana_client=SimpleNamespace(get_all=accounts.__getitem__),
+            held_states=(time.time(), live_states),
+            solana_config_cache=SimpleNamespace(config=lambda: cfg),
         )
-        return SimpleNamespace(solana_client=client), [
-            hotkey_ss58(hotkeys[str(pk)]) if str(pk) in hotkeys else None for pk in miners
-        ]
+        return validator, hotkeys
 
     def test_candidates_follow_selector_order_capped(self):
         # 6 quotes, sol→btc for 1 SOL: most BTC first, an exact tie keeps input order, 6th cut.
