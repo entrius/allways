@@ -22,6 +22,7 @@ import json
 import logging
 import os
 import re
+import threading
 import time
 from collections import deque
 from typing import Any, Callable, Dict, List, Optional
@@ -77,6 +78,25 @@ def redact_endpoint(url: Optional[str]) -> str:
 def describe_subtensor(subtensor) -> str:
     """``str(subtensor)`` with the endpoint redacted (the SDK's own ``__str__`` prints the full URL)."""
     return f'Network: {subtensor.network}, Chain: {redact_endpoint(subtensor.chain_endpoint)}'
+
+
+def serialize_subtensor(subtensor):
+    """Serialize one Subtensor's websocket round trips and runtime changes."""
+    substrate = subtensor.substrate
+    lock = threading.RLock()
+
+    def locked(method):
+        def call(*args, **kwargs):
+            with lock:
+                return method(*args, **kwargs)
+
+        return call
+
+    for name in ('_make_rpc_request', '_make_batch_rpc_request', 'init_runtime', '_reinstantiate_substrate'):
+        method = getattr(substrate, name, None)
+        if callable(method):
+            setattr(substrate, name, locked(method))
+    return subtensor
 
 
 class _EndpointRedactor(logging.Filter):
