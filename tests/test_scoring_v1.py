@@ -3615,3 +3615,29 @@ class TestDualBackingLanes:
 
         np.testing.assert_allclose(rewards[0], CROWN_SLICE * self.LANE_POOL, atol=1e-6)
         v.state_store.close()
+
+
+def test_live_quote_rates_reads_dropped_purse_as_zero():
+    """The program keeps a quote when its purse goes dark; the reconcile must not keep crediting it."""
+    from allways.validator.scoring import RATE_PRECISION, live_quote_rates
+
+    def q(backing):
+        return SimpleNamespace(
+            miner='pk',
+            from_chain='tao',
+            to_chain='sol',
+            collateral_chain=backing,
+            rate=15 * RATE_PRECISION,
+            miner_from_addr='from',
+            miner_to_addr='to',
+        )
+
+    client = MagicMock()
+    client.get_all.return_value = [('a', q('sol')), ('b', q('tao'))]
+    tao_only = SimpleNamespace(active=True, active_backings=BACKING_BITS['tao'])
+
+    rates = live_quote_rates(client, {}, {'pk': 'hk'}, {'hk': tao_only})
+    assert rates[('hk', 'tao', 'sol', 'sol')] == 0.0
+    assert rates[('hk', 'tao', 'sol', 'tao')] > 0
+    # No state (banned / off-metagraph) is not proof of a dark purse: the rate stands.
+    assert live_quote_rates(client, {}, {'pk': 'hk'})[('hk', 'tao', 'sol', 'sol')] > 0

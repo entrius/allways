@@ -52,7 +52,7 @@ from allways.constants import (
     required_collateral,
     scoring_family,
 )
-from allways.eligibility import RecentFills, direction_eligible, is_eligible, quote_addresses_valid
+from allways.eligibility import RecentFills, backing_active, direction_eligible, is_eligible, quote_addresses_valid
 from allways.solana.pdas import BACKING_BITS
 from allways.utils.rate import is_executable_rate, min_executable_hub_leg, quantize_rate_fixed
 from allways.validator.binding import build_attribution
@@ -270,7 +270,10 @@ def live_bond_balances(
 
 
 def live_quote_rates(
-    solana_client, providers: Dict[str, object], attribution: Optional[Dict[str, str]] = None
+    solana_client,
+    providers: Dict[str, object],
+    attribution: Optional[Dict[str, str]] = None,
+    states: Optional[Dict[str, object]] = None,
 ) -> Dict[Tuple[str, str, str, str], float]:
     """``{(hotkey, from_chain, to_chain, collateral_chain): display_rate}`` for every live
     on-chain quote from a bound miner — the chain-truth side of the quote-existence
@@ -280,16 +283,22 @@ def live_quote_rates(
     rate 0, as its ingest does: the reconcile then zeroes a bad lane the ingest could not
     judge (or ingested before judging existed), and a lane already zeroed is never restored.
     Unbound miners are dropped, matching ingest: their lanes never entered the event
-    tables, so there is nothing to reconcile."""
+    tables, so there is nothing to reconcile. A quote on a purse its miner dropped (``states``,
+    by hotkey) also reads 0: the program keeps the quote, so a lost ``MinerBackingChanged``
+    would otherwise let the reconcile keep crediting a lane the miner no longer funds."""
     if attribution is None:
         attribution = build_attribution(solana_client)
+    states = states or {}
     quotes: Dict[Tuple[str, str, str, str], float] = {}
     for _pda, q in solana_client.get_all('MinerQuote'):
         hotkey = attribution.get(str(q.miner))
         if hotkey is None:
             continue
         lane = (hotkey, str(q.from_chain).lower(), str(q.to_chain).lower(), str(q.collateral_chain).lower())
-        quotes[lane] = quantize_rate_fixed(int(q.rate)) / RATE_PRECISION if quote_addresses_valid(q, providers) else 0.0
+        ms = states.get(hotkey)
+        dark = ms is not None and not backing_active(ms, lane[3])
+        live = quote_addresses_valid(q, providers) and not dark
+        quotes[lane] = quantize_rate_fixed(int(q.rate)) / RATE_PRECISION if live else 0.0
     return quotes
 
 
@@ -530,7 +539,7 @@ def calculate_miner_rewards(self: Validator, current_time: int) -> Tuple[np.ndar
     # the reconcile is a safety net, so a failed quote read never sinks the round.
     live_rates: Dict[Tuple[str, str, str, str], float] = {}
     try:
-        live_rates = live_quote_rates(self.solana_client, self.assets, attribution)
+        live_rates = live_quote_rates(self.solana_client, self.assets, attribution, live_states)
         self.event_index.reconcile_live_quotes(live_rates, now=current_time)
     except Exception as e:
         bt.logging.warning(f'quote reconcile failed, skipping this round: {e}')

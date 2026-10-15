@@ -45,6 +45,16 @@ def purse_active(hotkey: Optional[str], backing: str, recent_fills: Optional[Rec
     return hotkey in recent_fills.get(backing, ())
 
 
+def backing_active(miner_state, backing: str) -> bool:
+    """Whether this purse is lit. Mirrors the contract's reserve gate (``active_backings & bit``):
+    `active` is only the OR of the bits, so a miner that dropped one purse still reads active.
+    A pre-dual-backing state has no mask and falls back to `active`."""
+    bits = getattr(miner_state, 'active_backings', None)
+    if bits is None:
+        return bool(miner_state.active)
+    return bool(int(bits) & BACKING_BITS.get(backing, 0))
+
+
 def hub_free(miner_state, backing: str, now: int) -> bool:
     """Whether this hub's penalty-settlement window has passed. Mirrors the contract's per-hub
     ``check_entry_gates`` (v3.1 reversed the whole-miner freeze), tolerating the pre-v3.1 scalar
