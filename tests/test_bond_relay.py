@@ -568,12 +568,12 @@ def test_a_failed_verdict_write_holds_the_relay_cursor_until_it_lands(monkeypatc
     orig = store.record_relay_slash
     monkeypatch.setattr(store, 'record_relay_slash', lambda *a, **k: (_ for _ in ()).throw(RuntimeError('db down')))
     forward_mod.ingest_solana_events(validator)
-    assert store.get_relay_event_cursor() is None, 'the cursor holds while the write is failing'
+    assert relay.event_cursor() is None, 'the cursor holds while the write is failing'
     assert store.open_relay_slashes('tao') == []
 
     monkeypatch.setattr(store, 'record_relay_slash', orig)
     forward_mod.ingest_solana_events(validator)
-    assert store.get_relay_event_cursor() == 'sig1', 'once it lands, the cursor advances'
+    assert relay.event_cursor() == 'sig1', 'once it lands, the cursor advances'
     assert len(store.open_relay_slashes('tao')) == 1
 
 
@@ -756,7 +756,7 @@ def test_a_boundary_with_no_delta_is_skipped_as_pure_postage():
     relay.store.record_relay_fee(SWAP, MINER, 'tao', 5 * RAO, NOW - 10)
     exit_relay.maybe_cadence_settle(relay, NOW)
     assert not relay.vault.calls
-    assert relay.store.get_relay_meta('fee_cadence_boundary') is not None, 'and it is not retried'
+    assert relay.store.get_relay_meta('tao:fee_cadence_boundary') is not None, 'and it is not retried'
 
 
 def test_a_boundary_with_a_delta_fires_once_and_only_once():
@@ -772,7 +772,7 @@ def test_an_unreadable_vault_defers_the_round_instead_of_deciding_blind():
     relay.store.record_relay_fee(SWAP, MINER, 'tao', 5 * RAO, NOW - 10)
     exit_relay.maybe_cadence_settle(relay, NOW)
     assert not relay.vault.calls
-    assert relay.store.get_relay_meta('fee_cadence_boundary') is None, 'the boundary is retried'
+    assert relay.store.get_relay_meta('tao:fee_cadence_boundary') is None, 'the boundary is retried'
 
 
 def test_a_rejected_batch_leaves_the_boundary_open_for_the_next_tick():
@@ -781,7 +781,7 @@ def test_a_rejected_batch_leaves_the_boundary_open_for_the_next_tick():
     relay = _relay(vault=vault, fee_cadence_secs=1000)
     relay.store.record_relay_fee(SWAP, MINER, 'tao', 5 * RAO, NOW - 10)
     exit_relay.maybe_cadence_settle(relay, NOW)
-    assert relay.store.get_relay_meta('fee_cadence_boundary') is None
+    assert relay.store.get_relay_meta('tao:fee_cadence_boundary') is None
 
 
 def test_a_miner_with_no_binding_is_excluded_rather_than_breaking_the_vector():
@@ -1173,10 +1173,95 @@ def test_vault_event_poll_walks_a_long_gap_one_window_per_step():
     vault = FakeVault()
     vault.head = lambda: 1000
     relay = _relay(vault=vault)
-    relay.store.set_relay_meta('vault_event_block', 0)
+    relay.store.set_relay_meta('tao:vault_event_block', 0)
 
     relay.poll_vault_events()
     relay.poll_vault_events()
 
     assert [c for c in vault.calls if c[0] == 'poll_events'] == [('poll_events', 1, 50), ('poll_events', 51, 100)]
-    assert relay.store.get_relay_meta('vault_event_block') == '100'
+    assert relay.store.get_relay_meta('tao:vault_event_block') == '100'
+
+
+# ─── relay_meta is namespaced by backing ────────────────────────────────────
+
+
+def _hub_relay(backing, store, vault=None):
+    return BondRelay(
+        FakeSolana(miner_states={MINER: _miner_state()}),
+        vault or FakeVault(),
+        store,
+        backing=backing,
+        clock=lambda: NOW,
+        config=RelayConfig(),
+        sleep=lambda _secs: None,
+    )
+
+
+def test_two_hubs_on_one_store_keep_their_own_bookmarks():
+    store = _store()
+    tao_vault, base_vault = FakeVault(), FakeVault()
+    tao_vault.head = lambda: 1000
+    base_vault.head = lambda: 7_000_000
+    tao, base = _hub_relay('tao', store, tao_vault), _hub_relay('baseusdc', store, base_vault)
+
+    tao.poll_vault_events()
+    base.poll_vault_events()
+    assert store.get_relay_meta('tao:vault_event_block') == '1000'
+    assert store.get_relay_meta('baseusdc:vault_event_block') == '7000000', 'a Base block never lands in the TAO cursor'
+
+    exit_relay.maybe_cadence_settle(tao, NOW)
+    assert store.get_relay_meta('tao:fee_cadence_boundary') is not None
+    assert store.get_relay_meta('baseusdc:fee_cadence_boundary') is None, "one hub's fee vote leaves the other's timer"
+
+    tao.set_event_cursor('sig-tao')
+    assert base.event_cursor() is None
+
+    tao.arm_exit(MINER)
+    base._refresh_exiting([])
+    assert MINER not in base._exiting
+    assert store.relay_meta_prefix('tao:exit:') == {MINER: '1'}
+    base.arm_exit(MINER2)
+    base.disarm_exit(MINER2)
+    assert store.relay_meta_prefix('tao:exit:') == {MINER: '1'}, "disarming on one hub leaves the other's exit armed"
+
+
+def _legacy_store():
+    store = _store()
+    store.set_relay_meta('vault_event_block', '1234')
+    store.set_relay_meta('fee_cadence_boundary', '86400')
+    store.set_relay_meta('event_cursor', 'sig-old')
+    store.set_relay_meta(f'exit:{MINER}', '1')
+    store.set_relay_meta('clearing_ledger_since', '42')
+    return store
+
+
+def test_a_tao_relay_adopts_the_pre_namespace_bookmarks_once():
+    store = _legacy_store()
+    relay = _hub_relay('tao', store)
+
+    assert store.get_relay_meta('tao:vault_event_block') == '1234', 'no rescan from the head'
+    assert store.get_relay_meta('tao:fee_cadence_boundary') == '86400', 'the fee cadence survives'
+    assert relay.event_cursor() == 'sig-old'
+    assert store.relay_meta_prefix('tao:exit:') == {MINER: '1'}, 'an in-flight exit is not forgotten'
+    for old in ('vault_event_block', 'fee_cadence_boundary', 'event_cursor', f'exit:{MINER}'):
+        assert store.get_relay_meta(old) is None
+    assert store.get_relay_meta('clearing_ledger_since') == '42', "the scoring key is not the relay's to move"
+
+    store.set_relay_meta('tao:vault_event_block', '2000')
+    _hub_relay('tao', store)
+    assert store.get_relay_meta('tao:vault_event_block') == '2000', 'a second boot is a no-op'
+
+
+def test_a_half_finished_adoption_keeps_the_newer_copy():
+    store = _legacy_store()
+    store.set_relay_meta('tao:vault_event_block', '5000')  # copied, then crashed before the delete
+    _hub_relay('tao', store)
+    assert store.get_relay_meta('tao:vault_event_block') == '5000'
+    assert store.get_relay_meta('vault_event_block') is None
+
+
+def test_a_non_tao_relay_never_adopts_the_old_keys():
+    store = _legacy_store()
+    _hub_relay('baseusdc', store)
+    assert store.get_relay_meta('vault_event_block') == '1234', 'left for the TAO relay'
+    assert store.relay_meta_prefix('baseusdc:') == {}

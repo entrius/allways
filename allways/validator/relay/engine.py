@@ -53,6 +53,9 @@ _ATTRIBUTION_TTL_SECS = 300
 _VAULT_CURSOR_KEY = 'vault_event_block'
 _VAULT_POLL_MAX_BLOCKS = 50  # two substrate reads per block; keeps one step's catch-up under the stall watchdog
 _EXIT_KEY_PREFIX = 'exit:'
+_EVENT_CURSOR_KEY = 'event_cursor'
+# Unprefixed names written before relay_meta was keyed by hub; only the TAO relay ever wrote them.
+_LEGACY_META_KEYS = (_VAULT_CURSOR_KEY, exit_relay.CADENCE_KEY, _EVENT_CURSOR_KEY)
 
 
 @dataclass(frozen=True)
@@ -141,6 +144,37 @@ class BondRelay:
         # F3: cleared when a verdict ingest write fails, so the liveness heartbeat is held down
         # until the relay has caught up — the fuse must not report "live" over a lost verdict.
         self._ingest_healthy = True
+        self._adopt_legacy_meta()
+
+    # ─── relay_meta (namespaced by backing, so hubs sharing one store keep their own bookmarks) ──
+
+    def meta_key(self, name: str) -> str:
+        return f'{self.backing}:{name}'
+
+    def _adopt_legacy_meta(self) -> None:
+        """Move the TAO relay's pre-namespace bookmarks under ``tao:`` before anything reads them,
+        so an upgrade neither rescans, re-fires the fee cadence, nor forgets an armed exit."""
+        if self.backing != pdas.BACKING_CHAIN_TAO:
+            return
+        legacy = {name: self.store.get_relay_meta(name) for name in _LEGACY_META_KEYS}
+        legacy.update(
+            {f'{_EXIT_KEY_PREFIX}{miner}': v for miner, v in self.store.relay_meta_prefix(_EXIT_KEY_PREFIX).items()}
+        )
+        for name, value in legacy.items():
+            if value is None:
+                continue
+            # A copy that landed before a crash between copy and delete is newer; keep it.
+            if self.store.get_relay_meta(self.meta_key(name)) is None:
+                self.store.set_relay_meta(self.meta_key(name), value)
+            self.store.delete_relay_meta(name)
+
+    def event_cursor(self) -> Optional[str]:
+        """The relay's OWN Solana event cursor (F3), kept apart from the crown cursor so a failed
+        verdict write holds it and the window is re-read, without wedging (or being wedged by) the crown."""
+        return self.store.get_relay_meta(self.meta_key(_EVENT_CURSOR_KEY))
+
+    def set_event_cursor(self, signature: str) -> None:
+        self.store.set_relay_meta(self.meta_key(_EVENT_CURSOR_KEY), signature)
 
     # ─── attribution (Solana pubkey ↔ Bittensor hotkey, via the A5 binding) ──
 
@@ -422,19 +456,19 @@ class BondRelay:
         resolves toward doing nothing."""
         miner = str(miner)
         self._exiting.add(miner)
-        self.store.set_relay_meta(f'{_EXIT_KEY_PREFIX}{miner}', '1')
+        self.store.set_relay_meta(self.meta_key(f'{_EXIT_KEY_PREFIX}{miner}'), '1')
         bt.logging.info(f'relay: {miner[:8]} deactivated its {self.backing} purse — exit sequence armed')
 
     def disarm_exit(self, miner: str) -> None:
         miner = str(miner)
         self._exiting.discard(miner)
-        self.store.delete_relay_meta(f'{_EXIT_KEY_PREFIX}{miner}')
+        self.store.delete_relay_meta(self.meta_key(f'{_EXIT_KEY_PREFIX}{miner}'))
 
     def _refresh_exiting(self, bonded: List[str]) -> None:
         """Reload the armed exits and drop any whose purse came back. Only ever REMOVES from the
         set — see ``arm_exit`` for why the arming half can't be derived from chain."""
         try:
-            self._exiting.update(self.store.relay_meta_prefix(_EXIT_KEY_PREFIX))
+            self._exiting.update(self.store.relay_meta_prefix(self.meta_key(_EXIT_KEY_PREFIX)))
         except Exception as e:
             bt.logging.warning(f'relay: could not reload the exit set: {e}')
         for miner in list(self._exiting):
@@ -487,11 +521,11 @@ class BondRelay:
         head = self._vault_head()
         if head is None:
             return
-        cursor = self.store.get_relay_meta(_VAULT_CURSOR_KEY)
+        cursor = self.store.get_relay_meta(self.meta_key(_VAULT_CURSOR_KEY))
         if cursor is None:
             # First run: start at the head. Anything earlier is already reflected in the state
             # the reconcile pass reads, so replaying history would buy nothing.
-            self.store.set_relay_meta(_VAULT_CURSOR_KEY, head)
+            self.store.set_relay_meta(self.meta_key(_VAULT_CURSOR_KEY), head)
             return
         start = int(cursor) + 1
         if start > head:
@@ -511,7 +545,7 @@ class BondRelay:
             miner = self.miner_for(str(ev.fields.get(field)))
             if miner is not None:
                 self.mark_dirty(miner)
-        self.store.set_relay_meta(_VAULT_CURSOR_KEY, end)
+        self.store.set_relay_meta(self.meta_key(_VAULT_CURSOR_KEY), end)
 
     def _vault_head(self) -> Optional[int]:
         try:
