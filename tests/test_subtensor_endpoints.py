@@ -4,6 +4,8 @@ redact_endpoint keeps a keyed provider's key (path, query, userinfo) out of ever
 
 import json
 import logging
+import threading
+import time
 from types import SimpleNamespace
 from unittest.mock import MagicMock
 
@@ -23,6 +25,7 @@ from allways.utils.subtensor import (
     is_rate_limited,
     parse_endpoints,
     redact_endpoint,
+    serialize_subtensor,
 )
 
 KEYED = 'wss://api-bittensor-mainnet.n.dwellir.com/0123456789abcdef'
@@ -506,6 +509,31 @@ def test_a_connection_built_off_the_primary_warns_once_and_re_tries_it(fake_subt
 def test_install_is_a_no_op_without_the_retry_internals():
     plain = SimpleNamespace(_original_methods=None)
     assert PrimaryWatch.install(plain, KEYED, [FINNEY], []) is None
+
+
+def test_serialize_subtensor_prevents_overlapping_rpc_round_trips():
+    active = 0
+    peak = 0
+    guard = threading.Lock()
+
+    def rpc(_payloads):
+        nonlocal active, peak
+        with guard:
+            active += 1
+            peak = max(peak, active)
+        time.sleep(0.02)
+        with guard:
+            active -= 1
+
+    substrate = SimpleNamespace(_make_rpc_request=rpc)
+    serialize_subtensor(SimpleNamespace(substrate=substrate))
+    threads = [threading.Thread(target=substrate._make_rpc_request, args=([],)) for _ in range(2)]
+    for thread in threads:
+        thread.start()
+    for thread in threads:
+        thread.join()
+
+    assert peak == 1
 
 
 # ─── parse_endpoints ────────────────────────────────────────────────────────
