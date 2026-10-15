@@ -61,24 +61,6 @@ def _validator(client, market):
     return SimpleNamespace(solana_client=client, market=market, solana_config_cache=SimpleNamespace(config=lambda: cfg))
 
 
-def test_the_forward_read_keeps_scorings_attestations_instead_of_refetching():
-    client = RecordingClient('0.5')
-    bond = SimpleNamespace(miner=MINER, chain='tao', locked=True, effective_balance=7)
-    market = MarketSnapshot.read(client, [(MINER, bond)])
-    assert sorted(client.reads) == ['Binding', 'MinerQuote', 'MinerState']
-    assert market.get_bond_attestation(MINER, 'tao') is bond
-
-
-def test_the_forward_read_fetches_attestations_until_scoring_has():
-    # Boot before a successful scoring round: no attestations held yet, so the step reads them live
-    # rather than quoting as if no TAO-backed offer existed.
-    client = RecordingClient('0.5')
-    bond = SimpleNamespace(miner=MINER, chain='tao', locked=True, effective_balance=7)
-    client.accounts['BondAttestation'] = [(MINER, bond)]
-    market = MarketSnapshot.read(client, None)
-    assert 'BondAttestation' in client.reads and market.get_bond_attestation(MINER, 'tao') is bond
-
-
 def test_a_fresh_market_quotes_without_one_client_read():
     market = MarketSnapshot(time.time(), _accounts('0.5'), {str(MINER): HOTKEY})
     rq = rate_quote(_validator(StrictClient(), market), 'sol', 'btc', SOL)

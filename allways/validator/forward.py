@@ -91,7 +91,7 @@ async def forward(self: Validator) -> None:
     # eligibility now gates crown CANDIDACY (lane_eligible_hotkeys), so the live
     # crown needs the same strike/settle view the round scorer applies, and the seam
     # quotes off the held read until the next step (stale → it reads live itself).
-    self.market = MarketSnapshot.read(self.solana_client, self.bond_attestations)
+    self.market = MarketSnapshot.read(self.solana_client)
     live_states = live_miner_states(self.market, self.metagraph, self.market.attribution)
     crown_snapshot = snapshot_current_crown_holders(self, live_states=live_states)
     log_crown_winners(self.metagraph, self.block, crown_snapshot)

@@ -8,7 +8,7 @@ from typing import Callable, Dict, List, Optional, Tuple
 from allways.assets.alpha import Alpha
 from allways.validator.binding import build_attribution
 
-HELD_ACCOUNTS = ('MinerQuote', 'MinerState')
+HELD_ACCOUNTS = ('MinerQuote', 'MinerState', 'BondAttestation')
 MARKET_MAX_AGE_SECS = 60  # older means the forward step stalled: quote off a live read instead
 PRICE_TTL_SECS = 12
 
@@ -25,12 +25,8 @@ class MarketSnapshot:
         self._attestations = {(str(ba.miner), str(ba.chain).lower()): ba for _pda, ba in accounts['BondAttestation']}
 
     @classmethod
-    def read(cls, client, attestations=None) -> 'MarketSnapshot':
-        """``attestations``: the BondAttestation accounts scoring last read — hourly is fresh enough, since
-        reserve re-checks the purse live. None (no round has fetched them yet) reads them now."""
-        accounts = {name: client.get_all(name) for name in HELD_ACCOUNTS}
-        accounts['BondAttestation'] = client.get_all('BondAttestation') if attestations is None else attestations
-        return cls(time.time(), accounts, build_attribution(client))
+    def read(cls, client) -> 'MarketSnapshot':
+        return cls(time.time(), {name: client.get_all(name) for name in HELD_ACCOUNTS}, build_attribution(client))
 
     def stale(self, now: float) -> bool:
         return now - self.taken_at > MARKET_MAX_AGE_SECS
