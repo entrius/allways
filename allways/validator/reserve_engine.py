@@ -39,10 +39,11 @@ from allways.solana.client import contract_reject_reason, swap_key_from_tx_hash
 from allways.solana.pdas import BACKING_BITS
 from allways.utils.rate import max_from_for_to_cap
 from allways.validator.binding import verify_binding
-from allways.validator.market import MarketSnapshot
+from allways.validator.market import AlphaPriceMemo, MarketSnapshot, memo_priced
 from allways.validator.solana_swap_loop import attest_reject_reason, collateral_verdict_for
 
 EMPTY_SWAP_KEY = b'\x00' * 32
+_alpha_prices = AlphaPriceMemo()  # /rate's alpha-price memo; reserve and finalize price live
 
 
 def resolve_miner_pubkey(validator, miner_hotkey: str) -> Optional[Pubkey]:
@@ -779,14 +780,14 @@ def rate_quote(validator, from_chain: str, to_chain: str, from_amount: int) -> R
     the reservable rate), the runners-up for that size, and the depth behind them. Rung order
     matches the selector's ranking (most dest per source); same-rate quotes collapse to the deepest.
     Capacities are per-rung maxima, never cumulative — a swap fills against a single miner.
-    Reads the market the forward step holds, so a quote is math on held data; a missing or stale
-    market (forward stalled) is read live instead."""
+    Reads the market the forward step holds and prices alpha legs off a short memo, so a quote is
+    math on held data; a missing or stale market (forward stalled) is read live instead."""
     market = getattr(validator, 'market', None)
     if market is None or market.stale(time.time()):
         market = MarketSnapshot.read(validator.solana_client)
     bounds = bounds_from_config(validator.solana_config_cache.config())
     min_swap, max_swap = hub_bounds(bounds, from_chain, to_chain)
-    providers = getattr(validator, 'axon_assets', None) or {}
+    providers = memo_priced(getattr(validator, 'axon_assets', None) or {}, _alpha_prices)
     cands = candidate_miners(market, from_chain, to_chain, providers)
     ranked = _ranked_intakes(cands, from_chain, to_chain, from_amount, min_swap, max_swap, bounds, providers)
     bound = list(islice(_bound_intakes(market.attribution, ranked), RATE_LEVELS_LIMIT))
