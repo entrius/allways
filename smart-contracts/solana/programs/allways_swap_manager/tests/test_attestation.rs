@@ -1810,6 +1810,32 @@ fn test_migrate_config_carries_a_v15_generation_into_the_tao_slot() {
     assert_eq!(config_acct(&svm).vault_generation[TAO_SLOT], 5, "idempotent re-run");
 }
 
+/// Between the program upgrade and `migrate_config`, the new program must refuse the old Config
+/// rather than read it as garbage: with few validators a v16 image even parses under v17, but its
+/// stored bump lands on zero padding, so every Config seeds check fails and only the crank runs.
+#[test]
+fn test_an_unmigrated_v16_config_fails_closed_until_the_crank_runs() {
+    let (mut svm, admin, vals, _miner) = setup();
+    let live = config_acct(&svm);
+    assert_eq!(live.validators.len(), 3, "the parse-as-garbage case needs <= 3 validators");
+    // Zero-padded to the real v16 allocation (16 reserved validator slots), as on chain.
+    let mut body = v16_image(&live, 16, 0);
+    body.resize(Config::INIT_SPACE - 192, 0);
+    let mut parsed = &body[..];
+    let garbage = <Config as anchor_lang::AnchorDeserialize>::deserialize(&mut parsed).expect("parses as v17");
+    assert_ne!(garbage.bump, live.bump, "the misread bump is what fails every seeds check");
+    downgrade(&mut svm, config_pda(), &Config::DISCRIMINATOR, body);
+
+    let setter = allways_swap_manager::instruction::SetMinCollateral { amount: 7 }.data();
+    assert!(send(&mut svm, admin_ix(&admin.pubkey(), setter.clone()), &admin.pubkey(), &admin).is_err());
+    assert!(send(&mut svm, heartbeat_ix(&vals[0].pubkey()), &vals[0].pubkey(), &vals[0]).is_err());
+
+    send(&mut svm, migrate_config_ix(&admin.pubkey()), &admin.pubkey(), &admin).expect("the crank still runs");
+    send(&mut svm, admin_ix(&admin.pubkey(), setter), &admin.pubkey(), &admin).expect("live again");
+    beat_heartbeat(&mut svm, &vals);
+    assert_eq!(config_acct(&svm).last_attest_heartbeat[TAO_SLOT], now_ts(&svm));
+}
+
 /// v16 -> v17 on a byte image of the deployed layout: every field survives, the global fuse and
 /// generation land in the TAO slot only, and the Base hub arrives closed.
 #[test]
