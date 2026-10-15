@@ -184,7 +184,7 @@ class Validator(BaseValidatorNeuron):
             providers=self.assets,
             quote_reader=self.solana_client.get_quote,
         )
-        # The forward step's latest live miner states (HeldStates); /rate quotes off them while fresh.
+        # The forward step's latest (taken_at, live_states); /rate quotes off them while fresh.
         self.held_states = None
 
         # Forces one scoring pass per fresh process so a mid-window restart

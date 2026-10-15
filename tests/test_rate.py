@@ -24,7 +24,7 @@ from allways.utils.rate import (
 )
 from allways.validator import reserve_engine
 from allways.validator.binding import hotkey_ss58
-from allways.validator.market import HeldStates, QuoteMemo
+from allways.validator.market import QuoteMemo
 from allways.validator.reserve_engine import RATE_LEVELS_LIMIT, rate_quote
 
 # Chain decimals
@@ -598,7 +598,7 @@ class TestRateQuoteCandidates:
         cfg = SimpleNamespace(min_swap_amount=self.MIN, max_swap_amount=self.MAX)
         validator = SimpleNamespace(
             solana_client=SimpleNamespace(get_all=accounts.__getitem__),
-            held_states=HeldStates(time.time(), live_states),
+            held_states=(time.time(), live_states),
             solana_config_cache=SimpleNamespace(config=lambda: cfg),
         )
         return validator, hotkeys

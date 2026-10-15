@@ -1,6 +1,5 @@
-"""What ``/rate`` reads instead of the chain: the live miner states the forward step already computes, plus
-memos of quotes, bond attestations and alpha prices read only when a quote asks. Reserve, confirm and finalize
-read live."""
+# What /rate reads instead of the chain: forward's live miner states plus memos of quotes, bond attestations
+# and alpha prices that are read only when a quote asks. Reserve, confirm and finalize read live.
 
 import threading
 import time
@@ -12,25 +11,8 @@ MARKET_TTL_SECS = 60  # how long /rate trusts a read: forward's held states and 
 PRICE_TTL_SECS = 12
 
 
-class HeldStates:
-    """Forward's ``live_states`` (bound, on-metagraph ``{hotkey: MinerState}``), time-stamped and re-keyed by
-    miner pubkey for a quote. Its hotkeys ARE the verified attribution (``live_miner_states`` binds them)."""
-
-    def __init__(self, taken_at: float, live_states: Dict[str, object]):
-        self.taken_at = taken_at
-        self.attribution = {str(ms.miner): hotkey for hotkey, ms in live_states.items()}
-        self._by_miner = {str(ms.miner): ms for ms in live_states.values()}
-
-    def stale(self, now: float) -> bool:
-        return now - self.taken_at > MARKET_TTL_SECS
-
-    def get_miner_state(self, miner):
-        return self._by_miner.get(str(miner))
-
-
 class QuoteMemo:
-    """MinerQuote and BondAttestation accounts, read when a quote asks and held ``MARKET_TTL_SECS``. One read
-    at a time: the thread that finds the memo cold reads while the rest wait for its answer."""
+    # One read at a time: the thread that finds the memo cold reads while the rest wait for its answer.
 
     def __init__(self, clock: Callable[[], float] = time.time):
         self._clock = clock
@@ -52,13 +34,17 @@ class QuoteMemo:
 
 
 class Market:
-    """The reader ``swap_intake`` quotes off: held states with memoed quotes and attestations."""
+    # The reader swap_intake quotes off. ``live_states`` is forward's bound, on-metagraph {hotkey: MinerState}:
+    # its hotkeys are the verified attribution, so no Binding read is needed.
 
     def __init__(
-        self, states: HeldStates, quotes: List[Tuple[str, object]], attestations: Dict[Tuple[str, str], object]
+        self,
+        live_states: Dict[str, object],
+        quotes: List[Tuple[str, object]],
+        attestations: Dict[Tuple[str, str], object],
     ):
-        self.attribution = states.attribution
-        self._states = states
+        self.attribution = {str(ms.miner): hotkey for hotkey, ms in live_states.items()}
+        self._states = {str(ms.miner): ms for ms in live_states.values()}
         self._quotes = quotes
         self._attestations = attestations
 
@@ -68,15 +54,14 @@ class Market:
         return self._quotes
 
     def get_miner_state(self, miner):
-        return self._states.get_miner_state(miner)
+        return self._states.get(str(miner))
 
     def get_bond_attestation(self, miner, chain: str = 'tao'):
         return self._attestations.get((str(miner), chain))
 
 
 class AlphaPriceMemo:
-    """Rao per whole alpha, per netuid, held ``PRICE_TTL_SECS``. One read at a time: the thread that finds
-    the memo cold reads while the rest wait for its answer."""
+    # Rao per whole alpha, per netuid. Single-flight like QuoteMemo.
 
     def __init__(self, clock: Callable[[], float] = time.time):
         self._clock = clock
@@ -94,7 +79,7 @@ class AlphaPriceMemo:
 
 
 class MemoPricedAlpha:
-    """``alpha`` with ``value_rao`` at head served off the memo; a dated read, and everything else, pass through."""
+    # value_rao at head comes off the memo; a dated read, and everything else, pass through to the alpha.
 
     def __init__(self, alpha: Alpha, memo: AlphaPriceMemo):
         self._alpha = alpha
@@ -110,5 +95,5 @@ class MemoPricedAlpha:
 
 
 def memo_priced(providers: Dict[str, object], memo: AlphaPriceMemo) -> Dict[str, object]:
-    """``providers`` with every alpha wrapped for the memo; the shared objects themselves are untouched."""
+    # Wraps each alpha for the memo; the shared provider objects themselves are untouched.
     return {chain: MemoPricedAlpha(p, memo) if isinstance(p, Alpha) else p for chain, p in providers.items()}

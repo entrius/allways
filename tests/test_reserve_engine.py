@@ -15,7 +15,6 @@ import pytest
 from solders.keypair import Keypair as SolKeypair
 
 from allways.constants import MAX_FAILED_SWAPS, RATE_PRECISION
-from allways.validator.market import HeldStates
 from allways.validator.reserve_engine import _best_offer, reserve_on_behalf
 from allways.validator.state_store import ValidatorStateStore
 
@@ -124,7 +123,7 @@ def test_reserve_reads_the_chain_not_the_held_states():
     # The held states (what /rate quotes off) know no miner at all; a reserve still reads live.
     client = FakeClient()
     validator = _validator(client)
-    validator.held_states = HeldStates(time.time(), {})
+    validator.held_states = (time.time(), {})
     assert reserve_on_behalf(validator, HOTKEY, 'sol', 'btc', USER_PK, USER_PK, 'userBTCaddr', 10**9).ok
 
 

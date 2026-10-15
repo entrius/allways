@@ -18,7 +18,6 @@ from allways.validator.market import (
     MARKET_TTL_SECS,
     PRICE_TTL_SECS,
     AlphaPriceMemo,
-    HeldStates,
     QuoteMemo,
     memo_priced,
 )
@@ -81,7 +80,7 @@ def quote_memo(monkeypatch):
 
 def test_held_states_and_a_warm_memo_quote_without_one_client_read(quote_memo):
     quote_memo.accounts(RecordingClient([(MINER, _quote('0.5'))]))  # warm
-    rq = rate_quote(_validator(StrictClient(), HeldStates(time.time(), {HOTKEY: _state()})), 'sol', 'btc', SOL)
+    rq = rate_quote(_validator(StrictClient(), (time.time(), {HOTKEY: _state()})), 'sol', 'btc', SOL)
     assert rq.quote.miner_hotkey == HOTKEY and rq.quote.rate_display == '0.5'
 
 
@@ -112,7 +111,7 @@ def test_the_quote_memo_reads_once_per_ttl_across_threads():
 def test_stale_held_states_are_read_live_with_forwards_own_filter(quote_memo, monkeypatch):
     # The live path is forward's: bound + on-metagraph only, so an off-metagraph miner's quote drops there too.
     monkeypatch.setattr(scoring, 'build_attribution', lambda client: {str(MINER): HOTKEY})
-    stale = HeldStates(time.time() - MARKET_TTL_SECS - 1, {HOTKEY: _state()})
+    stale = (time.time() - MARKET_TTL_SECS - 1, {HOTKEY: _state()})
     client = RecordingClient([(MINER, _quote('0.5'))], states=[(MINER, _state())])
     rq = rate_quote(_validator(client, stale, hotkeys=()), 'sol', 'btc', SOL)
     assert 'MinerState' in client.reads and rq.reason == 'no miner offers this direction'
@@ -122,7 +121,7 @@ def test_stale_held_states_are_read_live_with_forwards_own_filter(quote_memo, mo
 
 def test_a_miner_off_the_held_states_is_not_quoted(quote_memo):
     quote_memo.accounts(RecordingClient([(MINER, _quote('0.5'))]))
-    rq = rate_quote(_validator(StrictClient(), HeldStates(time.time(), {})), 'sol', 'btc', SOL)
+    rq = rate_quote(_validator(StrictClient(), (time.time(), {})), 'sol', 'btc', SOL)
     assert rq.quote is None and rq.reason == 'no miner offers this direction'
 
 
@@ -163,7 +162,7 @@ def test_rate_quote_prices_alpha_legs_off_the_shared_memo(quote_memo, monkeypatc
     alpha_quote = _quote('2', 'sn7', 'tao', bt.Keypair.create_from_seed('0x' + '11' * 32).ss58_address)
     bond = SimpleNamespace(miner=MINER, chain='tao', locked=True, effective_balance=10**13)
     quote_memo.accounts(RecordingClient([(MINER, alpha_quote)], [(MINER, bond)]))
-    held = HeldStates(time.time(), {HOTKEY: _state(collateral=0, active_backings=0b11)})
+    held = (time.time(), {HOTKEY: _state(collateral=0, active_backings=0b11)})
     validator = _validator(StrictClient(), held)
     validator.axon_assets = {'sn7': alpha}
 
