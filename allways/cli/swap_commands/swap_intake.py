@@ -372,20 +372,59 @@ def max_intake_from_amount(
     if leg is None:
         return 0
     if leg != candidate.backing:
-        whole = 10 ** get_chain_def(leg).decimals
-        try:
-            rao_per_whole = (providers or {})[leg].value_rao(whole)
-        except (KeyError, ProviderUnreachableError):
+        priced = _declared_leg_price(leg, providers)
+        if priced is None:
             return 0
-        if rao_per_whole <= 0:
-            return 0
+        whole, rao_per_whole = priced
         cap = cap * whole // rao_per_whole  # the TAO cap in the declared leg's own units
     if leg == from_chain:
         return cap  # the bounded leg IS the source
+    return _source_for_dest(cap, candidate.rate_display, from_chain, to_chain)
+
+
+def min_intake_from_amount(
+    candidate: MinerCandidate,
+    from_chain: str,
+    to_chain: str,
+    min_swap: int,
+    max_swap: int,
+    bounds_by_backing: Optional[BoundsByBacking] = None,
+    providers=None,
+) -> int:
+    """Smallest source amount (smallest units) this candidate's backing floor admits — the other end of
+    ``max_intake_from_amount``, meaningful for a candidate that can fill. 0 when the floor is unset or a
+    declared alpha leg is unpriceable. Rounds up, so the amount passes the gate and its predecessor fails."""
+    lo, _ = _bounds_for(candidate.backing, bounds_by_backing, min_swap, max_swap)
+    leg = collateral_leg(candidate.backing, from_chain, to_chain)
+    if lo <= 0 or leg is None:
+        return 0
+    if leg != candidate.backing:
+        priced = _declared_leg_price(leg, providers)
+        if priced is None:
+            return 0
+        whole, rao_per_whole = priced
+        lo = -(-lo * whole // rao_per_whole)  # the smallest declared leg whose TAO value reaches the floor
+    if leg == from_chain:
+        return lo
+    return _source_for_dest(lo - 1, candidate.rate_display, from_chain, to_chain) + 1  # one past the last short source
+
+
+def _declared_leg_price(leg: str, providers) -> Optional[Tuple[int, int]]:
+    """(one whole unit of a declared alpha leg, its rao value at head); None when unpriceable."""
+    whole = 10 ** get_chain_def(leg).decimals
+    try:
+        rao_per_whole = (providers or {})[leg].value_rao(whole)
+    except (KeyError, ProviderUnreachableError):
+        return None
+    return (whole, rao_per_whole) if rao_per_whole > 0 else None
+
+
+def _source_for_dest(to_amount: int, rate_display: str, from_chain: str, to_chain: str) -> int:
+    """Largest source whose dest leg stays <= ``to_amount`` at this rate — ``max_from_for_to_cap`` on the pair's decimals."""
     canon_from, canon_to = canonical_pair(from_chain, to_chain)
     return max_from_for_to_cap(
-        cap,
-        candidate.rate_display,
+        to_amount,
+        rate_display,
         from_chain != canon_from,
         get_chain_def(canon_to).decimals,
         get_chain_def(canon_from).decimals,

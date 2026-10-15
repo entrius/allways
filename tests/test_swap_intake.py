@@ -14,6 +14,7 @@ from allways.cli.swap_commands.swap_intake import (
     candidate_miners,
     compute_intake_amounts,
     max_intake_from_amount,
+    min_intake_from_amount,
     rate_display_from_fixed,
     required_collateral,
     select_best_miner,
@@ -370,6 +371,27 @@ def test_max_intake_prices_a_declared_alpha_leg():
     bounds = {'tao': (SOL // 10, 10 * SOL)}
     assert max_intake_from_amount(cand, 'sn7', 'avax', 0, 0, bounds, {'sn7': sn7}) == 100 * SOL
     assert max_intake_from_amount(cand, 'sn7', 'avax', 0, 0, bounds) == 0  # unpriceable
+
+
+# ---- min_intake_from_amount: the floor behind a rate, in source units ----
+TAO_BOUNDS = {'tao': (SOL // 10, 10 * SOL)}  # 0.1–10 TAO, in rao
+SN7_PRICED = {'sn7': SimpleNamespace(value_rao=lambda amount: amount // 100)}  # 0.01 TAO per sn7
+
+
+@pytest.mark.parametrize(
+    'from_chain, to_chain, rate, floor',
+    [
+        ('sol', 'sn7', '100', SOL // 10),  # alpha dest, forward: 0.1 TAO = 10 sn7 = 0.1 SOL
+        ('cro', 'sn7', '0.5', 5 * 10**18),  # alpha dest, reverse: 10 sn7 at 0.5 CRO per sn7 = 5 CRO
+        ('sn7', 'sol', '100', 10 * SOL),  # alpha source: the 10 sn7 leg itself
+    ],
+)
+def test_min_intake_prices_a_declared_alpha_leg_to_the_exact_floor(from_chain, to_chain, rate, floor):
+    cand = MinerCandidate(miner='m', rate_display=rate, collateral=100 * SOL, backing='tao')
+    assert min_intake_from_amount(cand, from_chain, to_chain, 0, 0, TAO_BOUNDS, SN7_PRICED) == floor
+    assert viable_intakes([cand], from_chain, to_chain, floor, 0, 0, TAO_BOUNDS, SN7_PRICED)
+    assert viable_intakes([cand], from_chain, to_chain, floor - 1, 0, 0, TAO_BOUNDS, SN7_PRICED) == []
+    assert min_intake_from_amount(cand, from_chain, to_chain, 0, 0, TAO_BOUNDS) == 0  # unpriceable
 
 
 def test_max_intake_spoke_source_respects_max_swap():
