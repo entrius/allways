@@ -247,19 +247,16 @@ def live_miner_states(solana_client, metagraph, attribution: Optional[Dict[str, 
     return states
 
 
-def live_bond_balances(
-    solana_client, metagraph, attribution: Optional[Dict[str, str]] = None, chain: str = 'tao'
-) -> Dict[str, int]:
+def live_bond_balances(attestations, metagraph, attribution: Dict[str, str], chain: str = 'tao') -> Dict[str, int]:
     """``{hotkey: effective bond collateral}`` for bound, on-metagraph miners with a
     ``BondAttestation`` on ``chain`` — the tao purse's live-read backstop, the sibling of
     ``live_miner_states``' ``ms.collateral`` for the sol purse. An unlocked bond backs
-    nothing → 0, matching the ``BondAttested`` ingest. One ``get_all`` per round; feeds
-    ``reconcile_live_state`` so a lost/pruned tao anchor self-heals like the sol one."""
-    if attribution is None:
-        attribution = build_attribution(solana_client)
+    nothing → 0, matching the ``BondAttested`` ingest. ``attestations`` is the round's one
+    ``get_all('BondAttestation')``; feeds ``reconcile_live_state`` so a lost/pruned tao anchor
+    self-heals like the sol one."""
     metagraph_hotkeys = set(metagraph.hotkeys)
     bonds: Dict[str, int] = {}
-    for _pubkey, ba in solana_client.get_all('BondAttestation'):
+    for _pubkey, ba in attestations:
         if str(ba.chain).lower() != chain:
             continue
         hotkey = attribution.get(str(ba.miner))
@@ -527,7 +524,9 @@ def calculate_miner_rewards(self: Validator, current_time: int) -> Tuple[np.ndar
     live_states = live_miner_states(self.solana_client, self.metagraph, attribution)
     # The tao bond has no live field on MinerState, so read the attestations too — else a
     # lost/pruned tao anchor leaves the purse stuck at 0 and drops the miner off every tao crown.
-    live_bonds = live_bond_balances(self.solana_client, self.metagraph, attribution)
+    # Kept for /rate's market: hourly is fresh enough there, since reserve re-checks the purse live.
+    self.bond_attestations = self.solana_client.get_all('BondAttestation')
+    live_bonds = live_bond_balances(self.bond_attestations, self.metagraph, attribution)
     self.event_index.reconcile_live_state(live_states, now=current_time, live_bonds=live_bonds)
     unbanned_states = without_address_banned(self.state_store, live_states, current_time)
     if len(unbanned_states) < len(live_states):
