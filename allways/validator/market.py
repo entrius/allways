@@ -27,7 +27,7 @@ class MarketSnapshot:
     @classmethod
     def read(cls, client, attestations=None) -> 'MarketSnapshot':
         """``attestations``: the BondAttestation accounts scoring last read — hourly is fresh enough, since
-        reserve re-checks the purse live. None reads them now."""
+        reserve re-checks the purse live. None (no round has fetched them yet) reads them now."""
         accounts = {name: client.get_all(name) for name in HELD_ACCOUNTS}
         accounts['BondAttestation'] = client.get_all('BondAttestation') if attestations is None else attestations
         return cls(time.time(), accounts, build_attribution(client))

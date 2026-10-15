@@ -185,9 +185,9 @@ class Validator(BaseValidatorNeuron):
             quote_reader=self.solana_client.get_quote,
         )
         # The market as the last forward step read it (MarketSnapshot); /rate quotes off it. Its bond
-        # attestations come from the last scoring round (the first runs on the first step).
+        # attestations come from the last scoring round; None = none yet, so the step reads them live.
         self.market = None
-        self.bond_attestations: list = []
+        self.bond_attestations = None
 
         # Forces one scoring pass per fresh process so a mid-window restart
         # doesn't leave self.scores stale until the next scoring boundary
