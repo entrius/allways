@@ -12,7 +12,7 @@ from allways import dev_signal
 from allways.utils.logging import log_crown_winners
 from allways.validator.binding import build_attribution
 from allways.validator.floor_sweep import maybe_sweep_floor
-from allways.validator.market import MarketSnapshot
+from allways.validator.market import HeldStates
 from allways.validator.relay.engine import maybe_relay
 from allways.validator.relay.wiring import ensure_bond_relay
 from allways.validator.reserve_engine import crank
@@ -87,12 +87,11 @@ async def forward(self: Validator) -> None:
     # never propagates into the forward loop. Reads "now" on the unix-time axis,
     # matching the scoring window. No halt check here (that RPC is the expensive
     # one); halt-aware clearing happens once per round in `_flush_halt_window`.
-    # One market read per step, shared by the crown snapshot, the score tip and /rate:
+    # One MinerState read per step, shared by the crown snapshot and the score tip:
     # eligibility now gates crown CANDIDACY (lane_eligible_hotkeys), so the live
-    # crown needs the same strike/settle view the round scorer applies, and the seam
-    # quotes off the held read until the next step (stale → it reads live itself).
-    self.market = MarketSnapshot.read(self.solana_client)
-    live_states = live_miner_states(self.market, self.metagraph, self.market.attribution)
+    # crown needs the same strike/settle view the round scorer applies.
+    live_states = live_miner_states(self.solana_client, self.metagraph)
+    self.held_states = HeldStates(time.time(), live_states)  # /rate quotes off this read until it ages out
     crown_snapshot = snapshot_current_crown_holders(self, live_states=live_states)
     log_crown_winners(self.metagraph, self.block, crown_snapshot)
     dev_signal.emit('crown_snapshot', holders={f'{k[0]}-{k[1]}-{k[2]}': v for k, v in crown_snapshot.items()})

@@ -1,41 +1,74 @@
-"""What ``/rate`` reads instead of the chain: the market as the forward step last saw it, plus a short
-alpha-price memo. A quote is then math on held data; reserve, confirm and finalize keep reading live."""
+"""What ``/rate`` reads instead of the chain: the live miner states the forward step already computes, plus
+memos of quotes, bond attestations and alpha prices read only when a quote asks. Reserve, confirm and finalize
+read live."""
 
 import threading
 import time
 from typing import Callable, Dict, List, Optional, Tuple
 
 from allways.assets.alpha import Alpha
-from allways.validator.binding import build_attribution
 
-HELD_ACCOUNTS = ('MinerQuote', 'MinerState', 'BondAttestation')
-MARKET_MAX_AGE_SECS = 60  # older means the forward step stalled: quote off a live read instead
+MARKET_TTL_SECS = 60  # how long /rate trusts a read: forward's held states and its own quote memo alike
 PRICE_TTL_SECS = 12
 
 
-class MarketSnapshot:
-    """One read of every quote, miner state and bond attestation, with the verified pubkey→hotkey
-    attribution. Immutable; answers the reader calls ``swap_intake`` makes on the Solana client."""
+class HeldStates:
+    """Forward's ``live_states`` (bound, on-metagraph ``{hotkey: MinerState}``), time-stamped and re-keyed by
+    miner pubkey for a quote. Its hotkeys ARE the verified attribution (``live_miner_states`` binds them)."""
 
-    def __init__(self, taken_at: float, accounts: Dict[str, List[Tuple[str, object]]], attribution: Dict[str, str]):
+    def __init__(self, taken_at: float, live_states: Dict[str, object]):
         self.taken_at = taken_at
-        self.attribution = attribution
-        self._accounts = accounts
-        self._states = {str(ms.miner): ms for _pda, ms in accounts['MinerState']}
-        self._attestations = {(str(ba.miner), str(ba.chain).lower()): ba for _pda, ba in accounts['BondAttestation']}
-
-    @classmethod
-    def read(cls, client) -> 'MarketSnapshot':
-        return cls(time.time(), {name: client.get_all(name) for name in HELD_ACCOUNTS}, build_attribution(client))
+        self.attribution = {str(ms.miner): hotkey for hotkey, ms in live_states.items()}
+        self._by_miner = {str(ms.miner): ms for ms in live_states.values()}
 
     def stale(self, now: float) -> bool:
-        return now - self.taken_at > MARKET_MAX_AGE_SECS
-
-    def get_all(self, name: str) -> List[Tuple[str, object]]:
-        return self._accounts[name]
+        return now - self.taken_at > MARKET_TTL_SECS
 
     def get_miner_state(self, miner):
-        return self._states.get(str(miner))
+        return self._by_miner.get(str(miner))
+
+
+class QuoteMemo:
+    """MinerQuote and BondAttestation accounts, read when a quote asks and held ``MARKET_TTL_SECS``. One read
+    at a time: the thread that finds the memo cold reads while the rest wait for its answer."""
+
+    def __init__(self, clock: Callable[[], float] = time.time):
+        self._clock = clock
+        self._lock = threading.Lock()
+        self._read_at: Optional[float] = None
+        self._quotes: List[Tuple[str, object]] = []
+        self._attestations: Dict[Tuple[str, str], object] = {}
+
+    def accounts(self, client) -> Tuple[List[Tuple[str, object]], Dict[Tuple[str, str], object]]:
+        with self._lock:
+            now = self._clock()
+            if self._read_at is None or now - self._read_at >= MARKET_TTL_SECS:
+                quotes = client.get_all('MinerQuote')  # a failed read memoizes nothing
+                attestations = client.get_all('BondAttestation')
+                self._quotes = quotes
+                self._attestations = {(str(ba.miner), str(ba.chain).lower()): ba for _pda, ba in attestations}
+                self._read_at = now
+            return self._quotes, self._attestations
+
+
+class Market:
+    """The reader ``swap_intake`` quotes off: held states with memoed quotes and attestations."""
+
+    def __init__(
+        self, states: HeldStates, quotes: List[Tuple[str, object]], attestations: Dict[Tuple[str, str], object]
+    ):
+        self.attribution = states.attribution
+        self._states = states
+        self._quotes = quotes
+        self._attestations = attestations
+
+    def get_all(self, name: str) -> List[Tuple[str, object]]:
+        if name != 'MinerQuote':
+            raise KeyError(name)
+        return self._quotes
+
+    def get_miner_state(self, miner):
+        return self._states.get_miner_state(miner)
 
     def get_bond_attestation(self, miner, chain: str = 'tao'):
         return self._attestations.get((str(miner), chain))

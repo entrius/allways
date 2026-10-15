@@ -22,8 +22,9 @@ from allways.utils.rate import (
     quantize_rate_display,
     quantize_rate_fixed,
 )
+from allways.validator import reserve_engine
 from allways.validator.binding import hotkey_ss58
-from allways.validator.market import MarketSnapshot
+from allways.validator.market import HeldStates, QuoteMemo
 from allways.validator.reserve_engine import RATE_LEVELS_LIMIT, rate_quote
 
 # Chain decimals
@@ -567,9 +568,13 @@ class TestRateQuoteCandidates:
     MAX = 5_000_000_000
     SOL = 1_000_000_000
 
+    @pytest.fixture(autouse=True)
+    def cold_quote_memo(self, monkeypatch):
+        monkeypatch.setattr(reserve_engine, '_quote_memo', QuoteMemo())
+
     def _validator(self, from_chain, to_chain, rates, unbound=()):
-        """One sol-backed miner per rate, in that order, held in the validator's market; ``unbound``
-        indexes have no attribution (no Binding PDA)."""
+        """One sol-backed miner per rate, in that order: states held by the validator, quotes read by the
+        memo; ``unbound`` indexes have no attribution (no Binding PDA)."""
         miners = [SolKeypair().pubkey() for _ in rates]
         hotkeys = [hotkey_ss58(bytes([i + 1]) * 32) if i not in unbound else None for i in range(len(miners))]
         quotes = [
@@ -584,18 +589,16 @@ class TestRateQuoteCandidates:
             )
             for pk, rate in zip(miners, rates)
         ]
-        accounts = {
-            'MinerQuote': [(q.miner, q) for q in quotes],
-            'MinerState': [
-                (pk, SimpleNamespace(miner=pk, active=True, failed_swaps=0, collateral=100 * self.SOL)) for pk in miners
-            ],
-            'BondAttestation': [],
+        live_states = {
+            hk: SimpleNamespace(miner=pk, active=True, failed_swaps=0, collateral=100 * self.SOL)
+            for pk, hk in zip(miners, hotkeys)
+            if hk
         }
-        attribution = {str(pk): hk for pk, hk in zip(miners, hotkeys) if hk}
+        accounts = {'MinerQuote': [(q.miner, q) for q in quotes], 'BondAttestation': []}
         cfg = SimpleNamespace(min_swap_amount=self.MIN, max_swap_amount=self.MAX)
         validator = SimpleNamespace(
-            solana_client=None,  # a fresh market is held: nothing here is read
-            market=MarketSnapshot(time.time(), accounts, attribution),
+            solana_client=SimpleNamespace(get_all=accounts.__getitem__),
+            held_states=HeldStates(time.time(), live_states),
             solana_config_cache=SimpleNamespace(config=lambda: cfg),
         )
         return validator, hotkeys
@@ -620,7 +623,7 @@ class TestRateQuoteCandidates:
     @pytest.mark.parametrize('bad_field', ['miner_from_addr', 'miner_to_addr'])
     def test_bad_best_address_is_absent_from_quote_levels_depth_and_candidates(self, bad_field):
         validator, hotkeys = self._validator('sol', 'btc', ['0.6', '0.5'])
-        quotes = [q for _key, q in validator.market.get_all('MinerQuote')]
+        quotes = [q for _key, q in validator.solana_client.get_all('MinerQuote')]
         for index, quote in enumerate(quotes):
             quote.miner_from_addr = f'from-{index}'
             quote.miner_to_addr = f'to-{index}'
@@ -637,7 +640,7 @@ class TestRateQuoteCandidates:
 
     def test_all_bad_addresses_leave_a_truthful_empty_rate(self):
         validator, _ = self._validator('sol', 'btc', ['0.6'])
-        quote = validator.market.get_all('MinerQuote')[0][1]
+        quote = validator.solana_client.get_all('MinerQuote')[0][1]
         quote.miner_from_addr = 'bad'
         quote.miner_to_addr = 'valid'
         provider = SimpleNamespace(chain=SimpleNamespace(is_valid_address=lambda address: address != 'bad'))

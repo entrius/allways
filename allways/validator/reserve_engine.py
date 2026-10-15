@@ -39,11 +39,14 @@ from allways.solana.client import contract_reject_reason, swap_key_from_tx_hash
 from allways.solana.pdas import BACKING_BITS
 from allways.utils.rate import max_from_for_to_cap
 from allways.validator.binding import verify_binding
-from allways.validator.market import AlphaPriceMemo, MarketSnapshot, memo_priced
+from allways.validator.market import AlphaPriceMemo, HeldStates, Market, QuoteMemo, memo_priced
+from allways.validator.scoring import live_miner_states
 from allways.validator.solana_swap_loop import attest_reject_reason, collateral_verdict_for
 
 EMPTY_SWAP_KEY = b'\x00' * 32
-_alpha_prices = AlphaPriceMemo()  # /rate's alpha-price memo; reserve and finalize price live
+# /rate's memos; reserve and finalize read live.
+_alpha_prices = AlphaPriceMemo()
+_quote_memo = QuoteMemo()
 
 
 def resolve_miner_pubkey(validator, miner_hotkey: str) -> Optional[Pubkey]:
@@ -780,11 +783,9 @@ def rate_quote(validator, from_chain: str, to_chain: str, from_amount: int) -> R
     the reservable rate), the runners-up for that size, and the depth behind them. Rung order
     matches the selector's ranking (most dest per source); same-rate quotes collapse to the deepest.
     Capacities are per-rung maxima, never cumulative — a swap fills against a single miner.
-    Reads the market the forward step holds and prices alpha legs off a short memo, so a quote is
-    math on held data; a missing or stale market (forward stalled) is read live instead."""
-    market = getattr(validator, 'market', None)
-    if market is None or market.stale(time.time()):
-        market = MarketSnapshot.read(validator.solana_client)
+    Reads the miner states the forward step holds and memoed quotes, attestations and alpha prices, so
+    a quote is mostly math on held data; states gone stale (forward stalled) are read live instead."""
+    market = _quote_market(validator)
     bounds = bounds_from_config(validator.solana_config_cache.config())
     min_swap, max_swap = hub_bounds(bounds, from_chain, to_chain)
     providers = memo_priced(getattr(validator, 'axon_assets', None) or {}, _alpha_prices)
@@ -818,6 +819,15 @@ def rate_quote(validator, from_chain: str, to_chain: str, from_amount: int) -> R
     ]
     min_from = _min_from_amount(min_swap, best_first[0][0] if best_first else None, from_chain, to_chain)
     return RateQuote(bq, reason, levels, max(depth.values(), default=0), min_from, candidates)
+
+
+def _quote_market(validator) -> Market:
+    """Forward's held states while fresh (else the same read, now) with the memoed quotes and attestations."""
+    client = validator.solana_client
+    states = validator.held_states
+    if states is None or states.stale(time.time()):
+        states = HeldStates(time.time(), live_miner_states(client, validator.metagraph))
+    return Market(states, *_quote_memo.accounts(client))
 
 
 def _ranked_intakes(
