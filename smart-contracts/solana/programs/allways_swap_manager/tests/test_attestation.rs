@@ -52,10 +52,6 @@ const FROM_TX_BLOCK: u32 = 800_000;
 const LOTTERY_USER: Pubkey = Pubkey::new_from_array([7u8; 32]);
 const TAO: &str = "tao";
 const SOL: &str = "sol";
-const BASEUSDC: &str = "baseusdc";
-/// The TAO hub's index in Config's per-hub arrays (its backing bit's position).
-const TAO_SLOT: usize = 1;
-const BASE_SLOT: usize = 2;
 
 // Hub↔hub pair: "sol" backing binds to from_amount, "tao" backing to to_amount.
 const HUB_FROM: &str = "sol";
@@ -644,7 +640,7 @@ fn set_tao_busy_until(svm: &mut LiteSVM, miner: &Pubkey, until: i64) {
 /// clock forward, which would also expire the live reservation under test.
 fn stale_heartbeat(svm: &mut LiteSVM) {
     let mut cfg = config_acct(svm);
-    cfg.last_attest_heartbeat[TAO_SLOT] = now_ts(svm) - cfg.attest_max_age_secs[TAO_SLOT] - 1;
+    cfg.last_attest_heartbeat = now_ts(svm) - cfg.attest_max_age_secs - 1;
     let mut buf = Vec::new();
     cfg.try_serialize(&mut buf).unwrap();
     overwrite(svm, config_pda(), buf);
@@ -903,7 +899,7 @@ fn test_attestation_and_heartbeat_run_during_a_halt() {
     .expect("halt");
     attest(&mut svm, &vals, &miner.pubkey(), 5_000_000_000, true, 1);
     beat_heartbeat(&mut svm, &vals);
-    assert_eq!(config_acct(&svm).last_attest_heartbeat[TAO_SLOT], now_ts(&svm));
+    assert_eq!(config_acct(&svm).last_attest_heartbeat, now_ts(&svm));
 }
 
 // --- the global heartbeat + the fuse ---------------------------------------------------------
@@ -911,19 +907,19 @@ fn test_attestation_and_heartbeat_run_during_a_halt() {
 #[test]
 fn test_heartbeat_round_advances_the_timestamp_on_quorum() {
     let (mut svm, _admin, vals, _miner) = setup();
-    assert_eq!(config_acct(&svm).last_attest_heartbeat[TAO_SLOT], 0, "fused closed on a fresh deploy");
-    assert_eq!(config_acct(&svm).attest_max_age_secs[TAO_SLOT], ATTEST_MAX_AGE_SECS);
+    assert_eq!(config_acct(&svm).last_attest_heartbeat, 0, "fused closed on a fresh deploy");
+    assert_eq!(config_acct(&svm).attest_max_age_secs, ATTEST_MAX_AGE_SECS);
 
     send(&mut svm, heartbeat_ix(&vals[0].pubkey()), &vals[0].pubkey(), &vals[0]).expect("hb0");
-    assert_eq!(config_acct(&svm).last_attest_heartbeat[TAO_SLOT], 0, "one vote is not a quorum");
+    assert_eq!(config_acct(&svm).last_attest_heartbeat, 0, "one vote is not a quorum");
     send(&mut svm, heartbeat_ix(&vals[1].pubkey()), &vals[1].pubkey(), &vals[1]).expect("hb1");
     let first = now_ts(&svm);
-    assert_eq!(config_acct(&svm).last_attest_heartbeat[TAO_SLOT], first);
+    assert_eq!(config_acct(&svm).last_attest_heartbeat, first);
 
     // The round is reusable — the next cadence beat lands in the same PDA.
     set_clock(&mut svm, first + 43_200);
     beat_heartbeat(&mut svm, &vals);
-    assert_eq!(config_acct(&svm).last_attest_heartbeat[TAO_SLOT], first + 43_200);
+    assert_eq!(config_acct(&svm).last_attest_heartbeat, first + 43_200);
 }
 
 #[test]
@@ -1596,8 +1592,8 @@ fn test_migrate_config_seeds_the_new_fields_and_is_idempotent() {
     // ...and the W1+W2 fields arrive at their seeded defaults, fuse closed.
     assert_eq!(cfg.tao_min_collateral, TAO_MIN_COLLATERAL_RAO);
     assert_eq!(cfg.settlement_grace_secs, SETTLEMENT_GRACE_SECS);
-    assert_eq!(cfg.attest_max_age_secs[TAO_SLOT], ATTEST_MAX_AGE_SECS);
-    assert_eq!(cfg.last_attest_heartbeat[TAO_SLOT], 0);
+    assert_eq!(cfg.attest_max_age_secs, ATTEST_MAX_AGE_SECS);
+    assert_eq!(cfg.last_attest_heartbeat, 0);
     assert!(svm.get_account(&config_pda()).unwrap().data.len() > short_len, "grown");
 
     // Re-running is a no-op, not a re-seed: the second call must not stomp post-migration state.
@@ -1740,7 +1736,7 @@ fn test_migrate_miner_state_refuses_a_v13_account_with_a_live_swap() {
     assert!(err.contains("MigrationSwapNotDrained"), "{err}");
 }
 
-/// The v14 image of the live config: the TAO slot read back into the old global scalars.
+/// The v14 image of the live config: every field the v14 program wrote.
 fn v14_image(live: &Config, version: u32) -> ConfigV14 {
     ConfigV14 {
         admin: live.admin,
@@ -1754,8 +1750,8 @@ fn v14_image(live: &Config, version: u32) -> ConfigV14 {
         tao_max_swap_amount: live.tao_max_swap_amount,
         tao_min_collateral: live.tao_min_collateral,
         settlement_grace_secs: live.settlement_grace_secs,
-        last_attest_heartbeat: live.last_attest_heartbeat[TAO_SLOT],
-        attest_max_age_secs: live.attest_max_age_secs[TAO_SLOT],
+        last_attest_heartbeat: live.last_attest_heartbeat,
+        attest_max_age_secs: live.attest_max_age_secs,
         reservation_ttl_secs: live.reservation_ttl_secs,
         consensus_threshold_percent: live.consensus_threshold_percent,
         validators: live.validators.clone(),
@@ -1794,7 +1790,7 @@ fn test_migrate_config_carries_a_v13_config_across() {
 }
 
 #[test]
-fn test_migrate_config_carries_a_v15_generation_into_the_tao_slot() {
+fn test_migrate_config_carries_a_v15_generation_across() {
     let (mut svm, admin, _vals, _miner) = setup();
     // v15 and v16 share a layout. Unlike the v13/v14 arm it must NOT re-seed `vault_generation` —
     // a retired vault's epoch namespace stays retired across the upgrade.
@@ -1804,81 +1800,83 @@ fn test_migrate_config_carries_a_v15_generation_into_the_tao_slot() {
     send(&mut svm, migrate_config_ix(&admin.pubkey()), &admin.pubkey(), &admin).expect("migrate");
     let cfg = config_acct(&svm);
     assert_eq!(cfg.version, CONFIG_VERSION);
-    assert_eq!(cfg.vault_generation[TAO_SLOT], 5, "the retired namespace stays retired");
+    assert_eq!(cfg.vault_generation, 5, "the retired namespace stays retired");
 
     send(&mut svm, migrate_config_ix(&admin.pubkey()), &admin.pubkey(), &admin).expect("again");
-    assert_eq!(config_acct(&svm).vault_generation[TAO_SLOT], 5, "idempotent re-run");
+    assert_eq!(config_acct(&svm).vault_generation, 5, "idempotent re-run");
 }
 
-/// Between the program upgrade and `migrate_config`, the new program must refuse the old Config
-/// rather than read it as garbage: with few validators a v16 image even parses under v17, but its
-/// stored bump lands on zero padding, so every Config seeds check fails and only the crank runs.
+/// The v16 allocation reserves room for 16 validators, so a live v16 Config is zero-padded on chain.
+fn padded_v16_image(live: &Config, vault_generation: u64) -> Vec<u8> {
+    let mut body = v16_image(live, 16, vault_generation);
+    body.resize(Config::INIT_SPACE - 6 * 8, 0);
+    body
+}
+
+/// Append-only means the window between the program upgrade and `migrate_config` is harmless: the new
+/// program reads an unmigrated v16 Config with every old field in place and the Base tail as zeros.
 #[test]
-fn test_an_unmigrated_v16_config_fails_closed_until_the_crank_runs() {
+fn test_an_unmigrated_v16_config_reads_correctly_and_keeps_base_closed() {
     let (mut svm, admin, vals, _miner) = setup();
-    let live = config_acct(&svm);
-    assert_eq!(live.validators.len(), 3, "the parse-as-garbage case needs <= 3 validators");
-    // Zero-padded to the real v16 allocation (16 reserved validator slots), as on chain.
-    let mut body = v16_image(&live, 16, 0);
-    body.resize(Config::INIT_SPACE - 192, 0);
-    let mut parsed = &body[..];
-    let garbage = <Config as anchor_lang::AnchorDeserialize>::deserialize(&mut parsed).expect("parses as v17");
-    assert_ne!(garbage.bump, live.bump, "the misread bump is what fails every seeds check");
-    downgrade(&mut svm, config_pda(), &Config::DISCRIMINATOR, body);
+    let mut live = config_acct(&svm);
+    live.vault_generation = 4;
+    downgrade(&mut svm, config_pda(), &Config::DISCRIMINATOR, padded_v16_image(&live, 4));
+    let cfg = config_acct(&svm);
+    assert_eq!((cfg.version, cfg.vault_generation, cfg.validators.len()), (16, 4, vals.len()));
+    assert_eq!(cfg.attest_max_age_secs, live.attest_max_age_secs);
+    assert_eq!((cfg.usdc_min_swap_amount, cfg.usdc_attest_max_age_secs, cfg.usdc_last_attest_heartbeat), (0, 0, 0));
 
-    let setter = allways_swap_manager::instruction::SetMinCollateral { amount: 7 }.data();
-    assert!(send(&mut svm, admin_ix(&admin.pubkey(), setter.clone()), &admin.pubkey(), &admin).is_err());
-    assert!(send(&mut svm, heartbeat_ix(&vals[0].pubkey()), &vals[0].pubkey(), &vals[0]).is_err());
-
-    send(&mut svm, migrate_config_ix(&admin.pubkey()), &admin.pubkey(), &admin).expect("the crank still runs");
-    send(&mut svm, admin_ix(&admin.pubkey(), setter), &admin.pubkey(), &admin).expect("live again");
+    // TAO keeps beating; the Base hub stays fused shut.
     beat_heartbeat(&mut svm, &vals);
-    assert_eq!(config_acct(&svm).last_attest_heartbeat[TAO_SLOT], now_ts(&svm));
+    assert_eq!(config_acct(&svm).last_attest_heartbeat, now_ts(&svm));
+    send(&mut svm, migrate_config_ix(&admin.pubkey()), &admin.pubkey(), &admin).expect("crank");
+    let cfg = config_acct(&svm);
+    assert_eq!((cfg.version, cfg.vault_generation), (CONFIG_VERSION, 4));
+    assert_eq!(cfg.last_attest_heartbeat, now_ts(&svm), "the beat landed before the crank survives it");
 }
 
-/// v16 -> v17 on a byte image of the deployed layout: every field survives, the global fuse and
-/// generation land in the TAO slot only, and the Base hub arrives closed.
+/// v16 -> v17 on a byte image of the deployed layout: every field survives at its offset, and the
+/// Base hub's six fields are appended at 0 — closed and fused shut.
 #[test]
-fn test_migrate_config_v16_to_v17_moves_the_fuse_into_the_tao_slot() {
+fn test_migrate_config_v16_to_v17_appends_a_closed_base_hub() {
     let (mut svm, admin, vals, miner) = setup();
     let m = miner.pubkey();
     let mut live = config_acct(&svm);
-    live.last_attest_heartbeat[TAO_SLOT] = now_ts(&svm) - 60;
-    live.attest_max_age_secs[TAO_SLOT] = 43_200;
+    live.last_attest_heartbeat = now_ts(&svm) - 60;
+    live.attest_max_age_secs = 43_200;
     live.last_weights_update = 99;
     live.tao_min_collateral = 777;
     let body = v16_image(&live, 16, 3);
     let v16_len = 8 + body.len();
-    downgrade(&mut svm, config_pda(), &Config::DISCRIMINATOR, body);
+    downgrade(&mut svm, config_pda(), &Config::DISCRIMINATOR, body.clone());
 
     send(&mut svm, migrate_config_ix(&admin.pubkey()), &admin.pubkey(), &admin).expect("migrate");
     let cfg = config_acct(&svm);
     assert_eq!(cfg.version, CONFIG_VERSION);
-    assert_eq!(svm.get_account(&config_pda()).unwrap().data.len(), 8 + Config::INIT_SPACE);
+    let data = svm.get_account(&config_pda()).unwrap().data;
+    assert_eq!(data.len(), 8 + Config::INIT_SPACE);
     // The image carries only the live validators; the allocation reserves room for the full set.
     let validator_slack = (allways_swap_manager::constants::MAX_VALIDATORS - vals.len()) * (32 + 8);
-    assert_eq!(8 + Config::INIT_SPACE - v16_len - validator_slack, 3 * 8 + 3 * 7 * 8, "3 u64s + 3 scalars → 8 slots");
+    assert_eq!(8 + Config::INIT_SPACE - v16_len - validator_slack, 6 * 8, "six u64/i64 appended");
+    // Every v16 byte is where it was, bar the version stamp at offset 40.
+    assert_eq!(data[8..40], body[..32]);
+    assert_eq!(data[44..v16_len], body[36..]);
 
-    // Global values move into the TAO slot, and nowhere else.
-    assert_eq!(cfg.last_attest_heartbeat[TAO_SLOT], live.last_attest_heartbeat[TAO_SLOT]);
-    assert_eq!(cfg.attest_max_age_secs[TAO_SLOT], 43_200);
-    assert_eq!(cfg.vault_generation[TAO_SLOT], 3);
-    for slot in (0..cfg.last_attest_heartbeat.len()).filter(|&s| s != TAO_SLOT) {
-        assert_eq!(cfg.last_attest_heartbeat[slot], 0, "slot {slot}");
-        assert_eq!(cfg.attest_max_age_secs[slot], 0, "slot {slot}");
-        assert_eq!(cfg.vault_generation[slot], 0, "slot {slot}");
-    }
-    // The Base hub's bounds and floor start unset, i.e. closed.
-    assert_eq!((cfg.usdc_min_swap_amount, cfg.usdc_max_swap_amount, cfg.usdc_min_collateral), (0, 0, 0));
-    // Everything else verbatim.
+    assert_eq!(cfg.last_attest_heartbeat, live.last_attest_heartbeat);
+    assert_eq!(cfg.attest_max_age_secs, 43_200);
+    assert_eq!(cfg.vault_generation, 3);
     assert_eq!(cfg.tao_min_collateral, 777);
     assert_eq!(cfg.last_weights_update, 99);
-    assert_eq!(cfg.validators.len(), vals.len());
-    assert_eq!(cfg.admin, admin.pubkey());
-    assert_eq!(cfg.min_collateral, live.min_collateral);
-    assert_eq!(cfg.reservation_fee_lamports, live.reservation_fee_lamports);
-    assert_eq!(cfg.max_total_extension_secs, live.max_total_extension_secs);
     assert_eq!(cfg.bump, live.bump);
+    let base = (
+        cfg.usdc_min_swap_amount,
+        cfg.usdc_max_swap_amount,
+        cfg.usdc_min_collateral,
+        cfg.usdc_last_attest_heartbeat,
+        cfg.usdc_attest_max_age_secs,
+        cfg.usdc_vault_generation,
+    );
+    assert_eq!(base, (0, 0, 0, 0, 0, 0));
 
     // The TAO fuse is exactly as open as before the upgrade: a TAO pool opens with no new heartbeat.
     light_tao_purse_no_beat(&mut svm, &vals, &miner, TAO_AMOUNT as u64);
@@ -1886,7 +1884,7 @@ fn test_migrate_config_v16_to_v17_moves_the_fuse_into_the_tao_slot() {
         .expect("TAO entry unaffected by the migration");
 
     send(&mut svm, migrate_config_ix(&admin.pubkey()), &admin.pubkey(), &admin).expect("again");
-    assert_eq!(config_acct(&svm).vault_generation[TAO_SLOT], 3, "idempotent re-run");
+    assert_eq!(config_acct(&svm).vault_generation, 3, "idempotent re-run");
 }
 
 #[test]
@@ -2068,7 +2066,7 @@ fn test_tao_backed_pool_entry_needs_a_locked_bond_and_a_live_fuse() {
 
     // Re-locked, but the heartbeat has gone stale — the dead-man fuse shuts entry.
     attest(&mut svm, &vals, &m, TAO_AMOUNT as u64, true, 3);
-    let stale_at = now_ts(&svm) + config_acct(&svm).attest_max_age_secs[TAO_SLOT] + 1;
+    let stale_at = now_ts(&svm) + config_acct(&svm).attest_max_age_secs + 1;
     set_clock(&mut svm, stale_at);
     let err = send(&mut svm, open_backed_ix(&vals[0].pubkey(), &m, HUB_FROM, HUB_TO, TAO), &vals[0].pubkey(), &vals[0])
         .unwrap_err();
@@ -2795,7 +2793,7 @@ fn test_close_legacy_swap_refuses_a_tight_unpadded_v10_buffer() {
 fn test_vault_generation_bump_unblocks_a_replacement_vault() {
     let (mut svm, admin, vals, miner) = setup();
     let m = miner.pubkey();
-    assert_eq!(config_acct(&svm).vault_generation[TAO_SLOT], 0, "starts in generation 0");
+    assert_eq!(config_acct(&svm).vault_generation, 0, "starts in generation 0");
 
     // The retired vault got to lock epoch 7.
     let old = compose(0, 7);
@@ -2813,7 +2811,7 @@ fn test_vault_generation_bump_unblocks_a_replacement_vault() {
         &admin,
     )
     .expect("bump");
-    assert_eq!(config_acct(&svm).vault_generation[TAO_SLOT], 1);
+    assert_eq!(config_acct(&svm).vault_generation, 1);
 
     // Same lock epoch 1, now in generation 1 — it outranks the retired vault's epoch 7.
     attest(&mut svm, &vals, &m, 5_000_000_000, true, compose(1, 1));
@@ -2842,7 +2840,7 @@ fn test_vault_generation_bump_is_admin_only_and_increment_only() {
             &admin,
         )
         .expect("bump");
-        assert_eq!(config_acct(&svm).vault_generation[TAO_SLOT], expected, "monotonic, never resettable");
+        assert_eq!(config_acct(&svm).vault_generation, expected, "monotonic, never resettable");
     }
 }
 
@@ -2864,7 +2862,7 @@ fn test_migrate_config_v14_to_v15_appends_the_generation() {
         tao_min_collateral: live.tao_min_collateral,
         settlement_grace_secs: live.settlement_grace_secs,
         last_attest_heartbeat: 4242,
-        attest_max_age_secs: live.attest_max_age_secs[TAO_SLOT],
+        attest_max_age_secs: live.attest_max_age_secs,
         reservation_ttl_secs: live.reservation_ttl_secs,
         consensus_threshold_percent: live.consensus_threshold_percent,
         validators: live.validators.clone(),
@@ -2885,9 +2883,9 @@ fn test_migrate_config_v14_to_v15_appends_the_generation() {
     send(&mut svm, migrate_config_ix(&admin.pubkey()), &admin.pubkey(), &admin).expect("migrate");
     let cfg = config_acct(&svm);
     assert_eq!(cfg.version, CONFIG_VERSION);
-    assert_eq!(cfg.vault_generation[TAO_SLOT], 0, "the epochs already attested came from the vault in service");
+    assert_eq!(cfg.vault_generation, 0, "the epochs already attested came from the vault in service");
     // The heartbeat and halt flag are the ones that would strand the subnet if a migration reset them.
-    assert_eq!(cfg.last_attest_heartbeat[TAO_SLOT], 4242);
+    assert_eq!(cfg.last_attest_heartbeat, 4242);
     assert!(cfg.halted);
     assert_eq!(cfg.last_weights_update, 99);
     assert_eq!(cfg.validators.len(), vals.len());

@@ -931,20 +931,21 @@ def test_a_fresh_on_chain_heartbeat_needs_no_vote_from_us():
 
 
 def _v17_config(tao_heartbeat=0, base_heartbeat=0, tao_generation=0, base_generation=0):
-    """A v17 Config: the fuse and generation are per-hub arrays indexed by backing-bit position."""
-    slots = lambda tao, base: [0, tao, base, 0, 0, 0, 0, 0]  # noqa: E731
+    """A v17 Config: the original scalars are TAO's; Base's fuse and generation are appended fields."""
     return SimpleNamespace(
-        last_attest_heartbeat=slots(tao_heartbeat, base_heartbeat),
-        vault_generation=slots(tao_generation, base_generation),
+        last_attest_heartbeat=tao_heartbeat,
+        vault_generation=tao_generation,
+        usdc_last_attest_heartbeat=base_heartbeat,
+        usdc_vault_generation=base_generation,
     )
 
 
-def test_the_tao_relay_reads_and_beats_only_the_tao_slot():
-    # Parity across the per-hub upgrade: a fresh TAO slot means no vote, whatever Base says...
+def test_the_tao_relay_reads_and_beats_only_the_tao_fuse():
+    # Parity across the per-hub upgrade: a fresh TAO heartbeat means no vote, whatever Base says...
     solana = FakeSolana(miner_states={MINER: _miner_state()}, config=_v17_config(tao_heartbeat=NOW - 5))
     _relay(solana=solana, heartbeat_interval_secs=3600).step(NOW)
     assert not [c for c in solana.calls if c[0] == 'vote_attest_heartbeat']
-    # ...and a stale one is beaten as "tao", even when the Base slot happens to be fresh.
+    # ...and a stale one is beaten as "tao", even when Base's happens to be fresh.
     solana = FakeSolana(miner_states={MINER: _miner_state()}, config=_v17_config(base_heartbeat=NOW - 5))
     _relay(solana=solana, heartbeat_interval_secs=3600).step(NOW)
     assert [c for c in solana.calls if c[0] == 'vote_attest_heartbeat'] == [('vote_attest_heartbeat', 'tao')]

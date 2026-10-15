@@ -12,8 +12,8 @@ pub struct ValidatorInfo {
 }
 
 /// Singleton config PDA (`seeds = [CONFIG_SEED]`). Amounts are in the named asset's smallest unit
-/// (lamports unless the field says otherwise), durations in seconds. Always boxed in Accounts structs:
-/// with the per-hub arrays it no longer fits on the 4 KB BPF frame beside a swap's other accounts.
+/// (lamports unless the field says otherwise), durations in seconds. Append-only: un-upgraded clients
+/// decode a prefix, so no field may move. Always boxed in Accounts structs, off the 4 KB BPF frame.
 #[account]
 #[derive(InitSpace)]
 pub struct Config {
@@ -38,20 +38,14 @@ pub struct Config {
     /// Attested effective bond (rao) needed to activate the TAO backing — the rao twin of
     /// `min_collateral`. Each future hub adds its own floor here.
     pub tao_min_collateral: u64,
-    /// The Base USDC hub's bounds and activation floor, in µUSDC. 0 min or 0 floor = hub not open
-    /// (`backing::require_configured`), so adding the hub changes nothing until the admin sets them.
-    pub usdc_min_swap_amount: u64,
-    pub usdc_max_swap_amount: u64,
-    pub usdc_min_collateral: u64,
     /// Seconds a miner stays busy after a non-locally-backed timeout, while the penalty settles on the
     /// backing chain (busy-until-settled). Unused by the "sol" path, which settles atomically.
     pub settlement_grace_secs: i64,
-    /// Per hub (indexed like `MinerState`'s arrays): unix timestamp of that hub's last
-    /// `vote_attest_heartbeat` quorum (0 = never). Liveness is a per-RELAY question, not per-miner: a
-    /// quiet miner's old-but-correct attestation is not staleness. The "sol" slot is unused.
-    pub last_attest_heartbeat: [i64; MAX_BACKING_SLOTS],
-    /// Per hub: how stale its heartbeat may get before that hub's entry (finalize/initiate) is refused.
-    pub attest_max_age_secs: [i64; MAX_BACKING_SLOTS],
+    /// The TAO hub's last `vote_attest_heartbeat` quorum (0 = never). Each remote hub has its own
+    /// fuse (read through `backing::heartbeat`); liveness is per relay, never per miner.
+    pub last_attest_heartbeat: i64,
+    /// How stale the TAO heartbeat may get before TAO-backed entry is refused (`backing::max_age`).
+    pub attest_max_age_secs: i64,
     /// How long a reservation holds a miner exclusive, in seconds.
     pub reservation_ttl_secs: i64,
     /// Quorum threshold, percent of the whitelisted validator set (e.g. 66).
@@ -77,10 +71,17 @@ pub struct Config {
     pub max_total_extension_secs: i64,
     /// Stored PDA bump.
     pub bump: u8,
-    /// Per hub: which bond vault the attested epochs belong to. Bumped when that hub's vault is
-    /// replaced: relayers compose it into the high half of the attestation epoch, so a new vault's
-    /// epochs outrank every epoch the retired one could produce.
-    pub vault_generation: [u64; MAX_BACKING_SLOTS],
+    /// Which TAO bond vault the attested epochs belong to. Bumped when the vault is replaced: relayers
+    /// compose it into the epoch's high half, so a new vault's epochs outrank the retired one's.
+    pub vault_generation: u64,
+    /// v17, appended: the Base USDC hub's bounds and bond floor (µUSDC), and its own fuse and vault
+    /// generation. 0 min or 0 floor = hub closed (`backing::require_configured`).
+    pub usdc_min_swap_amount: u64,
+    pub usdc_max_swap_amount: u64,
+    pub usdc_min_collateral: u64,
+    pub usdc_last_attest_heartbeat: i64,
+    pub usdc_attest_max_age_secs: i64,
+    pub usdc_vault_generation: u64,
 }
 
 /// Per-miner native-SOL collateral vault PDA (`seeds = [COLLATERAL_SEED, miner]`), program-owned.

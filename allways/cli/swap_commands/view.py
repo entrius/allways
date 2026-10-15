@@ -41,7 +41,7 @@ from allways.cli.swap_commands.swap_intake import free_purse, rate_display_from_
 from allways.constants import FEE_DIVISOR
 from allways.solana import pdas
 from allways.solana.client import swap_from_solana
-from allways.solana.layouts import hub_config
+from allways.solana.layouts import attest_heartbeat, attest_max_age
 from allways.utils.rate import apply_fee_deduction, directional_rate
 
 MINER_SORT_FIELDS = ['uid', 'rate', 'capacity', 'status']
@@ -506,13 +506,9 @@ def view_config(as_json):
                 'usdc_min_swap_amount': int(getattr(cfg, 'usdc_min_swap_amount', 0) or 0),
                 'usdc_max_swap_amount': int(getattr(cfg, 'usdc_max_swap_amount', 0) or 0),
                 # Kept as the TAO hub's value so existing readers see what they always did.
-                'attest_max_age_secs': hub_config(getattr(cfg, 'attest_max_age_secs', 0), 'tao'),
-                'attest_max_age_secs_by_hub': {
-                    h: hub_config(getattr(cfg, 'attest_max_age_secs', 0), h) for h in _REMOTE_HUBS
-                },
-                'last_attest_heartbeat_by_hub': {
-                    h: hub_config(getattr(cfg, 'last_attest_heartbeat', 0), h) for h in _REMOTE_HUBS
-                },
+                'attest_max_age_secs': attest_max_age(cfg, 'tao'),
+                'attest_max_age_secs_by_hub': {h: attest_max_age(cfg, h) for h in _REMOTE_HUBS},
+                'last_attest_heartbeat_by_hub': {h: attest_heartbeat(cfg, h) for h in _REMOTE_HUBS},
                 'fulfillment_timeout_secs': cfg.fulfillment_timeout_secs,
                 'reservation_ttl_secs': cfg.reservation_ttl_secs,
                 'pool_window_secs': cfg.pool_window_secs,
@@ -546,7 +542,7 @@ def view_config(as_json):
         f'  USDC max swap:        {_usdc_or(int(getattr(cfg, "usdc_max_swap_amount", 0) or 0), "no maximum")}'
     )
     for hub in _REMOTE_HUBS:
-        age = hub_config(getattr(cfg, 'attest_max_age_secs', 0), hub)
+        age = attest_max_age(cfg, hub)
         console.print(f'  Attest max age ({hub}):{" " * (8 - len(hub))}{secs_str(age) if age else "unset (fused)"}')
     console.print(f'  Fulfillment timeout:  {secs_str(cfg.fulfillment_timeout_secs)}')
     console.print(f'  Reservation TTL:      {secs_str(cfg.reservation_ttl_secs)}')

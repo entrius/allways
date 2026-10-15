@@ -79,8 +79,8 @@ pub const EVM_BIND_SEED: &[u8] = b"evmbind";
 #[constant]
 pub const EVM_ADDR_BIND_SEED: &[u8] = b"evmaddr";
 
-/// On-chain schema/version for upgrade tracking, bumped as phases land. v17: per-hub heartbeat, max age
-/// and vault generation, plus the Base USDC hub's bounds and floor. v16: stake-scaled
+/// On-chain schema/version for upgrade tracking, bumped as phases land. v17 appends the Base USDC hub's
+/// bounds, floor, heartbeat, max age and vault generation (the old scalars stay TAO's). v16: stake-scaled
 /// reservation-fee discount (fee semantics + entry-event `fee_paid`; layout unchanged from v15).
 /// v15 appends `vault_generation`; v14: v3.1 per-hub swap concurrency — per-hub transient state on
 /// MinerState, per-hub Pool/Reservation seeds. v13 = W2b quote-level backing; v12 = W2 bond
@@ -103,7 +103,7 @@ pub const REQ_TIMEOUT: u8 = 7;
 pub const REQ_SET_WEIGHTS: u8 = 8;
 /// Per-(miner, backing chain) round writing a `BondAttestation`.
 pub const REQ_SET_ATTESTATION: u8 = 9;
-/// Per-hub round bumping one slot of `Config.last_attest_heartbeat` (that hub's fuse liveness signal).
+/// Per-hub round advancing that hub's attestation heartbeat (its fuse's liveness signal).
 pub const REQ_ATTEST_HEARTBEAT: u8 = 10;
 /// Per-swap round for the no-fault cancel terminal (destination provably cannot receive the payout).
 /// Distinct from REQ_TIMEOUT so the two terminals accrue votes in separate rounds; the first to reach
@@ -386,7 +386,7 @@ const _: () = assert!(
 /// bond that can serve one min swap: 1.1 × TAO_MIN_SWAP_AMOUNT_RAO = 0.11 τ, floored up to 0.25 τ.
 pub const TAO_MIN_COLLATERAL_RAO: u64 = 250_000_000; // 0.25 τ
 
-/// Initial TAO slot of `Config.attest_max_age_secs` — the dead-man fuse: a hub's backed entry is
+/// Initial `Config.attest_max_age_secs` (the TAO hub's) — the dead-man fuse: a hub's backed entry is
 /// refused once that hub's attestation heartbeat is older than this. A circuit breaker, not a cadence,
 /// so it sits at ≥2× the 12–24 h heartbeat interval. Runtime-tunable within [MIN, MAX].
 pub const ATTEST_MAX_AGE_SECS: i64 = 86_400; // 24 h

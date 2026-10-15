@@ -3,7 +3,7 @@ use anchor_lang::prelude::*;
 use crate::constants::{CONFIG_SEED, MAX_VALIDATORS};
 use crate::error::ErrorCode;
 use crate::events::HaltSet;
-use crate::state::{Config, MinerState, ValidatorInfo};
+use crate::state::{Config, ValidatorInfo};
 
 /// Admin-only config mutations (validator set + consensus threshold).
 #[derive(Accounts)]
@@ -139,18 +139,11 @@ pub fn set_usdc_min_collateral(ctx: Context<AdminConfig>, amount: u64) -> Result
     Ok(())
 }
 
-/// The slot of a hub that has a relay. "sol" settles locally and has no heartbeat or vault to age.
-fn remote_hub_slot(hub: &str) -> Result<usize> {
-    require!(!crate::backing::settles_locally(hub), ErrorCode::BackingSettlesLocally);
-    Ok(MinerState::backing_slot(crate::backing::backing_bit(hub)?))
-}
-
 /// Dead-man fuse: how stale ONE hub's heartbeat may get before that hub's entry is refused. Sized
 /// off the heartbeat cadence, not the swap lifecycle.
 pub fn set_attest_max_age(ctx: Context<AdminConfig>, hub: String, secs: i64) -> Result<()> {
     crate::validate::attest_max_age(secs)?;
-    let slot = remote_hub_slot(&hub)?;
-    ctx.accounts.config.attest_max_age_secs[slot] = secs;
+    *crate::backing::max_age_mut(&mut ctx.accounts.config, &hub)? = secs;
     msg!("attest_max_age_secs[{}] = {}", hub, secs);
     Ok(())
 }
@@ -159,12 +152,9 @@ pub fn set_attest_max_age(ctx: Context<AdminConfig>, hub: String, secs: i64) -> 
 /// point at the new vault. Increment-only — a decrement would let a stale round from a retired vault
 /// satisfy the monotonic guard again.
 pub fn bump_vault_generation(ctx: Context<AdminConfig>, hub: String) -> Result<()> {
-    let slot = remote_hub_slot(&hub)?;
-    let config = &mut ctx.accounts.config;
-    config.vault_generation[slot] = config.vault_generation[slot]
-        .checked_add(1)
-        .ok_or(ErrorCode::Overflow)?;
-    msg!("vault_generation[{}] = {}", hub, config.vault_generation[slot]);
+    let generation = crate::backing::generation_mut(&mut ctx.accounts.config, &hub)?;
+    *generation = generation.checked_add(1).ok_or(ErrorCode::Overflow)?;
+    msg!("vault_generation[{}] = {}", hub, generation);
     Ok(())
 }
 

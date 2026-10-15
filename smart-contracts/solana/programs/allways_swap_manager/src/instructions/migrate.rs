@@ -2,13 +2,13 @@
 //! parse it: each crank reads it through a frozen mirror of the OLD layout, rebuilds it in the new one,
 //! and grows the allocation. Safe to re-run — gated on a marker the crank itself moves, moving no funds.
 //! v17 accepts five from-versions: v10 (pre-v3), v13/v14 (one layout), and v15/v16 (one layout). Each
-//! is first normalized to the v16 shape, then rebuilt once into v17.
+//! is first normalized to the v16 shape, then grown into v17, which only appends fields.
 
 use anchor_lang::prelude::*;
 use anchor_lang::Discriminator;
 
 use crate::constants::{
-    ATTEST_MAX_AGE_SECS, BACKING_BIT_SOL, BACKING_BIT_TAO, CONFIG_SEED, CONFIG_VERSION, MAX_BACKING_SLOTS,
+    ATTEST_MAX_AGE_SECS, BACKING_BIT_SOL, CONFIG_SEED, CONFIG_VERSION, MAX_BACKING_SLOTS,
     MINER_SEED, SETTLEMENT_GRACE_SECS, TAO_MAX_SWAP_AMOUNT_RAO, TAO_MIN_COLLATERAL_RAO,
     TAO_MIN_SWAP_AMOUNT_RAO,
 };
@@ -224,17 +224,8 @@ impl From<ConfigV10> for ConfigV16 {
     }
 }
 
-/// Put one global value in the TAO slot and 0 everywhere else. TAO was the only attested hub, so its
-/// slot inherits the global fuse unchanged; every other slot starts at 0 — never beaten, zero max
-/// age — so a new hub is fused shut until its own relay and the admin both open it.
-fn tao_slot<T: Copy + Default>(v: T) -> [T; MAX_BACKING_SLOTS] {
-    let mut slots = [T::default(); MAX_BACKING_SLOTS];
-    slots[MinerState::backing_slot(BACKING_BIT_TAO)] = v;
-    slots
-}
-
-/// v16 → v17: the global fuse/generation move into the TAO slot; the Base USDC hub's bounds and floor
-/// start at 0, which `backing::require_configured` reads as closed.
+/// v16 → v17 is append-only: every existing field keeps its offset (the scalars ARE the TAO hub's
+/// fuse), and the Base hub's six fields land after `vault_generation` at 0 — closed and fused shut.
 pub(crate) fn to_v17(c: ConfigV16) -> Config {
     Config {
         admin: c.admin,
@@ -247,12 +238,9 @@ pub(crate) fn to_v17(c: ConfigV16) -> Config {
         tao_min_swap_amount: c.tao_min_swap_amount,
         tao_max_swap_amount: c.tao_max_swap_amount,
         tao_min_collateral: c.tao_min_collateral,
-        usdc_min_swap_amount: 0,
-        usdc_max_swap_amount: 0,
-        usdc_min_collateral: 0,
         settlement_grace_secs: c.settlement_grace_secs,
-        last_attest_heartbeat: tao_slot(c.last_attest_heartbeat),
-        attest_max_age_secs: tao_slot(c.attest_max_age_secs),
+        last_attest_heartbeat: c.last_attest_heartbeat,
+        attest_max_age_secs: c.attest_max_age_secs,
         reservation_ttl_secs: c.reservation_ttl_secs,
         consensus_threshold_percent: c.consensus_threshold_percent,
         validators: c.validators,
@@ -264,7 +252,13 @@ pub(crate) fn to_v17(c: ConfigV16) -> Config {
         weights_update_min_interval_secs: c.weights_update_min_interval_secs,
         max_total_extension_secs: c.max_total_extension_secs,
         bump: c.bump,
-        vault_generation: tao_slot(c.vault_generation),
+        vault_generation: c.vault_generation,
+        usdc_min_swap_amount: 0,
+        usdc_max_swap_amount: 0,
+        usdc_min_collateral: 0,
+        usdc_last_attest_heartbeat: 0,
+        usdc_attest_max_age_secs: 0,
+        usdc_vault_generation: 0,
     }
 }
 

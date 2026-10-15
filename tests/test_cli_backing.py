@@ -189,14 +189,16 @@ def _admin_client(**cfg):
         tao_max_swap_amount=0,
         tao_min_collateral=100_000_000,
         settlement_grace_secs=900,
-        attest_max_age_secs=[0, 86_400, 0, 0, 0, 0, 0, 0],
-        vault_generation=[0] * 8,
+        attest_max_age_secs=86_400,
+        vault_generation=0,
         min_collateral=1_000_000_000,
         min_swap_amount=1_000,
         max_swap_amount=0,
         usdc_min_swap_amount=0,
         usdc_max_swap_amount=0,
         usdc_min_collateral=0,
+        usdc_attest_max_age_secs=0,
+        usdc_vault_generation=0,
     )
     base.update(cfg)
     c = MagicMock()

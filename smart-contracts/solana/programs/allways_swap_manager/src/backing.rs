@@ -138,13 +138,64 @@ pub fn settles_locally(collateral_chain: &str) -> bool {
     collateral_chain == BACKING_CHAIN_SOL
 }
 
+/// One remote hub's fuse and vault generation, by value. "sol" has no relay to age; an unknown hub
+/// has no fields. Every read of a per-hub fuse value goes through here, never a match at the call site.
+fn fuse(config: &Config, hub: &str) -> Result<(i64, i64, u64)> {
+    match hub {
+        BACKING_CHAIN_TAO => Ok((config.last_attest_heartbeat, config.attest_max_age_secs, config.vault_generation)),
+        BACKING_CHAIN_BASEUSDC => Ok((
+            config.usdc_last_attest_heartbeat,
+            config.usdc_attest_max_age_secs,
+            config.usdc_vault_generation,
+        )),
+        BACKING_CHAIN_SOL => err!(ErrorCode::BackingSettlesLocally),
+        _ => err!(ErrorCode::BackingNotSupported),
+    }
+}
+
+/// The writable twin of `fuse`, for the heartbeat quorum and the two admin setters.
+fn fuse_mut<'a>(config: &'a mut Config, hub: &str) -> Result<(&'a mut i64, &'a mut i64, &'a mut u64)> {
+    match hub {
+        BACKING_CHAIN_TAO => Ok((
+            &mut config.last_attest_heartbeat,
+            &mut config.attest_max_age_secs,
+            &mut config.vault_generation,
+        )),
+        BACKING_CHAIN_BASEUSDC => Ok((
+            &mut config.usdc_last_attest_heartbeat,
+            &mut config.usdc_attest_max_age_secs,
+            &mut config.usdc_vault_generation,
+        )),
+        BACKING_CHAIN_SOL => err!(ErrorCode::BackingSettlesLocally),
+        _ => err!(ErrorCode::BackingNotSupported),
+    }
+}
+
+pub fn heartbeat(config: &Config, hub: &str) -> Result<i64> {
+    Ok(fuse(config, hub)?.0)
+}
+pub fn max_age(config: &Config, hub: &str) -> Result<i64> {
+    Ok(fuse(config, hub)?.1)
+}
+pub fn generation(config: &Config, hub: &str) -> Result<u64> {
+    Ok(fuse(config, hub)?.2)
+}
+pub fn heartbeat_mut<'a>(config: &'a mut Config, hub: &str) -> Result<&'a mut i64> {
+    Ok(fuse_mut(config, hub)?.0)
+}
+pub fn max_age_mut<'a>(config: &'a mut Config, hub: &str) -> Result<&'a mut i64> {
+    Ok(fuse_mut(config, hub)?.1)
+}
+pub fn generation_mut<'a>(config: &'a mut Config, hub: &str) -> Result<&'a mut u64> {
+    Ok(fuse_mut(config, hub)?.2)
+}
+
 /// The dead-man fuse: refuse a non-local backing once ITS hub's heartbeat goes stale, so one stalled
 /// relay never fuses another hub. A never-set heartbeat (0) is stale by construction, so a hub fuses
 /// closed until its relayers prove they are alive.
 pub fn require_fresh_heartbeat(config: &Config, collateral_chain: &str, now: i64) -> Result<()> {
-    let slot = MinerState::backing_slot(backing_bit(collateral_chain)?);
     require!(
-        now.saturating_sub(config.last_attest_heartbeat[slot]) <= config.attest_max_age_secs[slot],
+        now.saturating_sub(heartbeat(config, collateral_chain)?) <= max_age(config, collateral_chain)?,
         ErrorCode::AttestationStale
     );
     Ok(())
@@ -192,7 +243,7 @@ pub fn check_entry_gates(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::constants::{ATTEST_MAX_AGE_SECS, MAX_BACKING_SLOTS};
+    use crate::constants::ATTEST_MAX_AGE_SECS;
 
     fn miner_with(collateral: u64) -> MinerState {
         MinerState {
@@ -212,14 +263,8 @@ mod tests {
         }
     }
 
-    /// Both remote hubs configured and sharing one fuse reading — the per-hub tests then move one slot.
+    /// Both remote hubs configured and sharing one fuse reading — the per-hub tests then move one hub.
     fn config_with(last_attest_heartbeat: i64, attest_max_age_secs: i64) -> Config {
-        let mut slots = [0; MAX_BACKING_SLOTS];
-        let mut ages = [0; MAX_BACKING_SLOTS];
-        for bit in [BACKING_BIT_TAO, BACKING_BIT_BASEUSDC] {
-            slots[MinerState::backing_slot(bit)] = last_attest_heartbeat;
-            ages[MinerState::backing_slot(bit)] = attest_max_age_secs;
-        }
         Config {
             admin: Pubkey::default(),
             version: 0,
@@ -231,12 +276,9 @@ mod tests {
             tao_min_swap_amount: 100_000_000,
             tao_max_swap_amount: 0,
             tao_min_collateral: 250_000_000,
-            usdc_min_swap_amount: 1_000_000,
-            usdc_max_swap_amount: 0,
-            usdc_min_collateral: 25_000_000,
             settlement_grace_secs: 0,
-            last_attest_heartbeat: slots,
-            attest_max_age_secs: ages,
+            last_attest_heartbeat,
+            attest_max_age_secs,
             reservation_ttl_secs: 0,
             consensus_threshold_percent: 100,
             validators: vec![],
@@ -248,12 +290,14 @@ mod tests {
             weights_update_min_interval_secs: 0,
             max_total_extension_secs: 0,
             bump: 255,
-            vault_generation: [0; MAX_BACKING_SLOTS],
+            vault_generation: 0,
+            usdc_min_swap_amount: 1_000_000,
+            usdc_max_swap_amount: 0,
+            usdc_min_collateral: 25_000_000,
+            usdc_last_attest_heartbeat: last_attest_heartbeat,
+            usdc_attest_max_age_secs: attest_max_age_secs,
+            usdc_vault_generation: 0,
         }
-    }
-
-    fn slot(chain: &str) -> usize {
-        MinerState::backing_slot(backing_bit(chain).unwrap())
     }
 
     fn attestation(effective_balance: u64, locked: bool) -> BondAttestation {
@@ -385,12 +429,12 @@ mod tests {
     #[test]
     fn a_stale_base_heartbeat_never_fuses_tao_and_the_other_way_round() {
         let mut cfg = config_with(NOW, ATTEST_MAX_AGE_SECS);
-        cfg.last_attest_heartbeat[slot("baseusdc")] = 0;
+        *heartbeat_mut(&mut cfg, "baseusdc").unwrap() = 0;
         assert!(check_entry_gates(&cfg, &miner_with(7), "tao", NOW).is_ok());
         assert!(check_entry_gates(&cfg, &miner_with(7), "baseusdc", NOW).is_err());
 
         let mut cfg = config_with(NOW, ATTEST_MAX_AGE_SECS);
-        cfg.last_attest_heartbeat[slot("tao")] = 0;
+        *heartbeat_mut(&mut cfg, "tao").unwrap() = 0;
         assert!(check_entry_gates(&cfg, &miner_with(7), "tao", NOW).is_err());
         assert!(check_entry_gates(&cfg, &miner_with(7), "baseusdc", NOW).is_ok());
     }
@@ -398,13 +442,34 @@ mod tests {
     #[test]
     fn each_hub_ages_against_its_own_max_age() {
         let mut cfg = config_with(NOW - 7_200, 3_600);
-        cfg.attest_max_age_secs[slot("baseusdc")] = 10_800;
+        *max_age_mut(&mut cfg, "baseusdc").unwrap() = 10_800;
         assert!(require_fresh_heartbeat(&cfg, "tao", NOW).is_err());
         assert!(require_fresh_heartbeat(&cfg, "baseusdc", NOW).is_ok());
     }
 
     #[test]
-    fn sol_stays_exempt_from_every_fuse_slot() {
+    fn the_tao_fuse_is_the_original_scalars_and_base_has_its_own() {
+        let mut cfg = config_with(0, 0);
+        cfg.last_attest_heartbeat = 11;
+        cfg.attest_max_age_secs = 22;
+        cfg.vault_generation = 33;
+        assert_eq!((heartbeat(&cfg, "tao").unwrap(), max_age(&cfg, "tao").unwrap(), generation(&cfg, "tao").unwrap()), (11, 22, 33));
+        *generation_mut(&mut cfg, "baseusdc").unwrap() = 7;
+        assert_eq!(cfg.usdc_vault_generation, 7);
+        assert_eq!(generation(&cfg, "tao").unwrap(), 33, "one hub's write never touches another's");
+    }
+
+    #[test]
+    fn sol_and_unknown_hubs_have_no_fuse() {
+        let mut cfg = config_with(0, 0);
+        assert!(heartbeat(&cfg, "sol").is_err());
+        assert!(max_age_mut(&mut cfg, "sol").is_err());
+        assert!(generation(&cfg, "btc").is_err());
+        assert!(heartbeat_mut(&mut cfg, "arbusdc").is_err());
+    }
+
+    #[test]
+    fn sol_stays_exempt_from_every_fuse() {
         // Every heartbeat dead, every max age zero, even the unused "sol" slot: SOL entry is untouched.
         let mut cfg = config_with(0, 0);
         cfg.usdc_min_swap_amount = 0;
@@ -428,8 +493,8 @@ mod tests {
     fn a_never_beaten_base_slot_is_fused_shut() {
         // Fresh upgrade: Base slot heartbeat 0 and max age 0, everything else configured and live.
         let mut cfg = config_with(NOW, ATTEST_MAX_AGE_SECS);
-        cfg.last_attest_heartbeat[slot("baseusdc")] = 0;
-        cfg.attest_max_age_secs[slot("baseusdc")] = 0;
+        *heartbeat_mut(&mut cfg, "baseusdc").unwrap() = 0;
+        *max_age_mut(&mut cfg, "baseusdc").unwrap() = 0;
         assert!(check_entry_gates(&cfg, &miner_with(7), "baseusdc", NOW).is_err());
     }
 

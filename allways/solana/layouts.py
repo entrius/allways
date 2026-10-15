@@ -12,8 +12,6 @@ client converts pubkey fields to solders Pubkey when mapping to dataclasses.
 from borsh_construct import I64, U8, U32, U64, U128, Bool, CStruct, Enum, Option, String, Vec
 from construct import Bytes as _Raw
 
-from allways.solana.pdas import PROGRAM_BACKING_BITS
-
 # `Config.version` the deployed program writes (constants.rs CONFIG_VERSION). Mirrored here so a schema
 # bump is one edit on each side rather than a literal buried in a test.
 CONFIG_VERSION = 17
@@ -68,14 +66,35 @@ def hub_busy_until(state, bit: int) -> int:
     return int(arr or 0)
 
 
-def hub_config(value, backing: str) -> int:
-    """ONE hub's slot of a per-hub Config array (v17 heartbeat / max age / vault generation), indexed
-    by backing-bit position like MinerState's. A pre-v17 scalar was the TAO hub's alone."""
-    bit = PROGRAM_BACKING_BITS.get(backing)
-    if not isinstance(value, (list, tuple)):
-        return int(value or 0) if backing == 'tao' else 0
-    idx = bit.bit_length() - 1 if bit else -1
-    return int(value[idx]) if 0 <= idx < len(value) else 0
+# Each remote hub's (heartbeat, max age, vault generation) Config fields. The original scalars are
+# the TAO hub's; v17 appended Base's. "sol" settles locally and has no fuse.
+_HUB_FUSE_FIELDS = {
+    'tao': ('last_attest_heartbeat', 'attest_max_age_secs', 'vault_generation'),
+    'baseusdc': ('usdc_last_attest_heartbeat', 'usdc_attest_max_age_secs', 'usdc_vault_generation'),
+}
+
+
+def _hub_fuse_field(config, hub: str, index: int) -> int:
+    fields = _HUB_FUSE_FIELDS.get(hub)
+    if fields is None:
+        raise ValueError(f'no attestation fuse for hub {hub!r}')
+    # A pre-v17 Config carries no Base fields: that hub reads as never beaten, i.e. closed.
+    return int(getattr(config, fields[index], 0) or 0)
+
+
+def attest_heartbeat(config, hub: str) -> int:
+    """The hub's last heartbeat quorum (0 = never)."""
+    return _hub_fuse_field(config, hub, 0)
+
+
+def attest_max_age(config, hub: str) -> int:
+    """How stale the hub's heartbeat may get before its entry is fused off."""
+    return _hub_fuse_field(config, hub, 1)
+
+
+def vault_generation(config, hub: str) -> int:
+    """The hub's bond-vault generation (the high half of its attestation epochs)."""
+    return _hub_fuse_field(config, hub, 2)
 
 
 def hub_reserved_collateral(state, bit: int) -> int:
@@ -279,15 +298,11 @@ Config = CStruct(
     # TAO-backed bounds (rao) + the busy-until-settled grace — W1 split-collateral seam.
     'tao_min_swap_amount' / U64,
     'tao_max_swap_amount' / U64,
+    # W2 — the TAO activation floor (rao) and the dead-man fuse's two fields (the TAO hub's).
     'tao_min_collateral' / U64,
-    # v17 — the Base USDC hub's bounds and floor (µUSDC); 0 = hub closed.
-    'usdc_min_swap_amount' / U64,
-    'usdc_max_swap_amount' / U64,
-    'usdc_min_collateral' / U64,
     'settlement_grace_secs' / I64,
-    # v17 — the dead-man fuse is per hub (read one slot with `hub_config`).
-    'last_attest_heartbeat' / I64[MAX_BACKING_SLOTS],
-    'attest_max_age_secs' / I64[MAX_BACKING_SLOTS],
+    'last_attest_heartbeat' / I64,
+    'attest_max_age_secs' / I64,
     'reservation_ttl_secs' / I64,
     'consensus_threshold_percent' / U8,
     'validators' / Vec(ValidatorInfo),
@@ -299,7 +314,15 @@ Config = CStruct(
     'weights_update_min_interval_secs' / I64,
     'max_total_extension_secs' / I64,
     'bump' / U8,
-    'vault_generation' / U64[MAX_BACKING_SLOTS],
+    'vault_generation' / U64,
+    # v17, appended so pre-v17 decoders (which stop here) still read every field above: the Base
+    # USDC hub's bounds and floor (µUSDC) and its own fuse + generation. All 0 = closed.
+    'usdc_min_swap_amount' / U64,
+    'usdc_max_swap_amount' / U64,
+    'usdc_min_collateral' / U64,
+    'usdc_last_attest_heartbeat' / I64,
+    'usdc_attest_max_age_secs' / I64,
+    'usdc_vault_generation' / U64,
 )
 
 # Top-level pubkey fields per account (decoded bytes -> solders Pubkey by the client). Hash/id byte

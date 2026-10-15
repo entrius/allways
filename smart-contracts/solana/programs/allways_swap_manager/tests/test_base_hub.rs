@@ -40,8 +40,6 @@ const FROM_TX_BLOCK: u32 = 800_000;
 const SOL: &str = "sol";
 const TAO: &str = "tao";
 const BASE: &str = "baseusdc";
-const TAO_SLOT: usize = 1;
-const BASE_SLOT: usize = 2;
 const MINER_FROM: &str = "minerSrcAddr";
 const MINER_TO: &str = "minerDstAddr";
 const RATE: u128 = 1_500_000_000_000_000_000;
@@ -558,7 +556,7 @@ fn test_a_fresh_base_hub_refuses_reserve_and_finalize() {
     let v = &vals[0];
     let cfg = config_acct(&svm);
     assert_eq!((cfg.usdc_min_swap_amount, cfg.usdc_max_swap_amount, cfg.usdc_min_collateral), (0, 0, 0));
-    assert_eq!((cfg.last_attest_heartbeat[BASE_SLOT], cfg.attest_max_age_secs[BASE_SLOT]), (0, 0));
+    assert_eq!((cfg.usdc_last_attest_heartbeat, cfg.usdc_attest_max_age_secs), (0, 0));
 
     // A locked, ample attestation exists — so only the hub's own closure can refuse what follows.
     attest(&mut svm, &vals, &m, BASE, 100 * USDC_MIN_COLLATERAL);
@@ -629,15 +627,15 @@ fn test_a_fresh_base_hub_refuses_initiate_on_a_claim_flipped_to_it() {
 // --- one fuse per hub ---------------------------------------------------------------------------
 
 #[test]
-fn test_each_hub_beats_its_own_round_and_slot() {
+fn test_each_hub_beats_its_own_round_and_field() {
     let (mut svm, _admin, vals, _miner) = setup();
     set_clock(&mut svm, BASE_TS + 100);
     let logs = beat(&mut svm, &vals, BASE);
     let ev: AttestHeartbeat = event(&logs);
     assert_eq!((ev.at, ev.hub.as_str()), (BASE_TS + 100, BASE));
     let cfg = config_acct(&svm);
-    assert_eq!(cfg.last_attest_heartbeat[BASE_SLOT], BASE_TS + 100);
-    assert_eq!(cfg.last_attest_heartbeat[TAO_SLOT], 0, "a Base beat leaves TAO's fuse alone");
+    assert_eq!(cfg.usdc_last_attest_heartbeat, BASE_TS + 100);
+    assert_eq!(cfg.last_attest_heartbeat, 0, "a Base beat leaves TAO's fuse alone");
 
     // A half-cast TAO round is not disturbed by a Base round running beside it.
     send(&mut svm, heartbeat_ix(&vals[0].pubkey(), TAO), &vals[0]).expect("tao vote 0");
@@ -645,8 +643,8 @@ fn test_each_hub_beats_its_own_round_and_slot() {
     beat(&mut svm, &vals, BASE);
     send(&mut svm, heartbeat_ix(&vals[1].pubkey(), TAO), &vals[1]).expect("tao vote 1");
     let cfg = config_acct(&svm);
-    assert_eq!(cfg.last_attest_heartbeat[TAO_SLOT], BASE_TS + 200);
-    assert_eq!(cfg.last_attest_heartbeat[BASE_SLOT], BASE_TS + 200);
+    assert_eq!(cfg.last_attest_heartbeat, BASE_TS + 200);
+    assert_eq!(cfg.usdc_last_attest_heartbeat, BASE_TS + 200);
 }
 
 #[test]
@@ -669,7 +667,7 @@ fn test_a_stale_base_fuse_leaves_tao_and_sol_entry_open() {
     quorum(&mut svm, &vals, |val| activate_ix(val, &m, TAO));
     send(&mut svm, quote_ix(&m, SOL, TAO, TAO), &miner).expect("tao quote");
     send(&mut svm, quote_ix(&m, "btc", SOL, SOL), &miner).expect("sol quote");
-    assert_eq!(config_acct(&svm).last_attest_heartbeat[BASE_SLOT], 0, "Base never beaten");
+    assert_eq!(config_acct(&svm).usdc_last_attest_heartbeat, 0, "Base never beaten");
 
     send(&mut svm, open_ix(&v.pubkey(), &m, SOL, TAO, TAO), v).expect("TAO entry ignores the Base fuse");
     send(&mut svm, open_ix(&v.pubkey(), &m, "btc", SOL, SOL), v).expect("SOL entry ignores every fuse");
@@ -684,14 +682,14 @@ fn test_a_stale_tao_fuse_leaves_base_entry_open() {
     attest(&mut svm, &vals, &m, BASE, USDC_MIN_COLLATERAL);
     quorum(&mut svm, &vals, |val| activate_ix(val, &m, BASE));
     send(&mut svm, quote_ix(&m, SOL, BASE, BASE), &miner).expect("base quote");
-    assert_eq!(config_acct(&svm).last_attest_heartbeat[TAO_SLOT], 0, "TAO never beaten");
+    assert_eq!(config_acct(&svm).last_attest_heartbeat, 0, "TAO never beaten");
     send(&mut svm, open_ix(&vals[0].pubkey(), &m, SOL, BASE, BASE), &vals[0]).expect("Base entry ignores the TAO fuse");
 }
 
 // --- admin per-hub setters ----------------------------------------------------------------------
 
 #[test]
-fn test_per_hub_setters_touch_only_their_slot_and_refuse_sol() {
+fn test_per_hub_setters_touch_only_their_hub_and_refuse_sol() {
     use allways_swap_manager::instruction as ix;
     let (mut svm, admin, _vals, _miner) = setup();
     let a = admin.pubkey();
@@ -700,10 +698,10 @@ fn test_per_hub_setters_touch_only_their_slot_and_refuse_sol() {
     send(&mut svm, admin_ix(&a, ix::SetAttestMaxAge { hub: BASE.to_string(), secs: 7_200 }.data()), &admin).unwrap();
     send(&mut svm, admin_ix(&a, ix::BumpVaultGeneration { hub: BASE.to_string() }.data()), &admin).unwrap();
     let cfg = config_acct(&svm);
-    assert_eq!(cfg.attest_max_age_secs[BASE_SLOT], 7_200);
-    assert_eq!(cfg.vault_generation[BASE_SLOT], 1);
-    assert_eq!(cfg.attest_max_age_secs[TAO_SLOT], before.attest_max_age_secs[TAO_SLOT], "TAO untouched");
-    assert_eq!(cfg.vault_generation[TAO_SLOT], 0, "TAO untouched");
+    assert_eq!(cfg.usdc_attest_max_age_secs, 7_200);
+    assert_eq!(cfg.usdc_vault_generation, 1);
+    assert_eq!(cfg.attest_max_age_secs, before.attest_max_age_secs, "TAO untouched");
+    assert_eq!(cfg.vault_generation, 0, "TAO untouched");
 
     for data in [
         ix::SetAttestMaxAge { hub: SOL.to_string(), secs: 7_200 }.data(),

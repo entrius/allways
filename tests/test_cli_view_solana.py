@@ -82,8 +82,10 @@ def test_view_config_renders_the_tao_hub_bounds(monkeypatch):
 def test_view_config_shows_each_hub_fuse_and_a_closed_base_hub(monkeypatch):
     client = MagicMock()
     client.get_config.return_value = _config(
-        attest_max_age_secs=[0, 86_400, 0, 0, 0, 0, 0, 0],
-        last_attest_heartbeat=[0, 1_700_000_000, 0, 0, 0, 0, 0, 0],
+        attest_max_age_secs=86_400,
+        last_attest_heartbeat=1_700_000_000,
+        usdc_attest_max_age_secs=0,
+        usdc_last_attest_heartbeat=0,
         usdc_min_swap_amount=0,
         usdc_max_swap_amount=0,
         usdc_min_collateral=0,

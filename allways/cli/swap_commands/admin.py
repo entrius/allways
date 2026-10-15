@@ -18,9 +18,8 @@ from allways.cli.swap_commands.helpers import (
     to_lamports,
 )
 from allways.constants import TAO_TO_RAO
-from allways.solana import pdas
+from allways.solana import layouts, pdas
 from allways.solana.client import SolanaClientError
-from allways.solana.layouts import hub_config
 
 
 def _parse_pubkey(s: str):
@@ -651,7 +650,7 @@ def set_attest_max_age(seconds: int, hub: str):
         fail('Attestation max age must be 3600-172800 seconds (1 h - 48 h)')
     _run_setter(
         title=f'Set Attestation Fuse Max Age ({hub})',
-        getter=lambda c: hub_config(c.get_config().attest_max_age_secs, hub),
+        getter=lambda c: layouts.attest_max_age(c.get_config(), hub),
         setter=lambda c: c.set_attest_max_age(hub, seconds),
         noun=f'{hub} attestation max age',
         format_current=lambda v: secs_str(v) if v else 'unset (fused)',
@@ -674,7 +673,7 @@ def bump_vault_generation(hub: str):
     """
     _run_setter(
         title=f'Bump Vault Generation ({hub})',
-        getter=lambda c: hub_config(c.get_config().vault_generation, hub),
+        getter=lambda c: layouts.vault_generation(c.get_config(), hub),
         setter=lambda c: c.bump_vault_generation(hub),
         noun=f'{hub} vault generation',
         format_current=str,

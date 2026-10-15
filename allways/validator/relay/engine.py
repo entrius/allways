@@ -32,8 +32,7 @@ from allways.constants import (
     VOTE_ROUND_TTL_SECS,
     family,
 )
-from allways.solana import pdas
-from allways.solana.layouts import hub_config
+from allways.solana import layouts, pdas
 from allways.validator.binding import build_attribution
 from allways.validator.relay import attestation as attestation_job
 from allways.validator.relay import exit_relay
@@ -308,7 +307,7 @@ class BondRelay:
         guessed generation would either land in a retired namespace or be refused as stale, and
         "unknown" must never be spelled as 0 — same contract as an unreadable vault read."""
         try:
-            return hub_config(getattr(self._config_fn(), 'vault_generation', 0), self.backing)
+            return layouts.vault_generation(self._config_fn(), self.backing)
         except Exception as e:
             bt.logging.warning(f'relay: vault generation read failed: {e}')
             return None
@@ -491,7 +490,7 @@ class BondRelay:
             return
         try:
             cfg = self._config_fn()
-            last = hub_config(getattr(cfg, 'last_attest_heartbeat', 0), self.backing)
+            last = layouts.attest_heartbeat(cfg, self.backing)
         except Exception as e:
             bt.logging.warning(f'relay: heartbeat config read failed: {e}')
             return

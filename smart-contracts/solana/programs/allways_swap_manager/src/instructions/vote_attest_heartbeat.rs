@@ -3,9 +3,8 @@ use anchor_lang::prelude::*;
 use crate::backing;
 use crate::consensus::{backing_request_hash, record_vote, reset_round};
 use crate::constants::{CONFIG_SEED, REQ_ATTEST_HEARTBEAT, VOTE_SEED};
-use crate::error::ErrorCode;
 use crate::events::AttestHeartbeat;
-use crate::state::{Config, MinerState, VoteRound};
+use crate::state::{Config, VoteRound};
 
 /// Validators prove ONE hub's relay is alive: one round per hub on a lazy cadence, never per miner, so
 /// a stalled Base relay can't fuse TAO entry (or the reverse). NOT halt-gated, like `vote_set_attestation`:
@@ -32,9 +31,8 @@ pub struct VoteAttestHeartbeat<'info> {
 }
 
 pub fn handler(ctx: Context<VoteAttestHeartbeat>, hub: String) -> Result<()> {
-    // "sol" has no relay to prove alive; an unknown hub has no slot.
-    require!(!backing::settles_locally(&hub), ErrorCode::BackingSettlesLocally);
-    let slot = MinerState::backing_slot(backing::backing_bit(&hub)?);
+    // Refuse "sol" (no relay to prove alive) and unknown hubs before any round opens.
+    backing::heartbeat(&ctx.accounts.config, &hub)?;
 
     let now = Clock::get()?.unix_timestamp;
     // The payload is (type, hub): the timestamp comes from the chain at quorum, so there is nothing
@@ -54,7 +52,7 @@ pub fn handler(ctx: Context<VoteAttestHeartbeat>, hub: String) -> Result<()> {
     )?;
 
     if quorum {
-        ctx.accounts.config.last_attest_heartbeat[slot] = now;
+        *backing::heartbeat_mut(&mut ctx.accounts.config, &hub)? = now;
         reset_round(&mut ctx.accounts.vote_round);
         emit!(AttestHeartbeat { at: now, hub: hub.clone() });
         msg!("attestation heartbeat [{}]: {}", hub, now);
