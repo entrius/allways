@@ -1,4 +1,5 @@
-"""``/rate`` alpha pricing off the shared memo: one read per TTL however many threads quote at once."""
+"""``/rate`` off forward's held states and the quote memo: no client read while both are fresh, a live state
+read when the held ones age out, one memo read per TTL however many threads quote at once."""
 
 import threading
 import time
@@ -12,8 +13,9 @@ from solders.keypair import Keypair as SolKeypair
 from allways.assets.alpha import Alpha
 from allways.chains import CHAIN_SN7
 from allways.constants import RATE_PRECISION
-from allways.validator import reserve_engine
+from allways.validator import reserve_engine, scoring
 from allways.validator.market import (
+    MARKET_TTL_SECS,
     PRICE_TTL_SECS,
     AlphaPriceMemo,
     HeldStates,
@@ -75,6 +77,53 @@ def quote_memo(monkeypatch):
     memo = QuoteMemo()
     monkeypatch.setattr(reserve_engine, '_quote_memo', memo)
     return memo
+
+
+def test_held_states_and_a_warm_memo_quote_without_one_client_read(quote_memo):
+    quote_memo.accounts(RecordingClient([(MINER, _quote('0.5'))]))  # warm
+    rq = rate_quote(_validator(StrictClient(), HeldStates(time.time(), {HOTKEY: _state()})), 'sol', 'btc', SOL)
+    assert rq.quote.miner_hotkey == HOTKEY and rq.quote.rate_display == '0.5'
+
+
+def test_the_quote_memo_reads_once_per_ttl_across_threads():
+    clock = [1000.0]
+    memo = QuoteMemo(clock=lambda: clock[0])
+    bond = SimpleNamespace(miner=MINER, chain='tao', locked=True, effective_balance=7)
+    client = RecordingClient([(MINER, _quote('0.5'))], [(MINER, bond)])
+    get_all = client.get_all
+    client.get_all = lambda name: time.sleep(0.02) or get_all(name)  # long enough for every thread to pile on
+
+    results: list = []
+    threads = [threading.Thread(target=lambda: results.append(memo.accounts(client))) for _ in range(8)]
+    for t in threads:
+        t.start()
+    for t in threads:
+        t.join()
+    assert client.reads == ['MinerQuote', 'BondAttestation']
+    assert all(
+        quotes == client.accounts['MinerQuote'] and atts[(str(MINER), 'tao')] is bond for quotes, atts in results
+    )
+
+    clock[0] += MARKET_TTL_SECS
+    memo.accounts(client)
+    assert client.reads == ['MinerQuote', 'BondAttestation'] * 2
+
+
+def test_stale_held_states_are_read_live_with_forwards_own_filter(quote_memo, monkeypatch):
+    # The live path is forward's: bound + on-metagraph only, so an off-metagraph miner's quote drops there too.
+    monkeypatch.setattr(scoring, 'build_attribution', lambda client: {str(MINER): HOTKEY})
+    stale = HeldStates(time.time() - MARKET_TTL_SECS - 1, {HOTKEY: _state()})
+    client = RecordingClient([(MINER, _quote('0.5'))], states=[(MINER, _state())])
+    rq = rate_quote(_validator(client, stale, hotkeys=()), 'sol', 'btc', SOL)
+    assert 'MinerState' in client.reads and rq.reason == 'no miner offers this direction'
+    rq = rate_quote(_validator(client, stale), 'sol', 'btc', SOL)
+    assert rq.quote.miner_hotkey == HOTKEY and client.reads.count('MinerQuote') == 1  # the memo served both
+
+
+def test_a_miner_off_the_held_states_is_not_quoted(quote_memo):
+    quote_memo.accounts(RecordingClient([(MINER, _quote('0.5'))]))
+    rq = rate_quote(_validator(StrictClient(), HeldStates(time.time(), {})), 'sol', 'btc', SOL)
+    assert rq.quote is None and rq.reason == 'no miner offers this direction'
 
 
 class CountingAlpha(Alpha):
