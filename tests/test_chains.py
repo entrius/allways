@@ -317,6 +317,9 @@ class TestReplayGrace:
         # floor are stamped by the same chain, so there is no hub-vs-spoke skew to absorb.
         assert CHAIN_SOLUSDC.replay_grace_secs == 0
 
+    def test_btc_grace_covers_an_hour_of_timestamp_lag(self):
+        assert CHAIN_BTC.replay_grace_secs >= 3600
+
     def test_freshness_consumer_absorbs_the_eth_grace(self):
         # The validator reads grace off chain_def (solana_swap_loop._is_fresh) — a deposit
         # stamped inside the grace window is fresh; one predating it is still a replay.
@@ -328,6 +331,15 @@ class TestReplayGrace:
         grace = CHAIN_ETH.replay_grace_secs
         assert is_tx_fresh(SimpleNamespace(block_time=floor - grace), floor, grace)
         assert not is_tx_fresh(SimpleNamespace(block_time=floor - grace - 1), floor, grace)
+
+
+class TestRequiredCollateral:
+    def test_rounds_up_like_the_contract(self):
+        from allways.constants import required_collateral
+
+        assert required_collateral(1) == 2
+        assert required_collateral(100_000_001) == 110_000_002
+        assert required_collateral(2_000_000_000) == 2_200_000_000
 
 
 class TestApplyTestnetNetworkDefaults:
