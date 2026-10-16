@@ -107,6 +107,7 @@ class TestAddresses:
         assert not provider.chain.is_valid_address('')
         assert not provider.chain.is_valid_address(None)
         assert not provider.chain.is_valid_address('f39Fd6e51aad88F6F4ce6aB8827279cffFb92266')  # no 0x
+        assert not provider.chain.is_valid_address(TEST_ADDR.lower() + '\n')  # unpayable, yet `$` matched it
 
     def test_zero_address_rejected(self, provider):
         # ERC-20 transfer() reverts to the zero address (no blacklist/pause gate catches it), so an
