@@ -906,4 +906,5 @@ class Bitcoin(Asset, Chain):
         first-input sender stays on the miner's committed address (validators
         enforce sender == committed address).
         """
+        to_address = self.chain.normalize_address(to_address)  # embit rejects uppercase bech32
         return self.send_amount_lightweight(to_address, amount, from_address=from_address, dedup_key=dedup_key)
