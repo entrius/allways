@@ -16,6 +16,12 @@ from allways.solana import events
 from allways.solana.events import SolanaEventIngest, decode_event
 
 
+@pytest.fixture(autouse=True)
+def _no_history_horizon(monkeypatch):
+    # These fixtures stamp entries with fixed historic blockTimes; the lookback cut has its own tests.
+    monkeypatch.setattr(events, 'HISTORY_HORIZON_SECS', 10**12)
+
+
 def _event_disc(name: str) -> bytes:
     return hashlib.sha256(f'event:{name}'.encode()).digest()[:8]
 
@@ -449,6 +455,28 @@ def test_pagination_drains_a_backlog_across_ticks_without_dropping_the_gap():
     records, cursor = ingest.poll(until_sig=None)
     assert [r.signature for r in records] == ['s1', 's2', 's3', 's4', 's5'], 'full window, oldest-first'
     assert cursor == 's5'
+
+
+def test_a_fresh_cursor_reads_back_only_to_the_horizon():
+    # A fresh database (or long outage) must not page back to the program's first tx.
+    ev = _encode('MinerActivated', {'miner': bytes(Keypair().pubkey()), 'at': 1})
+    now = 1_700_010_000
+    sigs = [{'signature': f's{i}', 'slot': i, 'blockTime': now - 1000 * (5 - i), 'err': None} for i in range(5, 0, -1)]
+    ingest = SolanaEventIngest(PagingClient(sigs, ev), page_size=2, horizon_secs=2500, clock=lambda: now)
+    records, cursor = ingest.poll(until_sig=None)
+    assert [r.signature for r in records] == ['s3', 's4', 's5'] and cursor == 's5'
+
+
+def test_a_backlog_is_decoded_a_budget_per_pass_and_resumes_from_the_cursor():
+    # Each pass decodes at most max_decode entries and stops the cursor there; the next pass carries on.
+    ev = _encode('MinerActivated', {'miner': bytes(Keypair().pubkey()), 'at': 1})
+    sigs = [{'signature': f's{i}', 'slot': i, 'blockTime': 1_700_000_000 + i, 'err': None} for i in range(5, 0, -1)]
+    ingest = SolanaEventIngest(PagingClient(sigs, ev), max_decode=2)
+    seen, cursor = [], None
+    for _ in range(3):
+        records, cursor = ingest.poll(until_sig=cursor)
+        seen.append([r.signature for r in records])
+    assert seen == [['s1', 's2'], ['s3', 's4'], ['s5']] and cursor == 's5'
 
 
 class FlakyPagingRpc(PagingRpc):
