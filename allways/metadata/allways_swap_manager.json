@@ -5016,6 +5016,19 @@
       ]
     },
     {
+      "name": "ConfigChanged",
+      "discriminator": [
+        147,
+        25,
+        86,
+        98,
+        98,
+        77,
+        78,
+        192
+      ]
+    },
+    {
       "name": "FulfillmentGraceApplied",
       "discriminator": [
         201,
@@ -6221,6 +6234,22 @@
       }
     },
     {
+      "name": "ConfigChanged",
+      "docs": [
+        "An admin setter changed `Config`; `setting` names the field. Readers re-read `Config` on it",
+        "instead of polling. `set_halted` emits this alongside `HaltSet`."
+      ],
+      "type": {
+        "kind": "struct",
+        "fields": [
+          {
+            "name": "setting",
+            "type": "string"
+          }
+        ]
+      }
+    },
+    {
       "name": "FulfillmentGraceApplied",
       "docs": [
         "`mark_fulfilled` slid `timeout_at` forward to cover the destination chain's confirmation window",
@@ -6905,6 +6934,13 @@
               "Backing hub whose contest resolved (v3.1, appended last)."
             ],
             "type": "string"
+          },
+          {
+            "name": "finalize_by",
+            "docs": [
+              "When the winner's unfilled reservation lapses if it is never finalized. Appended last."
+            ],
+            "type": "i64"
           }
         ]
       }
@@ -6991,6 +7027,18 @@
               "and once a quote has stood past the decay window."
             ],
             "type": "u64"
+          },
+          {
+            "name": "miner_from_addr",
+            "docs": [
+              "The quote's payout addresses as stored, so a reader can judge them without reading the account.",
+              "Appended last; prefix decoders keep working."
+            ],
+            "type": "string"
+          },
+          {
+            "name": "miner_to_addr",
+            "type": "string"
           }
         ]
       }
@@ -7280,6 +7328,13 @@
               "update, which is free. Appended last; prefix decoders keep working."
             ],
             "type": "u64"
+          },
+          {
+            "name": "collateral_chain",
+            "docs": [
+              "Backing hub of the pool bid on — with `miner`, the pool's identity. Appended last."
+            ],
+            "type": "string"
           }
         ]
       }

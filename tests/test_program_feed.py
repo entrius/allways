@@ -31,7 +31,9 @@ def _frame(logs, err=None) -> dict:
 def test_events_from_logs_decodes_program_events_and_skips_the_rest():
     logs = [
         'Program 6JVB invoke [1]',
-        _program_data('PoolResolved', miner=bytes(MINER), winner=bytes(WINNER), requests=2, collateral_chain='sol'),
+        _program_data(
+            'PoolResolved', miner=bytes(MINER), winner=bytes(WINNER), requests=2, collateral_chain='sol', finalize_by=0
+        ),
         'Program data: AAAA',  # too short / foreign
         'Program log: Instruction: ResolvePool',
     ]
@@ -48,7 +50,9 @@ def test_feed_dispatches_to_handlers_by_name_and_drops_failed_txs():
     feed.on('PoolResolved', lambda name, ev: (_ for _ in ()).throw(RuntimeError('boom')))  # never fatal
     logs = [
         _program_data('PoolDrawArmed', miner=bytes(MINER), seed_slot=4242, collateral_chain='tao'),
-        _program_data('PoolResolved', miner=bytes(MINER), winner=bytes(WINNER), requests=1, collateral_chain='sol'),
+        _program_data(
+            'PoolResolved', miner=bytes(MINER), winner=bytes(WINNER), requests=1, collateral_chain='sol', finalize_by=0
+        ),
     ]
     assert feed.handle_notification(_frame(logs)) == 2
     assert feed.handle_notification(_frame(logs, err={'InstructionError': [0, 'Custom']})) == 0

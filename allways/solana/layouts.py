@@ -310,6 +310,7 @@ EVENT_DISCRIMINATORS = {
     'CollateralPosted': bytes([133, 193, 58, 199, 229, 183, 154, 206]),
     'CollateralWithdrawn': bytes([51, 224, 133, 106, 74, 173, 72, 82]),
     'FulfillmentGraceApplied': bytes([201, 98, 85, 62, 191, 162, 4, 22]),
+    'ConfigChanged': bytes([147, 25, 86, 98, 98, 77, 78, 192]),
     'HaltSet': bytes([72, 72, 136, 23, 166, 26, 205, 223]),
     'HotkeyBound': bytes([168, 26, 136, 137, 160, 137, 120, 133]),
     'LegacySwapClosed': bytes([3, 153, 162, 14, 136, 34, 47, 239]),
@@ -350,6 +351,7 @@ EVENT_LAYOUTS = {
     'CollateralPosted': CStruct('miner' / Pubkey32, 'amount' / U64, 'total' / U64),
     'CollateralWithdrawn': CStruct('miner' / Pubkey32, 'amount' / U64, 'total' / U64),
     'FulfillmentGraceApplied': CStruct('swap_key' / Hash32, 'miner' / Pubkey32, 'timeout_at' / I64),
+    'ConfigChanged': CStruct('setting' / String),
     'HaltSet': CStruct('halted' / Bool),
     'HotkeyBound': CStruct('miner' / Pubkey32, 'hotkey' / Hash32, 'bound_at' / I64),
     'LegacySwapClosed': CStruct(
@@ -380,7 +382,9 @@ EVENT_LAYOUTS = {
         'fee_paid' / U64,
     ),
     'PoolDrawArmed': CStruct('miner' / Pubkey32, 'seed_slot' / U64, 'collateral_chain' / String),
-    'PoolResolved': CStruct('miner' / Pubkey32, 'winner' / Pubkey32, 'requests' / U8, 'collateral_chain' / String),
+    'PoolResolved': CStruct(
+        'miner' / Pubkey32, 'winner' / Pubkey32, 'requests' / U8, 'collateral_chain' / String, 'finalize_by' / I64
+    ),
     'QuoteRemoved': CStruct(
         'miner' / Pubkey32,
         'from_chain' / String,
@@ -397,6 +401,8 @@ EVENT_LAYOUTS = {
         'liquidity' / U128,
         'updated_at' / I64,
         'update_fee' / U64,
+        'miner_from_addr' / String,
+        'miner_to_addr' / String,
     ),
     'ReservationExtended': CStruct(
         'miner' / Pubkey32, 'validator' / Pubkey32, 'reserved_until' / I64, 'collateral_chain' / String
@@ -413,7 +419,9 @@ EVENT_LAYOUTS = {
         'reserved_until' / I64,
         'collateral_chain' / String,
     ),
-    'ReservationRequested': CStruct('miner' / Pubkey32, 'router' / Pubkey32, 'requests' / U8, 'fee_paid' / U64),
+    'ReservationRequested': CStruct(
+        'miner' / Pubkey32, 'router' / Pubkey32, 'requests' / U8, 'fee_paid' / U64, 'collateral_chain' / String
+    ),
     'StaleClaimClosed': CStruct('swap_key' / Hash32, 'miner' / Pubkey32),
     'UnfilledReservationClosed': CStruct('miner' / Pubkey32, 'router' / Pubkey32, 'collateral_chain' / String),
     'SwapClaimed': CStruct(
@@ -481,6 +489,7 @@ EVENT_PUBKEY_FIELDS = {
     'CollateralPosted': ['miner'],
     'CollateralWithdrawn': ['miner'],
     'FulfillmentGraceApplied': ['miner'],
+    'ConfigChanged': [],
     'HaltSet': [],
     'HotkeyBound': ['miner'],
     'LegacySwapClosed': ['miner', 'user'],
@@ -506,6 +515,25 @@ EVENT_PUBKEY_FIELDS = {
     'SwapTimeoutExtended': ['miner', 'validator'],
     'TreasuryWithdrawn': ['recipient'],
     'ValidatorWeightsUpdated': [],
+}
+
+# Events that gained trailing fields, as they were emitted before. History emitted before an upgrade
+# is still in the logs, so a decoder falls back to the older shape when the current one runs short.
+EVENT_PRIOR_LAYOUTS = {
+    'QuoteSet': [
+        CStruct(
+            'miner' / Pubkey32,
+            'from_chain' / String,
+            'to_chain' / String,
+            'collateral_chain' / String,
+            'rate' / U128,
+            'liquidity' / U128,
+            'updated_at' / I64,
+            'update_fee' / U64,
+        )
+    ],
+    'ReservationRequested': [CStruct('miner' / Pubkey32, 'router' / Pubkey32, 'requests' / U8, 'fee_paid' / U64)],
+    'PoolResolved': [CStruct('miner' / Pubkey32, 'winner' / Pubkey32, 'requests' / U8, 'collateral_chain' / String)],
 }
 
 # --- instruction encoding (8-byte discriminator from IDL + borsh arg body) ---

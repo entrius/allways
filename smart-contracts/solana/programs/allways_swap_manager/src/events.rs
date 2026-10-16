@@ -186,6 +186,10 @@ pub struct QuoteSet {
     /// Anti-flashing churn fee paid into the treasury this call (lamports); 0 on first creation
     /// and once a quote has stood past the decay window.
     pub update_fee: u64,
+    /// The quote's payout addresses as stored, so a reader can judge them without reading the account.
+    /// Appended last; prefix decoders keep working.
+    pub miner_from_addr: String,
+    pub miner_to_addr: String,
 }
 
 #[event]
@@ -284,6 +288,8 @@ pub struct ReservationRequested {
     /// Effective (stake-discounted) fee this entry paid, lamports. 0 = a same-router in-window bid
     /// update, which is free. Appended last; prefix decoders keep working.
     pub fee_paid: u64,
+    /// Backing hub of the pool bid on — with `miner`, the pool's identity. Appended last.
+    pub collateral_chain: String,
 }
 
 /// The seat winner filled its reservation: taker + amounts named, `reserved_until` set. Carries the
@@ -331,6 +337,8 @@ pub struct PoolResolved {
     pub requests: u8,
     /// Backing hub whose contest resolved (v3.1, appended last).
     pub collateral_chain: String,
+    /// When the winner's unfilled reservation lapses if it is never finalized. Appended last.
+    pub finalize_by: i64,
 }
 
 // --- Phase 10: consensus-governed validator weights ---
@@ -345,6 +353,13 @@ pub struct ValidatorWeightsUpdated {
 #[event]
 pub struct HaltSet {
     pub halted: bool,
+}
+
+/// An admin setter changed `Config`; `setting` names the field. Readers re-read `Config` on it
+/// instead of polling. `set_halted` emits this alongside `HaltSet`.
+#[event]
+pub struct ConfigChanged {
+    pub setting: String,
 }
 
 /// A pre-collateral-chain (v10-layout) `Swap` that survived an upgrade was decoded and terminated.
