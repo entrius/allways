@@ -346,6 +346,14 @@ fn test_oversized_string_rejected() {
 }
 
 #[test]
+fn test_non_ascii_deposit_wallet_rejected() {
+    let (mut svm, program_id) = setup();
+    let miner = dual_miner(&mut svm, &program_id);
+    let r = send(&mut svm, set_quote_ix(&program_id, &miner.pubkey(), "btc", "tao", "BC1Q\u{212a}", "b", RATE_PRECISION, 1), &miner.pubkey(), &miner);
+    assert!(r.unwrap_err().contains("NonAsciiAddress"), "a non-ASCII deposit wallet would alias a second source lock");
+}
+
+#[test]
 fn test_remove_quote_closes_and_refunds() {
     let (mut svm, program_id) = setup();
     let miner = dual_miner(&mut svm, &program_id);

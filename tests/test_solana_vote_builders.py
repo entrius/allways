@@ -294,6 +294,8 @@ def test_source_lock_key_matches_program_vector():
     key = pdas.source_lock_key('0xMinerWallet', '0xAbCdUser')
     assert key.hex() == '7c7ba20a03f7ad2b19226d94be0ef783dd31a6e2a0e2ae5dadfec2753cdb9612'
     assert key == pdas.source_lock_key('0xminerwallet', '0xABCDUSER')
+    # U+212A KELVIN SIGN folds to 'k' under str.lower() but not in the program: keys must not fold it.
+    assert pdas.source_lock_key('w', '\u212a') != pdas.source_lock_key('w', 'k')
 
 
 def test_source_lock_shared_across_miners_on_one_wallet():

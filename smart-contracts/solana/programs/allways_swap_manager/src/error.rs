@@ -177,4 +177,7 @@ pub enum ErrorCode {
     // --- V-M1: hotkey-binding freeze ---
     #[msg("Hotkey binding is set-once; a bound pubkey cannot change its hotkey")]
     HotkeyChangeForbidden,
+
+    #[msg("Addresses must be ASCII")]
+    NonAsciiAddress,
 }

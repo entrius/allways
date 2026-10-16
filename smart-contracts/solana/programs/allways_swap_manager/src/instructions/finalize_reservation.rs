@@ -92,6 +92,7 @@ pub fn handler(
         user_from_addr.len() <= MAX_ADDR_LEN && user_to_addr.len() <= MAX_ADDR_LEN,
         ErrorCode::StringTooLong
     );
+    crate::validate::addresses_ascii(&[&ctx.accounts.reservation.miner_from_addr, &user_from_addr])?;
     // `source_lock_key` seeds the source_lock PDA, so bind it to the real wallet + address (as swap_key binds
     // to from_tx_hash) — else a caller could seed a lock for a DIFFERENT address than it declares.
     require!(

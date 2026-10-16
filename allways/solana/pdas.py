@@ -97,8 +97,9 @@ def pool_pda(miner, backing: str = BACKING_CHAIN_SOL, program_id: Optional[Pubke
 
 def source_lock_key(miner_from_addr: str, from_addr: str) -> bytes:
     """keccak(keccak(lower(deposit wallet)) || keccak(lower(source address))) — mirrors the program's
-    `source_lock_key`; case-insensitive so one address can't be spelled into a second lock."""
-    lower = lambda s: keccak.new(data=s.lower().encode(), digest_bits=256).digest()  # noqa: E731
+    `source_lock_key`; case-insensitive so one address can't be spelled into a second lock. ASCII-only
+    folding (bytes.lower), like Rust's to_ascii_lowercase, so both sides derive one key."""
+    lower = lambda s: keccak.new(data=s.encode().lower(), digest_bits=256).digest()  # noqa: E731
     return keccak.new(data=lower(miner_from_addr) + lower(from_addr), digest_bits=256).digest()
 
 
