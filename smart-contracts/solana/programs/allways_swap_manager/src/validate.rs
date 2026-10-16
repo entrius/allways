@@ -22,6 +22,13 @@ pub fn chain_ids_lowercase(from_chain: &str, to_chain: &str) -> Result<()> {
     Ok(())
 }
 
+/// Source-lock key inputs must be ASCII: the key folds ASCII case only, so a non-ASCII alias that an
+/// off-chain normalizer folds (U+212A KELVIN SIGN → 'k') would key a second lock for one real address.
+pub fn addresses_ascii(addrs: &[&str]) -> Result<()> {
+    require!(addrs.iter().all(|a| a.is_ascii()), ErrorCode::NonAsciiAddress);
+    Ok(())
+}
+
 /// Quorum threshold as a percent of the validator set. Floored at a majority: anything below 51 lets
 /// a single validator (or a sub-majority clique) pass votes alone once the set has >1 member.
 pub fn consensus_threshold(percent: u8) -> Result<()> {

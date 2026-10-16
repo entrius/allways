@@ -1195,6 +1195,15 @@ fn test_source_lock_ignores_address_case() {
 }
 
 #[test]
+fn test_source_lock_rejects_non_ascii_source() {
+    // U+212A KELVIN SIGN folds to 'k' off-chain but not in the key, so it would mint a second lock.
+    let (mut svm, _admin, vals, a) = setup(0, 0);
+    seat_all(&mut svm, &vals, &[&a.pubkey()]);
+    let e = fill(&mut svm, &vals, &a.pubkey(), MFROM, "BC1Q\u{212a}USER").unwrap_err();
+    assert!(e.contains("NonAsciiAddress"), "non-ASCII source must be rejected: {e}");
+}
+
+#[test]
 fn test_source_lock_is_per_deposit_wallet() {
     // A different wallet can't receive the same deposit, so the same source may reserve it in parallel.
     let (mut svm, _admin, vals, a) = setup(0, 0);

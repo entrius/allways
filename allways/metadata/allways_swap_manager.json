@@ -5588,6 +5588,11 @@
       "code": 6071,
       "name": "HotkeyChangeForbidden",
       "msg": "Hotkey binding is set-once; a bound pubkey cannot change its hotkey"
+    },
+    {
+      "code": 6072,
+      "name": "NonAsciiAddress",
+      "msg": "Addresses must be ASCII"
     }
   ],
   "types": [
