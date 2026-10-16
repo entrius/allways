@@ -63,12 +63,12 @@ class SwapPlanner:
     """Live swaps and their reservations → lifecycle intents.
 
     To lift from ``allways.validator.solana_swap_loop``: the per-status decisions (``_decide_*``), with
-    every chain read replaced by ``LegVerifier.verdict`` and every account read by the World."""
+    every chain read replaced by ``ChainWatcher.verdict`` and every account read by the World."""
 
     name = 'swaps'
 
-    def __init__(self, legs) -> None:
-        self.legs = legs
+    def __init__(self, watchers) -> None:
+        self.watchers = watchers  # asset chain id → the ChainWatcher for the chain it lives on
 
     def plan(self, world: World, now: float) -> Iterable[Intent]:
         out: List[Intent] = []

@@ -11,9 +11,9 @@ import bittensor as bt
 
 from allways.solana.rpc import resolve_ws_url
 from allways.validator_v2.actuator.actuator import Actuator
-from allways.validator_v2.actuator.legs import LegVerifier
 from allways.validator_v2.actuator.planners import HygienePlanner, PoolPlanner, SwapPlanner
 from allways.validator_v2.chain.gateway import RpcGateway
+from allways.validator_v2.chains.watcher import ChainWatcher
 from allways.validator_v2.export.component import Export
 from allways.validator_v2.feed.events import EventFeed, FileCursorStore, LiveFeed
 from allways.validator_v2.hubs import HubSpec, relayed_hubs
@@ -49,7 +49,7 @@ class App:
 def build(
     cfg: Config,
     store: Any,
-    verify_leg: Callable[[str, Any], Any],
+    assets: Dict[str, Any],
     subtensor_factory: Callable[[], Any],
     executors: Dict[str, Any],
     export_storage: Optional[Any] = None,
@@ -68,10 +68,10 @@ def build(
         feed_status,
         world,
     )
-    legs = LegVerifier(verify_leg)
+    watchers = chain_watchers(assets)
     actuator = Actuator(
         world,
-        [SwapPlanner(legs), PoolPlanner(), HygienePlanner()],
+        [SwapPlanner(watchers), PoolPlanner(), HygienePlanner()],
         executors,
         lambda: gateway.client('actuator', cfg.program_id, cfg.keypair),
     )
@@ -91,6 +91,7 @@ def build(
         feed,
         scoring,
         WeightSetter(rounds, subtensor_factory),
+        *{id(w): w for w in watchers.values()}.values(),
     ]
     if cfg.relay:
         components += [_relay(h, world, events, actuator, store) for h in relayed_hubs()]
@@ -104,6 +105,21 @@ def build(
         os._exit(1)
 
     return App(components, Supervisor(components, on_fatal), gateway)
+
+
+def chain_watchers(assets: Dict[str, Any]) -> Dict[str, ChainWatcher]:
+    """One watcher per chain, shared by every asset on it (EVM tokens share their network's tip)."""
+    by_chain: Dict[int, ChainWatcher] = {}
+    out: Dict[str, ChainWatcher] = {}
+    for asset_id, asset in assets.items():
+        chain = asset.chain
+        watcher = by_chain.get(id(chain))
+        if watcher is None:
+            watcher = ChainWatcher(asset.chain_def.host_chain or asset_id, chain, {}, asset.chain_def.seconds_per_block)
+            by_chain[id(chain)] = watcher
+        watcher.assets[asset_id] = asset
+        out[asset_id] = watcher
+    return out
 
 
 def _relay(hub: HubSpec, world, events: Topic, actuator: Actuator, store) -> HubRelay:
