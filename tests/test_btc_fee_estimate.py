@@ -73,6 +73,6 @@ def test_select_utxos_sizes_outputs_from_their_scripts(monkeypatch):
     p = _provider(monkeypatch)
     change = address_to_scriptpubkey('bc1qw508d6qejxtdg4y5r3zarvary0c5xw7kv8f3t4')
     taproot = address_to_scriptpubkey('bc1p5d7rjq7g6rdk2yhzks9smlaqtedr4dekq08ge8ztwac72sfr9rusxg3297')
-    utxos = [{'value': 100_000}]
+    utxos = [{'txid': 'aa' * 32, 'value': 100_000, 'status': {'confirmed': True}}]
     _, _, fee = p.select_utxos(utxos, 10_000, True, [taproot, change], fee_rate_override=1)
     assert fee == 11 + 68 + 43 + 31  # Taproot dest is 43 vB, not the P2WPKH 31
