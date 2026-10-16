@@ -362,6 +362,14 @@ class SolanaSwapLoop:
         Re-fetching it every 12s pass added only RPC load, and worse: a transient node-view gap on that
         re-fetch could return non-`ok` and slash an already-attested payout (the same false-negative class
         as the dest-leg stale-view issue). Source is therefore a settled `ok` by construction."""
+        if self.state_store is not None and self.state_store.delivery_backs_another_swap(
+            swap.to_tx_hash, _swap_key_hex(swap.swap_key)
+        ):
+            # Each swap needs its own delivery; this one never confirms and slashes at timeout.
+            return SwapAction(
+                SwapDecision.TIMEOUT if overdue else SwapDecision.WAIT,
+                reason='delivery tx already backs another swap' + (' — slashing' if overdue else ''),
+            )
         s_status = 'ok'  # source verified + frozen at attestation (Fulfilled ⟹ attested); see docstring
         d_status, d_info = self._fetch_leg(
             swap.to_chain,
@@ -547,6 +555,8 @@ class SolanaSwapLoop:
             key = swap_key_from_tx_hash(swap.from_tx_hash).hex()
             self.state_store.record_deposit_claim(swap.from_tx_hash, key, now)
             self.state_store.mark_deposit_initiated(key)
+            if status == 'Fulfilled':
+                self.state_store.record_swap_fulfillment(_swap_key_hex(swap.swap_key), swap.to_tx_hash, now)
         # No dest provider here → can't verify locally. SKIP below the ceiling (a re-enabled spoke or a
         # provider-equipped peer still resolves it); past max_extend_at TIMEOUT so a permanently unverifiable
         # pair frees the collateral instead of freezing it forever (only network-wide gaps reach quorum).

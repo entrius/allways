@@ -31,8 +31,8 @@ from allways.classes import ActivityTransition, MinerActivity, next_activity
 _HEX_HASH = re.compile(r'(0x)?[0-9a-f]{64}', re.IGNORECASE)
 
 
-def deposit_key(tx_hash: str) -> str:
-    """Ledger key for a source tx hash: hex-shaped hashes lowercase (events carry no chain to ask)."""
+def tx_key(tx_hash: str) -> str:
+    """Ledger key for a tx hash: hex-shaped hashes lowercase (events carry no chain to ask)."""
     return tx_hash.lower() if _HEX_HASH.fullmatch(tx_hash) else tx_hash
 
 
@@ -652,7 +652,7 @@ class ValidatorStateStore:
             return None
         return bool(row['ok'])
 
-    # ─── swap_fulfillments (delivery-leg hash for post-close receipts) ──
+    # ─── swap_fulfillments (delivery-leg hash: post-close receipts + one swap per delivery) ──
 
     def record_swap_fulfillment(self, swap_key: str, to_tx_hash: str, block_time: int) -> None:
         """Persist the miner's delivery tx hash (``SwapFulfilled`` event) keyed by swap_key hex.
@@ -663,22 +663,29 @@ class ValidatorStateStore:
             INSERT INTO swap_fulfillments (swap_key, to_tx_hash, block_time) VALUES (?, ?, ?)
             ON CONFLICT(swap_key) DO UPDATE SET to_tx_hash = excluded.to_tx_hash, block_time = excluded.block_time
             """,
-            (swap_key, to_tx_hash, block_time),
+            (swap_key, tx_key(to_tx_hash), block_time),
         )
 
     def get_swap_fulfillment(self, swap_key: str) -> Optional[str]:
         row = self._fetchone('SELECT to_tx_hash FROM swap_fulfillments WHERE swap_key = ?', (swap_key,))
         return row['to_tx_hash'] if row is not None else None
 
+    def delivery_backs_another_swap(self, to_tx_hash: str, swap_key: str) -> bool:
+        row = self._fetchone(
+            'SELECT 1 FROM swap_fulfillments WHERE to_tx_hash = ? AND swap_key != ? LIMIT 1',
+            (tx_key(to_tx_hash), swap_key),
+        )
+        return row is not None
+
     # ─── used_deposits (one swap per source deposit) ─────────────────────
     # Fed by SwapClaimed/SwapInitiated events and the swap loop, so a fresh database rebuilds it
-    # from program history. Keys go through ``deposit_key``.
+    # from program history. Keys go through ``tx_key``.
 
     def record_deposit_claim(self, tx_hash: str, swap_key: str, seen_at: int) -> None:
         """Note the first claim seen on a deposit; later claims leave the row alone."""
         self._execute(
             'INSERT OR IGNORE INTO used_deposits (tx_hash, swap_key, seen_at, initiated) VALUES (?, ?, ?, 0)',
-            (deposit_key(tx_hash), swap_key, int(seen_at)),
+            (tx_key(tx_hash), swap_key, int(seen_at)),
         )
 
     def mark_deposit_initiated(self, swap_key: str) -> None:
@@ -687,7 +694,7 @@ class ValidatorStateStore:
 
     def deposit_claim(self, tx_hash: str) -> Optional[Tuple[str, bool]]:
         """(swap_key of the first claim, initiated?) for a deposit, or None if unseen."""
-        row = self._fetchone('SELECT swap_key, initiated FROM used_deposits WHERE tx_hash = ?', (deposit_key(tx_hash),))
+        row = self._fetchone('SELECT swap_key, initiated FROM used_deposits WHERE tx_hash = ?', (tx_key(tx_hash),))
         return (row['swap_key'], bool(row['initiated'])) if row is not None else None
 
     # ─── routed_requests (on-behalf reservation queue) ──────────────────

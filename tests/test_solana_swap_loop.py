@@ -166,6 +166,18 @@ def test_fulfilled_source_provider_down_still_confirms():
     assert providers['btc'].calls == []  # source never touched
 
 
+def test_delivery_backing_another_swap_never_confirms(tmp_path):
+    # One delivery tx marked on two swaps, in any casing: the first confirms, the second never does.
+    loop, _ = loop_with(state_store=ValidatorStateStore(tmp_path / 'state.db'))
+    first, second = make_swap(key=b'\x01' * 32), make_swap(key=b'\x02' * 32)
+    first.to_tx_hash, second.to_tx_hash = '0x' + 'ab' * 32, '0X' + 'AB' * 32
+    assert loop.decide(first, now=1500).decision == SwapDecision.CONFIRM
+    assert loop.decide(first, now=1501).decision == SwapDecision.CONFIRM  # re-deciding the same swap is fine
+    action = loop.decide(second, now=1500)
+    assert action.decision == SwapDecision.WAIT and 'another swap' in action.reason
+    assert loop.decide(second, now=2500).decision == SwapDecision.TIMEOUT
+
+
 def test_fulfilled_dest_pending_far_from_timeout_waits():
     loop, providers = loop_with(result=True)
     providers['sol'].result = False  # dest matched but unconfirmed, timeout far off
