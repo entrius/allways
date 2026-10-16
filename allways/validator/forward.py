@@ -53,13 +53,12 @@ async def forward(self: Validator) -> None:
         bt.logging.info(f'forward step #{self.step}: resolved {len(resolved)} reservation pool(s)')
     if finalized:
         bt.logging.info(f'forward step #{self.step}: finalized {len(finalized)} routed seat(s)')
+    # Ingest first: the swap loop's used-tx ledgers are fed by these events.
+    ingest_solana_events(self)
     decisions = await asyncio.to_thread(self.solana_swap_loop.run_once, now)
     bt.logging.info(
         f'forward step #{self.step} @ block {self.block}: solana swap loop processed {len(decisions)} live swap(s)'
     )
-
-    # Fold new program events into the crown index before scoring reads it.
-    ingest_solana_events(self)
 
     # Bond relay: carry Solana verdicts to the Bittensor vault and the vault's bonds back.
     # Off the event loop — a vault write waits on substrate block inclusion. Retry construction
