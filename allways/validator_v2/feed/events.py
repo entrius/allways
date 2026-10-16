@@ -9,6 +9,7 @@ across a restart. Every consumer must be order-tolerant and idempotent by (signa
 
 from __future__ import annotations
 
+import asyncio
 import json
 import os
 import threading
@@ -21,7 +22,7 @@ import bittensor as bt
 
 from allways.solana.events import EventRecord
 from allways.solana.program_feed import ProgramEventFeed, events_from_logs
-from allways.validator_v2.runtime.bus import Topic
+from allways.validator_v2.runtime.bus import Latest, Topic
 from allways.validator_v2.runtime.component import Component
 
 # Longest swap life (10 min reservation TTL + 140 min reservation extensions + 10 min base timeout +
@@ -32,6 +33,10 @@ BACKFILL_DECODES_PER_TICK = 300
 SEEN_SIGNATURES = 50_000
 # Solana slots are ~0.4s; between two block-time anchors the feed interpolates.
 SLOT_ANCHOR_SECS = 30.0
+SLOT_SECS = 0.4
+# No notification for this long and the socket is presumed dead: resubscribe, and the catch-up that
+# every resubscribe triggers fills whatever was missed. Costs ~one signature listing on a quiet socket.
+SILENT_SOCKET_SECS = 90.0
 
 
 class CursorStore(Protocol):
@@ -84,9 +89,9 @@ class SeenSignatures:
 
 
 class SlotClock:
-    """Turns a slot into chain time without a per-event read. Anchors are ``getBlockTime(slot)`` for the
-    newest slot seen, at most once per ``SLOT_ANCHOR_SECS``; times between anchors are interpolated, so
-    an event is held until an anchor at or past its slot exists."""
+    """Turns a slot into chain time without a read per event. Anchors are ``getBlockTime(slot)`` for the
+    newest slot seen, at most once per ``SLOT_ANCHOR_SECS``; a slot between two anchors is interpolated,
+    one past the newest is extrapolated at the measured slot rate. Error is a few seconds at worst."""
 
     def __init__(self, block_time: Any, min_interval: float = SLOT_ANCHOR_SECS) -> None:
         self._block_time = block_time  # callable: slot -> unix seconds or None
@@ -94,10 +99,8 @@ class SlotClock:
         self._anchors: List[Tuple[int, int]] = []  # (slot, unix), ascending
         self._fetched_at = 0.0
 
-    def anchor(self, slot: int, now: float, force: bool = False) -> None:
-        if not force and now - self._fetched_at < self._min_interval:
-            return
-        if self._anchors and slot <= self._anchors[-1][0]:
+    def anchor(self, slot: int, now: float) -> None:
+        if self._anchors and (now - self._fetched_at < self._min_interval or slot <= self._anchors[-1][0]):
             return
         t = self._block_time(slot)
         self._fetched_at = now
@@ -105,19 +108,28 @@ class SlotClock:
             self._anchors.append((slot, int(t)))
             del self._anchors[:-64]
 
+    def _rate(self) -> float:
+        if len(self._anchors) < 2:
+            return SLOT_SECS
+        (s0, t0), (s1, t1) = self._anchors[-2], self._anchors[-1]
+        return (t1 - t0) / (s1 - s0) if s1 > s0 and t1 >= t0 else SLOT_SECS
+
     def time_of(self, slot: int) -> Optional[int]:
-        """Interpolated unix time for ``slot``, or None while no anchor reaches it yet."""
+        """Unix time for ``slot``, or None before the first anchor."""
+        if not self._anchors:
+            return None
         prev: Optional[Tuple[int, int]] = None
         for a_slot, a_time in self._anchors:
             if a_slot == slot:
                 return a_time
             if a_slot > slot:
                 if prev is None:
-                    return a_time  # older than the first anchor: clamp
+                    return int(round(a_time - (a_slot - slot) * self._rate()))
                 p_slot, p_time = prev
                 return int(round(p_time + (slot - p_slot) * (a_time - p_time) / (a_slot - p_slot)))
             prev = (a_slot, a_time)
-        return None
+        last_slot, last_time = self._anchors[-1]
+        return int(round(last_time + (slot - last_slot) * self._rate()))
 
 
 @dataclass(frozen=True)
@@ -128,6 +140,13 @@ class HistoryGap:
     complete_since: float
 
 
+@dataclass(frozen=True)
+class FeedStatus:
+    catching_up: bool  # a catch-up is in progress: events since the cursor may not all be published yet
+    session: int  # acknowledged subscriptions so far
+    last_event_at: float  # wall time of the newest published live event (0 = none yet)
+
+
 @dataclass
 class _Pending:
     slot: int
@@ -136,12 +155,35 @@ class _Pending:
 
 
 class LiveFeed(ProgramEventFeed):
-    """ProgramEventFeed that keeps the signature and slot of each notification, for stamping."""
+    """ProgramEventFeed that keeps the signature and slot of each notification, and resubscribes when
+    the socket goes quiet: a connection that still answers pings can have stopped delivering."""
 
-    def __init__(self, ws_url: str, program_id) -> None:
+    def __init__(self, ws_url: str, program_id, silent_secs: float = SILENT_SOCKET_SECS) -> None:
         super().__init__(ws_url, program_id)
+        self.silent_secs = silent_secs
         self._lock = threading.Lock()
         self._inbox: List[_Pending] = []
+
+    async def _session(self) -> None:
+        import websockets
+
+        sub = {
+            'jsonrpc': '2.0',
+            'id': 1,
+            'method': 'logsSubscribe',
+            'params': [{'mentions': [self.mentions]}, {'commitment': 'confirmed'}],
+        }
+        async with websockets.connect(self.ws_url, ping_interval=20, ping_timeout=20, max_size=None) as ws:
+            await ws.send(json.dumps(sub))
+            while True:
+                try:
+                    raw = await asyncio.wait_for(ws.recv(), self.silent_secs)
+                except asyncio.TimeoutError:
+                    return  # silent too long: the base loop resubscribes at once
+                try:
+                    self.handle_frame(json.loads(raw))
+                except (ValueError, TypeError):
+                    continue
 
     def handle_notification(self, msg: dict) -> int:
         result = ((msg or {}).get('params') or {}).get('result') or {}
@@ -223,6 +265,7 @@ class EventFeed(Component):
         out: Topic,
         gaps: Topic,
         program_id,
+        status: Optional[Latest] = None,
         clock=time.time,
     ) -> None:
         super().__init__(clock)
@@ -231,6 +274,7 @@ class EventFeed(Component):
         self.cursor = cursor
         self.out = out
         self.gaps = gaps  # publishes a HistoryGap when the horizon cut history short
+        self.status: Latest = status or Latest()
         self.program_id = program_id
         self.seen = SeenSignatures()
         self._rpc: Any = None
@@ -240,6 +284,7 @@ class EventFeed(Component):
         self._session = 0
         self._rerun = False
         self._newest_live: Optional[str] = None
+        self._last_event_at = 0.0
 
     def setup(self) -> None:
         self._rpc = self._rpc_factory()
@@ -259,22 +304,22 @@ class EventFeed(Component):
             self._step_backfill(now)
         elif self._newest_live is not None:
             self.cursor.set(self._newest_live)
+        self.status.set(FeedStatus(self._backfill is not None, self.live.session, self._last_event_at))
 
     def _stamp_live(self, now: float) -> None:
         self._held.extend(self.live.take())
         if not self._held:
             return
         self._clock.anchor(max(p.slot for p in self._held), now)
-        still: List[_Pending] = []
+        if self._clock.time_of(self._held[0].slot) is None:
+            return  # no anchor yet (the block-time read failed): hold, and retry next tick
         for p in self._held:
-            t = self._clock.time_of(p.slot)
-            if t is None:
-                still.append(p)
-                continue
             if self.seen.add(p.signature):
+                t = self._clock.time_of(p.slot)
                 self.out.publish_many([EventRecord(n, f, p.slot, t, p.signature) for n, f in p.events])
+                self._last_event_at = now
             self._newest_live = p.signature
-        self._held = still
+        self._held = []
 
     def _step_backfill(self, now: float) -> None:
         bf = self._backfill

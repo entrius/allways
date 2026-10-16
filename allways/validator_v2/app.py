@@ -59,8 +59,15 @@ def build(
     rounds = Latest()
     events = Topic('events')
     gaps = Topic('gaps')
+    feed_status = Latest()
 
-    world_reader = WorldReader(lambda: gateway.client('world', cfg.program_id), world)
+    world_reader = WorldReader(
+        lambda: gateway.client('world', cfg.program_id),
+        events.subscribe('world'),
+        gaps.subscribe('world'),
+        feed_status,
+        world,
+    )
     legs = LegVerifier(verify_leg)
     actuator = Actuator(
         world,
@@ -75,6 +82,7 @@ def build(
         events,
         gaps,
         cfg.program_id,
+        status=feed_status,
     )
     scoring = Scoring(world, events.subscribe('scoring'), gaps.subscribe('scoring'), store, rounds)
     components: List[Component] = [
