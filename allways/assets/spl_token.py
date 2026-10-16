@@ -413,14 +413,13 @@ class SplToken(Asset):
                     f'{LOG_SOL} signer holds {sol} lamports < {lamports_needed} needed for fee+rent — not sending'
                 )
                 return None
-            ixs = [
+            # Create only when missing: CreateIdempotent fails on an existing ATA whose owner was reassigned.
+            create = [] if dst_account else [create_ata_idempotent_ix(me, Pubkey.from_string(to_address), mint)]
+            ixs = create + [
                 transfer_checked_ix(
                     self.ata(str(me)), mint, self.ata(to_address), me, int(amount), self.chain_def.decimals
                 ),
             ]
-            # Create only when missing: CreateIdempotent fails on an existing ATA whose owner was reassigned.
-            if not dst_account:
-                ixs.insert(0, create_ata_idempotent_ix(me, Pubkey.from_string(to_address), mint))
         except Exception as e:
             bt.logging.error(f'{LOG_SOL} {self.chain_def.id} send_amount build failed: {e}')
             return None
