@@ -6,7 +6,7 @@ use crate::constants::{
 };
 use crate::error::ErrorCode;
 use crate::events::SwapInitiated;
-use crate::state::{source_lock_key as source_lock_key_of, 
+use crate::state::{source_lock_key as source_lock_key_of,
     Binding, BondAttestation, Config, MinerState, Reservation, SourceLock, Swap, SwapStatus, VoteRound,
 };
 
