@@ -11,7 +11,8 @@ closes), ``collateral_verdicts`` (declared alpha leg checks pinned at fill),
 ``routed_requests`` (queued on-behalf reservation details awaiting
 finalize — the one table NOT rebuildable from chain),
 ``relay_swaps``/``relay_fees``/``relay_slashes``/``relay_meta`` (the W3 bond
-relay's ledger of what the vault still owes), and
+relay's ledger of what the vault still owes),
+``used_deposits`` (which swap claimed each source deposit), and
 ``solana_event_meta`` (the event-ingest cursor).
 Single connection guarded by one lock; opened with ``check_same_thread=False``.
 ``busy_timeout`` is set before ``journal_mode=WAL`` because the WAL flip takes a
@@ -615,6 +616,8 @@ class ValidatorStateStore:
             return
         self._execute('DELETE FROM swap_outcomes WHERE block_time < ?', (cutoff_block,))
         self._execute('DELETE FROM swap_fulfillments WHERE block_time < ?', (cutoff_block,))
+        # A deposit older than this can't pass freshness against any new reservation.
+        self._execute('DELETE FROM used_deposits WHERE reserved_at < ?', (cutoff_block,))
 
     # ─── collateral_verdicts (declared alpha leg at fill block) ────────
 
@@ -658,6 +661,32 @@ class ValidatorStateStore:
     def get_swap_fulfillment(self, swap_key: str) -> Optional[str]:
         row = self._fetchone('SELECT to_tx_hash FROM swap_fulfillments WHERE swap_key = ?', (swap_key,))
         return row['to_tx_hash'] if row is not None else None
+
+    # ─── used_deposits (one claim per source deposit) ────────────────────
+
+    def claim_deposit(self, from_chain: str, tx_hash: str, swap_key: str, reserved_at: int) -> Tuple[str, int]:
+        """Mark a canonical source deposit as used by the claim (swap_key, its reservation's created_at)
+        unless already marked; returns the claim holding it. Atomic across concurrent relays. The reservation
+        stamp tells two claims at the same key apart (a closed Swap's key can be claimed again)."""
+        with self.lock:
+            conn = self.require_connection()
+            conn.execute(
+                'INSERT OR IGNORE INTO used_deposits (from_chain, tx_hash, swap_key, reserved_at) VALUES (?, ?, ?, ?)',
+                (from_chain, tx_hash, swap_key, int(reserved_at)),
+            )
+            conn.commit()
+            row = conn.execute(
+                'SELECT swap_key, reserved_at FROM used_deposits WHERE from_chain = ? AND tx_hash = ?',
+                (from_chain, tx_hash),
+            ).fetchone()
+            return row['swap_key'], int(row['reserved_at'])
+
+    def release_deposit(self, from_chain: str, tx_hash: str, swap_key: str, reserved_at: int) -> None:
+        """Undo ``claim_deposit`` for a claim that never landed, so the taker can retry."""
+        self._execute(
+            'DELETE FROM used_deposits WHERE from_chain = ? AND tx_hash = ? AND swap_key = ? AND reserved_at = ?',
+            (from_chain, tx_hash, swap_key, int(reserved_at)),
+        )
 
     # ─── routed_requests (on-behalf reservation queue) ──────────────────
     # The ONLY table not rebuildable from chain events: a routed user's details
@@ -1246,6 +1275,16 @@ class ValidatorStateStore:
                     swap_key    TEXT PRIMARY KEY,
                     to_tx_hash  TEXT NOT NULL,
                     block_time  INTEGER NOT NULL
+                );
+
+                -- Canonical source tx hash -> the claim that used it, so each deposit
+                -- backs exactly one swap.
+                CREATE TABLE IF NOT EXISTS used_deposits (
+                    from_chain  TEXT NOT NULL,
+                    tx_hash     TEXT NOT NULL,
+                    swap_key    TEXT NOT NULL,
+                    reserved_at INTEGER NOT NULL,
+                    PRIMARY KEY (from_chain, tx_hash)
                 );
 
                 -- One row per hotkey ever banned (latest ban), so it needs no prune.

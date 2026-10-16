@@ -12,7 +12,7 @@ from embit.networks import NETWORKS
 from embit.script import address_to_scriptpubkey
 
 from allways.assets.asset import Asset, ProviderUnreachableError, SendResult, TransactionInfo
-from allways.assets.chain import Chain
+from allways.assets.chain import Chain, canonical_hex_tx_hash
 from allways.chains import CHAIN_BTC, ChainDefinition
 
 ADDR_TYPE_P2PKH = 'p2pkh'
@@ -211,6 +211,9 @@ class Bitcoin(Asset, Chain):
     def describe(self) -> str:
         hosts = ', '.join(urlparse(base).netloc or base for base, _ in self.btc_api_bases())
         return f'Esplora API ({self.network}): {hosts}'
+
+    def canonical_tx_hash(self, tx_hash: str) -> Optional[str]:
+        return canonical_hex_tx_hash(tx_hash, prefixed=False)
 
     def normalize_address(self, address: str) -> str:
         """bech32 is case-insensitive (BIP-173); base58 legacy addresses are not — lowercase bech32 only."""

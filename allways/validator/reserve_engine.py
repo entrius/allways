@@ -680,7 +680,10 @@ def confirm_deposit(validator, miner_hotkey: str, from_tx_hash: str, from_tx_blo
             ref = _deposit_ref(provider, from_tx_hash, from_tx_block)
             if ref is None:
                 continue
-            tx_hash, block_hint = ref
+            # One spelling per hash: the swap key hashes the raw string, and RPCs accept several spellings.
+            tx_hash, block_hint = provider.chain.canonical_tx_hash(ref[0]), ref[1]
+            if tx_hash is None:
+                continue
             candidate = provider.verify_transaction(
                 tx_hash=tx_hash,
                 expected_recipient=resv.miner_from_addr,
@@ -716,14 +719,24 @@ def confirm_deposit(validator, miner_hotkey: str, from_tx_hash: str, from_tx_blo
         # No live slot matched; fast-fail (no claim) so the short TTL frees the miner.
         return ConfirmResult(False, 'Source tx not visible or does not match the reservation')
     _, reservation, backing, tx_info, from_tx_hash = min(matches, key=lambda m: m[0])
+    swap_key = swap_key_from_tx_hash(from_tx_hash)
+    if client.get_swap(swap_key) is not None:
+        return ConfirmResult(False, 'Source deposit already claimed')
+    claim = (swap_key.hex(), int(reservation.created_at))
+    store = validator.state_store
+    if store.claim_deposit(reservation.from_chain, from_tx_hash, *claim) != claim:
+        return ConfirmResult(False, 'Source deposit already claimed')
 
     # The taker's funds are already on the source chain and this deposit just verified against the
     # pinned reservation — but submit_swap_claim needs reserved_until >= now, and once it lapses there
     # is no claim, no Swap, no timeout and no refund: the deposit is simply lost. Buy runway first.
     _extend_for_claim(client, miner_pk, reservation, backing)
 
-    swap_key = swap_key_from_tx_hash(from_tx_hash)
-    sig = client.submit_swap_claim(miner_pk, swap_key, from_tx_hash, tx_info.block_number or 0, backing)
+    try:
+        sig = client.submit_swap_claim(miner_pk, swap_key, from_tx_hash, tx_info.block_number or 0, backing)
+    except Exception:
+        store.release_deposit(reservation.from_chain, from_tx_hash, *claim)
+        raise
     return ConfirmResult(True, '', swap_key.hex(), sig, from_tx_hash)
 
 

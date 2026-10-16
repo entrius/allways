@@ -100,6 +100,9 @@ class RecordingProvider:
     def normalize_address(self, address):
         return address.lower() if isinstance(address, str) else address  # mirror the EVM provider
 
+    def canonical_tx_hash(self, tx_hash):
+        return tx_hash
+
     @property
     def chain_def(self):
         return SimpleNamespace(replay_grace_secs=self.grace)

@@ -783,6 +783,10 @@ from allways.validator.reserve_engine import confirm_deposit  # noqa: E402
 CONFIRM_CREATED_AT = 1000
 
 
+def _store():
+    return ValidatorStateStore(db_path=Path(tempfile.mkdtemp()) / 'state.db')
+
+
 class _ConfirmClient(FakeClient):
     def __init__(self, reservation, **kw):
         super().__init__(**kw)
@@ -791,6 +795,10 @@ class _ConfirmClient(FakeClient):
         self.extensions = []
         self.extend_backings = []
         self.extend_raises = False
+        self.swaps = {}
+
+    def get_swap(self, swap_key):
+        return self.swaps.get(bytes(swap_key))
 
     def get_reservation(self, miner, backing='sol'):
         # A dict models a dual-purse miner's per-hub slots (v3.1); a bare value is the same on every hub.
@@ -799,7 +807,10 @@ class _ConfirmClient(FakeClient):
         return self._reservation
 
     def submit_swap_claim(self, miner, swap_key, from_tx_hash, from_tx_block, backing='sol'):
+        if bytes(swap_key) in self.swaps:
+            raise RuntimeError('swap PDA already in use')
         self.claims.append((swap_key, from_tx_hash, from_tx_block, backing))
+        self.swaps[bytes(swap_key)] = SimpleNamespace(from_tx_hash=from_tx_hash)
         return 'claimsig'
 
     def extend_reservation(self, miner, target_at, backing='sol', *, from_chain=None, from_addr=None):
@@ -828,7 +839,7 @@ class _FakeProvider:
 
     @property
     def chain(self):
-        return SimpleNamespace(normalize_address=self._normalize)
+        return SimpleNamespace(normalize_address=self._normalize, canonical_tx_hash=lambda h: h)
 
 
 def _confirm_reservation(**over):
@@ -862,7 +873,9 @@ def _tx(*, confirmed, block_time, confirmations=0):
 def _confirm(reservation, tx_info, *, unreachable=False):
     client = _ConfirmClient(reservation)
     provider = _FakeProvider(tx_info, unreachable=unreachable)
-    validator = SimpleNamespace(solana_client=client, axon_assets={'btc': provider}, axon_lock=threading.RLock())
+    validator = SimpleNamespace(
+        solana_client=client, axon_assets={'btc': provider}, axon_lock=threading.RLock(), state_store=_store()
+    )
     return confirm_deposit(validator, HOTKEY, 'srctxhash'), client
 
 
@@ -927,7 +940,9 @@ def test_confirm_prefers_canonical_form_slot_over_case_variant():
     provider = _FakeProvider(
         _tx(confirmed=True, block_time=CONFIRM_CREATED_AT + 5, confirmations=6), normalize=str.lower
     )
-    validator = SimpleNamespace(solana_client=client, axon_assets={'btc': provider}, axon_lock=threading.RLock())
+    validator = SimpleNamespace(
+        solana_client=client, axon_assets={'btc': provider}, axon_lock=threading.RLock(), state_store=_store()
+    )
     r = confirm_deposit(validator, HOTKEY, 'srctxhash')
     assert r.ok and len(client.claims) == 1
     assert client.claims[0][3] == 'tao'  # the canonical slot's backing claimed, not the variant's
@@ -939,7 +954,9 @@ def test_confirm_prefers_the_oldest_slot_on_a_form_tie():
     older = _confirm_reservation(created_at=500)
     client = _ConfirmClient({'sol': younger, 'tao': older})
     provider = _FakeProvider(_tx(confirmed=True, block_time=CONFIRM_CREATED_AT + 5, confirmations=6))
-    validator = SimpleNamespace(solana_client=client, axon_assets={'btc': provider}, axon_lock=threading.RLock())
+    validator = SimpleNamespace(
+        solana_client=client, axon_assets={'btc': provider}, axon_lock=threading.RLock(), state_store=_store()
+    )
     r = confirm_deposit(validator, HOTKEY, 'srctxhash')
     assert r.ok and client.claims[0][3] == 'tao'
 
@@ -954,7 +971,9 @@ def test_confirm_fresh_match_on_one_hub_survives_stale_match_on_another():
         'btc': _FakeProvider(_tx(confirmed=True, block_time=CONFIRM_CREATED_AT - 1, confirmations=6)),
         'sol': _FakeProvider(_tx(confirmed=True, block_time=CONFIRM_CREATED_AT + 5, confirmations=6)),
     }
-    validator = SimpleNamespace(solana_client=client, axon_assets=providers, axon_lock=threading.RLock())
+    validator = SimpleNamespace(
+        solana_client=client, axon_assets=providers, axon_lock=threading.RLock(), state_store=_store()
+    )
     r = confirm_deposit(validator, HOTKEY, 'srctxhash')
     assert r.ok and client.claims[0][3] == 'tao'
 
@@ -993,6 +1012,7 @@ def test_confirm_measures_runway_after_the_source_rpc(monkeypatch):
         solana_client=client,
         axon_assets={'btc': _SlowProvider(_tx(confirmed=False, block_time=None))},
         axon_lock=threading.RLock(),
+        state_store=_store(),
     )
     monkeypatch.setattr(rc.time, 'time', lambda: clock['t'])
     r = confirm_deposit(validator, HOTKEY, 'srctxhash')
@@ -1023,7 +1043,9 @@ def test_confirm_claims_even_if_the_extension_fails():
     client = _ConfirmClient(_near_expiry(20))
     client.extend_raises = True
     provider = _FakeProvider(_tx(confirmed=False, block_time=None))
-    validator = SimpleNamespace(solana_client=client, axon_assets={'btc': provider}, axon_lock=threading.RLock())
+    validator = SimpleNamespace(
+        solana_client=client, axon_assets={'btc': provider}, axon_lock=threading.RLock(), state_store=_store()
+    )
     r = confirm_deposit(validator, HOTKEY, 'srctxhash')
     assert r.ok and client.claims
 
@@ -1035,7 +1057,9 @@ def test_confirm_uses_tao_slot_when_sol_slot_empty():
     resv = _near_expiry(20)  # near expiry so the runway extend also travels on the right hub
     client = _ConfirmClient({'sol': None, 'tao': resv})
     provider = _FakeProvider(_tx(confirmed=False, block_time=None))
-    validator = SimpleNamespace(solana_client=client, axon_assets={'btc': provider}, axon_lock=threading.RLock())
+    validator = SimpleNamespace(
+        solana_client=client, axon_assets={'btc': provider}, axon_lock=threading.RLock(), state_store=_store()
+    )
     r = confirm_deposit(validator, HOTKEY, 'srctxhash')
     assert r.ok and client.claims
     assert client.claims[0][3] == 'tao'  # claim submitted against the TAO hub, not the empty SOL slot
@@ -1046,7 +1070,9 @@ def test_confirm_no_live_unclaimed_slot_on_any_hub_rejects():
     # Empty SOL + expired TAO: nothing live+unclaimed anywhere → no claim, TTL frees the miner.
     client = _ConfirmClient({'sol': None, 'tao': _confirm_reservation(reserved_until=1)})
     provider = _FakeProvider(_tx(confirmed=False, block_time=None))
-    validator = SimpleNamespace(solana_client=client, axon_assets={'btc': provider}, axon_lock=threading.RLock())
+    validator = SimpleNamespace(
+        solana_client=client, axon_assets={'btc': provider}, axon_lock=threading.RLock(), state_store=_store()
+    )
     r = confirm_deposit(validator, HOTKEY, 'srctxhash')
     assert not r.ok and not client.claims
 
@@ -1071,7 +1097,7 @@ class _MatchingProvider:
 
     @property
     def chain(self):
-        return SimpleNamespace(normalize_address=lambda a: a)
+        return SimpleNamespace(normalize_address=lambda a: a, canonical_tx_hash=lambda h: h)
 
 
 def test_confirm_matches_the_right_hub_when_both_slots_are_live_unclaimed():
@@ -1083,7 +1109,9 @@ def test_confirm_matches_the_right_hub_when_both_slots_are_live_unclaimed():
     tao = _near_expiry(20, from_amount=777, miner_from_addr='minerBTC_tao')
     client = _ConfirmClient({'sol': sol, 'tao': tao})
     provider = _MatchingProvider(amount=777, recipient='minerBTC_tao')  # the real deposit is the TAO one
-    validator = SimpleNamespace(solana_client=client, axon_assets={'btc': provider}, axon_lock=threading.RLock())
+    validator = SimpleNamespace(
+        solana_client=client, axon_assets={'btc': provider}, axon_lock=threading.RLock(), state_store=_store()
+    )
     r = confirm_deposit(validator, HOTKEY, 'taoDeposit')
     assert r.ok and client.claims
     assert client.claims[0][3] == 'tao'  # claimed against the hub the deposit matched, not the first live slot
@@ -1404,6 +1432,8 @@ def test_confirm_resolves_an_extrinsic_id_through_the_source_chain_and_claims_th
     # The app relays btcli's `<block>-<idx>` unchanged; the seam resolves, claims and echoes the inner hash.
     from allways.assets.tao import Tao
 
+    INNER_HASH = '0x' + 'ab' * 32
+
     class _AlphaProvider(_FakeProvider):
         chain = Tao(SimpleNamespace())
         verified = None
@@ -1411,7 +1441,7 @@ def test_confirm_resolves_an_extrinsic_id_through_the_source_chain_and_claims_th
         def locate_transfer(self, block_num, ext_idx):
             if (block_num, ext_idx) != (8083554, 7):
                 raise ValueError('no creditable transfer')
-            return '0xinner', block_num
+            return INNER_HASH, block_num
 
         def verify_transaction(self, **kw):
             self.verified = kw
@@ -1419,9 +1449,11 @@ def test_confirm_resolves_an_extrinsic_id_through_the_source_chain_and_claims_th
 
     client = _ConfirmClient(_confirm_reservation(from_chain='sn19'))
     provider = _AlphaProvider(_tx(confirmed=True, block_time=CONFIRM_CREATED_AT + 5, confirmations=6))
-    validator = SimpleNamespace(solana_client=client, axon_assets={'sn19': provider}, axon_lock=threading.RLock())
+    validator = SimpleNamespace(
+        solana_client=client, axon_assets={'sn19': provider}, axon_lock=threading.RLock(), state_store=_store()
+    )
     r = confirm_deposit(validator, HOTKEY, '8083554-7')
-    assert r.ok and r.from_tx_hash == '0xinner'
-    assert (provider.verified['tx_hash'], provider.verified['block_hint']) == ('0xinner', 8083554)
-    assert client.claims[0][1] == '0xinner' and client.claims[0][0] == rc.swap_key_from_tx_hash('0xinner')
+    assert r.ok and r.from_tx_hash == INNER_HASH
+    assert (provider.verified['tx_hash'], provider.verified['block_hint']) == (INNER_HASH, 8083554)
+    assert client.claims[0][1] == INNER_HASH and client.claims[0][0] == rc.swap_key_from_tx_hash(INNER_HASH)
     assert not confirm_deposit(validator, HOTKEY, '8083554-6').ok  # names no transfer → not visible, no claim

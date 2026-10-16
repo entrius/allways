@@ -127,6 +127,10 @@ def is_tx_fresh(info: Any, floor_unix: int, grace: int = 0) -> bool:
 def attest_reject_reason(providers: Dict[str, Any], swap: Any, fee_divisor: int) -> Optional[str]:
     """Why a PendingAttestation claim must never attest, or None. Offline and deterministic (quorum
     votes); shared by the loop and the seam's /status."""
+    # Swap keys hash the raw string, so a claim must carry the chain's one canonical spelling.
+    from_provider = providers.get(swap.from_chain)
+    if from_provider is not None and from_provider.chain.canonical_tx_hash(swap.from_tx_hash) != swap.from_tx_hash:
+        return 'source tx hash not in canonical form — refusing to attest'
     to_provider = providers.get(swap.to_chain)
     # A malformed dest is unpayable by construction.
     if to_provider is not None and not to_provider.chain.is_valid_address(swap.user_to_addr):
@@ -442,6 +446,16 @@ class SolanaSwapLoop:
             return True
         return bytes(reservation.claimed_swap_key) != swap_key_from_tx_hash(swap.from_tx_hash)
 
+    def _deposit_claimed_reason(self, swap: Any, reservation: Any) -> Optional[str]:
+        """Refuse a claim on a deposit another claim already holds. Claims are told apart by reservation,
+        since a closed Swap's key can be claimed again. Records the first claim seen for each deposit."""
+        if self.state_store is None or reservation is None:
+            return None
+        claim = (swap_key_from_tx_hash(swap.from_tx_hash).hex(), int(reservation.created_at))
+        if self.state_store.claim_deposit(swap.from_chain, swap.from_tx_hash, *claim) != claim:
+            return 'source deposit already claimed by another swap'
+        return None
+
     def _decide_pending_attestation(self, swap: Any, now: int) -> SwapAction:
         reservation = self._get_reservation(swap.miner, str(swap.collateral_chain))
         # An orphaned claim can never attest (vote_initiate needs a live reservation) — reap it (close_stale_claim)
@@ -449,7 +463,9 @@ class SolanaSwapLoop:
         # source landing after the ceiling is the taker's tail risk (nothing moved on our side to refund).
         if self._claim_is_stale(reservation, swap, now):
             return SwapAction(SwapDecision.CANCEL, reason='reservation expired/superseded — reaping stale claim')
-        reason = attest_reject_reason(self.providers, swap, self.fee_divisor)
+        reason = attest_reject_reason(self.providers, swap, self.fee_divisor) or self._deposit_claimed_reason(
+            swap, reservation
+        )
         if reason:
             self._reject_logged(swap, reason)
             return SwapAction(SwapDecision.REJECT, reason=reason)

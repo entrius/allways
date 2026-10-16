@@ -1,6 +1,22 @@
+import re
 import time
 from abc import ABC, abstractmethod
 from typing import Any, Optional
+
+_HEX64 = re.compile(r'[0-9a-fA-F]{64}')
+
+
+def canonical_hex_tx_hash(tx_hash: str, prefixed: bool) -> Optional[str]:
+    """Lowercase 32-byte hex hash, ``0x``-prefixed when ``prefixed``; None when it is anything else."""
+    if not isinstance(tx_hash, str):
+        return None
+    if prefixed:
+        if tx_hash[:2] not in ('0x', '0X'):
+            return None
+        tx_hash = tx_hash[2:]
+    if not _HEX64.fullmatch(tx_hash):
+        return None
+    return ('0x' if prefixed else '') + tx_hash.lower()
 
 
 class Chain(ABC):
@@ -59,6 +75,11 @@ class Chain(ABC):
         on-chain in this form (the source-lock PDA is byte-keyed on it — V-C2); delivery
         addresses stay as given (EVM sends re-checksum at signing)."""
         return address
+
+    def canonical_tx_hash(self, tx_hash: str) -> Optional[str]:
+        """The one spelling of a tx hash, or None when malformed. A Swap PDA is keyed by the raw hash
+        string, so chains whose RPCs accept several spellings must collapse them here (identity by default)."""
+        return tx_hash or None
 
     @abstractmethod
     def sign_from_proof(self, address: str, message: str, key: Optional[Any] = None) -> str:
