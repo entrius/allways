@@ -242,7 +242,9 @@ class SolanaSwapLoop:
         if provider is None:
             bt.logging.warning(f'no chain provider for {chain}; cannot verify — treating as unverifiable (down)')
             return ('down', None)
-        if not tx_hash:
+        # One spelling per hash: a junk suffix (Esplora drops `?x`/`#x`) would alias a delivery already used.
+        tx_hash = provider.chain.canonical_tx_hash(tx_hash)
+        if tx_hash is None:
             return ('no', None)
         try:
             info = provider.verify_transaction(
