@@ -14,7 +14,7 @@ from eth_utils import is_checksum_address
 from allways.assets.asset import Asset, ProviderUnreachableError
 from allways.assets.chain import Chain, canonical_hex_tx_hash
 
-_HEX_ADDR_RE = re.compile(r'^0x[0-9a-fA-F]{40}$')
+_HEX_ADDR_RE = re.compile(r'0x[0-9a-fA-F]{40}')
 
 
 class EvmRpcError(RuntimeError):
@@ -367,7 +367,7 @@ class EvmChain(Chain):
         """0x + 40 hex, and if mixed-case the EIP-55 checksum must verify (typo protection,
         no RPC). Done by hand: eth_utils 5+ ``is_address`` accepts unprefixed hex and stopped
         validating checksums, which would wave through exactly the typos EIP-55 exists to catch."""
-        if not isinstance(address, str) or not _HEX_ADDR_RE.match(address):
+        if not isinstance(address, str) or not _HEX_ADDR_RE.fullmatch(address):
             return False
         # The zero address is never a real destination: ETH burns to it, and an ERC-20 transfer()
         # reverts on it — a dest no delivery gate catches, so an honest miner would be slashed.
