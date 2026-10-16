@@ -242,7 +242,9 @@ class SolanaSwapLoop:
         if provider is None:
             bt.logging.warning(f'no chain provider for {chain}; cannot verify — treating as unverifiable (down)')
             return ('down', None)
-        if not tx_hash:
+        # One spelling per hash: a junk suffix (Esplora drops `?x`/`#x`) would alias a delivery already used.
+        tx_hash = provider.chain.canonical_tx_hash(tx_hash)
+        if tx_hash is None:
             return ('no', None)
         try:
             info = provider.verify_transaction(
@@ -396,6 +398,14 @@ class SolanaSwapLoop:
             and d_status == 'ok'
             and self._is_fresh(d_info, int(swap.initiated_at), swap.to_chain, self._label(swap))
         ):
+            if self.state_store is not None and not self.state_store.claim_delivery(
+                str(swap.miner), swap.to_tx_hash, _swap_key_hex(swap.swap_key), now
+            ):
+                # The miner already used this delivery to confirm another swap: no confirm, slash at timeout.
+                return SwapAction(
+                    SwapDecision.TIMEOUT if overdue else SwapDecision.WAIT,
+                    reason='delivery tx already confirmed another swap' + (' — slashing' if overdue else ''),
+                )
             return SwapAction(SwapDecision.CONFIRM, reason='src=ok dst=ok dst-fresh — both legs verified')
         # No-fault cancel: sound evidence the dest can't receive (miner's reverted tx / issuer freeze /
         # reserved account) → close with NO slash, EARLY, ahead of the overdue/timeout logic.

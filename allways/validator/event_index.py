@@ -96,7 +96,7 @@ class SolanaEventIndex:
             block_time = rec.block_time
             if block_time is None:
                 continue
-            self._record_deposit_use(rec, int(block_time))
+            self._record_tx_use(rec, int(block_time))
             miner_pk = self._miner_str(rec)
             if miner_pk is None:
                 continue
@@ -114,13 +114,22 @@ class SolanaEventIndex:
                 written += 1
         return written
 
-    def _record_deposit_use(self, rec: EventRecord, block_time: int) -> None:
-        """Claims and initiations feed the one-swap-per-deposit ledger, whoever the miner is."""
+    def _record_tx_use(self, rec: EventRecord, block_time: int) -> None:
+        """Claims and initiations feed the one-swap-per-deposit ledger, and completions the
+        one-swap-per-delivery ledger, whoever the miner is."""
         if rec.name == 'SwapClaimed':
             swap_key = bytes(rec.fields['swap_key']).hex()
             self.state_store.record_deposit_claim(str(rec.fields['from_tx_hash']), swap_key, block_time)
         elif rec.name == 'SwapInitiated':
             self.state_store.mark_deposit_initiated(bytes(rec.fields['swap_key']).hex())
+        elif rec.name == 'SwapCompleted':
+            # A completed swap's delivery passed quorum verification; its SwapFulfilled came earlier.
+            swap_key = bytes(rec.fields['swap_key']).hex()
+            to_tx_hash = self.state_store.get_swap_fulfillment(swap_key)
+            if to_tx_hash:
+                self.state_store.claim_delivery(
+                    str(rec.fields['miner']), to_tx_hash, swap_key, block_time, settled=True
+                )
 
     def _record_unattributed_outcome(self, rec: EventRecord, block_time: int) -> bool:
         """Persist only the swap_key-keyed terminal facts (delivery hash, refund facts, and terminal/stale outcome)

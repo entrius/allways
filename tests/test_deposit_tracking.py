@@ -342,3 +342,121 @@ def test_solana_signatures_key_the_ledger_as_given(tmp_path):
     store = ValidatorStateStore(tmp_path / 'state.db')
     store.record_deposit_claim(SOL_SIG, 'k', 1)
     assert store.deposit_claim(SOL_SIG) == ('k', False) and store.deposit_claim(SOL_SIG.lower()) is None
+
+
+def test_completed_swaps_rebuild_the_delivery_ledger(tmp_path):
+    # Only a completed swap's delivery counts; a fulfilled-but-unconfirmed one leaves the tx free.
+    store = ValidatorStateStore(tmp_path / 'state.db')
+    index = SolanaEventIndex(store)
+    miner, done, open_ = bytes(32), b'\x01' * 32, b'\x02' * 32
+    delivery = '0x' + HEX.upper()
+    for key in (done, open_):
+        index.ingest([_event('SwapFulfilled', swap_key=key, miner=miner, to_tx_hash=delivery, to_amount=1)], {})
+    index.ingest(
+        [
+            _event(
+                'SwapCompleted',
+                swap_key=done,
+                miner=miner,
+                collateral_amount=1,
+                fee=0,
+                from_chain='eth',
+                to_chain='sol',
+                from_amount=1,
+                to_amount=1,
+            )
+        ],
+        {},
+    )
+    assert not store.claim_delivery(str(miner), delivery, open_.hex(), 1500)
+    assert store.claim_delivery(str(miner), '0x' + HEX.lower(), done.hex(), 1500)
+
+
+def test_completed_swap_replaces_a_local_delivery_claim(tmp_path):
+    # This validator first verified the other swap; the chain completing one wins the tx.
+    store = ValidatorStateStore(tmp_path / 'state.db')
+    assert store.claim_delivery('m', '0x' + HEX, 'local', 1)
+    assert store.claim_delivery('m', '0x' + HEX, 'onchain', 2, settled=True)
+    assert not store.claim_delivery('m', '0x' + HEX, 'local', 3)
+
+
+# ── delivery leg ─────────────────────────────────────────────────────────────
+# The miner writes to_tx_hash itself, so the validator cannot respell it: junk never verifies, while an
+# honest casing verifies in canonical form and keys the same delivery ledger row.
+
+BTC_SPEC = next(s for s in ASSET_REGISTRY if s.chain_id == 'btc')
+SOL_SPEC = next(s for s in ASSET_REGISTRY if s.chain_id == 'sol')
+# One per hash family: UTXO, EVM native, ERC-20, TAO, alpha.
+DEST_SPECS = [BTC_SPEC] + [s for s in HEX_SPECS if s.chain_id in ('eth', 'baseusdc', 'tao') or s.chain_id[:2] == 'sn']
+
+
+def _canonical(spec):
+    return HEX.lower() if spec is BTC_SPEC else '0x' + HEX.lower()
+
+
+def _honest_spellings(spec):
+    if spec is BTC_SPEC:
+        return [HEX.lower(), HEX, HEX.upper()]
+    return ['0x' + HEX.lower(), '0x' + HEX, '0x' + HEX.upper(), '0X' + HEX]
+
+
+def _junk_spellings(spec):
+    canonical = _canonical(spec)
+    wrong_prefix = '0x' + HEX if spec is BTC_SPEC else HEX
+    return [canonical + s for s in URL_SUFFIXES + ('\n',)] + [' ' + canonical, wrong_prefix, canonical[:-1], '']
+
+
+def _cases(spellings):
+    return [pytest.param(s, h, id=f'{s.chain_id}-{h!r}') for s in DEST_SPECS for h in spellings(s)]
+
+
+def _dest_loop(spec, store=None):
+    loop, providers = loop_with(result=True, state_store=store)
+    dest = providers['sol']
+    dest.canonical_tx_hash = _build(spec).chain.canonical_tx_hash
+    loop.providers[spec.chain_id] = dest
+    return loop, dest
+
+
+def _delivery(spec, to_tx_hash, key=b'\x01' * 32):
+    swap = make_swap(from_chain='sol', to_chain=spec.chain_id, key=key)
+    swap.to_tx_hash = to_tx_hash
+    return swap
+
+
+def test_dest_specs_cover_every_hash_family():
+    assert {'btc', 'eth', 'baseusdc', 'tao'} <= {s.chain_id for s in DEST_SPECS}
+    assert any(s.chain_id.startswith('sn') for s in DEST_SPECS)
+
+
+@pytest.mark.parametrize('spec,spelling', _cases(_honest_spellings))
+def test_honest_delivery_spelling_verifies_in_canonical_form(spec, spelling):
+    loop, dest = _dest_loop(spec)
+    assert loop.decide(_delivery(spec, spelling), now=1500).decision == SwapDecision.CONFIRM
+    assert dest.calls[-1].tx_hash == _canonical(spec)
+
+
+@pytest.mark.parametrize('spec,spelling', _cases(_junk_spellings))
+def test_junk_delivery_spelling_never_verifies(spec, spelling):
+    loop, dest = _dest_loop(spec)
+    swap = _delivery(spec, spelling)
+    assert loop.decide(swap, now=1500).decision == SwapDecision.WAIT
+    assert loop.decide(swap, now=2500).decision == SwapDecision.TIMEOUT
+    assert dest.calls == []
+
+
+@pytest.mark.parametrize('spec,spelling', _cases(_honest_spellings) + _cases(_junk_spellings))
+def test_one_delivery_confirms_one_swap_whatever_the_second_spelling(spec, spelling, tmp_path):
+    loop, _ = _dest_loop(spec, ValidatorStateStore(tmp_path / 'state.db'))
+    first, second = _delivery(spec, _canonical(spec)), _delivery(spec, spelling, b'\x02' * 32)
+    assert loop.decide(first, now=1500).decision == SwapDecision.CONFIRM
+    assert loop.decide(second, now=1500).decision == SwapDecision.WAIT
+    assert loop.decide(second, now=2500).decision == SwapDecision.TIMEOUT
+
+
+def test_solana_delivery_signature_is_verified_as_given():
+    # base58 has one spelling per signature; a malformed one is the RPC's to reject.
+    loop, dest = _dest_loop(SOL_SPEC)
+    assert loop.decide(_delivery(SOL_SPEC, SOL_SIG), now=1500).decision == SwapDecision.CONFIRM
+    assert dest.calls[-1].tx_hash == SOL_SIG
+    assert loop.decide(_delivery(SOL_SPEC, ''), now=1500).decision == SwapDecision.WAIT
