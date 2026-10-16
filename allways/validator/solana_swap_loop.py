@@ -124,6 +124,23 @@ def is_tx_fresh(info: Any, floor_unix: int, grace: int = 0) -> bool:
     return block_time >= floor_unix - grace
 
 
+def payout_reuse_reason(
+    state_store: Any, chain: Any, from_chain: str, sender: str, deposit_wallet: str, tx_hash: str
+) -> Optional[str]:
+    """Refuse a deposit that is some swap's payout. A miner refilling its deposit wallet through allways
+    announces the payout (sender, recipient, amount) on chain before it lands, so anyone could reserve
+    naming the payer as their source and claim the delivery as their own deposit. Matches the route of
+    any live swap the loop has seen, or a delivery hash already reported or verified."""
+    if state_store is None:
+        return None
+    norm = chain.normalize_address
+    if state_store.is_payout_route(from_chain, norm(sender), norm(deposit_wallet)) or state_store.is_recorded_payout(
+        tx_hash
+    ):
+        return "source tx is another swap's payout, not a deposit"
+    return None
+
+
 def attest_reject_reason(providers: Dict[str, Any], swap: Any, fee_divisor: int) -> Optional[str]:
     """Why a PendingAttestation claim must never attest, or None. Offline and deterministic (quorum
     votes); shared by the loop and the seam's /status."""
@@ -456,6 +473,36 @@ class SolanaSwapLoop:
             return True
         return bytes(reservation.claimed_swap_key) != swap_key_from_tx_hash(swap.from_tx_hash)
 
+    def _payout_reuse_reason(self, swap: Any) -> Optional[str]:
+        provider = self.providers.get(swap.from_chain)
+        if provider is None:
+            return None
+        return payout_reuse_reason(
+            self.state_store,
+            provider.chain,
+            swap.from_chain,
+            swap.user_from_addr,
+            swap.miner_from_addr,
+            swap.from_tx_hash,
+        )
+
+    def _note_payout_routes(self, swaps: List[Any], now: int) -> None:
+        """Record every live swap's payout route before any decision, so a claim on its payout is refused
+        even in the pass that first sees both."""
+        if self.state_store is None:
+            return
+        for swap in swaps:
+            provider = self.providers.get(swap.to_chain)
+            if provider is None:
+                continue
+            try:
+                norm = provider.chain.normalize_address
+                self.state_store.record_payout_route(
+                    swap.to_chain, norm(swap.miner_to_addr), norm(swap.user_to_addr), _swap_key_hex(swap.swap_key), now
+                )
+            except Exception as e:  # one bad swap must not break the pass
+                bt.logging.warning(f'swap {_swap_key_hex(swap.swap_key)}: payout route not recorded: {e}')
+
     def _deposit_claimed_reason(self, swap: Any, now: int) -> Optional[str]:
         """Refuse a claim on a deposit that another swap claimed first, or whose swap was already
         initiated (a closed Swap's key can be claimed again). Records the first claim seen."""
@@ -475,7 +522,11 @@ class SolanaSwapLoop:
         # source landing after the ceiling is the taker's tail risk (nothing moved on our side to refund).
         if self._claim_is_stale(reservation, swap, now):
             return SwapAction(SwapDecision.CANCEL, reason='reservation expired/superseded — reaping stale claim')
-        reason = attest_reject_reason(self.providers, swap, self.fee_divisor) or self._deposit_claimed_reason(swap, now)
+        reason = (
+            attest_reject_reason(self.providers, swap, self.fee_divisor)
+            or self._payout_reuse_reason(swap)
+            or self._deposit_claimed_reason(swap, now)
+        )
         if reason:
             self._reject_logged(swap, reason)
             return SwapAction(SwapDecision.REJECT, reason=reason)
@@ -734,10 +785,13 @@ class SolanaSwapLoop:
         """One pass: discover live swaps, decide each, and cast the vote (or LOG when read_only).
         Returns the per-swap decisions for observability."""
         out: List[Tuple[str, SwapDecision]] = []
-        for _pubkey, acct in self.client.get_swaps():
-            # get_swaps returns raw accounts (no swap_key field); flatten like the miner does. Already-flat
-            # views (carrying swap_key) pass through.
-            swap = acct if hasattr(acct, 'swap_key') else swap_from_solana(acct)
+        # get_swaps returns raw accounts (no swap_key field); flatten like the miner does. Already-flat
+        # views (carrying swap_key) pass through.
+        swaps = [
+            acct if hasattr(acct, 'swap_key') else swap_from_solana(acct) for _pubkey, acct in self.client.get_swaps()
+        ]
+        self._note_payout_routes(swaps, now)
+        for swap in swaps:
             key = _swap_key_hex(swap.swap_key)
             if self.relay is not None:
                 self.relay.observe_swap(swap)
