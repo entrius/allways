@@ -19,6 +19,8 @@ from allways.assets.evm import EvmChain
 from allways.assets.tao import Tao
 from allways.chains import get_chain_def
 from allways.solana.client import swap_key_from_tx_hash
+from allways.solana.events import EventRecord
+from allways.validator.event_index import SolanaEventIndex
 from allways.validator.reserve_engine import confirm_deposit
 from allways.validator.solana_swap_loop import SwapDecision, attest_reject_reason
 from allways.validator.state_store import ValidatorStateStore
@@ -165,16 +167,29 @@ def test_claimed_deposit_is_not_claimed_again_on_the_other_hub(spec):
 
 @pytest.mark.parametrize('spec', HEX_SPECS, ids=lambda s: s.chain_id)
 def test_deposit_stays_used_after_its_swap_closes(spec):
-    # The first Swap PDA closed; a later reservation inside the grace window sees the same deposit.
+    # The first swap was initiated and its PDA closed; a later reservation inside the grace window sees it.
     store = ValidatorStateStore(db_path=Path(tempfile.mkdtemp()) / 'state.db')
     validator, client, _ = _relay(spec, {'sol': dict(created_at=CREATED_AT)}, store)
-    assert confirm_deposit(validator, HOTKEY, '0x' + HEX.lower()).ok
+    canonical = '0x' + HEX.lower()
+    assert confirm_deposit(validator, HOTKEY, canonical).ok
+    store.mark_deposit_initiated(swap_key_from_tx_hash(canonical).hex())
     client.swaps.clear()
     client._reservation = {'sol': _confirm_reservation(from_chain=spec.chain_id, created_at=CREATED_AT + 3)}
-    for spelling in ('0x' + HEX.lower(), '0x' + HEX.upper()):
+    for spelling in (canonical, '0x' + HEX.upper()):
         r = confirm_deposit(validator, HOTKEY, spelling)
         assert not r.ok and 'already claimed' in r.reason
     assert len(client.claims) == 1
+
+
+def test_a_reaped_claim_can_be_claimed_again():
+    # Never initiated, so the deposit never backed a swap: the taker can claim it on a new reservation.
+    spec = next(s for s in HEX_SPECS if s.chain_id == 'eth')
+    validator, client, _ = _relay(spec, {'sol': dict(created_at=CREATED_AT)})
+    assert confirm_deposit(validator, HOTKEY, '0x' + HEX).ok
+    client.swaps.clear()
+    client._reservation = {'sol': _confirm_reservation(from_chain=spec.chain_id, created_at=CREATED_AT + 3)}
+    assert confirm_deposit(validator, HOTKEY, '0x' + HEX).ok
+    assert len(client.claims) == 2
 
 
 def test_relay_on_another_validator_sees_the_live_swap():
@@ -187,7 +202,7 @@ def test_relay_on_another_validator_sees_the_live_swap():
     assert not r.ok and 'already claimed' in r.reason and not client.claims
 
 
-def test_failed_submit_releases_the_deposit_for_a_retry():
+def test_failed_submit_can_be_retried():
     spec = next(s for s in HEX_SPECS if s.chain_id == 'eth')
     validator, client, _ = _relay(spec, {'sol': dict(created_at=CREATED_AT)})
     real_submit = client.submit_swap_claim
@@ -263,23 +278,67 @@ def test_non_canonical_in_flight_claim_refuses_to_attest(spelling):
     assert 'canonical' in attest_reject_reason(loop.providers, swap, loop.fee_divisor)
 
 
-def test_second_claim_on_a_claimed_deposit_refuses_to_attest(tmp_path):
-    # Same canonical key from a later reservation, after the first Swap closed.
+def test_claim_on_an_initiated_deposit_refuses_to_attest(tmp_path):
+    # Same canonical key from a later reservation, after the first swap was initiated and closed.
     store = ValidatorStateStore(tmp_path / 'state.db')
     canonical = '0x' + HEX.lower()
     first, swap = _hex_source_loop(canonical, store)
     assert first.decide(swap, now=1500).decision == SwapDecision.ATTEST
     assert first.decide(swap, now=1501).decision == SwapDecision.ATTEST  # re-deciding the same claim is fine
+    swap.status = 'Active'
+    first.decide(swap, now=1600)  # the loop sees it initiated
     later, swap = _hex_source_loop(canonical, store, created_at=RESV_CREATED_AT + 30)
-    action = later.decide(swap, now=1500)
+    action = later.decide(swap, now=1700)
     assert action.decision == SwapDecision.REJECT and 'already claimed' in action.reason
 
 
-def test_relay_and_loop_agree_on_the_claim_identity(tmp_path):
+def test_relay_and_loop_agree_on_the_claim(tmp_path):
     # A claim this validator relayed must not later trip its own attest gate.
     store = ValidatorStateStore(tmp_path / 'state.db')
     canonical = '0x' + HEX.lower()
-    key = swap_key_from_tx_hash(canonical).hex()
-    assert store.claim_deposit('btc', canonical, key, RESV_CREATED_AT) == (key, RESV_CREATED_AT)
+    store.record_deposit_claim(canonical, swap_key_from_tx_hash(canonical).hex(), 1400)
     loop, swap = _hex_source_loop(canonical, store)
     assert loop.decide(swap, now=1500).decision == SwapDecision.ATTEST
+
+
+# ── ledger rebuilt from program events ───────────────────────────────────────
+
+
+def _event(name, **fields):
+    return EventRecord(name=name, fields=fields, slot=1, block_time=1400, signature='sig')
+
+
+def test_program_events_rebuild_the_ledger_on_a_fresh_store(tmp_path):
+    # A fresh database replays program history; claims and initiations land whoever the miner is.
+    store = ValidatorStateStore(tmp_path / 'state.db')
+    index = SolanaEventIndex(store)
+    upper = '0x' + HEX.upper()
+    key = swap_key_from_tx_hash(upper)
+    miner = bytes(32)
+    index.ingest(
+        [_event('SwapClaimed', swap_key=key, miner=miner, user=miner, from_tx_hash=upper, from_tx_block=1)], {}
+    )
+    assert store.deposit_claim('0x' + HEX.lower()) == (key.hex(), False)  # hex hashes key case-blind
+    index.ingest(
+        [
+            _event(
+                'SwapInitiated',
+                swap_key=key,
+                user=miner,
+                miner=miner,
+                collateral_amount=1,
+                from_amount=1,
+                to_amount=1,
+                initiated_at=1400,
+                collateral_chain='sol',
+            )
+        ],
+        {},
+    )
+    assert store.deposit_claim(upper) == (key.hex(), True)
+
+
+def test_solana_signatures_key_the_ledger_as_given(tmp_path):
+    store = ValidatorStateStore(tmp_path / 'state.db')
+    store.record_deposit_claim(SOL_SIG, 'k', 1)
+    assert store.deposit_claim(SOL_SIG) == ('k', False) and store.deposit_claim(SOL_SIG.lower()) is None

@@ -96,6 +96,7 @@ class SolanaEventIndex:
             block_time = rec.block_time
             if block_time is None:
                 continue
+            self._record_deposit_use(rec, int(block_time))
             miner_pk = self._miner_str(rec)
             if miner_pk is None:
                 continue
@@ -112,6 +113,14 @@ class SolanaEventIndex:
             if self._apply(rec, hotkey, int(block_time)):
                 written += 1
         return written
+
+    def _record_deposit_use(self, rec: EventRecord, block_time: int) -> None:
+        """Claims and initiations feed the one-swap-per-deposit ledger, whoever the miner is."""
+        if rec.name == 'SwapClaimed':
+            swap_key = bytes(rec.fields['swap_key']).hex()
+            self.state_store.record_deposit_claim(str(rec.fields['from_tx_hash']), swap_key, block_time)
+        elif rec.name == 'SwapInitiated':
+            self.state_store.mark_deposit_initiated(bytes(rec.fields['swap_key']).hex())
 
     def _record_unattributed_outcome(self, rec: EventRecord, block_time: int) -> bool:
         """Persist only the swap_key-keyed terminal facts (delivery hash, refund facts, and terminal/stale outcome)

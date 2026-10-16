@@ -720,11 +720,8 @@ def confirm_deposit(validator, miner_hotkey: str, from_tx_hash: str, from_tx_blo
         return ConfirmResult(False, 'Source tx not visible or does not match the reservation')
     _, reservation, backing, tx_info, from_tx_hash = min(matches, key=lambda m: m[0])
     swap_key = swap_key_from_tx_hash(from_tx_hash)
-    if client.get_swap(swap_key) is not None:
-        return ConfirmResult(False, 'Source deposit already claimed')
-    claim = (swap_key.hex(), int(reservation.created_at))
-    store = validator.state_store
-    if store.claim_deposit(reservation.from_chain, from_tx_hash, *claim) != claim:
+    held = validator.state_store.deposit_claim(from_tx_hash)
+    if (held is not None and (held[0] != swap_key.hex() or held[1])) or client.get_swap(swap_key) is not None:
         return ConfirmResult(False, 'Source deposit already claimed')
 
     # The taker's funds are already on the source chain and this deposit just verified against the
@@ -732,11 +729,8 @@ def confirm_deposit(validator, miner_hotkey: str, from_tx_hash: str, from_tx_blo
     # is no claim, no Swap, no timeout and no refund: the deposit is simply lost. Buy runway first.
     _extend_for_claim(client, miner_pk, reservation, backing)
 
-    try:
-        sig = client.submit_swap_claim(miner_pk, swap_key, from_tx_hash, tx_info.block_number or 0, backing)
-    except Exception:
-        store.release_deposit(reservation.from_chain, from_tx_hash, *claim)
-        raise
+    sig = client.submit_swap_claim(miner_pk, swap_key, from_tx_hash, tx_info.block_number or 0, backing)
+    validator.state_store.record_deposit_claim(from_tx_hash, swap_key.hex(), int(time.time()))
     return ConfirmResult(True, '', swap_key.hex(), sig, from_tx_hash)
 
 

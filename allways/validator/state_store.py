@@ -20,12 +20,20 @@ brief exclusive lock that concurrent openers would otherwise hit as "database is
 locked" — the local dev env runs two validators against the same file.
 """
 
+import re
 import sqlite3
 import threading
 from pathlib import Path
 from typing import Callable, Dict, List, Optional, Sequence, Set, Tuple
 
 from allways.classes import ActivityTransition, MinerActivity, next_activity
+
+_HEX_HASH = re.compile(r'(0x)?[0-9a-f]{64}', re.IGNORECASE)
+
+
+def deposit_key(tx_hash: str) -> str:
+    """Ledger key for a source tx hash: hex-shaped hashes lowercase (events carry no chain to ask)."""
+    return tx_hash.lower() if _HEX_HASH.fullmatch(tx_hash) else tx_hash
 
 
 class ValidatorStateStore:
@@ -617,7 +625,7 @@ class ValidatorStateStore:
         self._execute('DELETE FROM swap_outcomes WHERE block_time < ?', (cutoff_block,))
         self._execute('DELETE FROM swap_fulfillments WHERE block_time < ?', (cutoff_block,))
         # A deposit older than this can't pass freshness against any new reservation.
-        self._execute('DELETE FROM used_deposits WHERE reserved_at < ?', (cutoff_block,))
+        self._execute('DELETE FROM used_deposits WHERE seen_at < ?', (cutoff_block,))
 
     # ─── collateral_verdicts (declared alpha leg at fill block) ────────
 
@@ -662,31 +670,25 @@ class ValidatorStateStore:
         row = self._fetchone('SELECT to_tx_hash FROM swap_fulfillments WHERE swap_key = ?', (swap_key,))
         return row['to_tx_hash'] if row is not None else None
 
-    # ─── used_deposits (one claim per source deposit) ────────────────────
+    # ─── used_deposits (one swap per source deposit) ─────────────────────
+    # Fed by SwapClaimed/SwapInitiated events and the swap loop, so a fresh database rebuilds it
+    # from program history. Keys go through ``deposit_key``.
 
-    def claim_deposit(self, from_chain: str, tx_hash: str, swap_key: str, reserved_at: int) -> Tuple[str, int]:
-        """Mark a canonical source deposit as used by the claim (swap_key, its reservation's created_at)
-        unless already marked; returns the claim holding it. Atomic across concurrent relays. The reservation
-        stamp tells two claims at the same key apart (a closed Swap's key can be claimed again)."""
-        with self.lock:
-            conn = self.require_connection()
-            conn.execute(
-                'INSERT OR IGNORE INTO used_deposits (from_chain, tx_hash, swap_key, reserved_at) VALUES (?, ?, ?, ?)',
-                (from_chain, tx_hash, swap_key, int(reserved_at)),
-            )
-            conn.commit()
-            row = conn.execute(
-                'SELECT swap_key, reserved_at FROM used_deposits WHERE from_chain = ? AND tx_hash = ?',
-                (from_chain, tx_hash),
-            ).fetchone()
-            return row['swap_key'], int(row['reserved_at'])
-
-    def release_deposit(self, from_chain: str, tx_hash: str, swap_key: str, reserved_at: int) -> None:
-        """Undo ``claim_deposit`` for a claim that never landed, so the taker can retry."""
+    def record_deposit_claim(self, tx_hash: str, swap_key: str, seen_at: int) -> None:
+        """Note the first claim seen on a deposit; later claims leave the row alone."""
         self._execute(
-            'DELETE FROM used_deposits WHERE from_chain = ? AND tx_hash = ? AND swap_key = ? AND reserved_at = ?',
-            (from_chain, tx_hash, swap_key, int(reserved_at)),
+            'INSERT OR IGNORE INTO used_deposits (tx_hash, swap_key, seen_at, initiated) VALUES (?, ?, ?, 0)',
+            (deposit_key(tx_hash), swap_key, int(seen_at)),
         )
+
+    def mark_deposit_initiated(self, swap_key: str) -> None:
+        """The claim on this swap key was initiated: its deposit is spent."""
+        self._execute('UPDATE used_deposits SET initiated = 1 WHERE swap_key = ?', (swap_key,))
+
+    def deposit_claim(self, tx_hash: str) -> Optional[Tuple[str, bool]]:
+        """(swap_key of the first claim, initiated?) for a deposit, or None if unseen."""
+        row = self._fetchone('SELECT swap_key, initiated FROM used_deposits WHERE tx_hash = ?', (deposit_key(tx_hash),))
+        return (row['swap_key'], bool(row['initiated'])) if row is not None else None
 
     # ─── routed_requests (on-behalf reservation queue) ──────────────────
     # The ONLY table not rebuildable from chain events: a routed user's details
@@ -1277,14 +1279,12 @@ class ValidatorStateStore:
                     block_time  INTEGER NOT NULL
                 );
 
-                -- Canonical source tx hash -> the claim that used it, so each deposit
-                -- backs exactly one swap.
+                -- Source tx hash -> the first swap that claimed it; initiated = spent.
                 CREATE TABLE IF NOT EXISTS used_deposits (
-                    from_chain  TEXT NOT NULL,
-                    tx_hash     TEXT NOT NULL,
+                    tx_hash     TEXT PRIMARY KEY,
                     swap_key    TEXT NOT NULL,
-                    reserved_at INTEGER NOT NULL,
-                    PRIMARY KEY (from_chain, tx_hash)
+                    seen_at     INTEGER NOT NULL,
+                    initiated   INTEGER NOT NULL DEFAULT 0
                 );
 
                 -- One row per hotkey ever banned (latest ban), so it needs no prune.
