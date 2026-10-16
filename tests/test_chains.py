@@ -11,7 +11,6 @@ from allways.chains import (
     CHAIN_ARBUSDC,
     CHAIN_ASTER,
     CHAIN_AVAX,
-    CHAIN_AVAXUSDC,
     CHAIN_BASEUSDC,
     CHAIN_BNB,
     CHAIN_BTC,
@@ -19,7 +18,6 @@ from allways.chains import (
     CHAIN_ETH,
     CHAIN_ETHUSDC,
     CHAIN_HYPE,
-    CHAIN_HYPEUSDC,
     CHAIN_POL,
     CHAIN_POLUSDC,
     CHAIN_QNT,
@@ -86,12 +84,6 @@ class TestGetChain:
 
     def test_solusdc(self):
         assert get_chain_def('solusdc') is CHAIN_SOLUSDC
-
-    def test_avaxusdc(self):
-        assert get_chain_def('avaxusdc') is CHAIN_AVAXUSDC
-
-    def test_hypeusdc(self):
-        assert get_chain_def('hypeusdc') is CHAIN_HYPEUSDC
 
     def test_unsupported_raises(self):
         with pytest.raises(KeyError):
@@ -298,12 +290,6 @@ class TestComputeExtensionTargetSecs:
         # A token and its host coin must extend identically — same confs, same stored block time.
         assert compute_extension_target_secs('polusdc', 0, self.NOW, self.CEILING) == compute_extension_target_secs(
             'pol', 0, self.NOW, self.CEILING
-        )
-
-    @pytest.mark.parametrize('token,host', (('avaxusdc', 'avax'), ('hypeusdc', 'hype')))
-    def test_evm_usdc_matches_the_chain_it_shares(self, token, host):
-        assert compute_extension_target_secs(token, 0, self.NOW, self.CEILING) == compute_extension_target_secs(
-            host, 0, self.NOW, self.CEILING
         )
 
     def test_solusdc_matches_the_chain_it_shares(self):
