@@ -101,7 +101,7 @@ def _best_offer(client, miner_pk, miner_state, from_chain, to_chain, from_amount
 
 @dataclass
 class RoutedRejection:
-    """A finalize the contract refused. The whole queue on that pool lost the round with it."""
+    """A finalize the contract refused, and the user whose request it was."""
 
     reason: str
     users: list
@@ -493,13 +493,11 @@ def finalize_won_seats(validator, now: int) -> list:
             if reason is None:
                 bt.logging.warning(f'routed sweep {miner[:8]}: finalize transport fault, retrying next step: {e}')
                 continue
-            bt.logging.warning(f'routed sweep {miner[:8]}: finalize rejected ({reason}), dropping queue')
-            # Every queued user lost this round; /status carries the verdict so the offering can
-            # refund at once instead of waiting out its "reservation never landed" backstop. Published
-            # BEFORE the delete: a request landing in between clears it and is then dropped with the
-            # queue — the slow backstop, never a fast fail on a seat that could still land.
-            _publish_verdict((miner, from_chain, to_chain), RoutedRejection(reason, [q['user_pubkey'] for q in queue]))
-            store.delete_routed_requests(miner, from_chain, to_chain, backing)
+            bt.logging.warning(f'routed sweep {miner[:8]}: finalize rejected ({reason}), dropping that request')
+            # Only this request's fields were committed, so only it is refused; the next pass tries the
+            # next user on the same seat. /status carries the verdict so the offering can refund at once.
+            _publish_verdict((miner, from_chain, to_chain), RoutedRejection(reason, [req['user_pubkey']]))
+            store.delete_routed_request(miner, from_chain, to_chain, backing, req['user_pubkey'])
             continue
         bt.logging.info(f'routed sweep {miner[:8]}: finalized seat for {req["user_pubkey"][:8]} (FIFO of queue)')
         store.delete_routed_requests(miner, from_chain, to_chain, backing)
