@@ -40,6 +40,16 @@ const MFROM: &str = "minerBTCaddr";
 const MTO: &str = "minerSOLaddr";
 const RATE: u128 = 1_500_000_000_000_000_000; // 1.5 × RATE_PRECISION (1e18)
 
+
+fn addr_lock_pda(program_id: &Pubkey, addr: &str) -> Pubkey {
+    Pubkey::find_program_address(&[b"addrlock", &allways_swap_manager::addr_lock_key(addr)], program_id).0
+}
+
+/// The payout wallet's lock, or None when it is the deposit wallet's (same lock).
+fn to_addr_lock_pda(program_id: &Pubkey, from: &str, to: &str) -> Option<Pubkey> {
+    (from.to_ascii_lowercase() != to.to_ascii_lowercase()).then(|| addr_lock_pda(program_id, to))
+}
+
 fn pid() -> Pubkey {
     allways_swap_manager::id()
 }
@@ -189,12 +199,16 @@ fn set_quote_ix(miner: &Pubkey, f: &str, t: &str, mfrom: &str, mto: &str, rate: 
             miner_to_addr: mto.to_string(),
             rate,
             liquidity: 1_000,
+            from_addr_lock_key: allways_swap_manager::addr_lock_key(mfrom),
+            to_addr_lock_key: allways_swap_manager::addr_lock_key(mto),
         }
         .data(),
         allways_swap_manager::accounts::SetQuote {
             miner: *miner,
             miner_state: miner_pda(miner),
             quote: quote_pda(miner, f, t, BACKING),
+            from_addr_lock: addr_lock_pda(&pid(), mfrom),
+            to_addr_lock: to_addr_lock_pda(&pid(), mfrom, mto),
             treasury: treasury_pda(),
             system_program: SYSTEM_PROGRAM,
         }
@@ -594,7 +608,7 @@ fn test_requires_active_miner() {
     send(&mut svm, post_ix(&inactive.pubkey(), 1_000_000_000), &inactive.pubkey(), &inactive).expect("post");
     send(&mut svm, vote_activate_ix(&vals[0].pubkey(), &inactive.pubkey()), &vals[0].pubkey(), &vals[0]).expect("a0");
     send(&mut svm, vote_activate_ix(&vals[1].pubkey(), &inactive.pubkey()), &vals[1].pubkey(), &vals[1]).expect("a1");
-    send(&mut svm, set_quote_ix(&inactive.pubkey(), "btc", "sol", MFROM, MTO, RATE), &inactive.pubkey(), &inactive).expect("quote");
+    send(&mut svm, set_quote_ix(&inactive.pubkey(), "btc", "sol", "inactiveBTC", "inactiveSOL", RATE), &inactive.pubkey(), &inactive).expect("quote");
     send(&mut svm, deactivate_ix(&inactive.pubkey()), &inactive.pubkey(), &inactive).expect("deactivate");
 
     let res = send(&mut svm, open_ix(&vals[0].pubkey(), &inactive.pubkey(), "btc", "sol"), &vals[0].pubkey(), &vals[0]);
@@ -1145,13 +1159,21 @@ fn test_close_unfilled_cannot_drag_busy_back_past_a_live_pool() {
 }
 
 /// A second funded, active miner quoting BTC→SOL into `mfrom` (shares the setup's validators).
-fn add_btc_miner(svm: &mut LiteSVM, vals: &[Keypair], mfrom: &str) -> Keypair {
+/// A second funded, activated BTC→SOL miner with no quote yet.
+fn add_unquoted_btc_miner(svm: &mut LiteSVM, vals: &[Keypair]) -> Keypair {
     let miner = Keypair::new();
     svm.airdrop(&miner.pubkey(), 100_000_000_000).unwrap();
     send(svm, post_ix(&miner.pubkey(), 10_000_000_000), &miner.pubkey(), &miner).expect("post");
     send(svm, vote_activate_ix(&vals[0].pubkey(), &miner.pubkey()), &vals[0].pubkey(), &vals[0]).expect("a0");
     send(svm, vote_activate_ix(&vals[1].pubkey(), &miner.pubkey()), &vals[1].pubkey(), &vals[1]).expect("a1");
-    send(svm, set_quote_ix(&miner.pubkey(), "btc", "sol", mfrom, MTO, RATE), &miner.pubkey(), &miner).expect("quote");
+    miner
+}
+
+/// A second BTC→SOL miner quoting from deposit wallet `mfrom` (payout wallet derived from it).
+fn add_btc_miner(svm: &mut LiteSVM, vals: &[Keypair], mfrom: &str) -> Keypair {
+    let miner = add_unquoted_btc_miner(svm, vals);
+    let mto = format!("{mfrom}SOL");
+    send(svm, set_quote_ix(&miner.pubkey(), "btc", "sol", mfrom, &mto, RATE), &miner.pubkey(), &miner).expect("quote");
     miner
 }
 
@@ -1173,25 +1195,25 @@ fn fill(svm: &mut LiteSVM, vals: &[Keypair], miner: &Pubkey, wallet: &str, ufrom
 }
 
 #[test]
-fn test_source_lock_spans_miners_sharing_a_deposit_wallet() {
-    // One deposit into a shared wallet would match both reservations, so the second must not open.
-    let (mut svm, _admin, vals, a) = setup(0, 0);
-    let b = add_btc_miner(&mut svm, &vals, MFROM);
-    seat_all(&mut svm, &vals, &[&a.pubkey(), &b.pubkey()]);
-    fill(&mut svm, &vals, &a.pubkey(), MFROM, "bc1quser").expect("first fill");
-    let e = fill(&mut svm, &vals, &b.pubkey(), MFROM, "bc1quser").unwrap_err();
-    assert!(e.contains("DuplicateSourceAddr"), "sibling on the same wallet is locked: {e}");
+fn test_second_miner_cannot_post_a_taken_wallet() {
+    // A payout from a wallet two miners post would verify for both miners' swaps.
+    let (mut svm, _admin, vals, _a) = setup(0, 0);
+    let b = add_unquoted_btc_miner(&mut svm, &vals);
+    let e = send(&mut svm, set_quote_ix(&b.pubkey(), "btc", "sol", MFROM, "bOwnSOL", RATE), &b.pubkey(), &b).unwrap_err();
+    assert!(e.contains("AddressTaken"), "deposit wallet is the first poster's: {e}");
+    let e = send(&mut svm, set_quote_ix(&b.pubkey(), "btc", "sol", "bOwnBTC", MTO, RATE), &b.pubkey(), &b).unwrap_err();
+    assert!(e.contains("AddressTaken"), "payout wallet is the first poster's: {e}");
+    send(&mut svm, set_quote_ix(&b.pubkey(), "btc", "sol", "bOwnBTC", "bOwnSOL", RATE), &b.pubkey(), &b).expect("own wallets");
 }
 
 #[test]
-fn test_source_lock_ignores_address_case() {
-    // A re-cased spelling of the same source (or wallet) resolves the same lock.
-    let (mut svm, _admin, vals, a) = setup(0, 0);
-    let b = add_btc_miner(&mut svm, &vals, &MFROM.to_uppercase());
-    seat_all(&mut svm, &vals, &[&a.pubkey(), &b.pubkey()]);
-    fill(&mut svm, &vals, &a.pubkey(), MFROM, "bc1quser").expect("first fill");
-    let e = fill(&mut svm, &vals, &b.pubkey(), &MFROM.to_uppercase(), "BC1QUSER").unwrap_err();
-    assert!(e.contains("DuplicateSourceAddr"), "case variants share one lock: {e}");
+fn test_wallet_lock_ignores_case() {
+    // A re-cased spelling of a taken wallet is the same wallet.
+    let (mut svm, _admin, vals, _a) = setup(0, 0);
+    let b = add_unquoted_btc_miner(&mut svm, &vals);
+    let e = send(&mut svm, set_quote_ix(&b.pubkey(), "btc", "sol", &MFROM.to_uppercase(), "bOwnSOL", RATE), &b.pubkey(), &b)
+        .unwrap_err();
+    assert!(e.contains("AddressTaken"), "case variant of a taken wallet: {e}");
 }
 
 #[test]

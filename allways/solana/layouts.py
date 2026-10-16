@@ -87,6 +87,7 @@ DISCRIMINATORS = {
     'HotkeyBinding': bytes([225, 14, 96, 246, 60, 210, 97, 210]),
     'MinerDirectionStats': bytes([109, 39, 104, 238, 244, 223, 118, 88]),
     'MinerQuote': bytes([205, 197, 49, 135, 73, 161, 154, 230]),
+    'AddrLock': bytes([234, 127, 191, 228, 66, 104, 58, 71]),
     'MinerState': bytes([171, 93, 72, 78, 139, 153, 97, 8]),
     'Pool': bytes([241, 154, 109, 4, 17, 177, 109, 188]),
     'Reservation': bytes([188, 235, 0, 111, 208, 253, 247, 212]),
@@ -173,6 +174,9 @@ MinerQuote = CStruct(
     'updated_at' / I64,
     'bump' / U8,
 )
+
+# Permanent owner of a posted wallet (`[addrlock, keccak(lower(wallet))]`).
+AddrLock = CStruct('owner' / Pubkey32, 'bump' / U8)
 
 # Two-phase: `router` pinned at draw (unfilled, reserved_until==0); the rest written at finalize.
 Reservation = CStruct(
@@ -288,6 +292,7 @@ ACCOUNT_PUBKEY_FIELDS = {
     'MinerState': ['miner'],
     'MinerDirectionStats': ['miner'],
     'MinerQuote': ['miner'],
+    'AddrLock': ['owner'],
     'Reservation': ['router', 'user'],
     'Swap': ['user', 'miner'],
     'Pool': ['miner'],
@@ -563,6 +568,7 @@ IX_DISCRIMINATORS = {
     'bump_vault_generation': bytes([93, 192, 10, 149, 230, 255, 251, 27]),
     # W2b — reap a quote stranded at the pre-W2b four-seed derivation (no args).
     'close_legacy_quote': bytes([174, 62, 107, 15, 91, 39, 82, 249]),
+    'close_unlocked_quote': bytes([155, 66, 158, 23, 96, 26, 90, 118]),
     # v3 — reap the reused per-miner slots the upgrade left unreadable (no args each). Unlike the
     # quotes these did NOT move, so they sit where the live program looks; run them per pre-v3 miner.
     'close_legacy_pool': bytes([135, 68, 69, 243, 68, 50, 121, 183]),
@@ -589,6 +595,8 @@ IX_SET_QUOTE_ARGS = CStruct(
     'miner_to_addr' / String,
     'rate' / U128,
     'liquidity' / U128,
+    'from_addr_lock_key' / Hash32,
+    'to_addr_lock_key' / Hash32,
 )
 IX_AMOUNT_ARGS = CStruct('amount' / U64)
 
@@ -648,6 +656,7 @@ ACCOUNT_LAYOUTS = {
     'HotkeyBinding': HotkeyBinding,
     'MinerDirectionStats': MinerDirectionStats,
     'MinerQuote': MinerQuote,
+    'AddrLock': AddrLock,
     'MinerState': MinerState,
     'Pool': Pool,
     'Reservation': Reservation,

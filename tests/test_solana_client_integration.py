@@ -123,12 +123,13 @@ def test_b0_round_trip(client):
     assert client.get_miner_state(me).active is True
 
     rate = 15 * 10**17  # 1.5 * RATE_PRECISION
-    client.set_quote('btc', 'sol', 'minerBTCaddr', 'minerSOLaddr', rate, 1_000, backing='sol')
+    tag = str(client.keypair.pubkey())[:8]  # wallets are per miner: a shared one is refused
+    client.set_quote('btc', 'sol', f'minerBTCaddr{tag}', f'minerSOLaddr{tag}', rate, 1_000, backing='sol')
     q = client.get_quote(me, 'btc', 'sol', 'sol')
     assert q.rate == rate
     assert q.from_chain == 'btc' and q.to_chain == 'sol'
     assert q.collateral_chain == 'sol'
-    assert q.miner_from_addr == 'minerBTCaddr' and q.liquidity == 1_000
+    assert q.miner_from_addr == f'minerBTCaddr{tag}' and q.liquidity == 1_000
 
     # bind_hotkey -> Binding + set-once HotkeyBinding
     hotkey = bytes(range(32))

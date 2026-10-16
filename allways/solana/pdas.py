@@ -109,6 +109,17 @@ def source_lock_pda(from_chain: str, lock_key: bytes, program_id: Optional[Pubke
     return _derive([b'srclock', from_chain.encode(), lock_key], program_id)
 
 
+def addr_lock_key(addr: str) -> bytes:
+    """keccak(lower(wallet)) — mirrors the program's `addr_lock_key`. No chain in it: one wallet has one
+    owner on every chain. ASCII-only folding, like Rust's to_ascii_lowercase."""
+    return keccak.new(data=addr.encode().lower(), digest_bits=256).digest()
+
+
+def addr_lock_pda(addr: str, program_id: Optional[Pubkey] = None) -> Pubkey:
+    """Wallet lock — the first miner to post `addr` owns it permanently."""
+    return _derive([b'addrlock', addr_lock_key(addr)], program_id)
+
+
 def legacy_reservation_pda(miner, program_id: Optional[Pubkey] = None) -> Pubkey:
     """The RETIRED pre-v3.1 per-miner address — only `close_legacy_reservation` resolves it now."""
     return _derive([b'resv', _pk_bytes(miner)], program_id)

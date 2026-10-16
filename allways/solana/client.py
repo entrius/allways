@@ -504,8 +504,10 @@ class AllwaysSolanaClient:
     ) -> str:
         """Publish a standing quote for one direction AND one backing. The contract requires `backing`
         to be a hub on one of the legs and to be a purse this miner has already activated, so posting
-        a quote now follows activation instead of preceding it."""
+        a quote now follows activation instead of preceding it. Both wallets are locked to this miner on
+        first post; a wallet another miner already posted is refused (AddressTaken)."""
         miner = self.keypair.pubkey()
+        from_key, to_key = pdas.addr_lock_key(miner_from_addr), pdas.addr_lock_key(miner_to_addr)
         args = layouts.IX_SET_QUOTE_ARGS.build(
             {
                 'from_chain': from_chain,
@@ -515,12 +517,18 @@ class AllwaysSolanaClient:
                 'miner_to_addr': miner_to_addr,
                 'rate': rate,
                 'liquidity': liquidity,
+                'from_addr_lock_key': from_key,
+                'to_addr_lock_key': to_key,
             }
         )
+        # One wallet on both legs is one lock; the payout slot is then omitted (program id).
+        to_lock = self.program_id if to_key == from_key else pdas.addr_lock_pda(miner_to_addr, self.program_id)
         metas = [
             AccountMeta(miner, True, True),
             AccountMeta(pdas.miner_state_pda(miner, self.program_id), False, False),
             AccountMeta(pdas.quote_pda(miner, from_chain, to_chain, backing, self.program_id), False, True),
+            AccountMeta(pdas.addr_lock_pda(miner_from_addr, self.program_id), False, True),
+            AccountMeta(to_lock, False, to_lock != self.program_id),
             AccountMeta(pdas.treasury_pda(self.program_id), False, True),
             AccountMeta(SYSTEM_PROGRAM, False, False),
         ]
@@ -572,6 +580,32 @@ class AllwaysSolanaClient:
             AccountMeta(pdas.legacy_quote_pda(m, from_chain, to_chain, self.program_id), False, True),
         ]
         return self._send([self._ix('close_legacy_quote', b'', metas)])
+
+    def unlocked_quotes(self) -> List[Tuple[str, object]]:
+        """Standing quotes whose two wallets aren't both locked to their miner — what `close_unlocked_quote`
+        reaps. Empty once every quote has been re-posted under wallet locks."""
+        owners = {str(pda): lock.owner for pda, lock in self.get_all('AddrLock')}
+
+        def locked(addr: str, miner) -> bool:
+            return owners.get(str(pdas.addr_lock_pda(addr, self.program_id))) == miner
+
+        return [
+            (pda, q)
+            for pda, q in self.get_all('MinerQuote')
+            if not (locked(q.miner_from_addr, q.miner) and locked(q.miner_to_addr, q.miner))
+        ]
+
+    def close_unlocked_quote(self, quote_pda, quote) -> str:
+        """Permissionless: reap a quote whose wallets aren't both locked to its miner (posted before wallet
+        locks existed). `quote` is the decoded MinerQuote at `quote_pda`. Rent goes to the miner."""
+        metas = [
+            AccountMeta(self.keypair.pubkey(), True, False),
+            AccountMeta(_as_pubkey(quote.miner), False, True),
+            AccountMeta(_as_pubkey(quote_pda), False, True),
+            AccountMeta(pdas.addr_lock_pda(quote.miner_from_addr, self.program_id), False, False),
+            AccountMeta(pdas.addr_lock_pda(quote.miner_to_addr, self.program_id), False, False),
+        ]
+        return self._send([self._ix('close_unlocked_quote', b'', metas)])
 
     def close_legacy_pool(self, miner) -> str:
         """Permissionless: reap a `Pool` stranded at the retired pre-v3.1 [pool, miner] address (live

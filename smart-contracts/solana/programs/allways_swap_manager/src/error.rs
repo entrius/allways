@@ -180,4 +180,15 @@ pub enum ErrorCode {
 
     #[msg("Addresses must be ASCII")]
     NonAsciiAddress,
+
+    #[msg("Wallet addresses must be ASCII letters and digits only")]
+    NonAlphanumericAddress,
+    #[msg("Wallet is already posted by another miner")]
+    AddressTaken,
+    #[msg("Payout wallet lock missing")]
+    MissingAddrLock,
+    #[msg("Quote's wallets are locked to its miner; nothing to reap")]
+    QuoteLocked,
+    #[msg("Wallet lock key or account does not match the wallet")]
+    AddrLockKeyMismatch,
 }

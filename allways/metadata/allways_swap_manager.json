@@ -849,6 +849,47 @@
       "args": []
     },
     {
+      "name": "close_unlocked_quote",
+      "docs": [
+        "Permissionless: reap a quote whose wallets aren't both locked to its miner (posted before",
+        "wallet locks existed), refunding its rent to the miner."
+      ],
+      "discriminator": [
+        155,
+        66,
+        158,
+        23,
+        96,
+        26,
+        90,
+        118
+      ],
+      "accounts": [
+        {
+          "name": "caller",
+          "docs": [
+            "Anyone — the caller only pays the transaction."
+          ],
+          "signer": true
+        },
+        {
+          "name": "miner",
+          "writable": true
+        },
+        {
+          "name": "quote",
+          "writable": true
+        },
+        {
+          "name": "from_addr_lock"
+        },
+        {
+          "name": "to_addr_lock"
+        }
+      ],
+      "args": []
+    },
+    {
       "name": "confirm_swap",
       "docs": [
         "Validators confirm a fulfilled swap (1% fee → treasury; swap closed) on quorum."
@@ -3100,6 +3141,60 @@
           }
         },
         {
+          "name": "from_addr_lock",
+          "writable": true,
+          "pda": {
+            "seeds": [
+              {
+                "kind": "const",
+                "value": [
+                  97,
+                  100,
+                  100,
+                  114,
+                  108,
+                  111,
+                  99,
+                  107
+                ]
+              },
+              {
+                "kind": "arg",
+                "path": "from_addr_lock_key"
+              }
+            ]
+          }
+        },
+        {
+          "name": "to_addr_lock",
+          "docs": [
+            "Omitted when the payout wallet is the deposit wallet (same lock)."
+          ],
+          "writable": true,
+          "optional": true,
+          "pda": {
+            "seeds": [
+              {
+                "kind": "const",
+                "value": [
+                  97,
+                  100,
+                  100,
+                  114,
+                  108,
+                  111,
+                  99,
+                  107
+                ]
+              },
+              {
+                "kind": "arg",
+                "path": "to_addr_lock_key"
+              }
+            ]
+          }
+        },
+        {
           "name": "treasury",
           "docs": [
             "Treasury sink for the quote-update churn fee — subnet revenue, separate from collateral."
@@ -3156,6 +3251,24 @@
         {
           "name": "liquidity",
           "type": "u128"
+        },
+        {
+          "name": "from_addr_lock_key",
+          "type": {
+            "array": [
+              "u8",
+              32
+            ]
+          }
+        },
+        {
+          "name": "to_addr_lock_key",
+          "type": {
+            "array": [
+              "u8",
+              32
+            ]
+          }
         }
       ]
     },
@@ -4654,6 +4767,19 @@
   ],
   "accounts": [
     {
+      "name": "AddrLock",
+      "discriminator": [
+        234,
+        127,
+        191,
+        228,
+        66,
+        104,
+        58,
+        71
+      ]
+    },
+    {
       "name": "Binding",
       "discriminator": [
         148,
@@ -5593,9 +5719,54 @@
       "code": 6072,
       "name": "NonAsciiAddress",
       "msg": "Addresses must be ASCII"
+    },
+    {
+      "code": 6073,
+      "name": "NonAlphanumericAddress",
+      "msg": "Wallet addresses must be ASCII letters and digits only"
+    },
+    {
+      "code": 6074,
+      "name": "AddressTaken",
+      "msg": "Wallet is already posted by another miner"
+    },
+    {
+      "code": 6075,
+      "name": "MissingAddrLock",
+      "msg": "Payout wallet lock missing"
+    },
+    {
+      "code": 6076,
+      "name": "QuoteLocked",
+      "msg": "Quote's wallets are locked to its miner; nothing to reap"
+    },
+    {
+      "code": 6077,
+      "name": "AddrLockKeyMismatch",
+      "msg": "Wallet lock key or account does not match the wallet"
     }
   ],
   "types": [
+    {
+      "name": "AddrLock",
+      "docs": [
+        "Permanent owner of a posted wallet (`seeds = [ADDR_LOCK_SEED, addr_lock_key]`). Never released:",
+        "a released wallet could pass to another miner while swaps pinned to it are still open."
+      ],
+      "type": {
+        "kind": "struct",
+        "fields": [
+          {
+            "name": "owner",
+            "type": "pubkey"
+          },
+          {
+            "name": "bump",
+            "type": "u8"
+          }
+        ]
+      }
+    },
     {
       "name": "AttestHeartbeat",
       "docs": [
@@ -7832,6 +8003,15 @@
     }
   ],
   "constants": [
+    {
+      "name": "ADDR_LOCK_SEED",
+      "docs": [
+        "PDA seed prefix for a wallet lock (`seeds = [ADDR_LOCK_SEED, addr_lock_key]`) — the first miner to",
+        "post a wallet owns it on every chain, permanently, so no other miner can post it."
+      ],
+      "type": "bytes",
+      "value": "[97, 100, 100, 114, 108, 111, 99, 107]"
+    },
     {
       "name": "ATTEST_SEED",
       "docs": [

@@ -16,6 +16,8 @@ import argparse
 import sys
 import time
 
+from solders.pubkey import Pubkey
+
 from allways.cli.swap_commands.helpers import get_effective_config, resolve_solana_rpc
 from allways.solana.client import AllwaysSolanaClient
 from allways.solana.program import resolve_program_id
@@ -29,7 +31,7 @@ def main() -> int:
 
     config = get_effective_config()
     rpc_url = args.rpc_url or resolve_solana_rpc(config)
-    program_id = args.program_id or resolve_program_id(config)
+    program_id = Pubkey.from_string(args.program_id) if args.program_id else resolve_program_id(config)
     client = AllwaysSolanaClient(rpc_url, program_id=program_id, keypair=None)
 
     now = int(time.time())

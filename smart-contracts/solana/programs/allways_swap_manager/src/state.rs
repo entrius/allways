@@ -360,10 +360,37 @@ pub struct Reservation {
 /// Reused across rounds (never closed).
 /// Source-lock key: keccak(keccak(lower(miner deposit wallet)) || keccak(lower(source address))).
 /// Lowercased for every chain so one address can't be spelled into a second lock; the stored addresses
-/// keep their real case. Keyed by wallet, not miner, so miners sharing a wallet share the lock.
+/// keep their real case. Keyed by wallet, so both of a miner's hubs paying into it share the lock.
 pub fn source_lock_key(miner_from_addr: &str, from_addr: &str) -> [u8; 32] {
     let lower = |s: &str| hashv(&[s.to_ascii_lowercase().as_bytes()]).to_bytes();
     hashv(&[&lower(miner_from_addr), &lower(from_addr)]).to_bytes()
+}
+
+/// Wallet-lock key: keccak(lower(address)). No chain in it, so one EVM wallet has one owner on every
+/// EVM chain; lowercased so no casing of a wallet keys a second lock.
+pub fn addr_lock_key(addr: &str) -> [u8; 32] {
+    hashv(&[addr.to_ascii_lowercase().as_bytes()]).to_bytes()
+}
+
+/// Permanent owner of a posted wallet (`seeds = [ADDR_LOCK_SEED, addr_lock_key]`). Never released:
+/// a released wallet could pass to another miner while swaps pinned to it are still open.
+#[account]
+#[derive(InitSpace)]
+pub struct AddrLock {
+    pub owner: Pubkey,
+    pub bump: u8,
+}
+
+impl AddrLock {
+    /// Claim on first post; afterwards only the owner may post this wallet.
+    pub fn claim(&mut self, miner: Pubkey, bump: u8) -> Result<()> {
+        if self.owner == Pubkey::default() {
+            self.owner = miner;
+            self.bump = bump;
+        }
+        require!(self.owner == miner, crate::error::ErrorCode::AddressTaken);
+        Ok(())
+    }
 }
 
 #[account]

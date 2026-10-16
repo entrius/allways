@@ -31,6 +31,16 @@ use {
 
 const SYSTEM_PROGRAM: Pubkey = anchor_lang::solana_program::system_program::ID;
 
+
+fn addr_lock_pda(program_id: &Pubkey, addr: &str) -> Pubkey {
+    Pubkey::find_program_address(&[b"addrlock", &allways_swap_manager::addr_lock_key(addr)], program_id).0
+}
+
+/// The payout wallet's lock, or None when it is the deposit wallet's (same lock).
+fn to_addr_lock_pda(program_id: &Pubkey, from: &str, to: &str) -> Option<Pubkey> {
+    (from.to_ascii_lowercase() != to.to_ascii_lowercase()).then(|| addr_lock_pda(program_id, to))
+}
+
 fn config_pda(program_id: &Pubkey) -> Pubkey {
     Pubkey::find_program_address(&[b"config"], program_id).0
 }
@@ -167,12 +177,16 @@ fn set_quote_backed(
             miner_to_addr: miner_to_addr.to_string(),
             rate,
             liquidity,
+            from_addr_lock_key: allways_swap_manager::addr_lock_key(miner_from_addr),
+            to_addr_lock_key: allways_swap_manager::addr_lock_key(miner_to_addr),
         }
         .data(),
         allways_swap_manager::accounts::SetQuote {
             miner: *miner,
             miner_state: miner_pda(program_id, miner),
             quote: quote_pda(program_id, miner, from_chain, to_chain, backing),
+            from_addr_lock: addr_lock_pda(program_id, miner_from_addr),
+            to_addr_lock: to_addr_lock_pda(program_id, miner_from_addr, miner_to_addr),
             treasury: treasury_pda(program_id),
             system_program: SYSTEM_PROGRAM,
         }
@@ -350,7 +364,7 @@ fn test_non_ascii_deposit_wallet_rejected() {
     let (mut svm, program_id) = setup();
     let miner = dual_miner(&mut svm, &program_id);
     let r = send(&mut svm, set_quote_ix(&program_id, &miner.pubkey(), "btc", "tao", "BC1Q\u{212a}", "b", RATE_PRECISION, 1), &miner.pubkey(), &miner);
-    assert!(r.unwrap_err().contains("NonAsciiAddress"), "a non-ASCII deposit wallet would alias a second source lock");
+    assert!(r.unwrap_err().contains("NonAlphanumericAddress"), "a non-ASCII deposit wallet would alias a second lock");
 }
 
 #[test]
@@ -638,4 +652,226 @@ fn test_the_reaper_refunds_only_the_owning_miner() {
     let err = send(&mut svm, close_legacy_ix(&program_id, &thief.pubkey(), &thief.pubkey(), &stranded), &thief.pubkey(), &thief)
         .unwrap_err();
     assert!(err.contains("NotMiner"), "rent may only go to the stored miner, got: {err}");
+}
+
+// ─── wallet locks ──────────────────────────────────────────────────────────────────────────────
+
+/// set_quote with explicit lock keys / payout-lock account, to drive the mismatch paths.
+#[allow(clippy::too_many_arguments)]
+fn set_quote_raw(
+    program_id: &Pubkey,
+    miner: &Pubkey,
+    miner_from_addr: &str,
+    miner_to_addr: &str,
+    from_addr_lock_key: [u8; 32],
+    to_addr_lock_key: [u8; 32],
+    to_addr_lock: Option<Pubkey>,
+) -> Instruction {
+    Instruction::new_with_bytes(
+        *program_id,
+        &allways_swap_manager::instruction::SetQuote {
+            from_chain: "btc".to_string(),
+            to_chain: "sol".to_string(),
+            collateral_chain: "sol".to_string(),
+            miner_from_addr: miner_from_addr.to_string(),
+            miner_to_addr: miner_to_addr.to_string(),
+            rate: RATE_PRECISION,
+            liquidity: 1,
+            from_addr_lock_key,
+            to_addr_lock_key,
+        }
+        .data(),
+        allways_swap_manager::accounts::SetQuote {
+            miner: *miner,
+            miner_state: miner_pda(program_id, miner),
+            quote: quote_pda(program_id, miner, "btc", "sol", "sol"),
+            from_addr_lock: Pubkey::find_program_address(&[b"addrlock", &from_addr_lock_key], program_id).0,
+            to_addr_lock,
+            treasury: treasury_pda(program_id),
+            system_program: SYSTEM_PROGRAM,
+        }
+        .to_account_metas(None),
+    )
+}
+
+fn lock_owner(svm: &LiteSVM, program_id: &Pubkey, addr: &str) -> Option<Pubkey> {
+    let a = svm.get_account(&addr_lock_pda(program_id, addr))?;
+    Some(allways_swap_manager::state::AddrLock::try_deserialize(&mut a.data.as_slice()).unwrap().owner)
+}
+
+fn close_unlocked_ix(program_id: &Pubkey, caller: &Pubkey, q: &MinerQuote, quote: Pubkey) -> Instruction {
+    Instruction::new_with_bytes(
+        *program_id,
+        &allways_swap_manager::instruction::CloseUnlockedQuote {}.data(),
+        allways_swap_manager::accounts::CloseUnlockedQuote {
+            caller: *caller,
+            miner: q.miner,
+            quote,
+            from_addr_lock: addr_lock_pda(program_id, &q.miner_from_addr),
+            to_addr_lock: addr_lock_pda(program_id, &q.miner_to_addr),
+        }
+        .to_account_metas(None),
+    )
+}
+
+/// Write a quote account directly, as one posted before wallet locks existed.
+fn plant_quote(svm: &mut LiteSVM, program_id: &Pubkey, miner: &Pubkey, f: &str, t: &str, mfrom: &str, mto: &str) -> (Pubkey, MinerQuote) {
+    let (pda, bump) = Pubkey::find_program_address(&[b"quote", miner.as_ref(), f.as_bytes(), t.as_bytes(), b"sol"], program_id);
+    let q = MinerQuote {
+        miner: *miner,
+        from_chain: f.into(),
+        to_chain: t.into(),
+        collateral_chain: "sol".into(),
+        miner_from_addr: mfrom.into(),
+        miner_to_addr: mto.into(),
+        rate: RATE_PRECISION,
+        liquidity: 1,
+        updated_at: 0,
+        bump,
+    };
+    let mut data = vec![];
+    q.try_serialize(&mut data).unwrap();
+    svm.set_account(pda, solana_account::Account { lamports: 10_000_000, data, owner: *program_id, executable: false, rent_epoch: 0 })
+        .unwrap();
+    (pda, q)
+}
+
+#[test]
+fn test_set_quote_locks_both_wallets_to_poster() {
+    let (mut svm, program_id) = setup();
+    let miner = dual_miner(&mut svm, &program_id);
+    send(&mut svm, set_quote_ix(&program_id, &miner.pubkey(), "btc", "sol", "bc1qminer", "minerSol", RATE_PRECISION, 1), &miner.pubkey(), &miner)
+        .expect("quote");
+    assert_eq!(lock_owner(&svm, &program_id, "bc1qminer"), Some(miner.pubkey()));
+    assert_eq!(lock_owner(&svm, &program_id, "minerSol"), Some(miner.pubkey()));
+}
+
+#[test]
+fn test_owner_reuses_its_wallets_across_pairs_and_hubs() {
+    // One wallet serves many chains; the lock is per wallet, so the owner may post it anywhere.
+    let (mut svm, program_id) = setup();
+    let miner = dual_miner(&mut svm, &program_id);
+    let m = miner.pubkey();
+    send(&mut svm, set_quote_ix(&program_id, &m, "btc", "sol", "bc1qminer", "minerSol", RATE_PRECISION, 1), &m, &miner).expect("btc->sol");
+    send(&mut svm, set_quote_ix(&program_id, &m, "sol", "btc", "minerSol", "bc1qminer", RATE_PRECISION, 1), &m, &miner).expect("sol->btc");
+    send(&mut svm, set_quote_ix(&program_id, &m, "btc", "tao", "BC1QMINER", "minerTao", RATE_PRECISION, 1), &m, &miner).expect("tao hub, re-cased");
+}
+
+#[test]
+fn test_other_miner_cannot_post_a_taken_wallet() {
+    let (mut svm, program_id) = setup();
+    let a = dual_miner(&mut svm, &program_id);
+    let b = dual_miner(&mut svm, &program_id);
+    send(&mut svm, set_quote_ix(&program_id, &a.pubkey(), "btc", "sol", "bc1qminer", "minerSol", RATE_PRECISION, 1), &a.pubkey(), &a)
+        .expect("a");
+    for (mfrom, mto) in [("bc1qminer", "bOwnSol"), ("bc1qbown", "minerSol"), ("bc1qbown", "MINERSOL")] {
+        let e = send(&mut svm, set_quote_ix(&program_id, &b.pubkey(), "btc", "sol", mfrom, mto, RATE_PRECISION, 1), &b.pubkey(), &b)
+            .unwrap_err();
+        assert!(e.contains("AddressTaken"), "{mfrom}/{mto}: {e}");
+    }
+}
+
+#[test]
+fn test_same_deposit_and_payout_wallet_takes_one_lock() {
+    let (mut svm, program_id) = setup();
+    let miner = dual_miner(&mut svm, &program_id);
+    send(&mut svm, set_quote_ix(&program_id, &miner.pubkey(), "btc", "sol", "sameWallet", "SAMEWALLET", RATE_PRECISION, 1), &miner.pubkey(), &miner)
+        .expect("one lock serves both legs");
+    assert_eq!(lock_owner(&svm, &program_id, "samewallet"), Some(miner.pubkey()));
+}
+
+#[test]
+fn test_payout_lock_may_only_be_omitted_for_the_same_wallet() {
+    let (mut svm, program_id) = setup();
+    let miner = dual_miner(&mut svm, &program_id);
+    let ix = set_quote_raw(
+        &program_id,
+        &miner.pubkey(),
+        "bc1qminer",
+        "minerSol",
+        allways_swap_manager::addr_lock_key("bc1qminer"),
+        allways_swap_manager::addr_lock_key("minerSol"),
+        None,
+    );
+    let e = send(&mut svm, ix, &miner.pubkey(), &miner).unwrap_err();
+    assert!(e.contains("MissingAddrLock"), "{e}");
+}
+
+#[test]
+fn test_lock_keys_must_match_the_posted_wallets() {
+    let (mut svm, program_id) = setup();
+    let miner = dual_miner(&mut svm, &program_id);
+    let ix = set_quote_raw(
+        &program_id,
+        &miner.pubkey(),
+        "bc1qminer",
+        "minerSol",
+        allways_swap_manager::addr_lock_key("bc1qelse"),
+        allways_swap_manager::addr_lock_key("minerSol"),
+        Some(addr_lock_pda(&program_id, "minerSol")),
+    );
+    let e = send(&mut svm, ix, &miner.pubkey(), &miner).unwrap_err();
+    assert!(e.contains("AddrLockKeyMismatch"), "{e}");
+}
+
+#[test]
+fn test_wallet_with_whitespace_or_punctuation_rejected() {
+    // Such a spelling would key its own lock while naming the same wallet to a lenient reader.
+    let (mut svm, program_id) = setup();
+    let miner = dual_miner(&mut svm, &program_id);
+    for bad in ["bc1qminer\n", " bc1qminer", "bc1q-miner", "0x:abc"] {
+        let e = send(&mut svm, set_quote_ix(&program_id, &miner.pubkey(), "btc", "sol", bad, "minerSol", RATE_PRECISION, 1), &miner.pubkey(), &miner)
+            .unwrap_err();
+        assert!(e.contains("NonAlphanumericAddress"), "{bad:?}: {e}");
+    }
+}
+
+#[test]
+fn test_addr_lock_key_matches_client_vector() {
+    // Same vector as the Python client's test, so both derive one lock address.
+    let key = allways_swap_manager::addr_lock_key("0xAbCdEf0123456789aBcDeF0123456789AbCdEf01");
+    let hex: String = key.iter().map(|b| format!("{b:02x}")).collect();
+    assert_eq!(hex, "1f887d4531c70c54739bc5682ffc477b35c5582aeea8c577b4e6c5565b4c9137");
+}
+
+#[test]
+fn test_close_unlocked_quote_reaps_pre_lock_quotes() {
+    let (mut svm, program_id) = setup();
+    let owner = dual_miner(&mut svm, &program_id);
+    let other = dual_miner(&mut svm, &program_id);
+    let caller = dual_miner(&mut svm, &program_id);
+    send(&mut svm, set_quote_ix(&program_id, &owner.pubkey(), "btc", "sol", "bc1qowner", "ownerSol", RATE_PRECISION, 1), &owner.pubkey(), &owner)
+        .expect("owner quote");
+
+    // A quote from before locks existed, on no lock at all: reaped, rent back to its miner.
+    let (pda, q) = plant_quote(&mut svm, &program_id, &other.pubkey(), "sol", "btc", "otherSol", "bc1qother");
+    let before = svm.get_balance(&other.pubkey()).unwrap();
+    send(&mut svm, close_unlocked_ix(&program_id, &caller.pubkey(), &q, pda), &caller.pubkey(), &caller).expect("reap unlocked");
+    assert!(svm.get_account(&pda).is_none_or(|a| a.lamports == 0));
+    assert_eq!(svm.get_balance(&other.pubkey()).unwrap(), before + 10_000_000);
+
+    // A pre-lock quote on a wallet another miner owns: reaped.
+    let (pda, q) = plant_quote(&mut svm, &program_id, &other.pubkey(), "sol", "btc", "otherSol", "bc1qowner");
+    send(&mut svm, close_unlocked_ix(&program_id, &caller.pubkey(), &q, pda), &caller.pubkey(), &caller).expect("reap copied");
+
+    // A quote whose wallets are its miner's: untouchable.
+    let q = read_quote(&svm, &program_id, &owner.pubkey(), "btc", "sol");
+    let pda = quote_pda(&program_id, &owner.pubkey(), "btc", "sol", "sol");
+    let e = send(&mut svm, close_unlocked_ix(&program_id, &caller.pubkey(), &q, pda), &caller.pubkey(), &caller).unwrap_err();
+    assert!(e.contains("QuoteLocked"), "{e}");
+}
+
+#[test]
+fn test_close_unlocked_quote_checks_lock_addresses() {
+    let (mut svm, program_id) = setup();
+    let owner = dual_miner(&mut svm, &program_id);
+    let caller = dual_miner(&mut svm, &program_id);
+    send(&mut svm, set_quote_ix(&program_id, &owner.pubkey(), "btc", "sol", "bc1qowner", "ownerSol", RATE_PRECISION, 1), &owner.pubkey(), &owner)
+        .expect("owner quote");
+    // Passing some other wallet's (empty) lock must not make a locked quote look unlocked.
+    let q = read_quote(&svm, &program_id, &owner.pubkey(), "btc", "sol");
+    let mut ix = close_unlocked_ix(&program_id, &caller.pubkey(), &q, quote_pda(&program_id, &owner.pubkey(), "btc", "sol", "sol"));
+    ix.accounts[3].pubkey = addr_lock_pda(&program_id, "unrelated");
+    let e = send(&mut svm, ix, &caller.pubkey(), &caller).unwrap_err();
+    assert!(e.contains("AddrLockKeyMismatch"), "{e}");
 }

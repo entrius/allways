@@ -3,12 +3,12 @@ use anchor_lang::system_program::{transfer, Transfer};
 
 use crate::backing;
 use crate::constants::{
-    quote_update_fee, quantize_rate_sig_figs, MAX_ADDR_LEN, MAX_CHAIN_LEN, MINER_SEED, QUOTE_SEED,
-    TREASURY_SEED,
+    quote_update_fee, quantize_rate_sig_figs, ADDR_LOCK_SEED, MAX_ADDR_LEN, MAX_CHAIN_LEN, MINER_SEED,
+    QUOTE_SEED, TREASURY_SEED,
 };
 use crate::error::ErrorCode;
 use crate::events::QuoteSet;
-use crate::state::{MinerQuote, MinerState, Treasury};
+use crate::state::{addr_lock_key, AddrLock, MinerQuote, MinerState, Treasury};
 
 /// Miner publishes (or overwrites) its standing quote for one pair-direction and one backing. The
 /// signer owns the quote and must already have that purse activated — a quote is a public promise the
@@ -18,9 +18,20 @@ use crate::state::{MinerQuote, MinerState, Treasury};
 /// both offers on one hub↔hub direction at different rates (D2). First call lazily creates the PDA
 /// (miner pays rent) and is otherwise free; subsequent calls overwrite in place and pay a **decaying
 /// anti-flashing fee** (`constants::quote_update_fee`) into the treasury PDA — high for rapid churn,
-/// zero once a quote has stood long enough.
+/// zero once a quote has stood long enough. Both wallets are locked to the poster on first post, so no
+/// other miner can ever post them (a payout from a shared wallet would confirm both miners' swaps).
 #[derive(Accounts)]
-#[instruction(from_chain: String, to_chain: String, collateral_chain: String)]
+#[instruction(
+    from_chain: String,
+    to_chain: String,
+    collateral_chain: String,
+    miner_from_addr: String,
+    miner_to_addr: String,
+    rate: u128,
+    liquidity: u128,
+    from_addr_lock_key: [u8; 32],
+    to_addr_lock_key: [u8; 32]
+)]
 pub struct SetQuote<'info> {
     #[account(mut)]
     pub miner: Signer<'info>,
@@ -48,6 +59,25 @@ pub struct SetQuote<'info> {
     )]
     pub quote: Account<'info, MinerQuote>,
 
+    #[account(
+        init_if_needed,
+        payer = miner,
+        space = 8 + AddrLock::INIT_SPACE,
+        seeds = [ADDR_LOCK_SEED, from_addr_lock_key.as_ref()],
+        bump,
+    )]
+    pub from_addr_lock: Account<'info, AddrLock>,
+
+    /// Omitted when the payout wallet is the deposit wallet (same lock).
+    #[account(
+        init_if_needed,
+        payer = miner,
+        space = 8 + AddrLock::INIT_SPACE,
+        seeds = [ADDR_LOCK_SEED, to_addr_lock_key.as_ref()],
+        bump,
+    )]
+    pub to_addr_lock: Option<Account<'info, AddrLock>>,
+
     /// Treasury sink for the quote-update churn fee — subnet revenue, separate from collateral.
     #[account(mut, seeds = [TREASURY_SEED], bump = treasury.bump)]
     pub treasury: Account<'info, Treasury>,
@@ -65,6 +95,8 @@ pub fn handler(
     miner_to_addr: String,
     rate: u128,
     liquidity: u128,
+    from_addr_lock_key: [u8; 32],
+    to_addr_lock_key: [u8; 32],
 ) -> Result<()> {
     // Mechanical sanity only — chains/addrs are opaque bounded strings. The rate is an opaque
     // fixed-point integer (display × RATE_PRECISION); the contract stores whatever the miner posts
@@ -87,7 +119,13 @@ pub fn handler(
     );
     require!(from_chain != to_chain, ErrorCode::SameChain);
     crate::validate::chain_ids_lowercase(&from_chain, &to_chain)?;
-    crate::validate::addresses_ascii(&[&miner_from_addr])?;
+    crate::validate::addresses_alphanumeric(&[&miner_from_addr, &miner_to_addr])?;
+    // The lock keys seed the wallet locks, so bind them to the posted wallets.
+    require!(
+        from_addr_lock_key == addr_lock_key(&miner_from_addr)
+            && to_addr_lock_key == addr_lock_key(&miner_to_addr),
+        ErrorCode::AddrLockKeyMismatch
+    );
 
     // The backing must be a hub AND one of the legs, and the miner must already be serving that purse.
     // Leg membership is also what keeps the seed lowercase without a third casing check.
@@ -108,6 +146,14 @@ pub fn handler(
     let now = Clock::get()?.unix_timestamp;
     let miner_key = ctx.accounts.miner.key();
     let bump = ctx.bumps.quote;
+
+    ctx.accounts
+        .from_addr_lock
+        .claim(miner_key, ctx.bumps.from_addr_lock)?;
+    match ctx.accounts.to_addr_lock.as_mut() {
+        Some(lock) => lock.claim(miner_key, ctx.bumps.to_addr_lock.ok_or(ErrorCode::MissingAddrLock)?)?,
+        None => require!(from_addr_lock_key == to_addr_lock_key, ErrorCode::MissingAddrLock),
+    }
 
     // Anti-flashing churn fee on UPDATES only — creation is free (no onboarding barrier), decaying to
     // zero the longer the prior quote stood; fee → treasury. The remove + re-create dodge is closed on

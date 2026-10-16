@@ -50,6 +50,16 @@ const MINER_FROM: &str = "minerBTCaddr";
 const MINER_TO: &str = "minerSOLaddr";
 const RATE: u128 = 1_500_000_000_000_000_000; // 1.5 × RATE_PRECISION (1e18)
 
+
+fn addr_lock_pda(program_id: &Pubkey, addr: &str) -> Pubkey {
+    Pubkey::find_program_address(&[b"addrlock", &allways_swap_manager::addr_lock_key(addr)], program_id).0
+}
+
+/// The payout wallet's lock, or None when it is the deposit wallet's (same lock).
+fn to_addr_lock_pda(program_id: &Pubkey, from: &str, to: &str) -> Option<Pubkey> {
+    (from.to_ascii_lowercase() != to.to_ascii_lowercase()).then(|| addr_lock_pda(program_id, to))
+}
+
 fn pid() -> Pubkey {
     allways_swap_manager::id()
 }
@@ -207,12 +217,16 @@ fn set_quote_ix(miner: &Pubkey) -> Instruction {
             miner_to_addr: MINER_TO.to_string(),
             rate: RATE,
             liquidity: 1_000,
+            from_addr_lock_key: allways_swap_manager::addr_lock_key(MINER_FROM),
+            to_addr_lock_key: allways_swap_manager::addr_lock_key(MINER_TO),
         }
         .data(),
         allways_swap_manager::accounts::SetQuote {
             miner: *miner,
             miner_state: miner_pda(miner),
             quote: quote_pda(miner, FROM_CHAIN, TO_CHAIN, BACKING),
+            from_addr_lock: addr_lock_pda(&pid(), MINER_FROM),
+            to_addr_lock: to_addr_lock_pda(&pid(), MINER_FROM, MINER_TO),
             treasury: treasury_pda(),
             system_program: SYSTEM_PROGRAM,
         }
@@ -232,12 +246,16 @@ fn set_quote_vals_ix(miner: &Pubkey, from_addr: &str, to_addr: &str, rate: u128)
             miner_to_addr: to_addr.to_string(),
             rate,
             liquidity: 1_000,
+            from_addr_lock_key: allways_swap_manager::addr_lock_key(from_addr),
+            to_addr_lock_key: allways_swap_manager::addr_lock_key(to_addr),
         }
         .data(),
         allways_swap_manager::accounts::SetQuote {
             miner: *miner,
             miner_state: miner_pda(miner),
             quote: quote_pda(miner, FROM_CHAIN, TO_CHAIN, BACKING),
+            from_addr_lock: addr_lock_pda(&pid(), from_addr),
+            to_addr_lock: to_addr_lock_pda(&pid(), from_addr, to_addr),
             treasury: treasury_pda(),
             system_program: SYSTEM_PROGRAM,
         }

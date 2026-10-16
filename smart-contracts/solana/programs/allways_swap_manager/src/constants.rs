@@ -29,6 +29,11 @@ pub const RESV_SEED: &[u8] = b"resv";
 #[constant]
 pub const SRCLOCK_SEED: &[u8] = b"srclock";
 
+/// PDA seed prefix for a wallet lock (`seeds = [ADDR_LOCK_SEED, addr_lock_key]`) — the first miner to
+/// post a wallet owns it on every chain, permanently, so no other miner can post it.
+#[constant]
+pub const ADDR_LOCK_SEED: &[u8] = b"addrlock";
+
 /// PDA seed prefix for a swap (`seeds = [SWAP_SEED, swap_key]`, swap_key = keccak(from_tx_hash)).
 #[constant]
 pub const SWAP_SEED: &[u8] = b"swap";
