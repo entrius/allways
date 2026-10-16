@@ -16,7 +16,7 @@ from solders.pubkey import Pubkey
 # One source of truth for event discriminators + borsh layouts (all program events) lives in layouts.py,
 # alongside the account layouts. The validator crown ingests only the subset it cares about (event_index.py
 # dispatches by name and ignores the rest); the dashboard indexer decodes the full set from the same tables.
-from allways.solana.layouts import EVENT_DISCRIMINATORS, EVENT_LAYOUTS, EVENT_PUBKEY_FIELDS
+from allways.solana.layouts import EVENT_DISCRIMINATORS, EVENT_LAYOUTS, EVENT_PRIOR_LAYOUTS, EVENT_PUBKEY_FIELDS
 
 _BY_DISC = {disc: name for name, disc in EVENT_DISCRIMINATORS.items()}
 
@@ -37,9 +37,14 @@ def decode_event(raw: bytes) -> Optional[Tuple[str, Any]]:
     name = _BY_DISC.get(bytes(raw[:8]))
     if name is None:
         return None
-    try:
-        parsed = EVENT_LAYOUTS[name].parse(raw[8:])
-    except ConstructError:
+    parsed = None
+    for layout in (EVENT_LAYOUTS[name], *EVENT_PRIOR_LAYOUTS.get(name, ())):
+        try:
+            parsed = layout.parse(raw[8:])
+            break
+        except ConstructError:
+            continue
+    if parsed is None:
         # A foreign-version body (e.g. a pre-v3 event in a genesis rescan) — drop it like a
         # foreign discriminator instead of letting the parse error kill the caller's whole pass.
         return None

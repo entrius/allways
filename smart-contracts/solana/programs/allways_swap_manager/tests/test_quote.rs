@@ -875,3 +875,51 @@ fn test_close_unlocked_quote_checks_lock_addresses() {
     let e = send(&mut svm, ix, &caller.pubkey(), &caller).unwrap_err();
     assert!(e.contains("AddrLockKeyMismatch"), "{e}");
 }
+
+/// Standard-alphabet base64 decode — just enough for `Program data:` log lines.
+fn b64(s: &str) -> Vec<u8> {
+    const A: &[u8] = b"ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/";
+    let (mut acc, mut bits, mut out) = (0u32, 0u32, Vec::new());
+    for c in s.bytes().filter(|&c| c != b'=') {
+        let v = A.iter().position(|&a| a == c).expect("base64 alphabet") as u32;
+        acc = (acc << 6) | v;
+        bits += 6;
+        if bits >= 8 {
+            bits -= 8;
+            out.push((acc >> bits) as u8);
+        }
+    }
+    out
+}
+
+#[test]
+fn test_quote_set_event_carries_the_stored_addresses() {
+    use allways_swap_manager::events::QuoteSet;
+    use anchor_lang::AnchorDeserialize;
+
+    let (mut svm, program_id) = setup();
+    let miner = dual_miner(&mut svm, &program_id);
+    let ix = set_quote_ix(
+        &program_id,
+        &miner.pubkey(),
+        "btc",
+        "tao",
+        "bc1qsrc",
+        "5Cdst",
+        340 * RATE_PRECISION,
+        100,
+    );
+    let msg = Message::new_with_blockhash(&[ix], Some(&miner.pubkey()), &svm.latest_blockhash());
+    let tx = VersionedTransaction::try_new(VersionedMessage::Legacy(msg), &[&miner]).unwrap();
+    let logs = svm.send_transaction(tx).expect("set_quote").logs;
+
+    let ev = logs
+        .iter()
+        .filter_map(|l| l.strip_prefix("Program data: "))
+        .map(b64)
+        .find(|raw| raw.len() > 8 && raw[..8] == QuoteSet::DISCRIMINATOR[..])
+        .map(|raw| QuoteSet::deserialize(&mut &raw[8..]).unwrap())
+        .expect("QuoteSet in logs");
+    assert_eq!((ev.miner_from_addr.as_str(), ev.miner_to_addr.as_str()), ("bc1qsrc", "5Cdst"));
+    assert_eq!(ev.rate, 340 * RATE_PRECISION);
+}

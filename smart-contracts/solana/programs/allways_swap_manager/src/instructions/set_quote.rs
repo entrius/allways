@@ -202,6 +202,8 @@ pub fn handler(
         liquidity,
         updated_at: now,
         update_fee: fee,
+        miner_from_addr: quote.miner_from_addr.clone(),
+        miner_to_addr: quote.miner_to_addr.clone(),
     });
     Ok(())
 }
