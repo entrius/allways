@@ -11,6 +11,7 @@ from typing import Any, Callable, Dict, Iterable, Optional, Protocol, Set, Tuple
 
 import bittensor as bt
 
+from allways.validator_v2.actuator.planners import ACTIONS
 from allways.validator_v2.chain.confirm import ConfirmTracker
 from allways.validator_v2.runtime.bus import Latest
 from allways.validator_v2.runtime.component import Component
@@ -56,9 +57,10 @@ class Actuator(Component):
         self.executors = executors
         self._client_factory = client_factory
         self._client: Any = None
-        self.queue = inbox or DeadlineQueue()  # serving/relay enqueue their writes here too
+        self.queue = inbox or DeadlineQueue()  # writes submitted by serving and the relays
         self.confirms = ConfirmTracker()
         self._in_flight: Set[Tuple[Any, ...]] = set()
+        self._submitted: Set[Tuple[Any, ...]] = set()  # in-flight keys that came from the inbox
 
     def setup(self) -> None:
         self._client = self._client_factory()
@@ -69,40 +71,63 @@ class Actuator(Component):
         if world is None or now - world.taken_at > MAX_WORLD_AGE_SECS:
             bt.logging.warning('actuator: no fresh World, holding sends')
             return
+        planned: Dict[Tuple[Any, ...], Intent] = {}
         for planner in self.planners:
             try:
                 for intent in planner.plan(world, now):
-                    if intent.key not in self._in_flight:
-                        self.queue.push(intent)
+                    planned[intent.key] = intent
             except Exception as e:
                 bt.logging.warning(f'actuator: planner {planner.name} failed: {e}')
-        for intent in self.queue.pop_due(now, limit=SENDS_PER_TICK):
+        # Planned intents are rebuilt from the World every tick, so an unsent one is simply re-planned.
+        # Submitted ones (serving, relays) exist only in the inbox, so an unsent one goes back in.
+        submitted = {i.key: i for i in self.queue.pop_due(now)}
+        due = [i for i in {**submitted, **planned}.values() if i.not_before <= now and i.key not in self._in_flight]
+        due.sort(key=lambda i: (int(i.urgency), i.deadline))
+        sent = 0
+        for intent in due:
+            action = ACTIONS.get(intent.key[0])
+            if sent >= SENDS_PER_TICK or (action is not None and action.needs_ledgers and not world.complete):
+                if intent.key in submitted:
+                    self.queue.push(intent)
+                continue
             if intent.deadline < now:
                 bt.logging.warning(f'actuator: {intent.key} past its deadline by {now - intent.deadline:.0f}s')
-            self._send(intent, now)
+            if self._send(intent, now) and intent.key in submitted:
+                self._submitted.add(intent.key)
+            sent += 1
 
-    def _send(self, intent: Intent, now: float) -> None:
+    def _send(self, intent: Intent, now: float) -> bool:
+        """True when a transaction went out and is being tracked."""
         executor = self.executors.get(intent.key[0])
         if executor is None:
             bt.logging.error(f'actuator: no executor for {intent.key[0]!r}')
-            return
+            return False
         try:
             signature = executor(self._client, intent)
         except Exception as e:
             bt.logging.warning(f'actuator: {intent.key} send failed: {e}')
-            return  # the planner re-plans it next tick if still due
-        if signature:
-            self.confirms.track(signature, intent, now)
-            self._in_flight.add(intent.key)
+            return False  # the planner re-plans it next tick if still due
+        if not signature:
+            return False
+        self.confirms.track(signature, intent, now)
+        self._in_flight.add(intent.key)
+        return True
 
     def _settle(self, now: float) -> None:
         if not self.confirms.pending():
             return
         resolved = self.confirms.resolve(self._client.rpc, now)
         for sent in resolved.landed:
-            self._in_flight.discard(sent.intent.key)
+            self._done(sent.intent)
         for sent, err in resolved.failed:
             bt.logging.warning(f'actuator: {sent.intent.key} failed on-chain: {err}')
-            self._in_flight.discard(sent.intent.key)
+            self._done(sent.intent)
         for sent in resolved.expired:
-            self._in_flight.discard(sent.intent.key)  # never landed: the planner may send it again
+            # Never landed. A planned intent is re-planned if still due; a submitted one goes back in.
+            if sent.intent.key in self._submitted:
+                self.queue.push(sent.intent)
+            self._done(sent.intent)
+
+    def _done(self, intent: Intent) -> None:
+        self._in_flight.discard(intent.key)
+        self._submitted.discard(intent.key)

@@ -11,8 +11,8 @@ from allways.validator_v2.world.snapshot import World
 NOW = 1_000_000.0
 
 
-def _world(taken_at=NOW):
-    return World(taken_at=taken_at, config=None, accounts={}, read_at={})
+def _world(taken_at=NOW, complete=True):
+    return World(taken_at=taken_at, slot=0, complete=complete, config=None, accounts={})
 
 
 class _Planner:
@@ -81,6 +81,34 @@ def test_a_stale_world_holds_all_sends():
     world.set(_world(taken_at=NOW - 120))
     act.tick(NOW)
     assert sent == []
+
+
+def test_ledger_votes_wait_while_the_world_is_incomplete_but_extends_do_not():
+    swap = SimpleNamespace(timeout_at=NOW + 500)
+    resv = SimpleNamespace(reserved_until=NOW + 400)
+    sent = []
+    act, _, world = _actuator(
+        [intent('confirm_swap', 'b', swap, NOW), intent('extend_reservation', 'c', resv, NOW)], sent
+    )
+    world.set(_world(complete=False))
+    act.tick(NOW)
+    assert [k[0] for k in sent] == ['extend_reservation']
+    world.set(_world(NOW + 2, complete=True))
+    act.tick(NOW + 2)
+    assert [k[0] for k in sent] == ['extend_reservation', 'confirm_swap']
+
+
+def test_a_submitted_intent_whose_send_expired_is_sent_again():
+    sent = []
+    act, _, world = _actuator([], sent)
+    act.queue.push(intent('vote_set_attestation', 'm', SimpleNamespace(), NOW))
+    act.tick(NOW)
+    world.set(_world(NOW + 2))
+    act.tick(NOW + 2)
+    assert len(sent) == 1 and len(act.queue) == 0
+    world.set(_world(NOW + 200))
+    act.tick(NOW + 200)  # never landed: back in the inbox, and out again
+    assert len(sent) == 2
 
 
 def test_action_table_urgencies():

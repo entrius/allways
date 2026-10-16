@@ -76,15 +76,25 @@ def test_backfill_hands_out_bounded_chunks():
     assert sizes == [100, 100, 50]
 
 
-def test_slot_clock_interpolates_between_anchors_and_holds_past_the_last():
+def test_slot_clock_interpolates_between_anchors_and_extrapolates_past_them():
     times = {100: 1000, 200: 1040}
     clock = SlotClock(times.get, min_interval=0)
+    assert clock.time_of(100) is None  # no anchor yet
     clock.anchor(100, now=0)
-    assert clock.time_of(150) is None  # no anchor reaches it yet
+    assert clock.time_of(110) == 1004  # one anchor: the nominal 0.4s slot
     clock.anchor(200, now=1)
-    assert clock.time_of(100) == 1000
     assert clock.time_of(150) == 1020
-    assert clock.time_of(50) == 1000  # before the first anchor: clamped
+    assert clock.time_of(300) == 1080  # past the newest anchor: the measured rate (0.4s here)
+    assert clock.time_of(50) == 980
+
+
+def test_slot_clock_reads_block_time_at_most_once_per_interval():
+    reads = []
+    clock = SlotClock(lambda slot: reads.append(slot) or 1000 + slot, min_interval=30)
+    clock.anchor(100, now=0)
+    clock.anchor(150, now=10)
+    clock.anchor(200, now=31)
+    assert reads == [100, 200]
 
 
 class _FakeLive:

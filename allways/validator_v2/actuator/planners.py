@@ -19,6 +19,8 @@ SOFT_DEADLINE_SECS = 600
 class Action:
     urgency: Urgency
     deadline: Callable[[Any, float], float]  # (the account the action is about, now) -> unix deadline
+    # Reads the World's event-fed ledgers (used deposits / deliveries), so it waits while the feed catches up.
+    needs_ledgers: bool = False
 
 
 def _field(name: str) -> Callable[[Any, float], float]:
@@ -33,8 +35,8 @@ ACTIONS = {
     # Swap lifecycle (about a Reservation or a Swap)
     'extend_reservation': Action(Urgency.EXTEND, _field('reserved_until')),
     'extend_timeout': Action(Urgency.EXTEND, _field('timeout_at')),
-    'vote_initiate': Action(Urgency.VOTE, _field('reserved_until')),
-    'confirm_swap': Action(Urgency.VOTE, _field('timeout_at')),
+    'vote_initiate': Action(Urgency.VOTE, _field('reserved_until'), needs_ledgers=True),
+    'confirm_swap': Action(Urgency.VOTE, _field('timeout_at'), needs_ledgers=True),
     'timeout_swap': Action(Urgency.SOFT, _soft),
     'cancel_swap': Action(Urgency.SOFT, _soft),
     'close_stale_claim': Action(Urgency.SOFT, _soft),
