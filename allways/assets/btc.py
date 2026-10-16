@@ -805,6 +805,10 @@ class Bitcoin(Asset, Chain):
         self, utxos: list, amount: int, is_segwit: bool, output_scripts: list, fee_rate_override: Optional[int] = None
     ) -> Optional[Tuple[list, int, int]]:
         """Greedy UTXO selection. Returns (selected, total_in, fee) or None."""
+        # Anyone can pay our public address; an unconfirmed outside coin can be RBF'd away or left
+        # unconfirmed, killing any payout built on it. Spend only confirmed coins or our own change.
+        pending = sum(u['value'] for u in utxos if not self.is_spendable_utxo(u))
+        utxos = [u for u in utxos if self.is_spendable_utxo(u)]
         fee_rate = self.estimate_fee_rate(override=fee_rate_override)
         input_vsize = 68 if is_segwit else 148
         # Each output: 8-byte value + length-prefixed scriptPubKey (Taproot 43 vB, P2WPKH 31).
@@ -822,9 +826,14 @@ class Bitcoin(Asset, Chain):
         est_vsize = base_vsize + len(selected) * input_vsize
         fee = est_vsize * fee_rate
         if total_in < amount + fee:
-            self._send_error(f'Insufficient funds: have {total_in} sat, need {amount} + {fee} fee')
+            held = f' ({pending} sat more awaiting confirmation)' if pending else ''
+            self._send_error(f'Insufficient funds: have {total_in} sat{held}, need {amount} + {fee} fee')
             return None
         return selected, total_in, fee
+
+    def is_spendable_utxo(self, utxo: dict) -> bool:
+        """Confirmed, or change from a tx this process broadcast (we won't replace our own)."""
+        return bool((utxo.get('status') or {}).get('confirmed')) or utxo.get('txid') in self.broadcasted_txids
 
     def broadcast_tx(self, raw_hex: str, dedup_key: Optional[str] = None) -> Optional[str]:
         """Broadcast a raw transaction. Returns tx_hash or None."""
