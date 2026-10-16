@@ -7,6 +7,7 @@ crown — replacing the old substrate event_watcher. Only the crown-relevant eve
 """
 
 import logging
+import time
 from dataclasses import dataclass
 from typing import Any, List, Optional, Tuple
 
@@ -27,6 +28,14 @@ logger = logging.getLogger(__name__)
 # Slot age at which poll() stops holding the cursor for an unstamped tx (~2 min): past this the
 # RPC is never going to backfill its blockTime, and holding would wedge ingest forever.
 UNSTAMPED_GIVE_UP_SLOTS = 300
+
+# Lookback cap for a fresh database or a long outage. The longest swap lives ~5h (TTL + two 140-min
+# extension budgets + base timeout), so the anti-replay ledgers and fill checks need no more than this.
+HISTORY_HORIZON_SECS = 6 * 3600
+# Per-pass decode budget: one getTransaction per signature, so a backlog is drained across passes
+# instead of in one pass the watchdog kills (and that, since ingest runs before the swap loop, blocks votes).
+MAX_DECODE_PER_PASS = 500
+MAX_DECODE_SECS = 30
 
 
 def decode_event(raw: bytes) -> Optional[Tuple[str, Any]]:
@@ -62,10 +71,23 @@ class SolanaEventIngest:
     last cursor (oldest-first), decodes the crown-relevant events, and returns typed records + the advanced
     cursor. Must run every forward step so the cursor never falls behind the RPC signature-prune window."""
 
-    def __init__(self, solana_client: Any, max_pages: int = 20, page_size: int = 1000):
+    def __init__(
+        self,
+        solana_client: Any,
+        max_pages: int = 20,
+        page_size: int = 1000,
+        horizon_secs: Optional[int] = None,
+        max_decode: int = MAX_DECODE_PER_PASS,
+        max_decode_secs: float = MAX_DECODE_SECS,
+        clock=time.time,
+    ):
         self.client = solana_client
         self.max_pages = max_pages
         self.page_size = page_size
+        self.horizon_secs = HISTORY_HORIZON_SECS if horizon_secs is None else horizon_secs
+        self.max_decode = max_decode
+        self.max_decode_secs = max_decode_secs
+        self.clock = clock
         # F3: fail-closed pagination. When a backlog exceeds max_pages*page_size in one pass, the
         # partial (newest) run is buffered and paging resumes deeper next call — so the older gap
         # toward until_sig is drained across ticks instead of silently dropped.
@@ -90,7 +112,15 @@ class SolanaEventIngest:
                 )
                 if not batch:
                     return self._drain_pending()
-                self._pending.extend(batch)
+                kept = self._within_horizon(batch)
+                self._pending.extend(kept)
+                if len(kept) < len(batch):
+                    logger.warning(
+                        'Event history cut at the %ss horizon: older program events are skipped '
+                        '(fresh database or long outage)',
+                        self.horizon_secs,
+                    )
+                    return self._drain_pending()
                 before = batch[-1]['signature']
                 if len(batch) < self.page_size:
                     return self._drain_pending()
@@ -100,6 +130,15 @@ class SolanaEventIngest:
         # Gap still open: hold here and resume paging from `before` on the next call.
         self._resume_before = before
         return []
+
+    def _within_horizon(self, batch: List[dict]) -> List[dict]:
+        """The newest-first prefix of ``batch`` inside the lookback horizon. Unstamped entries are kept."""
+        cutoff = self.clock() - self.horizon_secs
+        for i, entry in enumerate(batch):
+            block_time = entry.get('blockTime')
+            if block_time is not None and block_time < cutoff:
+                return batch[:i]
+        return batch
 
     def _drain_pending(self) -> List[dict]:
         collected = self._pending
@@ -123,7 +162,9 @@ class SolanaEventIngest:
         return out
 
     def poll(self, until_sig: Optional[str]) -> Tuple[List[EventRecord], Optional[str]]:
-        """Fetch + decode all events newer than until_sig. Returns (records oldest-first, new_cursor_sig).
+        """Fetch + decode events newer than until_sig, at most one decode budget's worth per pass (the
+        cursor stops at the last entry read, so the rest follows next pass) and never further back than
+        the horizon. Returns (records oldest-first, new_cursor_sig).
         The cursor advances only through stamped entries and holds at the first not-yet-stamped
         (blockTime-less) tip tx, so its events are re-read once stamped instead of skipped forever.
         An unstamped tx older than UNSTAMPED_GIVE_UP_SLOTS has its blockTime read off the transaction
@@ -135,7 +176,10 @@ class SolanaEventIngest:
         newest_slot = entries[-1]['slot'] if entries else 0
         records: List[EventRecord] = []
         new_cursor = until_sig
+        started, decoded = self.clock(), 0
         for entry in entries:
+            if decoded >= self.max_decode or self.clock() - started >= self.max_decode_secs:
+                break  # the rest of the backlog is read next pass, from the advanced cursor
             unstamped = entry.get('blockTime') is None and entry.get('err') is None
             if unstamped and newest_slot - entry['slot'] < UNSTAMPED_GIVE_UP_SLOTS:
                 break
@@ -151,6 +195,7 @@ class SolanaEventIngest:
                     )
             if not unstamped:
                 records.extend(self._decode_signature(entry))
+                decoded += entry.get('err') is None
             new_cursor = entry['signature']
         return records, new_cursor
 
