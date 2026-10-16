@@ -161,6 +161,10 @@ class MeteredAdapter(HTTPAdapter):
         return response
 
 
+# WebSocket traffic: subtensor (Dwellir, finney fallback) and the Solana logsSubscribe feed.
+UNMETERED = 'websocket traffic (subtensor, Solana log subscription)'
+
+
 class UsageReport(Component):
     """Logs each endpoint's usage and projected day once an hour, warning when a budget would be exceeded."""
 
@@ -183,3 +187,4 @@ class UsageReport(Component):
                 bt.logging.warning(f'{line} — over its {budget}/day budget')
             else:
                 bt.logging.info(line + (f' (budget {budget}/day)' if budget else ''))
+        bt.logging.info(f'usage: {UNMETERED} not metered')

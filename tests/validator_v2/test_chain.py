@@ -86,10 +86,12 @@ def test_projection_and_budget_warning(monkeypatch, caplog):
         session.post('https://h.example/', json={'method': 'getSlot'})
     clock.t = 3600
     assert meter.projected_daily() == {'helius': 240}
-    warned = []
-    monkeypatch.setattr('bittensor.logging.warning', lambda msg: warned.append(msg))
+    warned, info = [], []
+    monkeypatch.setattr('bittensor.logging.warning', warned.append)
+    monkeypatch.setattr('bittensor.logging.info', info.append)
     UsageReport(meter, endpoints).tick(clock.t)
     assert warned and 'over its 100/day budget' in warned[0]
+    assert 'websocket traffic' in info[-1]  # said plainly, not silently missing
 
 
 class _StatusRpc:
