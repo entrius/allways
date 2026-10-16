@@ -235,3 +235,17 @@ def test_a_snapshot_older_than_the_horizon_is_rescanned(tmp_path):
     again, _, _, _, _ = _reader(client, tmp_path)
     again.tick(NOW)
     assert client.scans > scans
+
+
+def test_an_idle_world_saves_only_on_its_heartbeat(tmp_path):
+    client = _Client()
+    reader, _, _, _, _ = _reader(client, tmp_path)
+    reader.tick(NOW)
+    commits = []
+    real = reader.store.tx
+    reader.store.tx = lambda: (commits.append(1), real())[1]
+    for t in range(1, 10):
+        reader.tick(NOW + t)  # nothing changed, same cursor
+    assert commits == []
+    reader.tick(NOW + 30)
+    assert commits == [1]

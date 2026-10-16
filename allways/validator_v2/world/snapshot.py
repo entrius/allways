@@ -29,6 +29,8 @@ from allways.validator_v2.world.touches import AccountKey, touches
 
 ACCOUNT_TYPES = ('Swap', 'Reservation', 'Pool', 'MinerState', 'MinerQuote', 'BondAttestation', 'Binding')
 MULTIPLE_ACCOUNTS_MAX = 100
+# With nothing changed, the World still saves this often, so its saved-at time stays fresh for a restore.
+SAVE_HEARTBEAT_SECS = 30
 
 
 @dataclass(frozen=True)
@@ -108,6 +110,8 @@ class WorldReader(Component):
         self._scan_slot = 0
         self._slot = 0
         self._need_scan = True
+        self._saved_at = 0.0
+        self._saved_cursor: Optional[Tuple[int, str]] = None
 
     def setup(self) -> None:
         self._client = self._client_factory()
@@ -125,13 +129,11 @@ class WorldReader(Component):
         if reads:
             self._read(reads)
         self._prune(now)
-        persist.save(
-            self.store,
-            self._changes,
-            {'slot': self._slot, 'scan_slot': self._scan_slot, 'saved_at': int(now)},
-            status.cursor if status is not None else None,
-        )
-        self._changes = {}
+        cursor = status.cursor if status is not None else None
+        if self._changes or cursor != self._saved_cursor or now - self._saved_at >= SAVE_HEARTBEAT_SECS:
+            meta = {'slot': self._slot, 'scan_slot': self._scan_slot, 'saved_at': int(now)}
+            persist.save(self.store, self._changes, meta, cursor)
+            self._changes, self._saved_at, self._saved_cursor = {}, now, cursor
         # Published every tick: taken_at is how the actuator knows this reader is alive.
         self._publish(now, complete=status is not None and not status.catching_up)
 
