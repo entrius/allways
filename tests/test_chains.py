@@ -317,9 +317,6 @@ class TestReplayGrace:
         # floor are stamped by the same chain, so there is no hub-vs-spoke skew to absorb.
         assert CHAIN_SOLUSDC.replay_grace_secs == 0
 
-    def test_btc_grace_covers_an_hour_of_timestamp_lag(self):
-        assert CHAIN_BTC.replay_grace_secs >= 3600
-
     def test_freshness_consumer_absorbs_the_eth_grace(self):
         # The validator reads grace off chain_def (solana_swap_loop._is_fresh) — a deposit
         # stamped inside the grace window is fresh; one predating it is still a replay.

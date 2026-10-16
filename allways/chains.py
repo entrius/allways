@@ -73,9 +73,9 @@ CHAIN_BTC = ChainDefinition(
     min_confirmations=2,
     # 1000 sat, not the bare 546 P2PKH dust line: margin vs higher dustrelayfee / wallet quirks, and a tighter executable-rate ceiling.
     min_onchain_amount=1000,
-    # A block's timestamp need only beat the median of the last 11, so it can lag wall clock by an hour
-    # or more and stamp an honest leg before its floor → false replay. Tx reuse is refused by the ledgers.
-    replay_grace_secs=7200,
+    # Only BTC needs a grace: a block's timestamp need only beat the median of the last 11, so it can lag
+    # wall clock (or go backwards) and stamp an honest deposit before reservation.created_at → false replay.
+    replay_grace_secs=300,
 )
 CHAIN_TAO = ChainDefinition(
     id='tao',
