@@ -24,6 +24,11 @@ BENIGN_EXTEND = ('ExtensionNotLater', 'ExtensionExceedsCeiling')
 # A peer already reaped it, or the on-chain clock hasn't passed the expiry yet.
 BENIGN_CLOSE = ('ClaimNotExpired', 'NotPending', 'AccountNotInitialized', 'could not find account')
 
+# A peer resolved it first, the on-chain clock hasn't passed closes_at, or the draw's seed slot isn't out yet.
+BENIGN_RESOLVE = ('NoRequests', 'PoolNotClosed', 'SeedSlotNotYetProduced')
+# Already voted this round, the on-chain cadence floor, or de-whitelisted mid-attempt.
+BENIGN_WEIGHTS = ('AlreadyVoted', 'WeightsUpdateTooSoon', 'NotValidator')
+
 Executor = Callable[[Any, Intent], Optional[str]]
 
 
@@ -139,6 +144,38 @@ def extend_timeout(client: Any, intent: Intent) -> Optional[str]:
         raise
 
 
+def resolve_pool(client: Any, intent: Intent) -> Optional[str]:
+    pool = intent.payload
+    try:
+        return client.resolve_pool(pool.miner, str(getattr(pool, 'collateral_chain', 'sol') or 'sol'))
+    except Exception as e:
+        if _benign(e, BENIGN_RESOLVE):
+            return None
+        raise
+
+
+def vote_deactivate(client: Any, intent: Intent) -> Optional[str]:
+    miner, backing = intent.payload
+    if client.has_voted(pdas.REQ_DEACTIVATE, miner, client.keypair.pubkey()):
+        return None
+    try:
+        return client.vote_deactivate(miner, backing=backing)
+    except Exception as e:
+        if _benign(e, ('AlreadyVoted',)):
+            return None
+        raise
+
+
+def vote_set_weights(client: Any, intent: Intent) -> Optional[str]:
+    vector, keys = intent.payload
+    try:
+        return client.vote_set_weights(vector, keys)
+    except Exception as e:
+        if _benign(e, BENIGN_WEIGHTS):
+            return None
+        raise
+
+
 SWAP_EXECUTORS: Dict[str, Executor] = {
     'vote_initiate': vote_initiate,
     'confirm_swap': confirm_swap,
@@ -150,12 +187,21 @@ SWAP_EXECUTORS: Dict[str, Executor] = {
 }
 
 
+EXECUTORS: Dict[str, Executor] = {
+    **SWAP_EXECUTORS,
+    'resolve_pool': resolve_pool,
+    'vote_deactivate': vote_deactivate,
+    'vote_set_weights': vote_set_weights,
+}
+
+
 def dry_run(executors: Dict[str, Executor]) -> Dict[str, Executor]:
     """The same table, logging what it would send instead of sending: for a shadow run."""
 
     def would(kind: str) -> Executor:
         def log(client: Any, intent: Intent) -> None:
-            bt.logging.info(f'WOULD {kind} {intent.key[1]} — {getattr(intent.payload.action, "reason", "")}')
+            why = getattr(getattr(intent.payload, 'action', None), 'reason', None)
+            bt.logging.info(f'WOULD {kind} {intent.key[1]}' + (f' — {why}' if why else ''))
             return None
 
         return log

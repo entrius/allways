@@ -152,3 +152,63 @@ class ParityLoop(SolanaSwapLoop):
         if action.decision.value == 'reject':
             self._reject_logged(swap, action.reason)
         return SwapAction(SwapDecision(action.decision.value), action.target_at, action.reason, action.reason_code)
+
+
+# ── floor sweep and stake-weight vote ───────────────────────────────────────
+
+from types import SimpleNamespace  # noqa: E402
+
+import bittensor as bt  # noqa: E402
+
+from allways.solana import pdas  # noqa: E402
+from allways.validator import weights_vote  # noqa: E402
+from allways.validator_v2.actuator import executors  # noqa: E402
+from allways.validator_v2.actuator.planners import HygienePlanner  # noqa: E402
+from allways.validator_v2.chains.subtensor_view import Head  # noqa: E402
+from allways.validator_v2.runtime.bus import Latest  # noqa: E402
+from allways.validator_v2.world.snapshot import World  # noqa: E402
+
+
+class ParityFloorSweep:
+    """CollateralFloorSweep's surface over HygienePlanner: each step builds the World from the fake client
+    (the World would already hold these accounts) and sends what the planner plans."""
+
+    RETRY_SECS = 300  # the old sweep's retry cadence; the tests advance their clock by it
+
+    def __init__(self, solana_client, read_only=False, clock=None):
+        self._client, self._read_only = solana_client, read_only
+        self._clock = clock or (lambda: 0.0)
+
+    def step(self, floor, tao_floor=0):
+        now = self._clock()
+        states = dict(self._client.get_all('MinerState'))
+        bonds = {}
+        for key, ms in states.items():
+            att = self._client.get_bond_attestation(key, 'tao')
+            if att is not None:
+                bonds[str(pdas.bond_attestation_pda(key, 'tao'))] = att
+        config = SimpleNamespace(min_collateral=floor, tao_min_collateral=tao_floor)
+        world = World(now, 1, True, config, {'MinerState': states, 'BondAttestation': bonds})
+        for intent in HygienePlanner(Latest())._floor_sweep(world, now):
+            if self._read_only:
+                continue
+            try:
+                executors.vote_deactivate(self._client, intent)
+            except Exception as e:
+                bt.logging.warning(f'floor sweep: {e}')
+
+
+def parity_vote_weights(vali, now):
+    """maybe_vote_weights' surface over HygienePlanner's weights rule."""
+    client = vali.solana_client
+    config = client.get_config()
+    head = Latest()
+    head.set(Head(vali.block, now, vali.metagraph, now))
+    world = World(now, 1, True, config, {}, attribution=weights_vote.build_attribution(client))
+    for intent in HygienePlanner(head, me=client.keypair.pubkey())._weights(world, now):
+        if vali.solana_swap_loop.read_only:
+            continue
+        try:
+            executors.vote_set_weights(client, intent)
+        except Exception as e:
+            bt.logging.warning(f'weights vote: {e}')

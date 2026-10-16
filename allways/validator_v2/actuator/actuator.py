@@ -61,6 +61,7 @@ class Actuator(Component):
         self.confirms = ConfirmTracker()
         self._in_flight: Set[Tuple[Any, ...]] = set()
         self._submitted: Set[Tuple[Any, ...]] = set()  # in-flight keys that came from the inbox
+        self._resting: Dict[Tuple[Any, ...], float] = {}  # key → when a send that went nowhere may be retried
 
     def setup(self) -> None:
         self._client = self._client_factory()
@@ -81,7 +82,15 @@ class Actuator(Component):
         # Planned intents are rebuilt from the World every tick, so an unsent one is simply re-planned.
         # Submitted ones (serving, relays) exist only in the inbox, so an unsent one goes back in.
         submitted = {i.key: i for i in self.queue.pop_due(now)}
-        due = [i for i in {**submitted, **planned}.values() if i.not_before <= now and i.key not in self._in_flight]
+        self._resting = {k: t for k, t in self._resting.items() if t > now}
+        due = [
+            i
+            for i in {**submitted, **planned}.values()
+            if i.not_before <= now and i.key not in self._in_flight and i.key not in self._resting
+        ]
+        for key, held in submitted.items():
+            if key in self._resting:
+                self.queue.push(held)  # submitted work exists only in the inbox: never drop it while it rests
         due.sort(key=lambda i: (int(i.urgency), i.deadline))
         sent = 0
         for intent in due:
@@ -92,8 +101,14 @@ class Actuator(Component):
                 continue
             if intent.deadline < now:
                 bt.logging.warning(f'actuator: {intent.key} past its deadline by {now - intent.deadline:.0f}s')
-            if self._send(intent, now) and intent.key in submitted:
-                self._submitted.add(intent.key)
+            if self._send(intent, now):
+                if intent.key in submitted:
+                    self._submitted.add(intent.key)
+            else:
+                # Went nowhere (no-op, lost race, rejected): rest it, so it isn't re-sent every tick.
+                self._resting[intent.key] = now + (action.retry_secs if action is not None else 6.0)
+                if intent.key in submitted:
+                    self.queue.push(intent)
             sent += 1
 
     def _send(self, intent: Intent, now: float) -> bool:
