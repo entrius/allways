@@ -11,12 +11,11 @@ from __future__ import annotations
 
 import asyncio
 import json
-import os
 import threading
 import time
 from collections import OrderedDict
 from dataclasses import dataclass
-from typing import Any, List, Optional, Protocol, Tuple
+from typing import Any, Callable, List, Optional, Tuple
 
 import bittensor as bt
 
@@ -37,32 +36,6 @@ SLOT_SECS = 0.4
 # No notification for this long and the socket is presumed dead: resubscribe, and the catch-up that
 # every resubscribe triggers fills whatever was missed. Costs ~one signature listing on a quiet socket.
 SILENT_SOCKET_SECS = 90.0
-
-
-class CursorStore(Protocol):
-    def get(self) -> Optional[str]: ...
-
-    def set(self, signature: str) -> None: ...
-
-
-class FileCursorStore:
-    """The newest signature whose events are all published. Written atomically (rename)."""
-
-    def __init__(self, path: str) -> None:
-        self.path = path
-
-    def get(self) -> Optional[str]:
-        try:
-            with open(self.path) as f:
-                return json.load(f).get('signature')
-        except (OSError, ValueError):
-            return None
-
-    def set(self, signature: str) -> None:
-        tmp = f'{self.path}.tmp'
-        with open(tmp, 'w') as f:
-            json.dump({'signature': signature}, f)
-        os.replace(tmp, self.path)
 
 
 class SeenSignatures:
@@ -142,9 +115,12 @@ class HistoryGap:
 
 @dataclass(frozen=True)
 class FeedStatus:
-    catching_up: bool  # a catch-up is in progress: events since the cursor may not all be published yet
+    catching_up: bool  # a catch-up is in progress: events past ``cursor`` may not all be published yet
     session: int  # acknowledged subscriptions so far
     last_event_at: float  # wall time of the newest published live event (0 = none yet)
+    # (slot, signature) up to which every event has been published. A consumer that has drained its
+    # subscription after reading this status may record it as its own durable position.
+    cursor: Optional[Tuple[int, str]] = None
 
 
 @dataclass
@@ -261,7 +237,7 @@ class EventFeed(Component):
         self,
         rpc_factory,
         live: LiveFeed,
-        cursor: CursorStore,
+        resume_from: Callable[[], Optional[str]],
         out: Topic,
         gaps: Topic,
         program_id,
@@ -271,7 +247,7 @@ class EventFeed(Component):
         super().__init__(clock)
         self._rpc_factory = rpc_factory
         self.live = live
-        self.cursor = cursor
+        self.resume_from = resume_from  # the oldest position any consumer durably applied (None = horizon)
         self.out = out
         self.gaps = gaps  # publishes a HistoryGap when the horizon cut history short
         self.status: Latest = status or Latest()
@@ -283,14 +259,15 @@ class EventFeed(Component):
         self._backfill: Optional[Backfill] = None
         self._session = 0
         self._rerun = False
-        self._newest_live: Optional[str] = None
+        self._newest_live: Optional[Tuple[int, str]] = None
+        self._cursor: Optional[Tuple[int, str]] = None
         self._last_event_at = 0.0
 
     def setup(self) -> None:
         self._rpc = self._rpc_factory()
         self._clock = SlotClock(lambda slot: self._rpc._call('getBlockTime', [slot]))
         self.live.start()
-        self._backfill = Backfill(self._rpc, self.program_id, self.cursor.get(), self.clock())
+        self._backfill = Backfill(self._rpc, self.program_id, self.resume_from(), self.clock())
 
     def tick(self, now: float) -> None:
         self._stamp_live(now)
@@ -299,12 +276,13 @@ class EventFeed(Component):
         self._session = self.live.session
         if self._backfill is None and self._rerun:
             self._rerun = False
-            self._backfill = Backfill(self._rpc, self.program_id, self.cursor.get(), now)
+            self._backfill = Backfill(self._rpc, self.program_id, self._cursor and self._cursor[1], now)
         if self._backfill is not None:
             self._step_backfill(now)
-        elif self._newest_live is not None:
-            self.cursor.set(self._newest_live)
-        self.status.set(FeedStatus(self._backfill is not None, self.live.session, self._last_event_at))
+        if self._backfill is None and self._newest_live is not None:
+            self._cursor = max(self._cursor or self._newest_live, self._newest_live)
+        # Set after publishing: whoever reads this status and then drains has everything up to cursor.
+        self.status.set(FeedStatus(self._backfill is not None, self.live.session, self._last_event_at, self._cursor))
 
     def _stamp_live(self, now: float) -> None:
         self._held.extend(self.live.take())
@@ -318,7 +296,7 @@ class EventFeed(Component):
                 t = self._clock.time_of(p.slot)
                 self.out.publish_many([EventRecord(n, f, p.slot, t, p.signature) for n, f in p.events])
                 self._last_event_at = now
-            self._newest_live = p.signature
+            self._newest_live = max(self._newest_live or (p.slot, p.signature), (p.slot, p.signature))
         self._held = []
 
     def _step_backfill(self, now: float) -> None:
@@ -340,7 +318,7 @@ class EventFeed(Component):
                 self.out.publish_many(
                     [EventRecord(n, f, entry.get('slot'), block_time, sig) for n, f in events_from_logs(logs)]
                 )
-            self.cursor.set(sig)
+            self._cursor = (int(entry.get('slot') or 0), sig)
         if bf.done:
             bt.logging.info('feed: backfill complete')
             self._backfill = None

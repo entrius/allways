@@ -15,7 +15,7 @@ from allways.validator_v2.actuator.planners import HygienePlanner, PoolPlanner, 
 from allways.validator_v2.chain.gateway import Endpoint, Meter, UsageReport
 from allways.validator_v2.chains.watcher import ChainWatcher
 from allways.validator_v2.export.component import Export
-from allways.validator_v2.feed.events import EventFeed, FileCursorStore, LiveFeed
+from allways.validator_v2.feed.events import EventFeed, LiveFeed
 from allways.validator_v2.hubs import HubSpec, relayed_hubs
 from allways.validator_v2.relay.component import VAULT_ADAPTERS, HubRelay
 from allways.validator_v2.runtime.bus import Latest, Topic
@@ -23,7 +23,11 @@ from allways.validator_v2.runtime.component import Component
 from allways.validator_v2.runtime.supervisor import Supervisor
 from allways.validator_v2.scoring.component import Scoring, WeightSetter
 from allways.validator_v2.serving.component import Serving
+from allways.validator_v2.store.db import Store
 from allways.validator_v2.world.snapshot import WorldReader
+
+# Components that record their own feed position; the feed resumes from the oldest of them.
+FEED_CONSUMERS = ('world',)
 
 
 @dataclass(frozen=True)
@@ -48,12 +52,12 @@ class App:
 
 def build(
     cfg: Config,
-    store: Any,
     assets: Dict[str, Any],
     subtensor_factory: Callable[[], Any],
     executors: Dict[str, Any],
     export_storage: Optional[Any] = None,
 ) -> App:
+    store = Store(os.path.join(cfg.state_dir, 'validator.db'))
     meter = Meter(list(cfg.endpoints))
     for asset in assets.values():
         session = getattr(asset, 'http', None) or getattr(getattr(asset, 'rpc', None), '_session', None)
@@ -71,6 +75,7 @@ def build(
         gaps.subscribe('world'),
         feed_status,
         world,
+        store,
     )
     watchers = chain_watchers(assets)
     actuator = Actuator(
@@ -82,7 +87,7 @@ def build(
     feed = EventFeed(
         lambda: meter.solana_client(cfg.solana_rpc_url, cfg.program_id).rpc,
         LiveFeed(resolve_ws_url(cfg.solana_rpc_url), cfg.program_id),
-        FileCursorStore(os.path.join(cfg.state_dir, 'feed_cursor.json')),
+        lambda: store.resume_point(list(FEED_CONSUMERS)),
         events,
         gaps,
         cfg.program_id,

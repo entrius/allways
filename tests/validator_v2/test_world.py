@@ -6,6 +6,7 @@ from allways.solana import layouts, pdas
 from allways.solana.events import EventRecord
 from allways.validator_v2.feed.events import FeedStatus, HistoryGap
 from allways.validator_v2.runtime.bus import Latest, Topic
+from allways.validator_v2.store.db import Store
 from allways.validator_v2.world.snapshot import WorldReader
 from allways.validator_v2.world.touches import touches
 
@@ -37,6 +38,19 @@ class _Rpc:
     def get_slot(self):
         return self.client.slot
 
+    def get_program_accounts(self, program_id, disc8=None):
+        self.client.scans += 1
+        out = []
+        for pda, value in self.client.live.items():
+            raw = base64.b64decode(value['data'][0])
+            if raw[:8] == disc8:
+                out.append((pda, raw))
+        return out
+
+    def get_account_info(self, pda):
+        value = self.client.live.get(str(pda))
+        return None if value is None else base64.b64decode(value['data'][0])
+
     def _call(self, method, params):
         self.calls.append((method, params))
         keys = params[0]
@@ -44,42 +58,37 @@ class _Rpc:
 
 
 class _Client:
-    """Program state as a dict pda → raw account bytes; get_all scans it, getMultipleAccounts reads it."""
+    """Program state as a dict pda → rpc account value; scans and getMultipleAccounts both read it."""
 
     def __init__(self):
         self.program_id = None
         self.slot = 100
-        self.live = {}  # pda → rpc account value
+        self.live = {}
         self.scans = 0
         self.rpc = _Rpc(self)
+        self._store(pdas.config_pda(), layouts.DISCRIMINATORS['Config'] + b'opaque')
 
     def put(self, name, pda, value):
-        raw = layouts.DISCRIMINATORS[name] + layouts.ACCOUNT_LAYOUTS[name].build(value)
+        self._store(pda, layouts.DISCRIMINATORS[name] + layouts.ACCOUNT_LAYOUTS[name].build(value))
+
+    def _store(self, pda, raw):
         self.live[str(pda)] = {'data': [base64.b64encode(raw).decode(), 'base64']}
 
     def _decode(self, name, raw):
+        if name == 'Config':
+            return {'raw': raw[8:]}  # opaque here: the World only hands Config through
         return layouts.ACCOUNT_LAYOUTS[name].parse(raw[8:])
 
-    def get_all(self, name):
-        self.scans += 1
-        disc = layouts.DISCRIMINATORS[name]
-        out = []
-        for pda, value in self.live.items():
-            raw = base64.b64decode(value['data'][0])
-            if raw[:8] == disc:
-                out.append((pda, self._decode(name, raw)))
-        return out
 
-    def get_config(self):
-        return {'halted': False}
-
-
-def _reader(client):
-    events, gaps, status, out = Topic('e'), Topic('g'), Latest(), Latest()
-    status.set(FeedStatus(catching_up=False, session=1, last_event_at=0))
-    reader = WorldReader(lambda: client, events.subscribe('w'), gaps.subscribe('w'), status, out, clock=lambda: NOW)
+def _reader(client, tmp_path, status=None):
+    events, gaps, feed_status, out = Topic('e'), Topic('g'), Latest(), Latest()
+    feed_status.set(status or FeedStatus(catching_up=False, session=1, last_event_at=0, cursor=(150, 'sig-150')))
+    store = Store(str(tmp_path / 'v.db'))
+    reader = WorldReader(
+        lambda: client, events.subscribe('w'), gaps.subscribe('w'), feed_status, out, store, clock=lambda: NOW
+    )
     reader.setup()
-    return reader, events, gaps, status, out
+    return reader, events, gaps, feed_status, out
 
 
 def _ev(name, fields, slot, sig='s'):
@@ -90,9 +99,9 @@ def _quote_pda():
     return str(pdas.quote_pda(MINER, 'btc', 'sol', 'sol'))
 
 
-def test_a_quote_update_needs_no_account_read():
+def test_a_quote_update_needs_no_account_read(tmp_path):
     client = _Client()
-    reader, events, _, _, out = _reader(client)
+    reader, events, _, _, out = _reader(client, tmp_path)
     reader.tick(NOW)  # boot scan
     events.publish(_ev('QuoteSet', _quote_fields(rate=5), slot=200))
     reader.tick(NOW)
@@ -101,9 +110,9 @@ def test_a_quote_update_needs_no_account_read():
     assert client.rpc.calls == []  # applied straight from the event
 
 
-def test_an_older_event_never_overwrites_newer_state():
+def test_an_older_event_never_overwrites_newer_state(tmp_path):
     client = _Client()
-    reader, events, _, _, out = _reader(client)
+    reader, events, _, _, out = _reader(client, tmp_path)
     reader.tick(NOW)
     events.publish(_ev('QuoteSet', _quote_fields(rate=7), slot=300))
     events.publish(_ev('QuoteSet', _quote_fields(rate=5), slot=200))  # a backfilled older one, arriving late
@@ -118,19 +127,19 @@ def test_an_older_event_never_overwrites_newer_state():
     assert out.get()[0].get('MinerQuote', _quote_pda()).rate == 7
 
 
-def test_events_older_than_the_boot_scan_leave_scanned_state_alone():
+def test_events_older_than_the_boot_scan_leave_scanned_state_alone(tmp_path):
     client = _Client()
     client.slot = 500
-    reader, events, _, _, out = _reader(client)
+    reader, events, _, _, out = _reader(client, tmp_path)
     reader.tick(NOW)
     events.publish(_ev('QuoteSet', _quote_fields(rate=5), slot=400))
     reader.tick(NOW)
     assert out.get()[0].get('MinerQuote', _quote_pda()) is None
 
 
-def test_touched_accounts_are_read_in_one_batch_and_closed_ones_leave():
+def test_touched_accounts_are_read_in_one_batch_and_closed_ones_leave(tmp_path):
     client = _Client()
-    reader, events, _, _, out = _reader(client)
+    reader, events, _, _, out = _reader(client, tmp_path)
     swap_key = bytes(range(32))
     swap_pda = str(pdas.swap_pda(swap_key))
     reader._accounts['Swap'][swap_pda] = 'stale'
@@ -145,9 +154,9 @@ def test_touched_accounts_are_read_in_one_batch_and_closed_ones_leave():
     assert out.get()[0].get('Swap', swap_pda) is None  # read back null: closed
 
 
-def test_the_earliest_claim_on_a_deposit_wins_whatever_order_it_arrives_in():
+def test_the_earliest_claim_on_a_deposit_wins_whatever_order_it_arrives_in(tmp_path):
     client = _Client()
-    reader, events, _, _, out = _reader(client)
+    reader, events, _, _, out = _reader(client, tmp_path)
     reader.tick(NOW)
     first, second = bytes([1] * 32), bytes([2] * 32)
     claim = {'miner': MINER, 'user': MINER, 'from_tx_hash': 'ABCDEF' * 10 + 'ab12', 'from_tx_block': 1}
@@ -159,9 +168,9 @@ def test_the_earliest_claim_on_a_deposit_wins_whatever_order_it_arrives_in():
     assert held.swap_key == first.hex() and held.initiated
 
 
-def test_a_history_gap_triggers_one_rescan():
+def test_a_history_gap_triggers_one_rescan(tmp_path):
     client = _Client()
-    reader, _, gaps, _, _ = _reader(client)
+    reader, _, gaps, _, _ = _reader(client, tmp_path)
     reader.tick(NOW)
     scans = client.scans
     reader.tick(NOW)
@@ -171,10 +180,10 @@ def test_a_history_gap_triggers_one_rescan():
     assert client.scans > scans
 
 
-def test_the_world_is_incomplete_while_the_feed_catches_up():
+def test_the_world_is_incomplete_while_the_feed_catches_up(tmp_path):
     client = _Client()
-    reader, _, _, status, out = _reader(client)
-    status.set(FeedStatus(catching_up=True, session=1, last_event_at=0))
+    reader, _, _, status, out = _reader(client, tmp_path)
+    status.set(FeedStatus(catching_up=True, session=1, last_event_at=0, cursor=None))
     reader.tick(NOW)
     assert out.get()[0].complete is False
 
@@ -188,3 +197,41 @@ def test_every_miner_event_rereads_its_state_reservation_and_pool():
     assert sum(1 for k, _ in t.reads if k == 'Reservation') == 2
     assert touches('ConfigChanged', {'setting': 'reservation_ttl'}).reads == {('Config', str(pdas.config_pda()))}
     assert touches('QuoteSet', _quote_fields(1, addrs=False)).reads == {('MinerQuote', _quote_pda())}
+
+
+def test_a_restart_restores_the_world_instead_of_scanning(tmp_path):
+    client = _Client()
+    reader, events, _, _, _ = _reader(client, tmp_path)
+    reader.tick(NOW)
+    events.publish(_ev('QuoteSet', _quote_fields(rate=9), slot=200))
+    claim = {'swap_key': bytes([3] * 32), 'miner': MINER, 'user': MINER, 'from_tx_hash': 'f' * 64, 'from_tx_block': 1}
+    events.publish(_ev('SwapClaimed', claim, slot=201))
+    reader.tick(NOW)
+    scans = client.scans
+
+    again, _, _, _, out = _reader(client, tmp_path)  # same database, new process
+    again.tick(NOW)
+    world = out.get()[0]
+    assert client.scans == scans  # restored: no scan
+    assert world.get('MinerQuote', _quote_pda()).rate == 9
+    assert list(world.deposits) == ['f' * 64]
+    assert world.config == {'raw': b'opaque'}
+
+
+def test_the_world_records_its_feed_position_with_its_state(tmp_path):
+    client = _Client()
+    reader, _, _, _, _ = _reader(client, tmp_path)
+    reader.tick(NOW)
+    assert reader.store.resume_point(['world']) == 'sig-150'
+
+
+def test_a_snapshot_older_than_the_horizon_is_rescanned(tmp_path):
+    client = _Client()
+    reader, _, _, _, _ = _reader(client, tmp_path)
+    reader.tick(NOW)
+    with reader.store.tx() as c:
+        Store.set_meta(c, 'world.saved_at', str(NOW - 7 * 3600))
+    scans = client.scans
+    again, _, _, _, _ = _reader(client, tmp_path)
+    again.tick(NOW)
+    assert client.scans > scans

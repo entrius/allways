@@ -44,7 +44,7 @@ def quote_from_event(fields: Any) -> Container:
     """The MinerQuote account a QuoteSet wrote: the event carries every field but the PDA bump."""
     keys = ('from_chain', 'to_chain', 'collateral_chain', 'miner_from_addr', 'miner_to_addr')
     return Container(
-        miner=fields['miner'],
+        miner=bytes(fields['miner']),
         **{k: str(fields[k]) for k in keys},
         rate=int(fields['rate']),
         liquidity=int(fields['liquidity']),
