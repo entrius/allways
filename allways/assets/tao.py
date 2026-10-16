@@ -7,7 +7,7 @@ from bittensor import Keypair
 from bittensor.utils import is_valid_ss58_address, ss58_encode
 
 from allways.assets.asset import Asset, ProviderUnreachableError, SendResult, TransactionInfo
-from allways.assets.chain import Chain
+from allways.assets.chain import Chain, canonical_hex_tx_hash
 from allways.chains import CHAIN_TAO, ChainDefinition
 from allways.utils.subtensor import redact_endpoint
 
@@ -768,6 +768,10 @@ class Tao(Asset, Chain):
             return int(self.subtensor.get_balance(address))
         except Exception as e:
             raise ProviderUnreachableError(f'TAO balance unavailable for {address}: {e}') from e
+
+    def canonical_tx_hash(self, tx_hash: str) -> Optional[str]:
+        """Extrinsic hash only; a ``<block>-<idx>`` id is resolved to its hash (``locate_transfer``) first."""
+        return canonical_hex_tx_hash(tx_hash, prefixed=True)
 
     def is_valid_address(self, address: str) -> bool:
         """Validate an SS58 address."""

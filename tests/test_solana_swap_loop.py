@@ -100,6 +100,9 @@ class RecordingProvider:
     def normalize_address(self, address):
         return address.lower() if isinstance(address, str) else address  # mirror the EVM provider
 
+    def canonical_tx_hash(self, tx_hash):
+        return tx_hash
+
     @property
     def chain_def(self):
         return SimpleNamespace(replay_grace_secs=self.grace)
@@ -161,6 +164,39 @@ def test_fulfilled_source_provider_down_still_confirms():
     providers['btc'].result = 'unreachable'  # source provider down — must be irrelevant now
     assert loop.decide(make_swap(status='Fulfilled'), now=1500).decision == SwapDecision.CONFIRM
     assert providers['btc'].calls == []  # source never touched
+
+
+def _delivery_pair(tmp_path, second_miner='minerPK'):
+    loop, providers = loop_with(state_store=ValidatorStateStore(tmp_path / 'state.db'))
+    first, second = make_swap(key=b'\x01' * 32), make_swap(key=b'\x02' * 32)
+    first.to_tx_hash, second.to_tx_hash = '0x' + 'ab' * 32, '0X' + 'AB' * 32
+    second.miner = second_miner
+    return loop, providers, first, second
+
+
+def test_delivery_confirms_one_swap_per_miner(tmp_path):
+    # One delivery tx on two of a miner's swaps, in any casing: the first verified keeps it.
+    loop, _, first, second = _delivery_pair(tmp_path)
+    assert loop.decide(first, now=1500).decision == SwapDecision.CONFIRM
+    action = loop.decide(second, now=1500)
+    assert action.decision == SwapDecision.WAIT and 'another swap' in action.reason
+    assert loop.decide(first, now=1501).decision == SwapDecision.CONFIRM  # the second never blocks the first
+    assert loop.decide(second, now=2500).decision == SwapDecision.TIMEOUT
+
+
+def test_unverified_delivery_does_not_use_the_tx(tmp_path):
+    # A hash only counts once it verifies; a failing submission leaves it free for the real swap.
+    loop, providers, first, second = _delivery_pair(tmp_path)
+    providers['sol'].result = None
+    assert loop.decide(second, now=1500).decision == SwapDecision.WAIT
+    providers['sol'].result = True
+    assert loop.decide(first, now=1500).decision == SwapDecision.CONFIRM
+
+
+def test_another_miner_naming_the_tx_cannot_block_the_swap(tmp_path):
+    loop, _, first, second = _delivery_pair(tmp_path, second_miner='otherPK')
+    assert loop.decide(second, now=1500).decision == SwapDecision.CONFIRM
+    assert loop.decide(first, now=1500).decision == SwapDecision.CONFIRM
 
 
 def test_fulfilled_dest_pending_far_from_timeout_waits():

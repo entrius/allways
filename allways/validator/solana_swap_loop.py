@@ -127,6 +127,10 @@ def is_tx_fresh(info: Any, floor_unix: int, grace: int = 0) -> bool:
 def attest_reject_reason(providers: Dict[str, Any], swap: Any, fee_divisor: int) -> Optional[str]:
     """Why a PendingAttestation claim must never attest, or None. Offline and deterministic (quorum
     votes); shared by the loop and the seam's /status."""
+    # Swap keys hash the raw string, so a claim must carry the chain's one canonical spelling.
+    from_provider = providers.get(swap.from_chain)
+    if from_provider is not None and from_provider.chain.canonical_tx_hash(swap.from_tx_hash) != swap.from_tx_hash:
+        return 'source tx hash not in canonical form — refusing to attest'
     to_provider = providers.get(swap.to_chain)
     # A malformed dest is unpayable by construction.
     if to_provider is not None and not to_provider.chain.is_valid_address(swap.user_to_addr):
@@ -238,7 +242,9 @@ class SolanaSwapLoop:
         if provider is None:
             bt.logging.warning(f'no chain provider for {chain}; cannot verify — treating as unverifiable (down)')
             return ('down', None)
-        if not tx_hash:
+        # One spelling per hash: a junk suffix (Esplora drops `?x`/`#x`) would alias a delivery already used.
+        tx_hash = provider.chain.canonical_tx_hash(tx_hash)
+        if tx_hash is None:
             return ('no', None)
         try:
             info = provider.verify_transaction(
@@ -392,6 +398,14 @@ class SolanaSwapLoop:
             and d_status == 'ok'
             and self._is_fresh(d_info, int(swap.initiated_at), swap.to_chain, self._label(swap))
         ):
+            if self.state_store is not None and not self.state_store.claim_delivery(
+                str(swap.miner), swap.to_tx_hash, _swap_key_hex(swap.swap_key), now
+            ):
+                # The miner already used this delivery to confirm another swap: no confirm, slash at timeout.
+                return SwapAction(
+                    SwapDecision.TIMEOUT if overdue else SwapDecision.WAIT,
+                    reason='delivery tx already confirmed another swap' + (' — slashing' if overdue else ''),
+                )
             return SwapAction(SwapDecision.CONFIRM, reason='src=ok dst=ok dst-fresh — both legs verified')
         # No-fault cancel: sound evidence the dest can't receive (miner's reverted tx / issuer freeze /
         # reserved account) → close with NO slash, EARLY, ahead of the overdue/timeout logic.
@@ -442,6 +456,18 @@ class SolanaSwapLoop:
             return True
         return bytes(reservation.claimed_swap_key) != swap_key_from_tx_hash(swap.from_tx_hash)
 
+    def _deposit_claimed_reason(self, swap: Any, now: int) -> Optional[str]:
+        """Refuse a claim on a deposit that another swap claimed first, or whose swap was already
+        initiated (a closed Swap's key can be claimed again). Records the first claim seen."""
+        if self.state_store is None:
+            return None
+        key = swap_key_from_tx_hash(swap.from_tx_hash).hex()
+        self.state_store.record_deposit_claim(swap.from_tx_hash, key, now)
+        held_key, initiated = self.state_store.deposit_claim(swap.from_tx_hash)
+        if held_key != key or initiated:
+            return 'source deposit already claimed by another swap'
+        return None
+
     def _decide_pending_attestation(self, swap: Any, now: int) -> SwapAction:
         reservation = self._get_reservation(swap.miner, str(swap.collateral_chain))
         # An orphaned claim can never attest (vote_initiate needs a live reservation) — reap it (close_stale_claim)
@@ -449,7 +475,7 @@ class SolanaSwapLoop:
         # source landing after the ceiling is the taker's tail risk (nothing moved on our side to refund).
         if self._claim_is_stale(reservation, swap, now):
             return SwapAction(SwapDecision.CANCEL, reason='reservation expired/superseded — reaping stale claim')
-        reason = attest_reject_reason(self.providers, swap, self.fee_divisor)
+        reason = attest_reject_reason(self.providers, swap, self.fee_divisor) or self._deposit_claimed_reason(swap, now)
         if reason:
             self._reject_logged(swap, reason)
             return SwapAction(SwapDecision.REJECT, reason=reason)
@@ -526,6 +552,11 @@ class SolanaSwapLoop:
         chain providers + the Reservation PDA."""
         status = _status_name(swap)
         overdue = now >= int(swap.timeout_at)
+        if status in ('Active', 'Fulfilled') and self.state_store is not None:
+            # An initiated swap has spent its deposit, even if this validator missed the events.
+            key = swap_key_from_tx_hash(swap.from_tx_hash).hex()
+            self.state_store.record_deposit_claim(swap.from_tx_hash, key, now)
+            self.state_store.mark_deposit_initiated(key)
         # No dest provider here → can't verify locally. SKIP below the ceiling (a re-enabled spoke or a
         # provider-equipped peer still resolves it); past max_extend_at TIMEOUT so a permanently unverifiable
         # pair frees the collateral instead of freezing it forever (only network-wide gaps reach quorum).

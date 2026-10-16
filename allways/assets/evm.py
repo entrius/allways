@@ -12,7 +12,7 @@ from eth_account.messages import encode_defunct
 from eth_utils import is_checksum_address
 
 from allways.assets.asset import Asset, ProviderUnreachableError
-from allways.assets.chain import Chain
+from allways.assets.chain import Chain, canonical_hex_tx_hash
 
 _HEX_ADDR_RE = re.compile(r'^0x[0-9a-fA-F]{40}$')
 
@@ -356,6 +356,9 @@ class EvmChain(Chain):
         except Exception as e:
             bt.logging.debug(f'{self.env_prefix} get_current_block_height failed: {e}')
             return None
+
+    def canonical_tx_hash(self, tx_hash: str) -> Optional[str]:
+        return canonical_hex_tx_hash(tx_hash, prefixed=True)
 
     def normalize_address(self, address: str) -> str:
         return address.lower() if isinstance(address, str) else address
