@@ -342,3 +342,31 @@ def test_solana_signatures_key_the_ledger_as_given(tmp_path):
     store = ValidatorStateStore(tmp_path / 'state.db')
     store.record_deposit_claim(SOL_SIG, 'k', 1)
     assert store.deposit_claim(SOL_SIG) == ('k', False) and store.deposit_claim(SOL_SIG.lower()) is None
+
+
+def test_completed_swaps_rebuild_the_delivery_ledger(tmp_path):
+    # Only a completed swap's delivery counts; a fulfilled-but-unconfirmed one leaves the tx free.
+    store = ValidatorStateStore(tmp_path / 'state.db')
+    index = SolanaEventIndex(store)
+    miner, done, open_ = bytes(32), b'\x01' * 32, b'\x02' * 32
+    delivery = '0x' + HEX.upper()
+    for key in (done, open_):
+        index.ingest([_event('SwapFulfilled', swap_key=key, miner=miner, to_tx_hash=delivery, to_amount=1)], {})
+    index.ingest(
+        [
+            _event(
+                'SwapCompleted',
+                swap_key=done,
+                miner=miner,
+                collateral_amount=1,
+                fee=0,
+                from_chain='eth',
+                to_chain='sol',
+                from_amount=1,
+                to_amount=1,
+            )
+        ],
+        {},
+    )
+    assert not store.claim_delivery(str(miner), delivery, open_.hex(), 1500)
+    assert store.claim_delivery(str(miner), '0x' + HEX.lower(), done.hex(), 1500)

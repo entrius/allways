@@ -62,7 +62,6 @@ def make_swap(
         timeout_at=timeout_at,
         max_extend_at=max_extend_at,
         initiated_at=INITIATED_AT,
-        fulfilled_at=INITIATED_AT + 100,
     )
 
 
@@ -167,17 +166,37 @@ def test_fulfilled_source_provider_down_still_confirms():
     assert providers['btc'].calls == []  # source never touched
 
 
-def test_only_the_first_fulfilled_swap_confirms_a_shared_delivery(tmp_path):
-    # One delivery tx marked on two swaps, in any casing: the earlier mark confirms whatever the read order.
-    first, second = make_swap(key=b'\x02' * 32), make_swap(key=b'\x01' * 32)
+def _delivery_pair(tmp_path, second_miner='minerPK'):
+    loop, providers = loop_with(state_store=ValidatorStateStore(tmp_path / 'state.db'))
+    first, second = make_swap(key=b'\x01' * 32), make_swap(key=b'\x02' * 32)
     first.to_tx_hash, second.to_tx_hash = '0x' + 'ab' * 32, '0X' + 'AB' * 32
-    second.fulfilled_at = first.fulfilled_at + 1
-    for order, db in (((first, second), 'a.db'), ((second, first), 'b.db')):
-        loop, _ = loop_with(state_store=ValidatorStateStore(tmp_path / db))
-        loop.read_only = True
-        loop.client.get_swaps = lambda order=order: [(None, swap) for swap in order]
-        assert dict(loop.run_once(now=1500)) == {'02' * 32: SwapDecision.CONFIRM, '01' * 32: SwapDecision.WAIT}
-        assert dict(loop.run_once(now=2500))['01' * 32] == SwapDecision.TIMEOUT
+    second.miner = second_miner
+    return loop, providers, first, second
+
+
+def test_delivery_confirms_one_swap_per_miner(tmp_path):
+    # One delivery tx on two of a miner's swaps, in any casing: the first verified keeps it.
+    loop, _, first, second = _delivery_pair(tmp_path)
+    assert loop.decide(first, now=1500).decision == SwapDecision.CONFIRM
+    action = loop.decide(second, now=1500)
+    assert action.decision == SwapDecision.WAIT and 'another swap' in action.reason
+    assert loop.decide(first, now=1501).decision == SwapDecision.CONFIRM  # the second never blocks the first
+    assert loop.decide(second, now=2500).decision == SwapDecision.TIMEOUT
+
+
+def test_unverified_delivery_does_not_use_the_tx(tmp_path):
+    # A hash only counts once it verifies; a failing submission leaves it free for the real swap.
+    loop, providers, first, second = _delivery_pair(tmp_path)
+    providers['sol'].result = None
+    assert loop.decide(second, now=1500).decision == SwapDecision.WAIT
+    providers['sol'].result = True
+    assert loop.decide(first, now=1500).decision == SwapDecision.CONFIRM
+
+
+def test_another_miner_naming_the_tx_cannot_block_the_swap(tmp_path):
+    loop, _, first, second = _delivery_pair(tmp_path, second_miner='otherPK')
+    assert loop.decide(second, now=1500).decision == SwapDecision.CONFIRM
+    assert loop.decide(first, now=1500).decision == SwapDecision.CONFIRM
 
 
 def test_fulfilled_dest_pending_far_from_timeout_waits():

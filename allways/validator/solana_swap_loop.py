@@ -362,14 +362,6 @@ class SolanaSwapLoop:
         Re-fetching it every 12s pass added only RPC load, and worse: a transient node-view gap on that
         re-fetch could return non-`ok` and slash an already-attested payout (the same false-negative class
         as the dest-leg stale-view issue). Source is therefore a settled `ok` by construction."""
-        if self.state_store is not None and self.state_store.delivery_backs_earlier_swap(
-            swap.to_tx_hash, _swap_key_hex(swap.swap_key), int(swap.fulfilled_at)
-        ):
-            # Each swap needs its own delivery; this one never confirms and slashes at timeout.
-            return SwapAction(
-                SwapDecision.TIMEOUT if overdue else SwapDecision.WAIT,
-                reason='delivery tx already backs another swap' + (' — slashing' if overdue else ''),
-            )
         s_status = 'ok'  # source verified + frozen at attestation (Fulfilled ⟹ attested); see docstring
         d_status, d_info = self._fetch_leg(
             swap.to_chain,
@@ -404,6 +396,14 @@ class SolanaSwapLoop:
             and d_status == 'ok'
             and self._is_fresh(d_info, int(swap.initiated_at), swap.to_chain, self._label(swap))
         ):
+            if self.state_store is not None and not self.state_store.claim_delivery(
+                str(swap.miner), swap.to_tx_hash, _swap_key_hex(swap.swap_key), now
+            ):
+                # The miner already used this delivery to confirm another swap: no confirm, slash at timeout.
+                return SwapAction(
+                    SwapDecision.TIMEOUT if overdue else SwapDecision.WAIT,
+                    reason='delivery tx already confirmed another swap' + (' — slashing' if overdue else ''),
+                )
             return SwapAction(SwapDecision.CONFIRM, reason='src=ok dst=ok dst-fresh — both legs verified')
         # No-fault cancel: sound evidence the dest can't receive (miner's reverted tx / issuer freeze /
         # reserved account) → close with NO slash, EARLY, ahead of the overdue/timeout logic.
@@ -726,17 +726,10 @@ class SolanaSwapLoop:
         """One pass: discover live swaps, decide each, and cast the vote (or LOG when read_only).
         Returns the per-swap decisions for observability."""
         out: List[Tuple[str, SwapDecision]] = []
-        # get_swaps returns raw accounts (no swap_key field); flatten like the miner does. Already-flat
-        # views (carrying swap_key) pass through.
-        swaps = [acct if hasattr(acct, 'swap_key') else swap_from_solana(acct) for _, acct in self.client.get_swaps()]
-        if self.state_store is not None:
-            # Every live delivery is on record before any is judged, so read order never picks the winner.
-            for swap in swaps:
-                if _status_name(swap) == 'Fulfilled':
-                    self.state_store.record_swap_fulfillment(
-                        _swap_key_hex(swap.swap_key), swap.to_tx_hash, int(swap.fulfilled_at)
-                    )
-        for swap in swaps:
+        for _pubkey, acct in self.client.get_swaps():
+            # get_swaps returns raw accounts (no swap_key field); flatten like the miner does. Already-flat
+            # views (carrying swap_key) pass through.
+            swap = acct if hasattr(acct, 'swap_key') else swap_from_solana(acct)
             key = _swap_key_hex(swap.swap_key)
             if self.relay is not None:
                 self.relay.observe_swap(swap)
