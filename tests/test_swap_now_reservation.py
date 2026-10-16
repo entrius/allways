@@ -121,7 +121,11 @@ def _run_swap_now(reserved_until, from_chain='btc'):
     resv = _resv(reserved_until, user=user)  # the FILLED reservation, post-finalize
     # The drawn (unfilled) reservation this taker gets seated with, before finalize.
     drawn = types.SimpleNamespace(
-        router=user, reserved_until=0, finalize_by=int(time.time()) + 60, rate=int(0.0021 * 10**18)
+        router=user,
+        reserved_until=0,
+        finalize_by=int(time.time()) + 60,
+        rate=int(0.0021 * 10**18),
+        miner_from_addr='miner-addr',
     )
     client = MagicMock()
     client.keypair.pubkey.return_value = user
@@ -386,7 +390,12 @@ def test_swap_now_resumes_a_drawn_seat_without_re_bidding():
     user = '68ToGUYjjYpqi7Atx7QyhbybR2RCfo2tkmgcoNR3DxYF'
     # a seat drawn to us but not finalized (reserved_until==0, created_at==0, finalize_by ahead)
     drawn = types.SimpleNamespace(
-        reserved_until=0, created_at=0, finalize_by=now + 120, router=user, rate=int(0.0021 * 10**18)
+        reserved_until=0,
+        created_at=0,
+        finalize_by=now + 120,
+        router=user,
+        rate=int(0.0021 * 10**18),
+        miner_from_addr='miner-addr',
     )
     live = _resv(now + 400, user=user)  # what finalize produces (returned by the patched _poll_reservation)
     client, result = _run_resume(drawn, poll_resv=live)

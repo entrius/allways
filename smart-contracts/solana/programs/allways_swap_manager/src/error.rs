@@ -139,7 +139,7 @@ pub enum ErrorCode {
     DestEqualsMinerAddr,
     #[msg("This source address already backs a live reservation on this miner")]
     DuplicateSourceAddr,
-    #[msg("from_addr_hash does not match keccak(user_from_addr)")]
+    #[msg("source_lock_key does not match the reservation's deposit wallet and source address")]
     SourceHashMismatch,
     #[msg("round_key does not match the keccak hash of the submitted weights snapshot")]
     WeightsRoundKeyMismatch,
@@ -177,4 +177,18 @@ pub enum ErrorCode {
     // --- V-M1: hotkey-binding freeze ---
     #[msg("Hotkey binding is set-once; a bound pubkey cannot change its hotkey")]
     HotkeyChangeForbidden,
+
+    #[msg("Addresses must be ASCII")]
+    NonAsciiAddress,
+
+    #[msg("Wallet addresses must be ASCII letters and digits only")]
+    NonAlphanumericAddress,
+    #[msg("Wallet is already posted by another miner")]
+    AddressTaken,
+    #[msg("Payout wallet lock missing")]
+    MissingAddrLock,
+    #[msg("Quote's wallets are locked to its miner; nothing to reap")]
+    QuoteLocked,
+    #[msg("Wallet lock key or account does not match the wallet")]
+    AddrLockKeyMismatch,
 }

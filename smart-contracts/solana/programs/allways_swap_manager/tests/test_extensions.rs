@@ -40,6 +40,16 @@ const MINER_FROM: &str = "minerBTCaddr";
 const MINER_TO: &str = "minerSOLaddr";
 const RATE: u128 = 1_500_000_000_000_000_000; // 1.5 × RATE_PRECISION (1e18)
 
+
+fn addr_lock_pda(program_id: &Pubkey, addr: &str) -> Pubkey {
+    Pubkey::find_program_address(&[b"addrlock", &allways_swap_manager::addr_lock_key(addr)], program_id).0
+}
+
+/// The payout wallet's lock, or None when it is the deposit wallet's (same lock).
+fn to_addr_lock_pda(program_id: &Pubkey, from: &str, to: &str) -> Option<Pubkey> {
+    (from.to_ascii_lowercase() != to.to_ascii_lowercase()).then(|| addr_lock_pda(program_id, to))
+}
+
 fn pid() -> Pubkey {
     allways_swap_manager::id()
 }
@@ -179,12 +189,16 @@ fn set_quote_ix(miner: &Pubkey) -> Instruction {
             miner_to_addr: MINER_TO.to_string(),
             rate: RATE,
             liquidity: 1_000,
+            from_addr_lock_key: allways_swap_manager::addr_lock_key(MINER_FROM),
+            to_addr_lock_key: allways_swap_manager::addr_lock_key(MINER_TO),
         }
         .data(),
         allways_swap_manager::accounts::SetQuote {
             miner: *miner,
             miner_state: miner_pda(miner),
             quote: quote_pda(miner, FROM_CHAIN, TO_CHAIN, BACKING),
+            from_addr_lock: addr_lock_pda(&pid(), MINER_FROM),
+            to_addr_lock: to_addr_lock_pda(&pid(), MINER_FROM, MINER_TO),
             treasury: treasury_pda(),
             system_program: SYSTEM_PROGRAM,
         }
@@ -226,7 +240,7 @@ fn finalize_ix(router: &Pubkey, miner: &Pubkey, user: &Pubkey) -> Instruction {
             collateral_amount: SOL_AMOUNT,
             from_amount: 100_000,
             to_amount: SOL_AMOUNT as u128,
-            from_addr_hash: hashv(&[FROM_ADDR.as_bytes()]).to_bytes(),
+            source_lock_key: allways_swap_manager::source_lock_key(MINER_FROM, FROM_ADDR),
         }
         .data(),
         allways_swap_manager::accounts::FinalizeReservation {
@@ -237,7 +251,7 @@ fn finalize_ix(router: &Pubkey, miner: &Pubkey, user: &Pubkey) -> Instruction {
             reservation: resv_pda(miner),
             attestation: None,
             source_lock: Pubkey::find_program_address(
-                &[b"srclock", miner.as_ref(), FROM_CHAIN.as_bytes(), &hashv(&[FROM_ADDR.as_bytes()]).to_bytes()],
+                &[b"srclock", FROM_CHAIN.as_bytes(), &allways_swap_manager::source_lock_key(MINER_FROM, FROM_ADDR)],
                 &pid(),
             )
             .0,
@@ -290,7 +304,7 @@ fn initiate_ix(validator: &Pubkey, miner: &Pubkey, from_tx_hash: &str) -> Instru
         pid(),
         &allways_swap_manager::instruction::VoteInitiate {
             swap_key: key,
-            from_addr_hash: hashv(&[FROM_ADDR.as_bytes()]).to_bytes(),
+            source_lock_key: allways_swap_manager::source_lock_key(MINER_FROM, FROM_ADDR),
         }
         .data(),
         allways_swap_manager::accounts::VoteInitiate {
@@ -300,7 +314,7 @@ fn initiate_ix(validator: &Pubkey, miner: &Pubkey, from_tx_hash: &str) -> Instru
             miner_state: miner_pda(miner),
             reservation: resv_pda(miner),
             source_lock: Pubkey::find_program_address(
-                &[b"srclock", miner.as_ref(), FROM_CHAIN.as_bytes(), &hashv(&[FROM_ADDR.as_bytes()]).to_bytes()],
+                &[b"srclock", FROM_CHAIN.as_bytes(), &allways_swap_manager::source_lock_key(MINER_FROM, FROM_ADDR)],
                 &pid(),
             )
             .0,
@@ -332,7 +346,7 @@ fn extend_reservation_ix(validator: &Pubkey, miner: &Pubkey, target_at: i64) -> 
         pid(),
         &allways_swap_manager::instruction::ExtendReservation {
             target_at,
-            from_addr_hash: hashv(&[FROM_ADDR.as_bytes()]).to_bytes(),
+            source_lock_key: allways_swap_manager::source_lock_key(MINER_FROM, FROM_ADDR),
         }
         .data(),
         allways_swap_manager::accounts::ExtendReservation {
@@ -342,7 +356,7 @@ fn extend_reservation_ix(validator: &Pubkey, miner: &Pubkey, target_at: i64) -> 
             miner_state: miner_pda(miner),
             reservation: resv_pda(miner),
             source_lock: Pubkey::find_program_address(
-                &[b"srclock", miner.as_ref(), FROM_CHAIN.as_bytes(), &hashv(&[FROM_ADDR.as_bytes()]).to_bytes()],
+                &[b"srclock", FROM_CHAIN.as_bytes(), &allways_swap_manager::source_lock_key(MINER_FROM, FROM_ADDR)],
                 &pid(),
             )
             .0,

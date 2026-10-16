@@ -695,7 +695,9 @@ class ExtendRecordingClient:
         self.calls = []
         self.keypair = SimpleNamespace(pubkey=lambda: 'VALIDATOR')
 
-    def extend_reservation(self, miner, target_at, backing='sol', *, from_chain=None, from_addr=None):
+    def extend_reservation(
+        self, miner, target_at, backing='sol', *, from_chain=None, from_addr=None, miner_from_addr=None
+    ):
         self.calls.append(('extend_reservation', miner, target_at))
         if self.reservation_exc:
             raise self.reservation_exc
@@ -785,7 +787,7 @@ class VoteRecordingClient:
     def has_voted(self, req_type, target, voter):
         return self.already_voted
 
-    def vote_initiate(self, swap_key, miner, from_chain, from_addr, backing='sol'):
+    def vote_initiate(self, swap_key, miner, from_chain, from_addr, backing='sol', *, miner_from_addr=None):
         self.calls.append(('vote_initiate', swap_key, miner, backing))
 
     def confirm_swap(self, swap_key, miner, from_chain, to_chain):

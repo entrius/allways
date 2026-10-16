@@ -487,6 +487,7 @@ def finalize_won_seats(validator, now: int) -> list:
                 fill.to_amount,
                 backing,
                 from_chain=from_chain,
+                miner_from_addr=resv.miner_from_addr,
             )
         except Exception as e:
             reason = contract_reject_reason(e) or (str(e) if isinstance(e, ValueError) else None)
@@ -620,7 +621,12 @@ def _extend_for_claim(client, miner_pk, reservation, backing) -> None:
         return  # already at the contract ceiling — nothing left to buy
     try:
         client.extend_reservation(
-            miner_pk, target, backing, from_chain=reservation.from_chain, from_addr=reservation.from_addr
+            miner_pk,
+            target,
+            backing,
+            from_chain=reservation.from_chain,
+            from_addr=reservation.from_addr,
+            miner_from_addr=reservation.miner_from_addr,
         )
         bt.logging.info(f'claim runway: extended reserved_until {reserved_until} -> {target} (+{target - now}s)')
     except Exception as e:  # noqa: BLE001 - never block the claim on a failed extension
@@ -648,7 +654,7 @@ def confirm_deposit(validator, miner_hotkey: str, from_tx_hash: str, from_tx_blo
     submit_swap_claim (creating the Swap in PendingAttestation). Accepts a content-valid deposit even before
     it fully confirms — the crank defers voting until confirmations accrue. Fast-fails (no claim, so the short
     TTL frees the miner) only when the tx is absent or its content doesn't match the reservation."""
-    from allways.validator.solana_swap_loop import is_tx_fresh
+    from allways.validator.solana_swap_loop import is_tx_fresh, payout_reuse_reason
 
     # Reject empty/whitespace-only hashes and strip surrounding whitespace before use (#167).
     from_tx_hash = from_tx_hash.strip() if from_tx_hash else from_tx_hash
@@ -717,6 +723,15 @@ def confirm_deposit(validator, miner_hotkey: str, from_tx_hash: str, from_tx_blo
         # No live slot matched; fast-fail (no claim) so the short TTL frees the miner.
         return ConfirmResult(False, 'Source tx not visible or does not match the reservation')
     _, reservation, backing, tx_info, from_tx_hash = min(matches, key=lambda m: m[0])
+    if payout_reuse_reason(
+        validator.state_store,
+        validator.axon_assets[reservation.from_chain].chain,
+        reservation.from_chain,
+        reservation.from_addr,
+        reservation.miner_from_addr,
+        from_tx_hash,
+    ):
+        return ConfirmResult(False, "Source tx is another swap's payout, not a deposit")
     swap_key = swap_key_from_tx_hash(from_tx_hash)
     held = validator.state_store.deposit_claim(from_tx_hash)
     if (held is not None and (held[0] != swap_key.hex() or held[1])) or client.get_swap(swap_key) is not None:

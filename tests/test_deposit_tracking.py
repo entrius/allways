@@ -301,6 +301,82 @@ def test_relay_and_loop_agree_on_the_claim(tmp_path):
     assert loop.decide(swap, now=1500).decision == SwapDecision.ATTEST
 
 
+# ── a swap's payout is never a deposit ───────────────────────────────────────
+# A miner refilling its deposit wallet through allways announces the payout before it lands; a taker
+# who reserves naming the payer as source must not be able to claim that delivery as their deposit.
+
+PAYER = '0x' + 'aB' * 20  # the paying miner's payout wallet
+DEPOSIT_WALLET = '0x' + 'cD' * 20  # the refilling miner's deposit wallet
+
+
+def _payout_relay(store):
+    spec = next(s for s in HEX_SPECS if s.chain_id == 'eth')
+    resv = dict(created_at=CREATED_AT, from_addr=PAYER, miner_from_addr=DEPOSIT_WALLET)
+    return _relay(spec, {'sol': resv}, store)
+
+
+def test_a_live_swaps_payout_cannot_be_claimed_as_a_deposit(tmp_path):
+    store = ValidatorStateStore(tmp_path / 'state.db')
+    store.record_payout_route('eth', PAYER.lower(), DEPOSIT_WALLET.lower(), 'aa' * 32, CREATED_AT)
+    validator, client, _ = _payout_relay(store)
+    r = confirm_deposit(validator, HOTKEY, '0x' + HEX)
+    assert not r.ok and 'payout' in r.reason and not client.claims
+
+
+@pytest.mark.parametrize('reported', ['0x' + HEX.upper(), '0x' + HEX.lower()])
+def test_a_closed_swaps_reported_payout_cannot_be_claimed(tmp_path, reported):
+    # The refill swap already completed and closed; only its SwapFulfilled hash remains.
+    store = ValidatorStateStore(tmp_path / 'state.db')
+    store.record_swap_fulfillment('aa' * 32, reported, CREATED_AT)
+    validator, client, _ = _payout_relay(store)
+    r = confirm_deposit(validator, HOTKEY, '0x' + HEX)
+    assert not r.ok and 'payout' in r.reason and not client.claims
+
+
+def test_a_verified_delivery_cannot_be_claimed(tmp_path):
+    store = ValidatorStateStore(tmp_path / 'state.db')
+    store.claim_delivery('payingMiner', '0x' + HEX, 'aa' * 32, CREATED_AT)
+    validator, client, _ = _payout_relay(store)
+    assert not confirm_deposit(validator, HOTKEY, '0x' + HEX).ok and not client.claims
+
+
+def test_an_honest_deposit_is_unaffected_by_other_routes(tmp_path):
+    store = ValidatorStateStore(tmp_path / 'state.db')
+    store.record_payout_route('eth', PAYER.lower(), '0x' + 'ee' * 20, 'aa' * 32, CREATED_AT)  # pays someone else
+    store.record_payout_route('base', PAYER.lower(), DEPOSIT_WALLET.lower(), 'bb' * 32, CREATED_AT)  # another chain
+    store.record_swap_fulfillment('cc' * 32, '0x' + 'f' * 64, CREATED_AT)
+    validator, client, _ = _payout_relay(store)
+    assert confirm_deposit(validator, HOTKEY, '0x' + HEX).ok and len(client.claims) == 1
+
+
+def _refill_and_claim(store):
+    """A live refill paying the miner's deposit wallet, and a claim naming its payer as source."""
+    loop, claim = _hex_source_loop('0x' + HEX.lower(), store)
+    claim.user_from_addr, claim.miner_from_addr = 'payerBTC', 'minerBTC'
+    refill = make_swap(status='Active', from_chain='sol', to_chain='btc', key=b'\x02' * 32)
+    refill.miner_to_addr, refill.user_to_addr = 'payerBTC', 'minerBTC'
+    return loop, claim, refill
+
+
+def test_attest_gate_refuses_a_claim_on_a_live_swaps_payout(tmp_path):
+    store = ValidatorStateStore(tmp_path / 'state.db')
+    loop, claim, refill = _refill_and_claim(store)
+    assert loop.decide(claim, now=1500).decision == SwapDecision.ATTEST  # no route known yet
+    loop._note_payout_routes([refill], now=1500)
+    action = loop.decide(claim, now=1501)
+    assert action.decision == SwapDecision.REJECT and 'payout' in action.reason
+
+
+def test_routes_are_recorded_before_any_decision_in_a_pass(tmp_path):
+    # The claim is listed before the refill: the pass must still know the refill's route when deciding it.
+    store = ValidatorStateStore(tmp_path / 'state.db')
+    loop, claim, refill = _refill_and_claim(store)
+    loop.read_only = True
+    loop.client.get_swaps = lambda: [(None, claim), (None, refill)]
+    decisions = dict(loop.run_once(now=1500))
+    assert decisions[claim.swap_key.hex()] == SwapDecision.REJECT
+
+
 # ── ledger rebuilt from program events ───────────────────────────────────────
 
 

@@ -108,7 +108,8 @@ def test_ingest_decodes_emitted_events(env):
     validators[0].vote_activate(miner.pubkey())
     validators[1].vote_activate(miner.pubkey())  # quorum → MinerActivated
     # QuoteSet comes after activation now: set_quote requires the declared purse to be lit (W2b).
-    mclient.set_quote('btc', 'sol', 'minerBTC', 'minerSOL', 345 * 10**18, 1_000)  # → QuoteSet
+    tag = str(mclient.keypair.pubkey())[:8]  # wallets are per miner: a shared one is refused
+    mclient.set_quote('btc', 'sol', f'minerBTC{tag}', f'minerSOL{tag}', 345 * 10**18, 1_000)  # → QuoteSet
 
     records, cursor = SolanaEventIngest(admin).poll(until_sig=None)
     by_name = {}

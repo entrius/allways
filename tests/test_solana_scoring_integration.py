@@ -132,7 +132,8 @@ def _activate_miner(admin, validators, rate_int):
     validators[0].vote_activate(miner.pubkey())
     validators[1].vote_activate(miner.pubkey())  # quorum → MinerActivated
     # Quote after activation (W2b): the declared purse must already be lit.
-    mclient.set_quote('btc', 'sol', 'minerBTC', 'minerSOL', rate_int, 1_000)
+    tag = str(mclient.keypair.pubkey())[:8]  # wallets are per miner: a shared one is refused
+    mclient.set_quote('btc', 'sol', f'minerBTC{tag}', f'minerSOL{tag}', rate_int, 1_000)
     return miner, hk, collateral
 
 

@@ -171,7 +171,7 @@ pub fn handler(
             .checked_add(to_amount)
             .ok_or(ErrorCode::Overflow)?;
 
-        // Close the per-swap round (unique swap_key seed → never reused) and refund its rent to the
+        // Close the per-swap round and refund its rent to the
         // validator instead of parking it on-chain forever. Safe: the swap closes just below in this
         // same terminal branch, and `swap` is resolved before `vote_round` in the accounts struct, so a
         // straggler validator's late confirm reverts on the gone swap before it could re-create the round.

@@ -628,6 +628,7 @@ class ValidatorStateStore:
         # A deposit older than this can't pass freshness against any new reservation.
         self._execute('DELETE FROM used_deposits WHERE seen_at < ?', (cutoff_block,))
         self._execute('DELETE FROM used_deliveries WHERE seen_at < ?', (cutoff_block,))
+        self._execute('DELETE FROM payout_routes WHERE seen_at < ?', (cutoff_block,))
 
     # ─── collateral_verdicts (declared alpha leg at fill block) ────────
 
@@ -671,6 +672,31 @@ class ValidatorStateStore:
     def get_swap_fulfillment(self, swap_key: str) -> Optional[str]:
         row = self._fetchone('SELECT to_tx_hash FROM swap_fulfillments WHERE swap_key = ?', (swap_key,))
         return row['to_tx_hash'] if row is not None else None
+
+    def is_recorded_payout(self, tx_hash: str) -> bool:
+        """Whether ``tx_hash`` is a delivery some swap reported (``SwapFulfilled``) or this validator
+        verified, in any spelling ``tx_key`` folds together."""
+        key = tx_key(tx_hash)
+        if self._fetchone('SELECT 1 FROM used_deliveries WHERE tx_hash = ?', (key,)) is not None:
+            return True
+        rows = self._fetchall('SELECT to_tx_hash FROM swap_fulfillments WHERE lower(to_tx_hash) = lower(?)', (tx_hash,))
+        return any(tx_key(row['to_tx_hash']) == key for row in rows)
+
+    # ─── payout_routes (live swaps' payout legs) ─────────────────────────
+    # Fed by the swap loop every pass, before it decides anything. Addresses are normalized by the
+    # caller; seen_at is refreshed each pass, so a route outlives its swap by the prune window.
+
+    def record_payout_route(self, chain: str, sender: str, recipient: str, swap_key: str, seen_at: int) -> None:
+        self._execute(
+            'INSERT OR REPLACE INTO payout_routes (chain, sender, recipient, swap_key, seen_at) VALUES (?, ?, ?, ?, ?)',
+            (chain, sender, recipient, swap_key, int(seen_at)),
+        )
+
+    def is_payout_route(self, chain: str, sender: str, recipient: str) -> bool:
+        row = self._fetchone(
+            'SELECT 1 FROM payout_routes WHERE chain = ? AND sender = ? AND recipient = ?', (chain, sender, recipient)
+        )
+        return row is not None
 
     # ─── used_deposits (one swap per source deposit) ─────────────────────
     # Fed by SwapClaimed/SwapInitiated events and the swap loop, so a fresh database rebuilds it
@@ -1302,6 +1328,19 @@ class ValidatorStateStore:
                     swap_key    TEXT PRIMARY KEY,
                     to_tx_hash  TEXT NOT NULL,
                     block_time  INTEGER NOT NULL
+                );
+                CREATE INDEX IF NOT EXISTS idx_swap_fulfillments_tx
+                    ON swap_fulfillments(lower(to_tx_hash));
+
+                -- (chain, payout wallet, payout address) of every live swap the loop has seen.
+                -- A source tx paid along one is that swap's payout, never a taker's deposit.
+                CREATE TABLE IF NOT EXISTS payout_routes (
+                    chain       TEXT NOT NULL,
+                    sender      TEXT NOT NULL,
+                    recipient   TEXT NOT NULL,
+                    swap_key    TEXT NOT NULL,
+                    seen_at     INTEGER NOT NULL,
+                    PRIMARY KEY (chain, sender, recipient, swap_key)
                 );
 
                 -- Source tx hash -> the first swap that claimed it; initiated = spent.

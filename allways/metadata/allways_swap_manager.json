@@ -244,6 +244,120 @@
       "args": []
     },
     {
+      "name": "cancel_swap",
+      "docs": [
+        "Validators cancel a swap whose destination provably cannot receive the payout, with NO slash,",
+        "fee, or strike — the lenient sibling of timeout. Frees the miner and closes the swap on quorum."
+      ],
+      "discriminator": [
+        88,
+        174,
+        98,
+        148,
+        24,
+        252,
+        93,
+        89
+      ],
+      "accounts": [
+        {
+          "name": "validator",
+          "writable": true,
+          "signer": true
+        },
+        {
+          "name": "config",
+          "pda": {
+            "seeds": [
+              {
+                "kind": "const",
+                "value": [
+                  99,
+                  111,
+                  110,
+                  102,
+                  105,
+                  103
+                ]
+              }
+            ]
+          }
+        },
+        {
+          "name": "miner",
+          "relations": [
+            "swap"
+          ]
+        },
+        {
+          "name": "miner_state",
+          "writable": true,
+          "pda": {
+            "seeds": [
+              {
+                "kind": "const",
+                "value": [
+                  109,
+                  105,
+                  110,
+                  101,
+                  114
+                ]
+              },
+              {
+                "kind": "account",
+                "path": "miner"
+              }
+            ]
+          }
+        },
+        {
+          "name": "swap",
+          "writable": true,
+          "pda": {
+            "seeds": [
+              {
+                "kind": "const",
+                "value": [
+                  115,
+                  119,
+                  97,
+                  112
+                ]
+              },
+              {
+                "kind": "arg",
+                "path": "swap_key"
+              }
+            ]
+          }
+        },
+        {
+          "name": "vote_round",
+          "writable": true
+        },
+        {
+          "name": "system_program",
+          "address": "11111111111111111111111111111111"
+        }
+      ],
+      "args": [
+        {
+          "name": "swap_key",
+          "type": {
+            "array": [
+              "u8",
+              32
+            ]
+          }
+        },
+        {
+          "name": "reason",
+          "type": "u8"
+        }
+      ]
+    },
+    {
       "name": "close_legacy_initiate_round",
       "docs": [
         "The same reap for an initiate `VoteRound` stranded at the retired per-miner address (live",
@@ -735,6 +849,47 @@
       "args": []
     },
     {
+      "name": "close_unlocked_quote",
+      "docs": [
+        "Permissionless: reap a quote whose wallets aren't both locked to its miner (posted before",
+        "wallet locks existed), refunding its rent to the miner."
+      ],
+      "discriminator": [
+        155,
+        66,
+        158,
+        23,
+        96,
+        26,
+        90,
+        118
+      ],
+      "accounts": [
+        {
+          "name": "caller",
+          "docs": [
+            "Anyone — the caller only pays the transaction."
+          ],
+          "signer": true
+        },
+        {
+          "name": "miner",
+          "writable": true
+        },
+        {
+          "name": "quote",
+          "writable": true
+        },
+        {
+          "name": "from_addr_lock"
+        },
+        {
+          "name": "to_addr_lock"
+        }
+      ],
+      "args": []
+    },
+    {
       "name": "confirm_swap",
       "docs": [
         "Validators confirm a fulfilled swap (1% fee → treasury; swap closed) on quorum."
@@ -1085,12 +1240,54 @@
               }
             ]
           }
+        },
+        {
+          "name": "source_lock",
+          "docs": [
+            "V-C2: this reservation's source lock (created at finalize). Slid forward with reserved_until so an",
+            "extended, still-unclaimed reservation can't outlive its lock and re-open the cross-hub collision."
+          ],
+          "writable": true,
+          "pda": {
+            "seeds": [
+              {
+                "kind": "const",
+                "value": [
+                  115,
+                  114,
+                  99,
+                  108,
+                  111,
+                  99,
+                  107
+                ]
+              },
+              {
+                "kind": "account",
+                "path": "reservation.from_chain",
+                "account": "Reservation"
+              },
+              {
+                "kind": "arg",
+                "path": "source_lock_key"
+              }
+            ]
+          }
         }
       ],
       "args": [
         {
           "name": "target_at",
           "type": "i64"
+        },
+        {
+          "name": "source_lock_key",
+          "type": {
+            "array": [
+              "u8",
+              32
+            ]
+          }
         }
       ]
     },
@@ -1221,6 +1418,7 @@
           "docs": [
             "The seat winner. Must equal `reservation.router` (constraint below)."
           ],
+          "writable": true,
           "signer": true
         },
         {
@@ -1323,6 +1521,44 @@
               }
             ]
           }
+        },
+        {
+          "name": "source_lock",
+          "docs": [
+            "Source lock, keyed by (from_chain, deposit wallet, from_addr) case-insensitively — not by miner or",
+            "backing, so every reservation one deposit could satisfy (any hub, any miner on that wallet) resolves",
+            "the SAME PDA. `init_if_needed` reuses a stale lock; the handler rejects a live one and verifies the key."
+          ],
+          "writable": true,
+          "pda": {
+            "seeds": [
+              {
+                "kind": "const",
+                "value": [
+                  115,
+                  114,
+                  99,
+                  108,
+                  111,
+                  99,
+                  107
+                ]
+              },
+              {
+                "kind": "account",
+                "path": "reservation.from_chain",
+                "account": "Reservation"
+              },
+              {
+                "kind": "arg",
+                "path": "source_lock_key"
+              }
+            ]
+          }
+        },
+        {
+          "name": "system_program",
+          "address": "11111111111111111111111111111111"
         }
       ],
       "args": [
@@ -1349,6 +1585,15 @@
         {
           "name": "to_amount",
           "type": "u128"
+        },
+        {
+          "name": "source_lock_key",
+          "type": {
+            "array": [
+              "u8",
+              32
+            ]
+          }
         }
       ]
     },
@@ -2896,6 +3141,60 @@
           }
         },
         {
+          "name": "from_addr_lock",
+          "writable": true,
+          "pda": {
+            "seeds": [
+              {
+                "kind": "const",
+                "value": [
+                  97,
+                  100,
+                  100,
+                  114,
+                  108,
+                  111,
+                  99,
+                  107
+                ]
+              },
+              {
+                "kind": "arg",
+                "path": "from_addr_lock_key"
+              }
+            ]
+          }
+        },
+        {
+          "name": "to_addr_lock",
+          "docs": [
+            "Omitted when the payout wallet is the deposit wallet (same lock)."
+          ],
+          "writable": true,
+          "optional": true,
+          "pda": {
+            "seeds": [
+              {
+                "kind": "const",
+                "value": [
+                  97,
+                  100,
+                  100,
+                  114,
+                  108,
+                  111,
+                  99,
+                  107
+                ]
+              },
+              {
+                "kind": "arg",
+                "path": "to_addr_lock_key"
+              }
+            ]
+          }
+        },
+        {
           "name": "treasury",
           "docs": [
             "Treasury sink for the quote-update churn fee — subnet revenue, separate from collateral."
@@ -2952,6 +3251,24 @@
         {
           "name": "liquidity",
           "type": "u128"
+        },
+        {
+          "name": "from_addr_lock_key",
+          "type": {
+            "array": [
+              "u8",
+              32
+            ]
+          }
+        },
+        {
+          "name": "to_addr_lock_key",
+          "type": {
+            "array": [
+              "u8",
+              32
+            ]
+          }
         }
       ]
     },
@@ -3896,10 +4213,44 @@
           }
         },
         {
+          "name": "source_lock",
+          "docs": [
+            "This reservation's source lock (created at finalize). Released at initiate quorum — the",
+            "deposit is bound to the swap, so a repeat swap from the same source needn't wait out the",
+            "original reserved_until. The clock stays the backstop for reservations that never initiate."
+          ],
+          "writable": true,
+          "pda": {
+            "seeds": [
+              {
+                "kind": "const",
+                "value": [
+                  115,
+                  114,
+                  99,
+                  108,
+                  111,
+                  99,
+                  107
+                ]
+              },
+              {
+                "kind": "account",
+                "path": "reservation.from_chain",
+                "account": "Reservation"
+              },
+              {
+                "kind": "arg",
+                "path": "source_lock_key"
+              }
+            ]
+          }
+        },
+        {
           "name": "vote_round",
           "docs": [
             "Keyed by swap_key like the confirm/timeout rounds (v3.1): per-hub for free (a swap pins its",
-            "backing), and closable at quorum since the unique seed is never reused."
+            "backing), and closable at quorum; a straggler vote reverts on the swap status gate."
           ],
           "writable": true
         },
@@ -3959,6 +4310,29 @@
           }
         },
         {
+          "name": "binding",
+          "docs": [
+            "the swap pins a zeroed hotkey). Read at quorum so the verdict names the bonded hotkey (V-M1)."
+          ],
+          "pda": {
+            "seeds": [
+              {
+                "kind": "const",
+                "value": [
+                  98,
+                  105,
+                  110,
+                  100
+                ]
+              },
+              {
+                "kind": "account",
+                "path": "miner"
+              }
+            ]
+          }
+        },
+        {
           "name": "system_program",
           "address": "11111111111111111111111111111111"
         }
@@ -3966,6 +4340,15 @@
       "args": [
         {
           "name": "swap_key",
+          "type": {
+            "array": [
+              "u8",
+              32
+            ]
+          }
+        },
+        {
+          "name": "source_lock_key",
           "type": {
             "array": [
               "u8",
@@ -4022,8 +4405,11 @@
           "name": "miner_state",
           "docs": [
             "Read for this hub's in-flight-swap reserve — a downward write is refused only if it would drop",
-            "the purse below a LIVE obligation (F5). Every attestable miner is registered, so this always exists."
+            "the purse below a LIVE obligation (F5). Every attestable miner is registered, so this always exists.",
+            "Mutable: a quorum write that lands the purse under the hub's activation floor drops the hub's",
+            "backing bit (`drop_backing_under_floor`), the vaulted twin of `apply_penalty`'s SOL rule."
           ],
+          "writable": true,
           "pda": {
             "seeds": [
               {
@@ -4381,6 +4767,19 @@
   ],
   "accounts": [
     {
+      "name": "AddrLock",
+      "discriminator": [
+        234,
+        127,
+        191,
+        228,
+        66,
+        104,
+        58,
+        71
+      ]
+    },
+    {
       "name": "Binding",
       "discriminator": [
         148,
@@ -4508,6 +4907,19 @@
         253,
         247,
         212
+      ]
+    },
+    {
+      "name": "SourceLock",
+      "discriminator": [
+        30,
+        241,
+        69,
+        235,
+        141,
+        45,
+        51,
+        123
       ]
     },
     {
@@ -4809,6 +5221,19 @@
         36,
         61,
         186
+      ]
+    },
+    {
+      "name": "SwapCancelled",
+      "discriminator": [
+        210,
+        232,
+        53,
+        121,
+        126,
+        236,
+        66,
+        142
       ]
     },
     {
@@ -5207,71 +5632,141 @@
     },
     {
       "code": 6055,
+      "name": "DestEqualsMinerAddr",
+      "msg": "Taker payout address must differ from the miner's delivery address"
+    },
+    {
+      "code": 6056,
+      "name": "DuplicateSourceAddr",
+      "msg": "This source address already backs a live reservation on this miner"
+    },
+    {
+      "code": 6057,
+      "name": "SourceHashMismatch",
+      "msg": "source_lock_key does not match the reservation's deposit wallet and source address"
+    },
+    {
+      "code": 6058,
       "name": "WeightsRoundKeyMismatch",
       "msg": "round_key does not match the keccak hash of the submitted weights snapshot"
     },
     {
-      "code": 6056,
+      "code": 6059,
       "name": "ChainNotLowercase",
       "msg": "Chain ids must be lowercase"
     },
     {
-      "code": 6057,
+      "code": 6060,
       "name": "BackingNotSupported",
       "msg": "This collateral chain has no purse on Solana yet"
     },
     {
-      "code": 6058,
+      "code": 6061,
       "name": "BackingNotInLegs",
       "msg": "The collateral chain is not one of the swap's legs"
     },
     {
-      "code": 6059,
+      "code": 6062,
       "name": "BackingSettlesLocally",
       "msg": "This collateral chain settles locally and takes no bond attestation"
     },
     {
-      "code": 6060,
+      "code": 6063,
       "name": "AttestationMissing",
       "msg": "No bond attestation exists for this miner on this backing chain"
     },
     {
-      "code": 6061,
+      "code": 6064,
       "name": "BondNotLocked",
       "msg": "The attested bond is not locked on its backing chain"
     },
     {
-      "code": 6062,
+      "code": 6065,
       "name": "AttestationEpochStale",
       "msg": "Attestation epoch is older than the one already stored"
     },
     {
-      "code": 6063,
+      "code": 6066,
       "name": "AttestationStale",
       "msg": "The global attestation heartbeat is stale; non-local backings are fused off"
     },
     {
-      "code": 6064,
+      "code": 6067,
       "name": "MinerSettling",
       "msg": "Miner is still settling a penalty on its backing chain"
     },
     {
-      "code": 6065,
+      "code": 6068,
       "name": "InvalidAccountForMigration",
       "msg": "Account is owned by another program or is not the expected account type"
     },
     {
-      "code": 6066,
+      "code": 6069,
       "name": "MigrationSwapNotDrained",
       "msg": "Miner has an in-flight swap; drain it before migrating its state"
     },
     {
-      "code": 6067,
+      "code": 6070,
       "name": "AttestationWouldStrandSwap",
       "msg": "Attestation would lower the bond while a reservation/swap is live on this hub"
+    },
+    {
+      "code": 6071,
+      "name": "HotkeyChangeForbidden",
+      "msg": "Hotkey binding is set-once; a bound pubkey cannot change its hotkey"
+    },
+    {
+      "code": 6072,
+      "name": "NonAsciiAddress",
+      "msg": "Addresses must be ASCII"
+    },
+    {
+      "code": 6073,
+      "name": "NonAlphanumericAddress",
+      "msg": "Wallet addresses must be ASCII letters and digits only"
+    },
+    {
+      "code": 6074,
+      "name": "AddressTaken",
+      "msg": "Wallet is already posted by another miner"
+    },
+    {
+      "code": 6075,
+      "name": "MissingAddrLock",
+      "msg": "Payout wallet lock missing"
+    },
+    {
+      "code": 6076,
+      "name": "QuoteLocked",
+      "msg": "Quote's wallets are locked to its miner; nothing to reap"
+    },
+    {
+      "code": 6077,
+      "name": "AddrLockKeyMismatch",
+      "msg": "Wallet lock key or account does not match the wallet"
     }
   ],
   "types": [
+    {
+      "name": "AddrLock",
+      "docs": [
+        "Permanent owner of a posted wallet (`seeds = [ADDR_LOCK_SEED, addr_lock_key]`). Never released:",
+        "a released wallet could pass to another miner while swaps pinned to it are still open."
+      ],
+      "type": {
+        "kind": "struct",
+        "fields": [
+          {
+            "name": "owner",
+            "type": "pubkey"
+          },
+          {
+            "name": "bump",
+            "type": "u8"
+          }
+        ]
+      }
+    },
     {
       "name": "AttestHeartbeat",
       "docs": [
@@ -5294,7 +5789,7 @@
         "Bittensor hotkey. `hotkey_sig` is an sr25519 signature by the hotkey over the miner's Solana pubkey;",
         "the contract only STORES it (sr25519 verify is too costly on-chain) — the validator verifies it",
         "off-chain. This PDA enforces pubkey→≤1 hotkey structurally; the reverse (hotkey→≤1 pubkey) is enforced",
-        "by the `HotkeyBinding` marker below. The miner may re-bind in place (refresh sig / change hotkey)."
+        "by the `HotkeyBinding` marker below. The hotkey is set-once (V-M1); only the sig may refresh in place."
       ],
       "type": {
         "kind": "struct",
@@ -6369,6 +6864,14 @@
           {
             "name": "seed_slot",
             "type": "u64"
+          },
+          {
+            "name": "fee_paid",
+            "docs": [
+              "Effective (stake-discounted) reservation fee the opener paid, lamports — so treasury income",
+              "attribution can tell discounted from full fees. Appended last; prefix decoders keep working."
+            ],
+            "type": "u64"
           }
         ]
       }
@@ -6769,6 +7272,33 @@
               "Number of bids in the pool after this one."
             ],
             "type": "u8"
+          },
+          {
+            "name": "fee_paid",
+            "docs": [
+              "Effective (stake-discounted) fee this entry paid, lamports. 0 = a same-router in-window bid",
+              "update, which is free. Appended last; prefix decoders keep working."
+            ],
+            "type": "u64"
+          }
+        ]
+      }
+    },
+    {
+      "name": "SourceLock",
+      "type": {
+        "kind": "struct",
+        "fields": [
+          {
+            "name": "reserved_until",
+            "docs": [
+              "The holding reservation's `reserved_until`; a lock `< now` is stale and reclaimable."
+            ],
+            "type": "i64"
+          },
+          {
+            "name": "bump",
+            "type": "u8"
           }
         ]
       }
@@ -6801,8 +7331,9 @@
       "name": "Swap",
       "docs": [
         "An in-flight swap (`seeds = [SWAP_SEED, swap_key]`, swap_key = keccak(from_tx_hash)).",
-        "Created by `vote_initiate` on quorum; closed by `confirm_swap` / `timeout_swap`. Chains/amounts/",
-        "miner-quote copied from the immutable Reservation; user-side fields from the hash-bound initiate vote."
+        "Created by `submit_swap_claim` (PendingAttestation), activated by `vote_initiate` on quorum, closed",
+        "by `confirm_swap` / `timeout_swap`. Chains/amounts/miner-quote copied from the immutable Reservation;",
+        "user-side fields from the hash-bound initiate vote."
       ],
       "type": {
         "kind": "struct",
@@ -6915,6 +7446,67 @@
           },
           {
             "name": "bump",
+            "type": "u8"
+          },
+          {
+            "name": "hotkey",
+            "docs": [
+              "Bittensor hotkey pinned from the miner's Binding at initiate ([0;32] = never bound), so the",
+              "timeout verdict names the bonded hotkey itself (V-M1). Appended last (Config precedent)."
+            ],
+            "type": {
+              "array": [
+                "u8",
+                32
+              ]
+            }
+          }
+        ]
+      }
+    },
+    {
+      "name": "SwapCancelled",
+      "docs": [
+        "The no-fault cancel verdict: the destination provably could not receive the payout, so the swap is",
+        "closed with no slash, fee, or strike, and the miner keeps the source. Unlike `SwapTimedOut`, the bond",
+        "reconciler must do NOTHING to a vaulted bond on this event — there is no seizure to relay, and the",
+        "on-chain `reserved_collateral` view was already cleared by `release_reserved`."
+      ],
+      "type": {
+        "kind": "struct",
+        "fields": [
+          {
+            "name": "swap_key",
+            "type": {
+              "array": [
+                "u8",
+                32
+              ]
+            }
+          },
+          {
+            "name": "miner",
+            "type": "pubkey"
+          },
+          {
+            "name": "collateral_chain",
+            "docs": [
+              "Backing chain whose hub was freed."
+            ],
+            "type": "string"
+          },
+          {
+            "name": "collateral_amount",
+            "docs": [
+              "Swap size, for ledger symmetry with the other terminals."
+            ],
+            "type": "u64"
+          },
+          {
+            "name": "reason",
+            "docs": [
+              "Advisory reason discriminant (`CANCEL_REASON_*`); observability only, never a consensus input."
+            ],
             "type": "u8"
           }
         ]
@@ -7193,6 +7785,20 @@
               "that refund already moved, to `Swap::user`."
             ],
             "type": "string"
+          },
+          {
+            "name": "hotkey",
+            "docs": [
+              "Bittensor hotkey the swap pinned at initiate ([0;32] = never bound) — the bond the vault",
+              "seizure targets, so a rebind can never redirect it (V-M1). Appended last; prefix decoders",
+              "keep working."
+            ],
+            "type": {
+              "array": [
+                "u8",
+                32
+              ]
+            }
           }
         ]
       }
@@ -7309,8 +7915,9 @@
     {
       "name": "ValidatorInfo",
       "docs": [
-        "A whitelisted validator and its draw weight. `weight` (default 1, admin-set) is the",
-        "stake-weight seam consumed ONLY by the reservation-lottery draw; consensus stays count-based."
+        "A whitelisted validator and its draw weight. `weight` (default 1, admin-set) is the stake-weight",
+        "seam consumed by the reservation-lottery draw and the entry-fee discount",
+        "(`discounted_reservation_fee`); consensus stays count-based."
       ],
       "type": {
         "kind": "struct",
@@ -7397,6 +8004,15 @@
   ],
   "constants": [
     {
+      "name": "ADDR_LOCK_SEED",
+      "docs": [
+        "PDA seed prefix for a wallet lock (`seeds = [ADDR_LOCK_SEED, addr_lock_key]`) — the first miner to",
+        "post a wallet owns it on every chain, permanently, so no other miner can post it."
+      ],
+      "type": "bytes",
+      "value": "[97, 100, 100, 114, 108, 111, 99, 107]"
+    },
+    {
       "name": "ATTEST_SEED",
       "docs": [
         "PDA seed prefix for a miner's bond attestation on one backing chain",
@@ -7475,6 +8091,16 @@
       ],
       "type": "bytes",
       "value": "[114, 101, 115, 118]"
+    },
+    {
+      "name": "SRCLOCK_SEED",
+      "docs": [
+        "PDA seed prefix for the source-address lock (`seeds = [SRCLOCK_SEED, from_chain, source_lock_key]`) —",
+        "one live-unclaimed reservation per `(from_chain, deposit wallet, from_addr)`, case-insensitive,",
+        "enforced for routed and self-represented alike."
+      ],
+      "type": "bytes",
+      "value": "[115, 114, 99, 108, 111, 99, 107]"
     },
     {
       "name": "STATS_SEED",
