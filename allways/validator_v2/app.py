@@ -11,7 +11,7 @@ import bittensor as bt
 
 from allways.solana.rpc import resolve_ws_url
 from allways.validator_v2.actuator.actuator import Actuator
-from allways.validator_v2.actuator.executors import EXECUTORS, SendingClient, dry_run
+from allways.validator_v2.actuator.executors import EXECUTORS, SendingClient
 from allways.validator_v2.actuator.planners import HygienePlanner, PoolPlanner, SwapPlanner
 from allways.validator_v2.actuator.swap_context import SwapMemory
 from allways.validator_v2.chain.gateway import Endpoint, Meter, UsageReport
@@ -42,8 +42,6 @@ class Config:
     netuid: int
     # Rate limits and daily budgets per endpoint host. Unlisted hosts are still counted, never throttled.
     endpoints: Tuple[Endpoint, ...] = ()
-    # Shadow: decide everything, send nothing, log what would be sent. On until the cutover.
-    shadow: bool = True
     # Not ported yet: off, so nothing half-built runs.
     relay: bool = False  # relay every vault-custody hub in hubs.HUBS
     serve: bool = False
@@ -86,11 +84,10 @@ def build(
     )
     watchers = chain_watchers(assets)
     swaps = SwapPlanner(watchers, assets, SwapMemory(store), program_id=cfg.program_id)
-    executors = dry_run(EXECUTORS) if cfg.shadow else dict(EXECUTORS)
     actuator = Actuator(
         world,
         [swaps, PoolPlanner(), HygienePlanner(head, me=cfg.keypair.pubkey())],
-        executors,
+        dict(EXECUTORS),
         lambda: meter.solana_client(cfg.solana_rpc_url, cfg.program_id, cfg.keypair, cls=SendingClient),
     )
     feed = EventFeed(

@@ -2,7 +2,7 @@ from types import SimpleNamespace
 
 from solders.keypair import Keypair
 
-from allways.validator_v2.actuator.executors import SWAP_EXECUTORS, SendingClient, dry_run
+from allways.validator_v2.actuator.executors import SWAP_EXECUTORS, SendingClient
 from allways.validator_v2.actuator.planners import SwapIntent, intent
 
 SWAP = SimpleNamespace(
@@ -63,13 +63,6 @@ def test_a_lost_extension_race_is_a_no_op_but_a_real_failure_raises():
     except RuntimeError:
         return
     raise AssertionError('a real failure was swallowed')
-
-
-def test_shadow_mode_sends_nothing():
-    client = _Client()
-    for kind, execute in dry_run(SWAP_EXECUTORS).items():
-        assert execute(client, _intent(kind, 5)) is None
-    assert client.calls == []
 
 
 class _Rpc:

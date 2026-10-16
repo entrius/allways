@@ -137,11 +137,9 @@ def test_a_send_that_went_nowhere_rests_instead_of_repeating_every_tick():
     assert len(sends) == 2
 
 
-def test_the_app_builds_in_shadow_with_relay_and_serving_off(tmp_path):
+def test_the_app_builds_with_relay_and_serving_off(tmp_path):
     cfg = Config(solana_rpc_url='http://unused', program_id=None, keypair=Keypair(), state_dir=str(tmp_path), netuid=19)
     app = build(cfg, assets={}, subtensor_factory=lambda: None)
     names = {c.name for c in app.components}
     assert {'world', 'actuator', 'feed', 'scoring', 'weights', 'subtensor', 'usage'} <= names
     assert not any(n.startswith('relay') or n == 'serving' for n in names)
-    actuator = next(c for c in app.components if c.name == 'actuator')
-    assert all(fn.__name__ == 'log' for fn in actuator.executors.values())  # every executor is the dry run
