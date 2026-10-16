@@ -327,7 +327,7 @@ DECLARED_COLLATERAL_BAND_BPS = 100
 
 def required_collateral(collateral_amount: int) -> int:
     """Lamports a miner must hold to back ``collateral_amount`` (1.10×). Mirrors the contract."""
-    return -(-collateral_amount * COLLATERAL_REQUIREMENT_BPS // 10_000)  # ceil, as the contract rounds
+    return (collateral_amount * COLLATERAL_REQUIREMENT_BPS + 9_999) // 10_000  # round up, as the contract does
 
 
 # ─── Emission Recycling ────────────────────────────────────
