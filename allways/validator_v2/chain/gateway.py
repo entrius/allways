@@ -141,9 +141,9 @@ class Meter:
         session.mount('http://', adapter)
         return session
 
-    def solana_client(self, url: str, program_id=None, keypair=None) -> AllwaysSolanaClient:
+    def solana_client(self, url: str, program_id=None, keypair=None, cls=AllwaysSolanaClient) -> AllwaysSolanaClient:
         """A program client whose requests are metered. One per component: sessions aren't thread-safe."""
-        client = AllwaysSolanaClient(url, program_id=program_id, keypair=keypair)
+        client = cls(url, program_id=program_id, keypair=keypair)
         self.attach(client.rpc._session)
         return client
 

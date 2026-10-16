@@ -8,7 +8,7 @@ from typing import Dict, Iterable, Optional, Tuple
 
 from allways.validator_v2.store.db import Store
 
-OWNER, VERSION = 'world', 1
+OWNER, VERSION = 'world', 2
 TABLES = [
     (
         'world_accounts',
@@ -23,8 +23,13 @@ TABLES = [
     ('world_initiated', 'CREATE TABLE IF NOT EXISTS world_initiated (swap_key TEXT PRIMARY KEY, at INTEGER NOT NULL)'),
     (
         'world_fulfillments',
-        'CREATE TABLE IF NOT EXISTS world_fulfillments '
-        '(swap_key TEXT PRIMARY KEY, to_tx_hash TEXT NOT NULL, block_time INTEGER NOT NULL)',
+        'CREATE TABLE IF NOT EXISTS world_fulfillments (swap_key TEXT PRIMARY KEY, to_tx_hash TEXT NOT NULL, '
+        'block_time INTEGER NOT NULL, miner TEXT NOT NULL, settled INTEGER NOT NULL)',
+    ),
+    (
+        'world_routes',
+        'CREATE TABLE IF NOT EXISTS world_routes (swap_key TEXT PRIMARY KEY, chain TEXT NOT NULL, '
+        'sender TEXT NOT NULL, recipient TEXT NOT NULL, seen_at INTEGER NOT NULL)',
     ),
 ]
 
@@ -35,13 +40,15 @@ _UPSERT = {
     'world_accounts': 'INSERT OR REPLACE INTO world_accounts (pda, type, slot, data) VALUES (?, ?, ?, ?)',
     'world_deposits': 'INSERT OR REPLACE INTO world_deposits VALUES (?, ?, ?, ?, ?)',
     'world_initiated': 'INSERT OR REPLACE INTO world_initiated VALUES (?, ?)',
-    'world_fulfillments': 'INSERT OR REPLACE INTO world_fulfillments VALUES (?, ?, ?)',
+    'world_fulfillments': 'INSERT OR REPLACE INTO world_fulfillments VALUES (?, ?, ?, ?, ?)',
+    'world_routes': 'INSERT OR REPLACE INTO world_routes VALUES (?, ?, ?, ?, ?)',
 }
 _KEY = {
     'world_accounts': 'pda',
     'world_deposits': 'tx_key',
     'world_initiated': 'swap_key',
     'world_fulfillments': 'swap_key',
+    'world_routes': 'swap_key',
 }
 
 

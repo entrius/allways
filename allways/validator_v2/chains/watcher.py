@@ -10,11 +10,12 @@ from __future__ import annotations
 import threading
 import time
 from collections import OrderedDict
-from dataclasses import dataclass
-from typing import Any, Dict, Optional
+from dataclasses import dataclass, field
+from typing import Any, Callable, Dict, Optional, Tuple
 
 import bittensor as bt
 
+from allways.assets.asset import ProviderUnreachableError
 from allways.validator_v2.runtime.bus import Latest
 from allways.validator_v2.runtime.component import Component
 
@@ -24,27 +25,45 @@ CHECKS_PER_TICK = 20
 
 
 @dataclass(frozen=True)
-class LegRequest:
-    """Everything ``Asset.verify_transaction`` needs — hashable, so it is also the cache key."""
+class Probe:
+    """One question for a chain's endpoint, asked on the watcher's thread. ``name`` and ``args`` are the
+    cache key; ``run(asset)`` asks it; ``final(result)`` says the answer can never change (a confirmed leg,
+    a price pinned to a block), so it is never asked again."""
 
-    asset: str  # chain id of the asset (e.g. 'btc', 'ethusdc')
-    tx_hash: str
-    expected_recipient: str
-    expected_amount: int
-    block_hint: int = 0
-    expected_sender: Optional[str] = None
+    asset: str  # chain id of the asset to ask (e.g. 'btc', 'ethusdc')
+    name: str
+    args: Tuple[Any, ...]
+    run: Callable[[Any], Any] = field(compare=False, repr=False)
+    final: Callable[[Any], bool] = field(default=lambda result: False, compare=False, repr=False)
+
+
+def verify_probe(
+    asset: str, tx_hash: str, recipient: str, amount: int, block_hint: int = 0, sender: Optional[str] = None
+) -> Probe:
+    """``Asset.verify_transaction``: settled once the leg has confirmed."""
+    return Probe(
+        asset,
+        'verify',
+        (tx_hash, recipient, int(amount), int(block_hint), sender),
+        run=lambda a: a.verify_transaction(
+            tx_hash=tx_hash,
+            expected_recipient=recipient,
+            expected_amount=int(amount),
+            block_hint=int(block_hint),
+            expected_sender=sender,
+        ),
+        final=lambda info: info is not None and bool(getattr(info, 'confirmed', False)),
+    )
 
 
 @dataclass(frozen=True)
 class Verdict:
     tip: Optional[int]  # the tip it was judged against
     checked_at: float
-    info: Any = None  # TransactionInfo, or None = not found / did not match
-    error: Optional[str] = None  # the endpoint failed: unknown, not "no"
-
-    @property
-    def settled(self) -> bool:
-        return self.info is not None and bool(getattr(self.info, 'confirmed', False))
+    info: Any = None  # the probe's answer (for a leg: TransactionInfo, or None = not found / did not match)
+    error: Optional[str] = None  # the probe failed: unknown, not "no"
+    unreachable: bool = False  # the failure was the endpoint being unreachable, not a bug or a bad answer
+    settled: bool = False  # the answer can never change
 
 
 class ChainWatcher(Component):
@@ -60,14 +79,14 @@ class ChainWatcher(Component):
         self.assets = assets  # asset chain id → Asset on this chain
         self.interval_secs = min(30.0, max(2.0, seconds_per_block / 2))
         self.tip: Latest[int] = Latest()
-        self._verdicts: Dict[LegRequest, Verdict] = {}
-        self._wanted: 'OrderedDict[LegRequest, float]' = OrderedDict()  # request → last asked (wall time)
+        self._verdicts: Dict[Probe, Verdict] = {}
+        self._wanted: 'OrderedDict[Probe, float]' = OrderedDict()  # request → last asked (wall time)
         self._lock = threading.Lock()
 
     # ── called from other threads ──────────────────────────────────────────
 
-    def verdict(self, request: LegRequest) -> Optional[Verdict]:
-        """The newest verdict for ``request`` (possibly from an older tip), or None if never checked.
+    def verdict(self, request: Probe) -> Optional[Verdict]:
+        """The newest verdict for ``request`` (possibly from an older tip), or None if never asked.
         Asking keeps the request alive and queues a check when one is due."""
         with self._lock:
             self._wanted[request] = self.clock()
@@ -98,23 +117,17 @@ class ChainWatcher(Component):
                     due.append(request)
             return due[:CHECKS_PER_TICK]
 
-    def _check(self, request: LegRequest, tip: Optional[int], now: float) -> None:
+    def _check(self, request: Probe, tip: Optional[int], now: float) -> None:
         asset = self.assets.get(request.asset)
         if asset is None:
             verdict = Verdict(tip, now, error=f'no provider for {request.asset}')
         else:
             try:
-                info = asset.verify_transaction(
-                    tx_hash=request.tx_hash,
-                    expected_recipient=request.expected_recipient,
-                    expected_amount=request.expected_amount,
-                    block_hint=request.block_hint,
-                    expected_sender=request.expected_sender,
-                )
-                verdict = Verdict(tip, now, info=info)
+                info = request.run(asset)
+                verdict = Verdict(tip, now, info=info, settled=bool(request.final(info)))
             except Exception as e:
-                bt.logging.debug(f'{self.name}: verify {request.tx_hash[:16]} failed: {e}')
-                verdict = Verdict(tip, now, error=str(e))
+                bt.logging.debug(f'{self.name}: {request.name} {request.args[:1]} failed: {e}')
+                verdict = Verdict(tip, now, error=str(e), unreachable=isinstance(e, ProviderUnreachableError))
         with self._lock:
             if request in self._wanted:
                 self._verdicts[request] = verdict
