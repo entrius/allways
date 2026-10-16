@@ -2,7 +2,6 @@ from allways.validator_v2.feed.events import (
     HISTORY_HORIZON_SECS,
     Backfill,
     EventFeed,
-    FileCursorStore,
     HistoryGap,
     SlotClock,
     _Pending,
@@ -110,11 +109,9 @@ class _FakeLive:
         return out
 
 
-def _feed(tmp_path, rpc, live):
+def _feed(tmp_path, rpc, live, resume=None):
     out, gaps = Topic('events'), Topic('gaps')
-    feed = EventFeed(
-        lambda: rpc, live, FileCursorStore(str(tmp_path / 'cursor.json')), out, gaps, 'prog', clock=lambda: NOW
-    )
+    feed = EventFeed(lambda: rpc, live, lambda: resume, out, gaps, 'prog', clock=lambda: NOW)
     return feed, out.subscribe('t'), gaps.subscribe('t')
 
 
@@ -128,7 +125,7 @@ def test_fresh_start_backfills_within_horizon_then_follows_live(tmp_path):
     assert feed._backfill is None
     assert gaps.drain() == [HistoryGap(NOW - HISTORY_HORIZON_SECS)]
     assert len(rpc.tx_reads) == HISTORY_HORIZON_SECS // 10 + 1  # never decoded past the horizon
-    assert feed.cursor.get() == f's-{NOW}'
+    assert feed.status.get()[0].cursor[1] == f's-{NOW}'
     # A live tx already decoded by the backfill is not published twice.
     live.inbox.append(_Pending(10_000, f's-{NOW}', [('QuoteRemoved', {})]))
     feed._clock = SlotClock(lambda slot: NOW, min_interval=0)
@@ -148,4 +145,4 @@ def test_live_events_need_no_transaction_read(tmp_path):
     (record,) = events.drain()
     assert (record.name, record.signature, record.block_time) == ('QuoteRemoved', 'live-1', NOW + 7)
     assert rpc.tx_reads == []
-    assert feed.cursor.get() == 'live-1'
+    assert feed.status.get()[0].cursor == (7, 'live-1')
