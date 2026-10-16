@@ -1,14 +1,13 @@
 use anchor_lang::prelude::*;
 
 use crate::backing::{self, LegBind};
-use solana_keccak_hasher::hashv;
 
 use crate::constants::{
     required_collateral, ATTEST_SEED, CONFIG_SEED, MAX_ADDR_LEN, MINER_SEED, RESV_SEED, SRCLOCK_SEED,
 };
 use crate::error::ErrorCode;
 use crate::events::ReservationFilled;
-use crate::state::{BondAttestation, Config, MinerState, Reservation, SourceLock};
+use crate::state::{source_lock_key as source_lock_key_of, BondAttestation, Config, MinerState, Reservation, SourceLock};
 
 /// The seat winner (`reservation.router`) fills the reservation it won at the draw: names the taker +
 /// amounts and sets `reserved_until`, making the reservation live (sendable/claimable). Only the router
@@ -22,7 +21,7 @@ use crate::state::{BondAttestation, Config, MinerState, Reservation, SourceLock}
     collateral_amount: u64,
     from_amount: u128,
     to_amount: u128,
-    from_addr_hash: [u8; 32],
+    source_lock_key: [u8; 32],
 )]
 pub struct FinalizeReservation<'info> {
     /// The seat winner. Must equal `reservation.router` (constraint below).
@@ -59,15 +58,14 @@ pub struct FinalizeReservation<'info> {
     )]
     pub attestation: Option<Account<'info, BondAttestation>>,
 
-    /// V-C2 source lock, keyed by (miner, from_chain, keccak(from_addr)) — NOT by backing, so it is the
-    /// SAME PDA for a colliding reservation on ANY other hub sharing that source chain, but distinct for a
-    /// concurrent swap on a different from_chain (a deposit is chain-specific; one can't satisfy both).
-    /// `init_if_needed` reuses a stale lock; the handler rejects a still-live one and verifies the hash.
+    /// Source lock, keyed by (from_chain, deposit wallet, from_addr) case-insensitively — not by miner or
+    /// backing, so every reservation one deposit could satisfy (any hub, any miner on that wallet) resolves
+    /// the SAME PDA. `init_if_needed` reuses a stale lock; the handler rejects a live one and verifies the key.
     #[account(
         init_if_needed,
         payer = router,
         space = 8 + SourceLock::INIT_SPACE,
-        seeds = [SRCLOCK_SEED, miner.key().as_ref(), reservation.from_chain.as_bytes(), from_addr_hash.as_ref()],
+        seeds = [SRCLOCK_SEED, reservation.from_chain.as_bytes(), source_lock_key.as_ref()],
         bump,
     )]
     pub source_lock: Account<'info, SourceLock>,
@@ -83,7 +81,7 @@ pub fn handler(
     collateral_amount: u64,
     from_amount: u128,
     to_amount: u128,
-    from_addr_hash: [u8; 32],
+    source_lock_key: [u8; 32],
 ) -> Result<()> {
     require!(!ctx.accounts.config.halted, ErrorCode::SystemHalted);
     require!(
@@ -94,10 +92,10 @@ pub fn handler(
         user_from_addr.len() <= MAX_ADDR_LEN && user_to_addr.len() <= MAX_ADDR_LEN,
         ErrorCode::StringTooLong
     );
-    // V-C2: `from_addr_hash` seeds the source_lock PDA, so bind it to the real address (as swap_key binds
+    // `source_lock_key` seeds the source_lock PDA, so bind it to the real wallet + address (as swap_key binds
     // to from_tx_hash) — else a caller could seed a lock for a DIFFERENT address than it declares.
     require!(
-        from_addr_hash == hashv(&[user_from_addr.as_bytes()]).to_bytes(),
+        source_lock_key == source_lock_key_of(&ctx.accounts.reservation.miner_from_addr, &user_from_addr),
         ErrorCode::SourceHashMismatch
     );
 
@@ -182,10 +180,9 @@ pub fn handler(
         ErrorCode::InsufficientCollateral
     );
 
-    // V-C2 (after the fundamental entry gates above so a settling/halted/undercollateralized miner reports
-    // THAT, not this): the source_lock's seeds omit the backing, so it is shared across hubs. A lock still
-    // live (reserved_until >= now) means another unclaimed reservation on this miner already holds this
-    // (from_chain, from_addr) — reject the duplicate. A stale/`< now` (or freshly-init 0) lock is ours.
+    // After the entry gates, so a settling/halted/undercollateralized miner reports THAT, not this. A live
+    // lock means another unclaimed reservation already expects this source into this wallet — reject it.
+    // A stale/`< now` (or freshly-init 0) lock is ours.
     require!(
         ctx.accounts.source_lock.reserved_until < now,
         ErrorCode::DuplicateSourceAddr

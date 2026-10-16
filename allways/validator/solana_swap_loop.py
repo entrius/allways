@@ -623,7 +623,12 @@ class SolanaSwapLoop:
                     return False
                 backing = str(getattr(swap, 'collateral_chain', 'sol') or 'sol').lower()
                 sig = self.client.vote_initiate(
-                    swap_key, swap.miner, swap.from_chain, str(swap.user_from_addr), backing=backing
+                    swap_key,
+                    swap.miner,
+                    swap.from_chain,
+                    str(swap.user_from_addr),
+                    backing=backing,
+                    miner_from_addr=str(swap.miner_from_addr),
                 )
             elif decision == SwapDecision.CONFIRM:
                 if self.client.has_voted(pdas.REQ_CONFIRM, swap_key, voter):
@@ -648,6 +653,7 @@ class SolanaSwapLoop:
                     str(swap.collateral_chain),
                     from_chain=swap.from_chain,
                     from_addr=swap.user_from_addr,
+                    miner_from_addr=swap.miner_from_addr,
                 )
             elif decision == SwapDecision.EXTEND_TIMEOUT:
                 sig = self.client.extend_timeout(swap_key, swap.miner, action.target_at)

@@ -302,7 +302,7 @@ fn finalize_ix_b(
             collateral_amount,
             from_amount,
             to_amount,
-            from_addr_hash: hashv(&["userSrcAddr".as_bytes()]).to_bytes(),
+            source_lock_key: allways_swap_manager::source_lock_key(MINER_FROM, "userSrcAddr"),
         }
         .data(),
         allways_swap_manager::accounts::FinalizeReservation {
@@ -313,7 +313,7 @@ fn finalize_ix_b(
             reservation: resv_pda_b(miner, backing),
             attestation: None,
             source_lock: Pubkey::find_program_address(
-                &[b"srclock", miner.as_ref(), from_chain.as_bytes(), &hashv(&["userSrcAddr".as_bytes()]).to_bytes()],
+                &[b"srclock", from_chain.as_bytes(), &allways_swap_manager::source_lock_key(MINER_FROM, "userSrcAddr")],
                 &pid(),
             )
             .0,
@@ -349,7 +349,7 @@ fn initiate_ix(validator: &Pubkey, miner: &Pubkey, from_tx_hash: &str, from_chai
         pid(),
         &allways_swap_manager::instruction::VoteInitiate {
             swap_key: key,
-            from_addr_hash: hashv(&["userSrcAddr".as_bytes()]).to_bytes(),
+            source_lock_key: allways_swap_manager::source_lock_key(MINER_FROM, "userSrcAddr"),
         }
         .data(),
         allways_swap_manager::accounts::VoteInitiate {
@@ -359,7 +359,7 @@ fn initiate_ix(validator: &Pubkey, miner: &Pubkey, from_tx_hash: &str, from_chai
             miner_state: miner_pda(miner),
             reservation: resv_pda(miner),
             source_lock: Pubkey::find_program_address(
-                &[b"srclock", miner.as_ref(), from_chain.as_bytes(), &hashv(&["userSrcAddr".as_bytes()]).to_bytes()],
+                &[b"srclock", from_chain.as_bytes(), &allways_swap_manager::source_lock_key(MINER_FROM, "userSrcAddr")],
                 &pid(),
             )
             .0,

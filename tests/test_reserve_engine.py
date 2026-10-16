@@ -813,7 +813,9 @@ class _ConfirmClient(FakeClient):
         self.swaps[bytes(swap_key)] = SimpleNamespace(from_tx_hash=from_tx_hash)
         return 'claimsig'
 
-    def extend_reservation(self, miner, target_at, backing='sol', *, from_chain=None, from_addr=None):
+    def extend_reservation(
+        self, miner, target_at, backing='sol', *, from_chain=None, from_addr=None, miner_from_addr=None
+    ):
         if self.extend_raises:
             raise RuntimeError('rpc down')
         self.extensions.append(target_at)

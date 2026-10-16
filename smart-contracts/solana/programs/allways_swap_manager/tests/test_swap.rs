@@ -90,9 +90,9 @@ fn swap_pda(key: &[u8; 32]) -> Pubkey {
 fn bind_pda(m: &Pubkey) -> Pubkey {
     Pubkey::find_program_address(&[b"bind", m.as_ref()], &pid()).0
 }
-fn srclock_pda(m: &Pubkey, from_chain: &str, from_addr: &str) -> Pubkey {
+fn srclock_pda(_m: &Pubkey, from_chain: &str, from_addr: &str) -> Pubkey {
     Pubkey::find_program_address(
-        &[b"srclock", m.as_ref(), from_chain.as_bytes(), &hashv(&[from_addr.as_bytes()]).to_bytes()],
+        &[b"srclock", from_chain.as_bytes(), &allways_swap_manager::source_lock_key(MINER_FROM, from_addr)],
         &pid(),
     )
     .0
@@ -279,7 +279,7 @@ fn finalize_ix(router: &Pubkey, miner: &Pubkey, user: &Pubkey) -> Instruction {
             collateral_amount: SOL_AMOUNT,
             from_amount: FROM_AMOUNT,
             to_amount: TO_AMOUNT,
-            from_addr_hash: hashv(&[FROM_ADDR.as_bytes()]).to_bytes(),
+            source_lock_key: allways_swap_manager::source_lock_key(MINER_FROM, FROM_ADDR),
         }
         .data(),
         allways_swap_manager::accounts::FinalizeReservation {
@@ -339,7 +339,7 @@ fn initiate_ix(validator: &Pubkey, miner: &Pubkey, from_tx_hash: &str) -> Instru
         pid(),
         &allways_swap_manager::instruction::VoteInitiate {
             swap_key: key,
-            from_addr_hash: hashv(&[FROM_ADDR.as_bytes()]).to_bytes(),
+            source_lock_key: allways_swap_manager::source_lock_key(MINER_FROM, FROM_ADDR),
         }
         .data(),
         allways_swap_manager::accounts::VoteInitiate {
@@ -690,7 +690,7 @@ fn test_finalize_rejects_dest_equal_to_miner_delivery_addr() {
             collateral_amount: SOL_AMOUNT,
             from_amount: FROM_AMOUNT,
             to_amount: TO_AMOUNT,
-            from_addr_hash: hashv(&[FROM_ADDR.as_bytes()]).to_bytes(),
+            source_lock_key: allways_swap_manager::source_lock_key(MINER_FROM, FROM_ADDR),
         }
         .data(),
         allways_swap_manager::accounts::FinalizeReservation {
@@ -1248,7 +1248,7 @@ fn extend_ix(validator: &Pubkey, miner: &Pubkey, target_at: i64) -> Instruction 
         pid(),
         &allways_swap_manager::instruction::ExtendReservation {
             target_at,
-            from_addr_hash: hashv(&[FROM_ADDR.as_bytes()]).to_bytes(),
+            source_lock_key: allways_swap_manager::source_lock_key(MINER_FROM, FROM_ADDR),
         }
         .data(),
         allways_swap_manager::accounts::ExtendReservation {

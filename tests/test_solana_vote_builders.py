@@ -91,18 +91,18 @@ def test_submit_swap_claim_ix(client):
 
 def test_vote_initiate_ix(client):
     miner = Keypair().pubkey()
-    client.vote_initiate(SK, miner, 'btc', 'userBTCaddr')
+    client.vote_initiate(SK, miner, 'btc', 'userBTCaddr', miner_from_addr='minerBTCaddr')
     ix = _ix(client)
-    from_addr_hash = keccak_lib.new(data=b'userBTCaddr', digest_bits=256).digest()
+    lock_key = pdas.source_lock_key('minerBTCaddr', 'userBTCaddr')
     assert ix.data[:8] == layouts.IX_DISCRIMINATORS['vote_initiate']
-    assert ix.data[8:] == SK + from_addr_hash
+    assert ix.data[8:] == SK + lock_key
     assert _metas(ix) == [
         (client.keypair.pubkey(), True, True),
         (pdas.config_pda(PID), False, False),
         (miner, False, False),
         (pdas.miner_state_pda(miner, PID), False, True),
         (pdas.reservation_pda(miner, 'sol', PID), False, True),
-        (pdas.source_lock_pda(miner, 'btc', from_addr_hash, PID), False, True),
+        (pdas.source_lock_pda('btc', lock_key, PID), False, True),
         (pdas.vote_round_pda(pdas.REQ_INITIATE, SK, PID), False, True),
         (pdas.swap_pda(SK, PID), False, True),
         (PID, False, False),  # absent optional BondAttestation — a "sol"-backed swap has no bond
@@ -270,14 +270,14 @@ def test_extend_timeout_ix(client):
 
 def test_extend_reservation_ix(client):
     miner = Keypair().pubkey()
-    client.extend_reservation(miner, 1_700_009_999, from_chain='btc', from_addr='userBTCaddr')
+    client.extend_reservation(
+        miner, 1_700_009_999, from_chain='btc', from_addr='userBTCaddr', miner_from_addr='minerBTCaddr'
+    )
     ix = _ix(client)
-    from Crypto.Hash import keccak
-
-    expected_hash = keccak.new(data=b'userBTCaddr', digest_bits=256).digest()
+    expected_hash = pdas.source_lock_key('minerBTCaddr', 'userBTCaddr')
     assert ix.data[:8] == layouts.IX_DISCRIMINATORS['extend_reservation']
     assert ix.data[8:] == layouts.IX_EXTEND_RESERVATION_ARGS.build(
-        {'target_at': 1_700_009_999, 'from_addr_hash': expected_hash}
+        {'target_at': 1_700_009_999, 'source_lock_key': expected_hash}
     )
     assert _metas(ix) == [
         (client.keypair.pubkey(), True, False),
@@ -285,5 +285,19 @@ def test_extend_reservation_ix(client):
         (miner, False, False),
         (pdas.miner_state_pda(miner, PID), False, True),
         (pdas.reservation_pda(miner, 'sol', PID), False, True),
-        (pdas.source_lock_pda(miner, 'btc', expected_hash, PID), False, True),
+        (pdas.source_lock_pda('btc', expected_hash, PID), False, True),
     ]
+
+
+def test_source_lock_key_matches_program_vector():
+    # Same vector as the program's unit test: the client and program must derive one lock address.
+    key = pdas.source_lock_key('0xMinerWallet', '0xAbCdUser')
+    assert key.hex() == '7c7ba20a03f7ad2b19226d94be0ef783dd31a6e2a0e2ae5dadfec2753cdb9612'
+    assert key == pdas.source_lock_key('0xminerwallet', '0xABCDUSER')
+
+
+def test_source_lock_shared_across_miners_on_one_wallet():
+    a = pdas.source_lock_pda('eth', pdas.source_lock_key('0xWallet', '0xUser'), PID)
+    assert a == pdas.source_lock_pda('eth', pdas.source_lock_key('0xwallet', '0xuser'), PID)
+    assert a != pdas.source_lock_pda('eth', pdas.source_lock_key('0xOtherWallet', '0xUser'), PID)
+    assert a != pdas.source_lock_pda('btc', pdas.source_lock_key('0xWallet', '0xUser'), PID)

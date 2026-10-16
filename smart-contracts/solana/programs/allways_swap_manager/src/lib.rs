@@ -202,7 +202,7 @@ pub mod allways_swap_manager {
         collateral_amount: u64,
         from_amount: u128,
         to_amount: u128,
-        from_addr_hash: [u8; 32],
+        source_lock_key: [u8; 32],
     ) -> Result<()> {
         finalize_reservation::handler(
             ctx,
@@ -212,7 +212,7 @@ pub mod allways_swap_manager {
             collateral_amount,
             from_amount,
             to_amount,
-            from_addr_hash,
+            source_lock_key,
         )
     }
     /// Permissionless: reap an unfilled reservation past its finalize deadline, freeing the miner.
@@ -233,8 +233,8 @@ pub mod allways_swap_manager {
     }
     /// Validators attest a pending claim (`PendingAttestation` → `Active` on quorum); the miner's
     /// obligation deadline starts here.
-    pub fn vote_initiate(ctx: Context<VoteInitiate>, swap_key: [u8; 32], from_addr_hash: [u8; 32]) -> Result<()> {
-        vote_initiate::handler(ctx, swap_key, from_addr_hash)
+    pub fn vote_initiate(ctx: Context<VoteInitiate>, swap_key: [u8; 32], source_lock_key: [u8; 32]) -> Result<()> {
+        vote_initiate::handler(ctx, swap_key, source_lock_key)
     }
     /// Permissionless: reap an orphaned `PendingAttestation` claim whose reservation expired (rent →
     /// caller; frees the reservation's claim slot).
@@ -275,9 +275,9 @@ pub mod allways_swap_manager {
     pub fn extend_reservation(
         ctx: Context<ExtendReservation>,
         target_at: i64,
-        from_addr_hash: [u8; 32],
+        source_lock_key: [u8; 32],
     ) -> Result<()> {
-        extend_reservation::handler(ctx, target_at, from_addr_hash)
+        extend_reservation::handler(ctx, target_at, source_lock_key)
     }
     /// A validator slides a swap's fulfillment timeout forward while it waits on slow destination-chain
     /// confirmation. Bounded by the per-swap ceiling frozen at creation.

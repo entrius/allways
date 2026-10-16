@@ -139,7 +139,11 @@ def test_routed_failure_fallback_declined_aborts():
 
 def test_routed_failure_with_yes_falls_back_to_self_represented():
     drawn = types.SimpleNamespace(
-        router=USER, reserved_until=0, finalize_by=int(time.time()) + 60, rate=int(0.0021 * 10**18)
+        router=USER,
+        reserved_until=0,
+        finalize_by=int(time.time()) + 60,
+        rate=int(0.0021 * 10**18),
+        miner_from_addr='miner-addr',
     )
     client = _client([None])
     with (
@@ -155,7 +159,11 @@ def test_routed_failure_with_yes_falls_back_to_self_represented():
 
 def test_no_router_forces_self_represented_despite_config():
     drawn = types.SimpleNamespace(
-        router=USER, reserved_until=0, finalize_by=int(time.time()) + 60, rate=int(0.0021 * 10**18)
+        router=USER,
+        reserved_until=0,
+        finalize_by=int(time.time()) + 60,
+        rate=int(0.0021 * 10**18),
+        miner_from_addr='miner-addr',
     )
     client = _client([None])
     with (

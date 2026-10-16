@@ -47,6 +47,7 @@ class SweepClient:
         backing='sol',
         *,
         from_chain=None,
+        miner_from_addr=None,
     ):
         self.finalized.append(
             (str(miner), str(user), user_from_addr, user_to_addr, collateral_amount, from_amount, to_amount)
@@ -63,6 +64,7 @@ def _drawn_seat(client, *, router=None, finalize_by=NOW + 100, reserved_until=0,
         reserved_until=reserved_until,
         finalize_by=finalize_by,
         collateral_chain='sol',
+        miner_from_addr='minerDepositAddr',
     )
 
 
@@ -171,7 +173,9 @@ def _declared_seat(client, *, price_at_block):
     seat.rate = RATE_FIXED
     client._reservation = seat
 
-    def finalize(miner, user, src, dst, collateral_amount, from_amount, to_amount, backing='sol', *, from_chain=None):
+    def finalize(
+        miner, user, src, dst, collateral_amount, from_amount, to_amount, backing='sol', *, from_chain=None, **_
+    ):
         client.finalized.append((str(miner), str(user), src, dst, collateral_amount, from_amount, to_amount))
         client._reservation = SimpleNamespace(created_at=NOW, collateral_amount=collateral_amount)
         return 'finalizesig'

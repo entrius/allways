@@ -1,4 +1,5 @@
 use anchor_lang::prelude::*;
+use solana_keccak_hasher::hashv;
 
 use crate::constants::{MAX_ADDR_LEN, MAX_BACKING_SLOTS, MAX_CHAIN_LEN, MAX_TX_LEN, MAX_VALIDATORS};
 
@@ -350,13 +351,21 @@ pub struct Reservation {
     pub bump: u8,
 }
 
-/// V-C2 on-chain source-address lock (`seeds = [SRCLOCK_SEED, miner, from_chain, keccak(from_addr)]`).
-/// `finalize_reservation` claims it so a live-unclaimed reservation holds a `(from_chain, from_addr)`
-/// exclusively per miner — a second reservation (any backing/hub) declaring the same source finds a live
-/// lock and reverts. `reserved_until` mirrors the holding reservation's `reserved_until` and is slid
+/// On-chain source-address lock (`seeds = [SRCLOCK_SEED, from_chain, source_lock_key(..)]`).
+/// `finalize_reservation` claims it so a live-unclaimed reservation holds a `(from_chain, deposit wallet,
+/// from_addr)` exclusively — a second reservation on any miner or hub paying into the same wallet from the
+/// same source finds a live lock and reverts, since one deposit would match both. `reserved_until` mirrors the holding reservation's `reserved_until` and is slid
 /// forward by `extend_reservation` in lockstep, so an extended reservation can't outlive its lock; a lock
 /// whose `reserved_until < now` is free to reclaim, so a lapsed reservation never permanently strands its source.
 /// Reused across rounds (never closed).
+/// Source-lock key: keccak(keccak(lower(miner deposit wallet)) || keccak(lower(source address))).
+/// Lowercased for every chain so one address can't be spelled into a second lock; the stored addresses
+/// keep their real case. Keyed by wallet, not miner, so miners sharing a wallet share the lock.
+pub fn source_lock_key(miner_from_addr: &str, from_addr: &str) -> [u8; 32] {
+    let lower = |s: &str| hashv(&[s.to_ascii_lowercase().as_bytes()]).to_bytes();
+    hashv(&[&lower(miner_from_addr), &lower(from_addr)]).to_bytes()
+}
+
 #[account]
 #[derive(InitSpace)]
 pub struct SourceLock {
@@ -425,9 +434,8 @@ pub struct Swap {
     pub hotkey: [u8; 32],
 }
 
-// (Removed: the permanent `TxMarker` source-replay marker — A4. Source replay is now blocked by a
-// validator freshness check: a deposit must be mined after `Reservation.created_at`; an old (replayed)
-// deposit predates any later reservation. See SOLANA_VALIDATOR_OFFLOAD.md "Tx-hash replay protection".)
+// (Removed: the permanent `TxMarker` source-replay marker. Deposit reuse is refused off-chain by the
+// freshness floor plus the validators' claimed-deposit ledger; a closed Swap PDA's key can be re-created.)
 
 /// A miner's standing on-chain quote for one pair-direction and one backing
 /// (`seeds = [QUOTE_SEED, miner, from_chain, to_chain, collateral_chain]`).
@@ -675,5 +683,19 @@ mod tests {
         // gate only gets more conservative.
         ms.release_reserved(BACKING_BIT_TAO, 7);
         assert_eq!(ms.reserved(BACKING_BIT_TAO), 0);
+    }
+}
+
+#[cfg(test)]
+mod source_lock_key_tests {
+    use super::source_lock_key;
+
+    #[test]
+    fn matches_client_vector_and_ignores_case() {
+        // Same vector as the Python client's test: both sides must derive one lock address.
+        let key = source_lock_key("0xMinerWallet", "0xAbCdUser");
+        let hex: String = key.iter().map(|b| format!("{b:02x}")).collect();
+        assert_eq!(hex, "7c7ba20a03f7ad2b19226d94be0ef783dd31a6e2a0e2ae5dadfec2753cdb9612");
+        assert_eq!(key, source_lock_key("0xminerwallet", "0xABCDUSER"));
     }
 }

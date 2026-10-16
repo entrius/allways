@@ -229,7 +229,33 @@ fn open_ix(router: &Pubkey, miner: &Pubkey, f: &str, t: &str) -> Instruction {
 /// The seat winner names the fill (taker + amounts), making the reservation live.
 #[allow(clippy::too_many_arguments)]
 #[allow(clippy::too_many_arguments)]
+/// The miner deposit wallet each test quote pins for a source chain (it keys the source lock).
+fn quoted_deposit_addr(from_chain: &str) -> &'static str {
+    match from_chain {
+        "sol" => MTO,
+        "tao" => "minerTAOaddr",
+        _ => MFROM,
+    }
+}
+
+#[allow(clippy::too_many_arguments)]
 fn finalize_ix(
+    from_chain: &str,
+    router: &Pubkey,
+    miner: &Pubkey,
+    user: &Pubkey,
+    ufrom: &str,
+    uto: &str,
+    collateral_amount: u64,
+    from_amount: u128,
+    to_amount: u128,
+) -> Instruction {
+    let wallet = quoted_deposit_addr(from_chain);
+    finalize_ix_into(wallet, from_chain, router, miner, user, ufrom, uto, collateral_amount, from_amount, to_amount)
+}
+#[allow(clippy::too_many_arguments)]
+fn finalize_ix_into(
+    wallet: &str,
     from_chain: &str,
     router: &Pubkey,
     miner: &Pubkey,
@@ -249,7 +275,7 @@ fn finalize_ix(
             collateral_amount,
             from_amount,
             to_amount,
-            from_addr_hash: hashv(&[ufrom.as_bytes()]).to_bytes(),
+            source_lock_key: allways_swap_manager::source_lock_key(wallet, ufrom),
         }
         .data(),
         allways_swap_manager::accounts::FinalizeReservation {
@@ -260,7 +286,7 @@ fn finalize_ix(
             reservation: resv_pda(miner),
             attestation: None,
             source_lock: Pubkey::find_program_address(
-                &[b"srclock", miner.as_ref(), from_chain.as_bytes(), &hashv(&[ufrom.as_bytes()]).to_bytes()],
+                &[b"srclock", from_chain.as_bytes(), &allways_swap_manager::source_lock_key(wallet, ufrom)],
                 &pid(),
             )
             .0,
@@ -1116,4 +1142,64 @@ fn test_close_unfilled_cannot_drag_busy_back_past_a_live_pool() {
     // The stale reservation is still reapable — but the reaper must leave the live pool's lock intact.
     send(&mut svm, close_unfilled_ix(&vals[2].pubkey(), &miner.pubkey()), &vals[2].pubkey(), &vals[2]).expect("reap");
     assert_eq!(busy_until(&svm, &miner.pubkey()), busy_after_open, "live pool's busy lock must not move back");
+}
+
+/// A second funded, active miner quoting BTC→SOL into `mfrom` (shares the setup's validators).
+fn add_btc_miner(svm: &mut LiteSVM, vals: &[Keypair], mfrom: &str) -> Keypair {
+    let miner = Keypair::new();
+    svm.airdrop(&miner.pubkey(), 100_000_000_000).unwrap();
+    send(svm, post_ix(&miner.pubkey(), 10_000_000_000), &miner.pubkey(), &miner).expect("post");
+    send(svm, vote_activate_ix(&vals[0].pubkey(), &miner.pubkey()), &vals[0].pubkey(), &vals[0]).expect("a0");
+    send(svm, vote_activate_ix(&vals[1].pubkey(), &miner.pubkey()), &vals[1].pubkey(), &vals[1]).expect("a1");
+    send(svm, set_quote_ix(&miner.pubkey(), "btc", "sol", mfrom, MTO, RATE), &miner.pubkey(), &miner).expect("quote");
+    miner
+}
+
+/// Seat vals[0] on each miner's BTC→SOL pool (one shared window), so each can be finalized.
+fn seat_all(svm: &mut LiteSVM, vals: &[Keypair], miners: &[&Pubkey]) {
+    for m in miners {
+        send(svm, open_ix(&vals[0].pubkey(), m, "btc", "sol"), &vals[0].pubkey(), &vals[0]).expect("bid");
+    }
+    set_clock(svm, BASE_TS + POOL_WINDOW_SECS + 1);
+    for m in miners {
+        arm_and_resolve(svm, &vals[0], m).expect("resolve");
+    }
+}
+
+fn fill(svm: &mut LiteSVM, vals: &[Keypair], miner: &Pubkey, wallet: &str, ufrom: &str) -> Result<(), String> {
+    let user = Keypair::new().pubkey();
+    let ix = finalize_ix_into(wallet, "btc", &vals[0].pubkey(), miner, &user, ufrom, "uSOL", 2_000_000_000, 1, 2_000_000_000);
+    send(svm, ix, &vals[0].pubkey(), &vals[0])
+}
+
+#[test]
+fn test_source_lock_spans_miners_sharing_a_deposit_wallet() {
+    // One deposit into a shared wallet would match both reservations, so the second must not open.
+    let (mut svm, _admin, vals, a) = setup(0, 0);
+    let b = add_btc_miner(&mut svm, &vals, MFROM);
+    seat_all(&mut svm, &vals, &[&a.pubkey(), &b.pubkey()]);
+    fill(&mut svm, &vals, &a.pubkey(), MFROM, "bc1quser").expect("first fill");
+    let e = fill(&mut svm, &vals, &b.pubkey(), MFROM, "bc1quser").unwrap_err();
+    assert!(e.contains("DuplicateSourceAddr"), "sibling on the same wallet is locked: {e}");
+}
+
+#[test]
+fn test_source_lock_ignores_address_case() {
+    // A re-cased spelling of the same source (or wallet) resolves the same lock.
+    let (mut svm, _admin, vals, a) = setup(0, 0);
+    let b = add_btc_miner(&mut svm, &vals, &MFROM.to_uppercase());
+    seat_all(&mut svm, &vals, &[&a.pubkey(), &b.pubkey()]);
+    fill(&mut svm, &vals, &a.pubkey(), MFROM, "bc1quser").expect("first fill");
+    let e = fill(&mut svm, &vals, &b.pubkey(), &MFROM.to_uppercase(), "BC1QUSER").unwrap_err();
+    assert!(e.contains("DuplicateSourceAddr"), "case variants share one lock: {e}");
+}
+
+#[test]
+fn test_source_lock_is_per_deposit_wallet() {
+    // A different wallet can't receive the same deposit, so the same source may reserve it in parallel.
+    let (mut svm, _admin, vals, a) = setup(0, 0);
+    let b = add_btc_miner(&mut svm, &vals, "otherMinerBTCaddr");
+    seat_all(&mut svm, &vals, &[&a.pubkey(), &b.pubkey()]);
+    fill(&mut svm, &vals, &a.pubkey(), MFROM, "bc1quser").expect("first fill");
+    fill(&mut svm, &vals, &b.pubkey(), "otherMinerBTCaddr", "bc1quser").expect("distinct wallet fills");
 }

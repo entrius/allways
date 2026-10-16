@@ -595,13 +595,13 @@ IX_AMOUNT_ARGS = CStruct('amount' / U64)
 # B2 swap-lifecycle args. `swap_key` is a borsh `[u8; 32]` (fixed array → raw 32 bytes, no len prefix).
 IX_SWAP_KEY_ARGS = CStruct('swap_key' / Hash32)  # timeout_swap, close_stale_claim
 # V-C2: initiate quorum releases the source lock; the hash targets it (verified vs reservation.from_addr).
-IX_VOTE_INITIATE_ARGS = CStruct('swap_key' / Hash32, 'from_addr_hash' / Hash32)
+IX_VOTE_INITIATE_ARGS = CStruct('swap_key' / Hash32, 'source_lock_key' / Hash32)
 IX_CANCEL_SWAP_ARGS = CStruct('swap_key' / Hash32, 'reason' / U8)  # cancel_swap (reason is advisory)
 IX_SUBMIT_CLAIM_ARGS = CStruct('swap_key' / Hash32, 'from_tx_hash' / String, 'from_tx_block' / U32)
 IX_CONFIRM_SWAP_ARGS = CStruct('swap_key' / Hash32, 'from_chain' / String, 'to_chain' / String)
 IX_MARK_FULFILLED_ARGS = CStruct('swap_key' / Hash32, 'to_tx_hash' / String, 'to_tx_block' / U32)
 IX_EXTEND_TIMEOUT_ARGS = CStruct('swap_key' / Hash32, 'target_at' / I64)
-IX_EXTEND_RESERVATION_ARGS = CStruct('target_at' / I64, 'from_addr_hash' / Hash32)  # V-C2: keccak(from_addr)
+IX_EXTEND_RESERVATION_ARGS = CStruct('target_at' / I64, 'source_lock_key' / Hash32)  # pdas.source_lock_key
 IX_ADD_VALIDATOR_ARGS = CStruct('validator' / Pubkey32, 'weight' / U64)
 
 # B4 — quote retract + admin-setter args. (`deactivate` takes no args → empty body.)
@@ -620,7 +620,7 @@ IX_FINALIZE_RESERVATION_ARGS = CStruct(
     'collateral_amount' / U64,
     'from_amount' / U128,
     'to_amount' / U128,
-    'from_addr_hash' / Hash32,  # V-C2: keccak(user_from_addr); seeds the source_lock, verified on-chain
+    'source_lock_key' / Hash32,  # pdas.source_lock_key(wallet, user_from_addr); verified on-chain
 )
 IX_SET_WEIGHTS_ARGS = CStruct('weights' / Vec(U64), 'round_key' / Hash32)  # vote_set_weights
 # W2 — vote_activate / vote_deactivate now name the purse they act on.

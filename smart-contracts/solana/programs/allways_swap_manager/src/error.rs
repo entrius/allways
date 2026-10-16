@@ -139,7 +139,7 @@ pub enum ErrorCode {
     DestEqualsMinerAddr,
     #[msg("This source address already backs a live reservation on this miner")]
     DuplicateSourceAddr,
-    #[msg("from_addr_hash does not match keccak(user_from_addr)")]
+    #[msg("source_lock_key does not match the reservation's deposit wallet and source address")]
     SourceHashMismatch,
     #[msg("round_key does not match the keccak hash of the submitted weights snapshot")]
     WeightsRoundKeyMismatch,

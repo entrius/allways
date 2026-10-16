@@ -487,6 +487,7 @@ def finalize_won_seats(validator, now: int) -> list:
                 fill.to_amount,
                 backing,
                 from_chain=from_chain,
+                miner_from_addr=resv.miner_from_addr,
             )
         except Exception as e:
             reason = contract_reject_reason(e) or (str(e) if isinstance(e, ValueError) else None)
@@ -622,7 +623,12 @@ def _extend_for_claim(client, miner_pk, reservation, backing) -> None:
         return  # already at the contract ceiling — nothing left to buy
     try:
         client.extend_reservation(
-            miner_pk, target, backing, from_chain=reservation.from_chain, from_addr=reservation.from_addr
+            miner_pk,
+            target,
+            backing,
+            from_chain=reservation.from_chain,
+            from_addr=reservation.from_addr,
+            miner_from_addr=reservation.miner_from_addr,
         )
         bt.logging.info(f'claim runway: extended reserved_until {reserved_until} -> {target} (+{target - now}s)')
     except Exception as e:  # noqa: BLE001 - never block the claim on a failed extension
