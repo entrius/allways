@@ -193,17 +193,3 @@ EXECUTORS: Dict[str, Executor] = {
     'vote_deactivate': vote_deactivate,
     'vote_set_weights': vote_set_weights,
 }
-
-
-def dry_run(executors: Dict[str, Executor]) -> Dict[str, Executor]:
-    """The same table, logging what it would send instead of sending: for a shadow run."""
-
-    def would(kind: str) -> Executor:
-        def log(client: Any, intent: Intent) -> None:
-            why = getattr(getattr(intent.payload, 'action', None), 'reason', None)
-            bt.logging.info(f'WOULD {kind} {intent.key[1]}' + (f' — {why}' if why else ''))
-            return None
-
-        return log
-
-    return {kind: would(kind) for kind in executors}

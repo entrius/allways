@@ -1,11 +1,8 @@
-"""Allways validator, component-based (validator_v2). Runs in SHADOW by default: it decides everything
-and logs what it would send, but sends nothing and sets no weights. Same command line and .env as
-neurons/validator.py, so it can run beside the current validator for a side-by-side comparison.
+"""Allways validator, component-based (validator_v2). Same command line and .env as neurons/validator.py.
 
     python neurons/validator_v2.py --netuid 19 --subtensor.network test --wallet.name v --wallet.hotkey v
 
-Env: VALIDATOR_V2_LIVE=1 sends for real (not before the cutover). ALLWAYS_RPC_ENDPOINTS sets per-endpoint
-rate limits and daily budgets, e.g. ``helius=mainnet.helius-rpc.com:8:16:150000``.
+Env: ALLWAYS_RPC_ENDPOINTS sets per-endpoint rate limits and daily budgets, e.g. ``helius=mainnet.helius-rpc.com:8:16:150000``.
 """
 
 import os
@@ -52,9 +49,6 @@ def main() -> None:
     # Fail closed if a testnet neuron points at mainnet or the program id is on the wrong cluster.
     assert_cluster_safe(probe.rpc, probe.program_id, netuid, role='validator')
 
-    live = os.environ.get('VALIDATOR_V2_LIVE') == '1'
-    if live:
-        bt.logging.warning('VALIDATOR_V2_LIVE=1: validator_v2 will SEND program transactions')
     state_dir = os.path.join(cfg.neuron.full_path, 'v2')
     os.makedirs(state_dir, exist_ok=True)
     # The spoke providers get their own subtensor: the TAO watcher is its only user.
@@ -73,14 +67,11 @@ def main() -> None:
             state_dir=state_dir,
             netuid=netuid,
             endpoints=tuple(parse_endpoints(os.environ.get('ALLWAYS_RPC_ENDPOINTS', ''))),
-            shadow=not live,
         ),
         assets=assets,
         subtensor_factory=lambda: build_subtensor(config=cfg),
     )
-    bt.logging.info(
-        f'validator_v2 {"LIVE" if live else "shadow"}: {len(app.components)} components, state in {state_dir}'
-    )
+    bt.logging.info(f'validator_v2: {len(app.components)} components, state in {state_dir}')
     app.supervisor.run_forever()
 
 
