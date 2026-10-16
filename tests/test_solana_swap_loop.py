@@ -62,6 +62,7 @@ def make_swap(
         timeout_at=timeout_at,
         max_extend_at=max_extend_at,
         initiated_at=INITIATED_AT,
+        fulfilled_at=INITIATED_AT + 100,
     )
 
 
@@ -166,16 +167,17 @@ def test_fulfilled_source_provider_down_still_confirms():
     assert providers['btc'].calls == []  # source never touched
 
 
-def test_delivery_backing_another_swap_never_confirms(tmp_path):
-    # One delivery tx marked on two swaps, in any casing: the first confirms, the second never does.
-    loop, _ = loop_with(state_store=ValidatorStateStore(tmp_path / 'state.db'))
-    first, second = make_swap(key=b'\x01' * 32), make_swap(key=b'\x02' * 32)
+def test_only_the_first_fulfilled_swap_confirms_a_shared_delivery(tmp_path):
+    # One delivery tx marked on two swaps, in any casing: the earlier mark confirms whatever the read order.
+    first, second = make_swap(key=b'\x02' * 32), make_swap(key=b'\x01' * 32)
     first.to_tx_hash, second.to_tx_hash = '0x' + 'ab' * 32, '0X' + 'AB' * 32
-    assert loop.decide(first, now=1500).decision == SwapDecision.CONFIRM
-    assert loop.decide(first, now=1501).decision == SwapDecision.CONFIRM  # re-deciding the same swap is fine
-    action = loop.decide(second, now=1500)
-    assert action.decision == SwapDecision.WAIT and 'another swap' in action.reason
-    assert loop.decide(second, now=2500).decision == SwapDecision.TIMEOUT
+    second.fulfilled_at = first.fulfilled_at + 1
+    for order, db in (((first, second), 'a.db'), ((second, first), 'b.db')):
+        loop, _ = loop_with(state_store=ValidatorStateStore(tmp_path / db))
+        loop.read_only = True
+        loop.client.get_swaps = lambda order=order: [(None, swap) for swap in order]
+        assert dict(loop.run_once(now=1500)) == {'02' * 32: SwapDecision.CONFIRM, '01' * 32: SwapDecision.WAIT}
+        assert dict(loop.run_once(now=2500))['01' * 32] == SwapDecision.TIMEOUT
 
 
 def test_fulfilled_dest_pending_far_from_timeout_waits():

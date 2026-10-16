@@ -362,8 +362,8 @@ class SolanaSwapLoop:
         Re-fetching it every 12s pass added only RPC load, and worse: a transient node-view gap on that
         re-fetch could return non-`ok` and slash an already-attested payout (the same false-negative class
         as the dest-leg stale-view issue). Source is therefore a settled `ok` by construction."""
-        if self.state_store is not None and self.state_store.delivery_backs_another_swap(
-            swap.to_tx_hash, _swap_key_hex(swap.swap_key)
+        if self.state_store is not None and self.state_store.delivery_backs_earlier_swap(
+            swap.to_tx_hash, _swap_key_hex(swap.swap_key), int(swap.fulfilled_at)
         ):
             # Each swap needs its own delivery; this one never confirms and slashes at timeout.
             return SwapAction(
@@ -555,8 +555,6 @@ class SolanaSwapLoop:
             key = swap_key_from_tx_hash(swap.from_tx_hash).hex()
             self.state_store.record_deposit_claim(swap.from_tx_hash, key, now)
             self.state_store.mark_deposit_initiated(key)
-            if status == 'Fulfilled':
-                self.state_store.record_swap_fulfillment(_swap_key_hex(swap.swap_key), swap.to_tx_hash, now)
         # No dest provider here → can't verify locally. SKIP below the ceiling (a re-enabled spoke or a
         # provider-equipped peer still resolves it); past max_extend_at TIMEOUT so a permanently unverifiable
         # pair frees the collateral instead of freezing it forever (only network-wide gaps reach quorum).
@@ -728,10 +726,17 @@ class SolanaSwapLoop:
         """One pass: discover live swaps, decide each, and cast the vote (or LOG when read_only).
         Returns the per-swap decisions for observability."""
         out: List[Tuple[str, SwapDecision]] = []
-        for _pubkey, acct in self.client.get_swaps():
-            # get_swaps returns raw accounts (no swap_key field); flatten like the miner does. Already-flat
-            # views (carrying swap_key) pass through.
-            swap = acct if hasattr(acct, 'swap_key') else swap_from_solana(acct)
+        # get_swaps returns raw accounts (no swap_key field); flatten like the miner does. Already-flat
+        # views (carrying swap_key) pass through.
+        swaps = [acct if hasattr(acct, 'swap_key') else swap_from_solana(acct) for _, acct in self.client.get_swaps()]
+        if self.state_store is not None:
+            # Every live delivery is on record before any is judged, so read order never picks the winner.
+            for swap in swaps:
+                if _status_name(swap) == 'Fulfilled':
+                    self.state_store.record_swap_fulfillment(
+                        _swap_key_hex(swap.swap_key), swap.to_tx_hash, int(swap.fulfilled_at)
+                    )
+        for swap in swaps:
             key = _swap_key_hex(swap.swap_key)
             if self.relay is not None:
                 self.relay.observe_swap(swap)

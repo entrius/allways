@@ -670,10 +670,15 @@ class ValidatorStateStore:
         row = self._fetchone('SELECT to_tx_hash FROM swap_fulfillments WHERE swap_key = ?', (swap_key,))
         return row['to_tx_hash'] if row is not None else None
 
-    def delivery_backs_another_swap(self, to_tx_hash: str, swap_key: str) -> bool:
+    def delivery_backs_earlier_swap(self, to_tx_hash: str, swap_key: str, fulfilled_at: int) -> bool:
+        """True when another swap marked this delivery first (by fulfilled time, then swap key)."""
         row = self._fetchone(
-            'SELECT 1 FROM swap_fulfillments WHERE to_tx_hash = ? AND swap_key != ? LIMIT 1',
-            (tx_key(to_tx_hash), swap_key),
+            """
+            SELECT 1 FROM swap_fulfillments
+            WHERE to_tx_hash = ? AND swap_key != ? AND (block_time < ? OR (block_time = ? AND swap_key < ?))
+            LIMIT 1
+            """,
+            (tx_key(to_tx_hash), swap_key, fulfilled_at, fulfilled_at, swap_key),
         )
         return row is not None
 
