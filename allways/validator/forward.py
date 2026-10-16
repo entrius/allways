@@ -32,11 +32,12 @@ if TYPE_CHECKING:
 async def forward(self: Validator) -> None:
     """One validator forward step — Solana-sourced end to end.
 
+    Program events are ingested into ``SolanaEventIndex`` first, so the
+    used-deposit and used-delivery ledgers are current when
     ``SolanaSwapLoop.run_once`` drives the swap lifecycle (discover live Solana
     swaps off the contract, verify both legs with replay-freshness gates, cast
-    the on-chain consensus vote). Then the program's crown-relevant events are
-    ingested into ``SolanaEventIndex`` and, on the block-gated cadence, replayed
-    to score + reward miners and snapshot the live crown. Scoring CADENCE stays
+    the on-chain consensus vote). On the block-gated cadence the index is then
+    replayed to score + reward miners and snapshot the live crown. Scoring CADENCE stays
     subtensor-block-gated (heartbeat + set_weights are TAO); only the crown
     replay WINDOW is unix-time.
     """
