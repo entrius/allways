@@ -70,6 +70,19 @@ class Endpoint:
     daily_budget: Optional[int] = None  # warn when the projected day exceeds it
 
 
+def parse_endpoints(raw: str) -> List[Endpoint]:
+    """``name=host:rate:burst[:daily_budget]`` entries, comma-separated (e.g. the ALLWAYS_RPC_ENDPOINTS env)."""
+    out = []
+    for entry in filter(None, (e.strip() for e in (raw or '').split(','))):
+        name, _, spec = entry.partition('=')
+        parts = spec.split(':')
+        if not name or len(parts) not in (3, 4):
+            raise ValueError(f'bad endpoint {entry!r}: want name=host:rate:burst[:daily_budget]')
+        budget = int(parts[3]) if len(parts) == 4 else None
+        out.append(Endpoint(name.strip(), parts[0].strip(), float(parts[1]), float(parts[2]), budget))
+    return out
+
+
 def calls_in(body: Optional[bytes], path: str) -> List[str]:
     """The billable calls in one HTTP request: each JSON-RPC method (batches count per call), else the
     first path segment."""

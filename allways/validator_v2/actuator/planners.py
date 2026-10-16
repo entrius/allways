@@ -10,10 +10,14 @@ from dataclasses import dataclass
 from typing import Any, Callable, Dict, Iterable, List, Optional, Tuple
 
 import bittensor as bt
+from solders.pubkey import Pubkey
 
 from allways.chains import get_chain_def
-from allways.constants import FEE_DIVISOR
+from allways.constants import FEE_DIVISOR, SECONDS_PER_BLOCK, WEIGHTS_VOTE_INTERVAL_BLOCKS
+from allways.solana import pdas
 from allways.solana.client import swap_from_solana
+from allways.solana.layouts import hub_busy_until, hub_swap_on
+from allways.validator.weights_vote import derive_weight_vector
 from allways.validator_v2.actuator.swap_context import WorldContext
 from allways.validator_v2.actuator.swaps import decide, status_of
 from allways.validator_v2.runtime.bus import Latest
@@ -29,6 +33,8 @@ class Action:
     deadline: Callable[[Any, float], float]  # (the account the action is about, now) -> unix deadline
     # Reads the World's event-fed ledgers (used deposits / deliveries), so it waits while the feed catches up.
     needs_ledgers: bool = False
+    # After a send that went nowhere (lost race, already voted, rejected), wait this long before resending.
+    retry_secs: float = 6.0
 
 
 def _field(name: str) -> Callable[[Any, float], float]:
@@ -49,11 +55,11 @@ ACTIONS = {
     'cancel_swap': Action(Urgency.SOFT, _soft),
     'close_stale_claim': Action(Urgency.SOFT, _soft),
     # Pools (about a Pool or a Reservation)
-    'resolve_pool': Action(Urgency.CRANK, _soft),
+    'resolve_pool': Action(Urgency.CRANK, _soft, retry_secs=2.0),  # the draw retries until its seed slot exists
     'finalize_reservation': Action(Urgency.CRANK, _field('finalize_by')),
     # Hygiene
-    'vote_deactivate': Action(Urgency.SOFT, _soft),
-    'vote_set_weights': Action(Urgency.SOFT, _soft),
+    'vote_deactivate': Action(Urgency.SOFT, _soft, retry_secs=300.0),
+    'vote_set_weights': Action(Urgency.SOFT, _soft, retry_secs=1800.0),
     # Relay writes on Solana (enqueued by a hub relay, sent by the actuator)
     'vote_set_attestation': Action(Urgency.VOTE, _soft),
     'vote_attest_heartbeat': Action(Urgency.SOFT, _soft),
@@ -158,23 +164,85 @@ def _conf_pair(chain: str, info: Any) -> Tuple[int, int]:
 
 
 class PoolPlanner:
-    """Closed pools and drawn reservations → ``resolve_pool`` / ``finalize_reservation``.
-
-    To lift from ``allways.validator.reserve_engine.crank``. The WebSocket-driven scheduler becomes a
-    nudge that wakes the actuator early; it no longer runs its own copy of the crank."""
+    """Closed pools → ``resolve_pool``. Permissionless and first-wins, so every validator cranks every closed,
+    non-empty pool; a peer that got there first makes ours a benign no-op. Finalizing a seat this validator
+    won for a routed user needs the routed-request queue, which serving fills, so it lands with serving."""
 
     name = 'pools'
 
     def plan(self, world: World, now: float) -> Iterable[Intent]:
-        return []
+        out = []
+        for pda, pool in world.all('Pool'):
+            if int(getattr(pool, 'opened_at', 0)) == 0 or now <= int(pool.closes_at) or not pool.requests:
+                continue
+            out.append(intent('resolve_pool', pda, pool, now, payload=pool))
+        return out
 
 
 class HygienePlanner:
-    """Floor sweep (``vote_deactivate``) and the stake-weight vote, from Config + MinerState + metagraph.
+    """Two slow duties off the World and the subtensor head.
 
-    To lift from ``allways.validator.floor_sweep`` and ``allways.validator.weights_vote``."""
+    Floor sweep: a miner still active on a hub whose purse sits under that hub's floor (a raised floor never
+    touches MinerState, and the contract's own auto-deactivation can't reach an unreservable miner) is voted
+    out on that hub, once the hub is idle. Stake-weight vote: once per boundary, the lottery's draw weights
+    are voted to match metagraph stake."""
 
     name = 'hygiene'
 
+    def __init__(self, head: Latest, me: Any = None) -> None:
+        self.head = head  # Latest[subtensor_view.Head]
+        self.me = me  # this validator's Solana pubkey
+
     def plan(self, world: World, now: float) -> Iterable[Intent]:
-        return []
+        if world.config is None:
+            return []
+        return [*self._floor_sweep(world, now), *self._weights(world, now)]
+
+    def _floor_sweep(self, world: World, now: float) -> List[Intent]:
+        floors = {'sol': int(world.config.min_collateral), 'tao': int(world.config.tao_min_collateral)}
+        out = []
+        for _, ms in world.all('MinerState'):
+            if not ms.active:
+                continue
+            miner = str(Pubkey.from_bytes(bytes(ms.miner)))
+            for backing, bit in pdas.BACKING_BITS.items():
+                floor = floors.get(backing, 0)
+                if not floor or not int(ms.active_backings or 0) & bit:
+                    continue
+                purse = _purse(world, ms, miner, backing)
+                if purse is None or purse >= floor:
+                    continue
+                if hub_swap_on(ms, bit) or now < hub_busy_until(ms, bit):
+                    continue  # the contract refuses to kick a busy hub; it is re-planned once idle
+                out.append(intent('vote_deactivate', (miner, backing), ms, now, payload=(miner, backing)))
+                break  # one hub at a time, as the contract judges them
+        return out
+
+    def _weights(self, world: World, now: float) -> List[Intent]:
+        head, _ = self.head.get()
+        if head is None or self.me is None:
+            return []
+        config = world.config
+        block = head.block_at(now, SECONDS_PER_BLOCK)
+        boundary = now - (block % WEIGHTS_VOTE_INTERVAL_BLOCKS) * SECONDS_PER_BLOCK
+        if int(config.last_weights_update) >= boundary:
+            return []  # already landed this epoch
+        keys = [bytes(v.key) for v in config.validators]
+        if bytes(self.me) not in keys:
+            return []
+        vector = derive_weight_vector(config.validators, world.attribution, head.metagraph)
+        if vector == [int(v.weight) for v in config.validators]:
+            return []
+        epoch = block // WEIGHTS_VOTE_INTERVAL_BLOCKS
+        return [intent('vote_set_weights', epoch, config, now, payload=(vector, keys))]
+
+
+def _purse(world: World, ms: Any, miner: str, backing: str) -> Optional[int]:
+    """A hub's own bond: the local vault for SOL, the attested balance for a vault hub. None skips: an
+    unreadable or unlocked attestation never forces a kick."""
+    if backing == 'sol':
+        return int(ms.collateral)
+    att = world.get('BondAttestation', pdas.bond_attestation_pda(miner, backing))
+    if att is None or not getattr(att, 'locked', False):
+        return None
+    return int(att.effective_balance)
