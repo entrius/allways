@@ -5,14 +5,14 @@ from __future__ import annotations
 
 import os
 from dataclasses import dataclass
-from typing import Any, Callable, Dict, List, Optional
+from typing import Any, Callable, Dict, List, Optional, Tuple
 
 import bittensor as bt
 
 from allways.solana.rpc import resolve_ws_url
 from allways.validator_v2.actuator.actuator import Actuator
 from allways.validator_v2.actuator.planners import HygienePlanner, PoolPlanner, SwapPlanner
-from allways.validator_v2.chain.gateway import RpcGateway
+from allways.validator_v2.chain.gateway import Endpoint, Meter, UsageReport
 from allways.validator_v2.chains.watcher import ChainWatcher
 from allways.validator_v2.export.component import Export
 from allways.validator_v2.feed.events import EventFeed, FileCursorStore, LiveFeed
@@ -32,8 +32,8 @@ class Config:
     program_id: Any
     keypair: Any
     state_dir: str
-    rpc_rate: float = 8.0  # requests/second, under the plan's limit with headroom for the miner/indexer
-    rpc_burst: float = 16.0
+    # Rate limits and daily budgets per endpoint host. Unlisted hosts are still counted, never throttled.
+    endpoints: Tuple[Endpoint, ...] = ()
     relay: bool = True  # relay every vault-custody hub in hubs.HUBS
     serve: bool = True
     export: bool = False
@@ -43,7 +43,7 @@ class Config:
 class App:
     components: List[Component]
     supervisor: Supervisor
-    gateway: RpcGateway
+    meter: Meter
 
 
 def build(
@@ -54,7 +54,11 @@ def build(
     executors: Dict[str, Any],
     export_storage: Optional[Any] = None,
 ) -> App:
-    gateway = RpcGateway(cfg.solana_rpc_url, cfg.rpc_rate, cfg.rpc_burst)
+    meter = Meter(list(cfg.endpoints))
+    for asset in assets.values():
+        session = getattr(asset, 'http', None) or getattr(getattr(asset, 'rpc', None), '_session', None)
+        if session is not None:
+            meter.attach(session)
     world = Latest()
     rounds = Latest()
     events = Topic('events')
@@ -62,7 +66,7 @@ def build(
     feed_status = Latest()
 
     world_reader = WorldReader(
-        lambda: gateway.client('world', cfg.program_id),
+        lambda: meter.solana_client(cfg.solana_rpc_url, cfg.program_id),
         events.subscribe('world'),
         gaps.subscribe('world'),
         feed_status,
@@ -73,10 +77,10 @@ def build(
         world,
         [SwapPlanner(watchers), PoolPlanner(), HygienePlanner()],
         executors,
-        lambda: gateway.client('actuator', cfg.program_id, cfg.keypair),
+        lambda: meter.solana_client(cfg.solana_rpc_url, cfg.program_id, cfg.keypair),
     )
     feed = EventFeed(
-        lambda: gateway.rpc('feed'),
+        lambda: meter.solana_client(cfg.solana_rpc_url, cfg.program_id).rpc,
         LiveFeed(resolve_ws_url(cfg.solana_rpc_url), cfg.program_id),
         FileCursorStore(os.path.join(cfg.state_dir, 'feed_cursor.json')),
         events,
@@ -91,6 +95,7 @@ def build(
         feed,
         scoring,
         WeightSetter(rounds, subtensor_factory),
+        UsageReport(meter, list(cfg.endpoints)),
         *{id(w): w for w in watchers.values()}.values(),
     ]
     if cfg.relay:
@@ -104,7 +109,7 @@ def build(
         bt.logging.error(f'supervisor: {why} — exiting for restart')
         os._exit(1)
 
-    return App(components, Supervisor(components, on_fatal), gateway)
+    return App(components, Supervisor(components, on_fatal), meter)
 
 
 def chain_watchers(assets: Dict[str, Any]) -> Dict[str, ChainWatcher]:
