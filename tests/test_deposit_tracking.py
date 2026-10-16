@@ -372,6 +372,14 @@ def test_completed_swaps_rebuild_the_delivery_ledger(tmp_path):
     assert store.claim_delivery(str(miner), '0x' + HEX.lower(), done.hex(), 1500)
 
 
+def test_completed_swap_replaces_a_local_delivery_claim(tmp_path):
+    # This validator first verified the other swap; the chain completing one wins the tx.
+    store = ValidatorStateStore(tmp_path / 'state.db')
+    assert store.claim_delivery('m', '0x' + HEX, 'local', 1)
+    assert store.claim_delivery('m', '0x' + HEX, 'onchain', 2, settled=True)
+    assert not store.claim_delivery('m', '0x' + HEX, 'local', 3)
+
+
 # ── delivery leg ─────────────────────────────────────────────────────────────
 # The miner writes to_tx_hash itself, so the validator cannot respell it: junk never verifies, while an
 # honest casing verifies in canonical form and keys the same delivery ledger row.

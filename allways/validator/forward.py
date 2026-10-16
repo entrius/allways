@@ -54,8 +54,11 @@ async def forward(self: Validator) -> None:
         bt.logging.info(f'forward step #{self.step}: resolved {len(resolved)} reservation pool(s)')
     if finalized:
         bt.logging.info(f'forward step #{self.step}: finalized {len(finalized)} routed seat(s)')
-    # Ingest first: the swap loop's used-tx ledgers are fed by these events.
-    ingest_solana_events(self)
+    # Ingest first: the swap loop's used-tx ledgers are fed by these events. A failed ingest still lets it vote.
+    try:
+        ingest_solana_events(self)
+    except Exception as e:
+        bt.logging.warning(f'forward: solana event ingest failed: {e}')
     decisions = await asyncio.to_thread(self.solana_swap_loop.run_once, now)
     bt.logging.info(
         f'forward step #{self.step} @ block {self.block}: solana swap loop processed {len(decisions)} live swap(s)'

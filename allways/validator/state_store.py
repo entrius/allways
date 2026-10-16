@@ -696,11 +696,13 @@ class ValidatorStateStore:
     # Written only once a delivery has verified, so a hash a miner merely submits never counts.
     # Keyed per miner: another miner naming the same tx can't block this one's swap.
 
-    def claim_delivery(self, miner: str, tx_hash: str, swap_key: str, seen_at: int) -> bool:
-        """Record a verified delivery for a swap; False if it already confirmed a different swap."""
+    def claim_delivery(self, miner: str, tx_hash: str, swap_key: str, seen_at: int, settled: bool = False) -> bool:
+        """Record a verified delivery for a swap; False if it already confirmed a different swap.
+        ``settled`` (an on-chain completion) replaces whatever this validator recorded locally."""
         key = tx_key(tx_hash)
+        verb = 'INSERT OR REPLACE' if settled else 'INSERT OR IGNORE'
         self._execute(
-            'INSERT OR IGNORE INTO used_deliveries (miner, tx_hash, swap_key, seen_at) VALUES (?, ?, ?, ?)',
+            f'{verb} INTO used_deliveries (miner, tx_hash, swap_key, seen_at) VALUES (?, ?, ?, ?)',
             (miner, key, swap_key, int(seen_at)),
         )
         row = self._fetchone('SELECT swap_key FROM used_deliveries WHERE miner = ? AND tx_hash = ?', (miner, key))

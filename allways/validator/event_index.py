@@ -127,7 +127,9 @@ class SolanaEventIndex:
             swap_key = bytes(rec.fields['swap_key']).hex()
             to_tx_hash = self.state_store.get_swap_fulfillment(swap_key)
             if to_tx_hash:
-                self.state_store.claim_delivery(str(rec.fields['miner']), to_tx_hash, swap_key, block_time)
+                self.state_store.claim_delivery(
+                    str(rec.fields['miner']), to_tx_hash, swap_key, block_time, settled=True
+                )
 
     def _record_unattributed_outcome(self, rec: EventRecord, block_time: int) -> bool:
         """Persist only the swap_key-keyed terminal facts (delivery hash, refund facts, and terminal/stale outcome)
