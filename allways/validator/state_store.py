@@ -786,6 +786,13 @@ class ValidatorStateStore:
             (miner, from_chain, to_chain, backing),
         )
 
+    def delete_routed_request(self, miner: str, from_chain: str, to_chain: str, backing: str, user_pubkey: str) -> None:
+        self._execute(
+            'DELETE FROM routed_requests WHERE miner = ? AND from_chain = ? AND to_chain = ? AND backing = ? '
+            'AND user_pubkey = ?',
+            (miner, from_chain, to_chain, backing, user_pubkey),
+        )
+
     def prune_routed_requests(self, cutoff_time: int) -> None:
         """Staleness backstop: drop rows older than ``cutoff_time`` so a dead
         miner (pool never drawn, reservation never seen) can't pin a queue."""
