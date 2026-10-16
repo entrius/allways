@@ -11,7 +11,9 @@ import bittensor as bt
 
 from allways.solana.rpc import resolve_ws_url
 from allways.validator_v2.actuator.actuator import Actuator
+from allways.validator_v2.actuator.executors import SWAP_EXECUTORS, SendingClient, dry_run
 from allways.validator_v2.actuator.planners import HygienePlanner, PoolPlanner, SwapPlanner
+from allways.validator_v2.actuator.swap_context import SwapMemory
 from allways.validator_v2.chain.gateway import Endpoint, Meter, UsageReport
 from allways.validator_v2.chains.watcher import ChainWatcher
 from allways.validator_v2.export.component import Export
@@ -38,6 +40,8 @@ class Config:
     state_dir: str
     # Rate limits and daily budgets per endpoint host. Unlisted hosts are still counted, never throttled.
     endpoints: Tuple[Endpoint, ...] = ()
+    # Shadow: decide everything, send nothing, log what would be sent. On until the cutover.
+    shadow: bool = True
     relay: bool = True  # relay every vault-custody hub in hubs.HUBS
     serve: bool = True
     export: bool = False
@@ -54,7 +58,6 @@ def build(
     cfg: Config,
     assets: Dict[str, Any],
     subtensor_factory: Callable[[], Any],
-    executors: Dict[str, Any],
     export_storage: Optional[Any] = None,
 ) -> App:
     store = Store(os.path.join(cfg.state_dir, 'validator.db'))
@@ -78,11 +81,13 @@ def build(
         store,
     )
     watchers = chain_watchers(assets)
+    swaps = SwapPlanner(watchers, assets, SwapMemory(store), program_id=cfg.program_id)
+    executors = dry_run(SWAP_EXECUTORS) if cfg.shadow else dict(SWAP_EXECUTORS)
     actuator = Actuator(
         world,
-        [SwapPlanner(watchers), PoolPlanner(), HygienePlanner()],
+        [swaps, PoolPlanner(), HygienePlanner()],
         executors,
-        lambda: meter.solana_client(cfg.solana_rpc_url, cfg.program_id, cfg.keypair),
+        lambda: meter.solana_client(cfg.solana_rpc_url, cfg.program_id, cfg.keypair, cls=SendingClient),
     )
     feed = EventFeed(
         lambda: meter.solana_client(cfg.solana_rpc_url, cfg.program_id).rpc,

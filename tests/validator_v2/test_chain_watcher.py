@@ -1,7 +1,7 @@
 from types import SimpleNamespace
 
 from allways.validator_v2.app import chain_watchers
-from allways.validator_v2.chains.watcher import MEMPOOL_RECHECK_SECS, ChainWatcher, LegRequest
+from allways.validator_v2.chains.watcher import MEMPOOL_RECHECK_SECS, ChainWatcher, verify_probe
 
 
 class _Chain:
@@ -51,7 +51,7 @@ def _watcher():
     return w, chain, btc, clock
 
 
-REQ = LegRequest('btc', 'aa' * 32, 'bc1qdst', 1000)
+REQ = verify_probe('btc', 'aa' * 32, 'bc1qdst', 1000)
 
 
 def test_asking_never_blocks_and_the_check_runs_on_the_watcher():
@@ -96,7 +96,7 @@ def test_a_settled_leg_is_never_checked_again():
 def test_every_check_in_a_tick_shares_one_tip_read():
     w, chain, btc, clock = _watcher()
     for n in range(5):
-        w.verdict(LegRequest('btc', f'{n:064x}', 'bc1qdst', 1000))
+        w.verdict(verify_probe('btc', f'{n:064x}', 'bc1qdst', 1000))
     w.tick(clock.t)
     assert btc.verifies == 5 and chain.tip_reads == 1
 

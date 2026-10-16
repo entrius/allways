@@ -7,8 +7,16 @@ decision rules (freshness gates, attest/confirm/refuse checks) move here as pure
 from __future__ import annotations
 
 from dataclasses import dataclass
-from typing import Any, Callable, Iterable, List
+from typing import Any, Callable, Dict, Iterable, List, Optional, Tuple
 
+import bittensor as bt
+
+from allways.chains import get_chain_def
+from allways.constants import FEE_DIVISOR
+from allways.solana.client import swap_from_solana
+from allways.validator_v2.actuator.swap_context import WorldContext
+from allways.validator_v2.actuator.swaps import decide, status_of
+from allways.validator_v2.runtime.bus import Latest
 from allways.validator_v2.runtime.deadline_queue import Intent, Urgency
 from allways.validator_v2.world.snapshot import World
 
@@ -59,20 +67,94 @@ def intent(
     return Intent((kind, subject_key), action.urgency, action.deadline(account, now), payload, not_before)
 
 
-class SwapPlanner:
-    """Live swaps and their reservations → lifecycle intents.
+@dataclass(frozen=True)
+class SwapIntent:
+    swap: Any  # the flat swap view the decision was made on
+    action: Any  # swaps.Action
 
-    To lift from ``allways.validator.solana_swap_loop``: the per-status decisions (``_decide_*``), with
-    every chain read replaced by ``ChainWatcher.verdict`` and every account read by the World."""
+
+@dataclass(frozen=True)
+class SwapReport:
+    """What the validator currently thinks of one live swap, for the seam's /status and the logs."""
+
+    status: str
+    decision: str
+    reason: Optional[str]
+    legs: Dict[str, Tuple[int, int]]  # chain → (confirmations seen, required)
+
+
+# Decision → (intent kind, which account carries its deadline)
+_SENDS = {
+    'attest': ('vote_initiate', 'reservation'),
+    'extend_reservation': ('extend_reservation', 'reservation'),
+    'confirm': ('confirm_swap', 'swap'),
+    'extend_timeout': ('extend_timeout', 'swap'),
+    'timeout': ('timeout_swap', 'swap'),
+    'cancel': ('close_stale_claim', 'swap'),
+    'refuse': ('cancel_swap', 'swap'),
+}
+
+
+class SwapPlanner:
+    """Every live swap in the World → its decision → an intent when there is something to send. Logs a
+    swap's decision only when it changes, and publishes the whole picture as ``report``."""
 
     name = 'swaps'
 
-    def __init__(self, watchers) -> None:
-        self.watchers = watchers  # asset chain id → the ChainWatcher for the chain it lives on
+    def __init__(
+        self,
+        watchers: Dict[str, Any],
+        providers: Dict[str, Any],
+        memory: Any,
+        owes_settlement: Optional[Callable[[Any], bool]] = None,
+        program_id: Any = None,
+        fee_divisor: int = FEE_DIVISOR,
+    ) -> None:
+        self.watchers = watchers  # asset chain id → the ChainWatcher for its chain
+        self.providers = providers
+        self.memory = memory
+        self.owes_settlement = owes_settlement
+        self.program_id = program_id
+        self.fee_divisor = fee_divisor
+        self.report: Latest = Latest()
+        self._said: Dict[str, Tuple[str, Optional[str]]] = {}
 
     def plan(self, world: World, now: float) -> Iterable[Intent]:
         out: List[Intent] = []
+        report: Dict[str, SwapReport] = {}
+        for _, acct in world.all('Swap'):
+            swap = swap_from_solana(acct)
+            key = swap.swap_key.hex()
+            ctx = WorldContext(
+                world, self.watchers, self.providers, self.memory, int(now), self.owes_settlement, self.program_id
+            )
+            action = decide(swap, ctx, int(now), self.fee_divisor)
+            self._log(key, swap, action)
+            legs = {c: _conf_pair(c, leg.info) for c, leg in ctx.legs.items()}
+            report[key] = SwapReport(status_of(swap), action.decision.value, action.reason, legs)
+            send = _SENDS.get(action.decision.value)
+            if send is not None:
+                kind, deadline_from = send
+                account = ctx.reservation(swap) if deadline_from == 'reservation' else swap
+                out.append(intent(kind, key, account or swap, now, payload=SwapIntent(swap, action)))
+        for gone in set(self._said) - set(report):
+            del self._said[gone]
+        self.memory.prune(int(now))
+        self.report.set(report)
         return out
+
+    def _log(self, key: str, swap: Any, action: Any) -> None:
+        said = (action.decision.value, action.reason)
+        if self._said.get(key) != said:
+            self._said[key] = said
+            reason = f' — {action.reason}' if action.reason else ''
+            bt.logging.info(
+                f'swap {key[:16]} [{status_of(swap)} {swap.from_chain}->{swap.to_chain}]: {said[0]}{reason}'
+            )
+
+
+def _conf_pair(chain: str, info: Any) -> Tuple[int, int]:
+    return int(getattr(info, 'confirmations', 0) or 0), int(get_chain_def(chain).min_confirmations)
 
 
 class PoolPlanner:

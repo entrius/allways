@@ -18,6 +18,7 @@ from typing import Any, Callable, Dict, Iterable, List, Mapping, Optional, Set, 
 import bittensor as bt
 
 from allways.solana import layouts, pdas
+from allways.solana.client import swap_key_from_tx_hash
 from allways.validator.binding import build_attribution
 from allways.validator.state_store import tx_key
 from allways.validator_v2.feed.events import HISTORY_HORIZON_SECS, FeedStatus
@@ -42,6 +43,24 @@ class DepositClaim:
 
 
 @dataclass(frozen=True)
+class Fulfillment:
+    to_tx_hash: str
+    block_time: int
+    miner: str
+    settled: bool = False  # the swap completed on-chain: this delivery is spent for good
+
+
+@dataclass(frozen=True)
+class PayoutRoute:
+    """A live swap's payout leg, kept past the swap's close: a deposit matching it is someone's payout."""
+
+    chain: str
+    sender: str  # the miner's delivery address, as posted
+    recipient: str  # the user's address, as posted
+    seen_at: int
+
+
+@dataclass(frozen=True)
 class World:
     taken_at: float
     slot: int  # every event at or below this slot is reflected
@@ -50,7 +69,8 @@ class World:
     accounts: Mapping[str, Mapping[str, Any]]  # account type → pda → decoded account
     attribution: Mapping[str, str] = field(default_factory=dict)  # miner pubkey → verified hotkey ss58
     deposits: Mapping[str, DepositClaim] = field(default_factory=dict)  # tx_key(source tx) → first claim
-    fulfillments: Mapping[str, Tuple[str, int]] = field(default_factory=dict)  # swap_key → (to_tx_hash, block_time)
+    fulfillments: Mapping[str, Fulfillment] = field(default_factory=dict)  # swap_key → reported delivery
+    routes: Mapping[str, PayoutRoute] = field(default_factory=dict)  # swap_key → payout route
 
     def all(self, name: str) -> Iterable[Tuple[str, Any]]:
         return self.accounts.get(name, {}).items()
@@ -105,7 +125,8 @@ class WorldReader(Component):
         self._attribution: Dict[str, str] = {}
         self._deposits: Dict[str, DepositClaim] = {}
         self._initiated: Dict[str, int] = {}  # swap_key → block_time of its SwapInitiated
-        self._fulfillments: Dict[str, Tuple[str, int]] = {}
+        self._fulfillments: Dict[str, Fulfillment] = {}
+        self._routes: Dict[str, PayoutRoute] = {}
         self._changes: persist.Changes = {}
         self._scan_slot = 0
         self._slot = 0
@@ -152,7 +173,12 @@ class WorldReader(Component):
             )
         self._initiated = {r['swap_key']: r['at'] for r in persist.load(self.store, 'world_initiated')}
         self._fulfillments = {
-            r['swap_key']: (r['to_tx_hash'], r['block_time']) for r in persist.load(self.store, 'world_fulfillments')
+            r['swap_key']: Fulfillment(r['to_tx_hash'], r['block_time'], r['miner'], bool(r['settled']))
+            for r in persist.load(self.store, 'world_fulfillments')
+        }
+        self._routes = {
+            r['swap_key']: PayoutRoute(r['chain'], r['sender'], r['recipient'], r['seen_at'])
+            for r in persist.load(self.store, 'world_routes')
         }
         self._scan_slot = int(self.store.get_meta('world.scan_slot') or 0)
         self._slot = int(self.store.get_meta('world.slot') or 0)
@@ -197,9 +223,19 @@ class WorldReader(Component):
             self._config = decoded
         else:
             self._accounts[name][pda] = decoded
+        if name == 'Swap' and record:
+            self._note_route(decoded)
         self._slot_of[(name, pda)] = slot
         if record:
             self._changes.setdefault('world_accounts', {})[pda] = (pda, name, slot, raw)
+
+    def _note_route(self, swap: Any) -> None:
+        key = swap_key_from_tx_hash(swap.from_tx_hash).hex()
+        if key not in self._routes:
+            route = PayoutRoute(str(swap.to_chain), str(swap.miner_to_addr), str(swap.user_to_addr), int(self.clock()))
+            self._routes[key] = route
+            row = (key, route.chain, route.sender, route.recipient, route.seen_at)
+            self._changes.setdefault('world_routes', {})[key] = row
 
     def _drop(self, name: str, pda: str, slot: int) -> None:
         self._accounts.get(name, {}).pop(pda, None)
@@ -240,9 +276,20 @@ class WorldReader(Component):
                 if claim.swap_key == swap_key and not claim.initiated:
                     self._set_deposit(key, DepositClaim(claim.swap_key, claim.slot, claim.seen_at, True))
         elif record.name == 'SwapFulfilled':
-            swap_key, to_tx = bytes(f['swap_key']).hex(), str(f['to_tx_hash'])
-            self._fulfillments[swap_key] = (to_tx, t)
-            self._changes.setdefault('world_fulfillments', {})[swap_key] = (swap_key, to_tx, t)
+            swap_key = bytes(f['swap_key']).hex()
+            held = self._fulfillments.get(swap_key)
+            settled = held is not None and held.settled
+            self._set_fulfillment(swap_key, Fulfillment(str(f['to_tx_hash']), t, str(f['miner']), settled))
+        elif record.name == 'SwapCompleted':
+            # A completion can arrive before its fulfillment (backfill order); the fulfillment keeps the flag.
+            swap_key = bytes(f['swap_key']).hex()
+            held = self._fulfillments.get(swap_key) or Fulfillment('', t, str(f['miner']))
+            self._set_fulfillment(swap_key, Fulfillment(held.to_tx_hash, held.block_time, held.miner, True))
+
+    def _set_fulfillment(self, swap_key: str, f: Fulfillment) -> None:
+        self._fulfillments[swap_key] = f
+        row = (swap_key, f.to_tx_hash, f.block_time, f.miner, int(f.settled))
+        self._changes.setdefault('world_fulfillments', {})[swap_key] = row
 
     def _set_deposit(self, key: str, claim: DepositClaim) -> None:
         self._deposits[key] = claim
@@ -276,7 +323,8 @@ class WorldReader(Component):
         floor = now - HISTORY_HORIZON_SECS
         for table, ledger, when in (
             ('world_deposits', self._deposits, lambda c: c.seen_at),
-            ('world_fulfillments', self._fulfillments, lambda v: v[1]),
+            ('world_fulfillments', self._fulfillments, lambda v: v.block_time),
+            ('world_routes', self._routes, lambda r: r.seen_at),
             ('world_initiated', self._initiated, lambda t: t),
         ):
             for key in [k for k, v in ledger.items() if 0 < when(v) < floor]:
@@ -294,5 +342,6 @@ class WorldReader(Component):
                 attribution=dict(self._attribution),
                 deposits=dict(self._deposits),
                 fulfillments=dict(self._fulfillments),
+                routes=dict(self._routes),
             )
         )
