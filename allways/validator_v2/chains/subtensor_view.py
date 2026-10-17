@@ -1,4 +1,5 @@
-"""The validator's read of Bittensor: the current block and the subnet metagraph, on a slow cadence.
+"""The validator's read of Bittensor: the current block, and the subnet metagraph and alpha prices on a
+slow cadence.
 
 The only reader of the subnet's state on subtensor; weights, scoring and the stake-weight vote read the
 published ``Head`` instead of each calling subtensor. Its connection is its own (the TAO watcher and the
@@ -7,8 +8,10 @@ weight setter each hold theirs), so a slow metagraph sync can't stall a leg chec
 from __future__ import annotations
 
 import time
-from dataclasses import dataclass
-from typing import Any, Callable, Optional
+from dataclasses import dataclass, field
+from typing import Any, Callable, Dict, Optional
+
+import bittensor as bt
 
 from allways.validator_v2.runtime.bus import Latest
 from allways.validator_v2.runtime.component import Component
@@ -22,6 +25,7 @@ class Head:
     block_read_at: float
     metagraph: Any  # bt.Metagraph: hotkeys, alpha_stake, …
     metagraph_read_at: float
+    prices: Dict[int, Any] = field(default_factory=dict)  # netuid → alpha price (Balance), read with the metagraph
 
     def block_at(self, now: float, seconds_per_block: float = 12.0) -> int:
         """The block now, projected from the last read (a read is at most one tick old)."""
@@ -41,6 +45,7 @@ class SubtensorView(Component):
         self._subtensor: Any = None
         self._metagraph: Optional[Any] = None
         self._metagraph_at = 0.0
+        self._prices: Dict[int, Any] = {}
 
     def setup(self) -> None:
         self._subtensor = self._factory()
@@ -50,4 +55,8 @@ class SubtensorView(Component):
         if self._metagraph is None or now - self._metagraph_at >= METAGRAPH_SYNC_SECS:
             self._metagraph = self._subtensor.metagraph(self.netuid)
             self._metagraph_at = now
-        self.out.set(Head(block, now, self._metagraph, self._metagraph_at))
+            try:
+                self._prices = dict(self._subtensor.get_subnet_prices())
+            except Exception as e:  # stale prices keep their last value; scoring checks their age
+                bt.logging.warning(f'subtensor: subnet prices unreadable: {e}')
+        self.out.set(Head(block, now, self._metagraph, self._metagraph_at, self._prices))
