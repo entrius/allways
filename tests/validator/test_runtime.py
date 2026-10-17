@@ -134,11 +134,12 @@ def test_a_requeued_intent_never_replaces_a_newer_one_with_its_key():
 def test_an_episode_logs_its_start_once_a_change_again_and_its_end():
     said = []
     episodes = Episodes()
+    say = lambda message, **_: said.append(message)  # noqa: E731
     for _ in range(5):
-        episodes.start('world', 'stale', said.append)
-    episodes.start('world', 'staler', said.append)
-    episodes.end('world', 'fresh', said.append)
-    episodes.end('world', 'fresh again', said.append)  # not open: silent
+        episodes.start('world', 'stale', say)
+    episodes.start('world', 'staler', say)
+    episodes.end('world', 'fresh', say)
+    episodes.end('world', 'fresh again', say)  # not open: silent
     assert said == ['stale', 'staler', 'fresh']
 
 
