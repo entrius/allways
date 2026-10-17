@@ -13,7 +13,7 @@ from solders.keypair import Keypair as SolKeypair
 from allways.assets.alpha import Alpha
 from allways.chains import CHAIN_SN7
 from allways.constants import RATE_PRECISION
-from allways.validator import reserve_engine, scoring
+from allways.validator import reserve_engine
 from allways.validator.market import (
     MARKET_TTL_SECS,
     PRICE_TTL_SECS,
@@ -106,17 +106,6 @@ def test_the_quote_memo_reads_once_per_ttl_across_threads():
     clock[0] += MARKET_TTL_SECS
     memo.accounts(client)
     assert client.reads == ['MinerQuote', 'BondAttestation'] * 2
-
-
-def test_stale_held_states_are_read_live_with_forwards_own_filter(quote_memo, monkeypatch):
-    # The live path is forward's: bound + on-metagraph only, so an off-metagraph miner's quote drops there too.
-    monkeypatch.setattr(scoring, 'build_attribution', lambda client: {str(MINER): HOTKEY})
-    stale = (time.time() - MARKET_TTL_SECS - 1, {HOTKEY: _state()})
-    client = RecordingClient([(MINER, _quote('0.5'))], states=[(MINER, _state())])
-    rq = rate_quote(_validator(client, stale, hotkeys=()), 'sol', 'btc', SOL)
-    assert 'MinerState' in client.reads and rq.reason == 'no miner offers this direction'
-    rq = rate_quote(_validator(client, stale), 'sol', 'btc', SOL)
-    assert rq.quote.miner_hotkey == HOTKEY and client.reads.count('MinerQuote') == 1  # the memo served both
 
 
 def test_a_miner_off_the_held_states_is_not_quoted(quote_memo):

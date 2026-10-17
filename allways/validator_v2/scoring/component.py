@@ -1,13 +1,10 @@
 """Scoring: the crown ledger fed from program events, one reward vector per round, and the weights.
 
-The scoring math is lifted unchanged from ``allways.validator.scoring`` (pools, crown replay, capacity,
-quality slice, eligibility). What changes is where it reads: the ledger instead of the old state store,
-and the World and the subtensor ``Head`` instead of a fresh scan of the program each round (``_View``)."""
+A round reads the ledger and the World (``rewards.score_round``); nothing in it reads a chain."""
 
 from __future__ import annotations
 
 import time
-from dataclasses import dataclass, field
 from functools import partial
 from types import SimpleNamespace
 from typing import Any, Callable, Dict, List, Optional, Tuple
@@ -17,84 +14,19 @@ import numpy as np
 
 from allways.constants import MAX_SCORING_BACKFILL_SECS, RECYCLE_UID, SCORING_WINDOW_SECS
 from allways.eligibility import quote_addresses_valid
-from allways.validator.scoring import build_halted_rewards, calculate_miner_rewards, fill_held_crown
 from allways.validator_v2.chains.subtensor_view import Head
 from allways.validator_v2.chains.watcher import ChainWatcher, Probe
 from allways.validator_v2.feed.events import FeedStatus
 from allways.validator_v2.runtime.bus import Latest, Subscription
 from allways.validator_v2.runtime.component import Component
 from allways.validator_v2.scoring.ledger import Ledger
+from allways.validator_v2.scoring.rewards import AlphaPrices, RoundResult, fill_held_crown, halted_round, score_round
 from allways.validator_v2.store.db import Store
 from allways.validator_v2.world.snapshot import World
 from neurons.base.utils.weight_utils import convert_weights_and_uids_for_emit, process_weights_for_netuid
 
 LAST_SCORED = 'scoring.last_scored_time'
 JUDGE_WAIT_SECS = 60.0  # a quote whose address check hasn't come back by then ingests unjudged
-
-
-@dataclass(frozen=True)
-class RoundResult:
-    window_start: int
-    window_end: int
-    hotkeys: Tuple[str, ...]  # the metagraph the rewards are indexed by
-    rewards: np.ndarray  # per uid, before the EMA
-    halted: bool = False
-
-
-class _Accounts:
-    """The World as the ``get_all`` client the lifted functions read accounts through."""
-
-    def __init__(self, world: World) -> None:
-        self.world = world
-
-    def get_all(self, name: str) -> List[Tuple[str, Any]]:
-        return list(self.world.all(name))
-
-
-class _Config:
-    def __init__(self, config: Any) -> None:
-        self._config = config
-
-    def config(self) -> Any:
-        return self._config
-
-    def halted(self) -> bool:
-        return bool(self._config.halted)
-
-
-class _Off:
-    def is_enabled(self) -> bool:
-        return False
-
-
-class _Prices:
-    def __init__(self, head: Head) -> None:
-        self._prices = head.prices
-
-    def get_subnet_prices(self) -> Dict[int, Any]:
-        if not self._prices:
-            raise RuntimeError('no subnet prices yet')
-        return self._prices
-
-
-@dataclass
-class _View:
-    """Exactly what the lifted scoring functions read off the old validator object."""
-
-    world: World
-    head: Head
-    ledger: Ledger
-    assets: Dict[str, Any]
-    last_scored_time: int
-    alpha_prices: Dict[str, Tuple[int, float]] = field(default_factory=dict)
-
-    def __post_init__(self) -> None:
-        self.metagraph = self.head.metagraph
-        self.state_store = self.event_index = self.ledger
-        self.solana_client = _Accounts(self.world)
-        self.solana_config_cache = _Config(self.world.config)
-        self.database_storage = _Off()
-        self.subtensor = _Prices(self.head)
 
 
 class Scoring(Component):
@@ -123,6 +55,7 @@ class Scoring(Component):
         self.feed_status, self.store, self.out = feed_status, store, out
         self.assets, self.watchers = assets, watchers
         self.ledger = Ledger(store)
+        self.prices = AlphaPrices(assets, lambda: (self.head.get()[0] or SimpleNamespace(prices=None)).prices)
         self._held: List[Tuple[Any, str, float]] = []  # QuoteSets waiting on an address check
         self._dropped = 0
         row = store.conn().execute("SELECT slot FROM acks WHERE consumer = 'scoring'").fetchone()
@@ -146,7 +79,7 @@ class Scoring(Component):
             self._round(world, head, int(now), max(last, int(now) - MAX_SCORING_BACKFILL_SECS))
 
     def _ingest(self, records: List[Any], world: World, head: Head, now: float, status: Optional[FeedStatus]) -> None:
-        view = _View(world, head, self.ledger, self.assets, 0)
+        fill = partial(fill_held_crown, world, set(head.metagraph.hotkeys), self.ledger, self.prices)
         ttl = int(getattr(world.config, 'reservation_ttl_secs', 0) or 0)
         fresh = [(r, _hotkey(r, world), now) for r in records if int(r.slot or 0) >= self._acked_slot]
         pending, self._held = self._held + fresh, []
@@ -159,7 +92,7 @@ class Scoring(Component):
                     self._held.append((record, hotkey, since))
                     continue
                 try:
-                    self.ledger.ingest(record, hotkey, ttl, usable, partial(fill_held_crown, view))
+                    self.ledger.ingest(record, hotkey, ttl, usable, fill)
                 except Exception as e:  # one malformed event must not hold back the rest
                     bt.logging.warning(f'scoring: {record.name} at {record.signature} not ingested: {e}')
             if status is not None and status.cursor is not None:
@@ -184,14 +117,16 @@ class Scoring(Component):
         return verdict.error is None and bool(verdict.info)  # a failed check judges nothing
 
     def _round(self, world: World, head: Head, now: int, last: int) -> None:
-        view = _View(world, head, self.ledger, self.assets, last)
-        halted = bool(world.config.halted)
-        rewards, _ = build_halted_rewards(view) if halted else calculate_miner_rewards(view, now)
+        hotkeys = tuple(head.metagraph.hotkeys)
+        if world.config.halted:
+            result = halted_round(hotkeys, last, now)
+        else:
+            result = score_round(world, hotkeys, self.ledger, self.assets, self.prices, last, now)
         self.ledger.prune(now)
         with self.store.tx() as c:
             Store.set_meta(c, LAST_SCORED, str(now))
-        self.out.set(RoundResult(last, now, tuple(head.metagraph.hotkeys), np.asarray(rewards, np.float32), halted))
-        bt.logging.info(f'scoring: round [{last}, {now}] scored' + (' (halted: recycled)' if halted else ''))
+        self.out.set(result)
+        bt.logging.info(f'scoring: round [{last}, {now}] scored' + (' (halted: recycled)' if result.halted else ''))
 
 
 def quote_usable(

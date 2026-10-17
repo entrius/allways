@@ -17,7 +17,7 @@ from allways.classes import ActivityTransition, MinerActivity, next_activity
 from allways.constants import CLEARING_RETENTION_SECS, EVENT_RETENTION_SECS, RATE_PRECISION, RECONCILE_QUIET_SECS
 from allways.solana.pdas import BACKING_BITS
 from allways.utils.rate import quantize_rate_fixed
-from allways.validator.scoring import EventKind
+from allways.validator_v2.scoring.rewards import EventKind
 from allways.validator_v2.store.db import Store
 
 OWNER, VERSION = 'scoring', 1
@@ -57,7 +57,7 @@ def _lower(fields: Any, key: str, default: Optional[str] = None) -> Optional[str
 
 
 class Ledger:
-    """Also the read interface the lifted crown functions take as both ``store`` and ``event_index``."""
+    """Written by program events and the round's anchors; read by the crown replay (``rewards``)."""
 
     def __init__(self, store: Store) -> None:
         self.store = store
@@ -211,7 +211,7 @@ class Ledger:
         legs = (f['from_amount'], f['to_amount'], collateral)
         self.put_fill(bytes(f['swap_key']).hex(), at, hotkey, lane, legs, qualified)
 
-    # ── anchors from the World (called once per round by the lifted scorer) ──
+    # ── anchors from the World (once per round) ──
 
     def reconcile_live_state(
         self, live_states: Dict[str, Any], now: int, live_bonds: Optional[Dict[str, int]] = None

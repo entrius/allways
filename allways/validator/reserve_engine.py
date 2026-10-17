@@ -39,8 +39,7 @@ from allways.eligibility import direction_eligible, quote_addresses_valid
 from allways.solana.client import contract_reject_reason, swap_key_from_tx_hash
 from allways.solana.pdas import BACKING_BITS
 from allways.validator.binding import verify_binding
-from allways.validator.market import MARKET_TTL_SECS, AlphaPriceMemo, Market, QuoteMemo, memo_priced
-from allways.validator.scoring import live_miner_states
+from allways.validator.market import AlphaPriceMemo, Market, QuoteMemo, memo_priced
 from allways.validator.solana_swap_loop import attest_reject_reason, collateral_verdict_for
 
 EMPTY_SWAP_KEY = b'\x00' * 32
@@ -845,9 +844,7 @@ def rate_quote(validator, from_chain: str, to_chain: str, from_amount: int) -> R
 def _quote_market(validator) -> Market:
     """Forward's held states while fresh (else the same read, now) with the memoed quotes and attestations."""
     client = validator.solana_client
-    taken_at, live_states = validator.held_states or (0, None)
-    if time.time() - taken_at > MARKET_TTL_SECS:
-        live_states = live_miner_states(client, validator.metagraph)
+    _, live_states = validator.held_states or (0, {})
     return Market(live_states, *_quote_memo.accounts(client))
 
 

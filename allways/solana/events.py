@@ -15,8 +15,8 @@ from construct import ConstructError
 from solders.pubkey import Pubkey
 
 # One source of truth for event discriminators + borsh layouts (all program events) lives in layouts.py,
-# alongside the account layouts. The validator crown ingests only the subset it cares about (event_index.py
-# dispatches by name and ignores the rest); the dashboard indexer decodes the full set from the same tables.
+# alongside the account layouts. Each validator component folds only the events it reads and ignores the
+# rest; the dashboard indexer decodes the full set from the same tables.
 from allways.solana.layouts import EVENT_DISCRIMINATORS, EVENT_LAYOUTS, EVENT_PRIOR_LAYOUTS, EVENT_PUBKEY_FIELDS
 
 _BY_DISC = {disc: name for name, disc in EVENT_DISCRIMINATORS.items()}

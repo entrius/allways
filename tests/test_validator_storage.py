@@ -12,7 +12,6 @@ test-local ``OperationalError``, which ``is_connection_failure`` matches by clas
 """
 
 import contextlib
-from types import SimpleNamespace
 
 from allways.validator.storage import storage as storage_mod
 from allways.validator.storage.database import is_connection_failure
@@ -161,21 +160,6 @@ def test_disabled_flag_never_dials(monkeypatch):
     storage = DatabaseStorage()
     assert not storage.is_enabled()
     assert not storage.upsert_current_crown_snapshot({}).success
-
-
-def test_gated_caller_path_reaches_the_redial(monkeypatch):
-    """Through a REAL caller (scoring._flush_halt_window, same is_enabled() gate as forward.py):
-    with the connection dead, the gate must still pass so the write methods — which own
-    connection state — get to redial. Regression for the unreachable-reconnect review finding."""
-    from allways.validator.scoring import _flush_halt_window
-
-    fresh = FakeConnection()
-    storage = make_storage(monkeypatch, [None, fresh])  # aw-db down at validator boot
-    force_retry_window(storage)
-
-    _flush_halt_window(SimpleNamespace(database_storage=storage), current_time=1_000_000)
-    assert storage.db_connection is fresh
-    assert fresh.commits == 2  # flush_halt_window + upsert_current_crown_snapshot both landed
 
 
 def test_halt_flush_clears_live_score_tip(monkeypatch):
