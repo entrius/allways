@@ -21,6 +21,7 @@ from allways.validator_v2.world.snapshot import World
 # A World older than this is too stale to decide deadline-bound actions on; the actuator waits instead.
 MAX_WORLD_AGE_SECS = 30.0
 SENDS_PER_TICK = 16
+SENT, NOOP, FAILED = 'sent', 'noop', 'failed'
 
 
 class Planner(Protocol):
@@ -101,32 +102,35 @@ class Actuator(Component):
                 continue
             if intent.deadline < now:
                 bt.logging.warning(f'actuator: {intent.key} past its deadline by {now - intent.deadline:.0f}s')
-            if self._send(intent, now):
+            outcome = self._send(intent, now)
+            if outcome == SENT:
                 if intent.key in submitted:
                     self._submitted.add(intent.key)
             else:
-                # Went nowhere (no-op, lost race, rejected): rest it, so it isn't re-sent every tick.
+                # Went nowhere: rest it, so it isn't re-sent every tick. A submitted intent that was a
+                # no-op (already voted, lost a race) is done; one that failed goes back in the inbox.
                 self._resting[intent.key] = now + (action.retry_secs if action is not None else 6.0)
-                if intent.key in submitted:
+                if intent.key in submitted and outcome == FAILED:
                     self.queue.push(intent)
             sent += 1
 
-    def _send(self, intent: Intent, now: float) -> bool:
-        """True when a transaction went out and is being tracked."""
+    def _send(self, intent: Intent, now: float) -> str:
+        """SENT when a transaction went out and is being tracked; NOOP when the executor found nothing to
+        do; FAILED when the send raised."""
         executor = self.executors.get(intent.key[0])
         if executor is None:
             bt.logging.error(f'actuator: no executor for {intent.key[0]!r}')
-            return False
+            return FAILED
         try:
             signature = executor(self._client, intent)
         except Exception as e:
             bt.logging.warning(f'actuator: {intent.key} send failed: {e}')
-            return False  # the planner re-plans it next tick if still due
+            return FAILED  # the planner re-plans it next tick if still due
         if not signature:
-            return False
+            return NOOP
         self.confirms.track(signature, intent, now)
         self._in_flight.add(intent.key)
-        return True
+        return SENT
 
     def _settle(self, now: float) -> None:
         if not self.confirms.pending():

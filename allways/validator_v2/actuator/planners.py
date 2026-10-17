@@ -60,9 +60,10 @@ ACTIONS = {
     # Hygiene
     'vote_deactivate': Action(Urgency.SOFT, _soft, retry_secs=300.0),
     'vote_set_weights': Action(Urgency.SOFT, _soft, retry_secs=1800.0),
-    # Relay writes on Solana (enqueued by a hub relay, sent by the actuator)
-    'vote_set_attestation': Action(Urgency.VOTE, _soft),
-    'vote_attest_heartbeat': Action(Urgency.SOFT, _soft),
+    # Relay writes on Solana (enqueued by a hub relay, sent by the actuator). A held hub refuses a lower
+    # attestation until its swap ends: retried each minute, not each tick.
+    'vote_set_attestation': Action(Urgency.VOTE, _soft, retry_secs=60.0),
+    'vote_attest_heartbeat': Action(Urgency.SOFT, _soft, retry_secs=60.0),
 }
 
 

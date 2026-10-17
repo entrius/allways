@@ -17,13 +17,15 @@ import bittensor as bt  # noqa: E402
 from allways.assets import create_assets  # noqa: E402
 from allways.chains import apply_testnet_network_defaults  # noqa: E402
 from allways.constants import HUB_CHAINS, NETUID_FINNEY  # noqa: E402
-from allways.solana import keys  # noqa: E402
+from allways.solana import keys, pdas  # noqa: E402
 from allways.solana.client import AllwaysSolanaClient  # noqa: E402
 from allways.solana.rpc import assert_cluster_safe, resolve_rpc_url  # noqa: E402
 from allways.utils.config import add_args, add_validator_args, check_config, config  # noqa: E402
 from allways.utils.subtensor import build_subtensor, serialize_subtensor  # noqa: E402
 from allways.validator_v2.app import Config, build  # noqa: E402
 from allways.validator_v2.chain.gateway import parse_endpoints  # noqa: E402
+from allways.validator_v2.relay.component import ink_vault  # noqa: E402
+from allways.vault import VaultConfigError  # noqa: E402
 from neurons.base.neuron import validator_mode  # noqa: E402
 
 
@@ -66,6 +68,12 @@ def main() -> None:
         subtensor=serialize_subtensor(build_subtensor(config=cfg)),
         solana_rpc_url=rpc_url,
     )
+    wallet = bt.Wallet(config=cfg)
+    vaults = {}
+    try:  # the vault address is the relay's on/off switch: without one, nothing is relayed
+        vaults[pdas.BACKING_CHAIN_TAO] = ink_vault(lambda: build_subtensor(config=cfg), wallet)
+    except VaultConfigError as e:
+        bt.logging.info(f'bond relay off: {e}')
     app = build(
         Config(
             solana_rpc_url=rpc_url,
@@ -74,7 +82,8 @@ def main() -> None:
             state_dir=state_dir,
             netuid=netuid,
             endpoints=tuple(parse_endpoints(os.environ.get('ALLWAYS_RPC_ENDPOINTS', ''))),
-            wallet=bt.Wallet(config=cfg) if sets_weights else None,
+            wallet=wallet if sets_weights else None,
+            vaults=vaults,
             weights_alpha=float(cfg.neuron.moving_average_alpha),
             epoch_length=int(cfg.neuron.epoch_length),
         ),

@@ -137,9 +137,26 @@ def test_a_send_that_went_nowhere_rests_instead_of_repeating_every_tick():
     assert len(sends) == 2
 
 
-def test_the_app_builds_with_relay_and_serving_off(tmp_path):
+def test_the_app_builds_with_no_relay_without_a_vault_and_serving_off(tmp_path):
     cfg = Config(solana_rpc_url='http://unused', program_id=None, keypair=Keypair(), state_dir=str(tmp_path), netuid=19)
     app = build(cfg, assets={}, subtensor_factory=lambda: None)
     names = {c.name for c in app.components}
     assert {'world', 'actuator', 'feed', 'scoring', 'weights', 'subtensor', 'usage'} <= names
     assert not any(n.startswith('relay') or n == 'serving' for n in names)
+
+
+def test_a_configured_vault_adds_its_relay_which_blocks_swaps_for_a_miner_owing_a_slash(tmp_path):
+    cfg = Config(
+        solana_rpc_url='http://unused',
+        program_id=None,
+        keypair=Keypair(),
+        state_dir=str(tmp_path),
+        netuid=19,
+        vaults={'tao': lambda: None},
+    )
+    app = build(cfg, assets={}, subtensor_factory=lambda: None)
+    relay = next(c for c in app.components if c.name == 'relay-tao')
+    relay.ledger.record_relay_slash('aa', str(MINER), 'tao', 1, 1, 'payee', NOW)
+    swaps = next(p for p in next(c for c in app.components if c.name == 'actuator').planners if p.name == 'swaps')
+    assert swaps.owes_settlement(SimpleNamespace(miner=MINER, collateral_chain='tao'))
+    assert not swaps.owes_settlement(SimpleNamespace(miner=ME, collateral_chain='tao'))

@@ -176,6 +176,29 @@ def vote_set_weights(client: Any, intent: Intent) -> Optional[str]:
         raise
 
 
+def vote_set_attestation(client: Any, intent: Intent) -> Optional[str]:
+    """A held hub's refusal (AttestationWouldStrandSwap) raises, so the relay's vote is retried once the
+    hub frees; an already-recorded vote is a no-op."""
+    miner, chain, balance, locked, epoch = intent.payload
+    try:
+        return client.vote_set_attestation(miner, chain, balance, locked, epoch)
+    except Exception as e:
+        if _benign(e, ('AlreadyVoted',)):
+            return None
+        raise
+
+
+def vote_attest_heartbeat(client: Any, intent: Intent) -> Optional[str]:
+    if client.has_voted(pdas.REQ_ATTEST_HEARTBEAT, pdas.config_pda(client.program_id), client.keypair.pubkey()):
+        return None
+    try:
+        return client.vote_attest_heartbeat()
+    except Exception as e:
+        if _benign(e, ('AlreadyVoted',)):
+            return None
+        raise
+
+
 SWAP_EXECUTORS: Dict[str, Executor] = {
     'vote_initiate': vote_initiate,
     'confirm_swap': confirm_swap,
@@ -192,4 +215,6 @@ EXECUTORS: Dict[str, Executor] = {
     'resolve_pool': resolve_pool,
     'vote_deactivate': vote_deactivate,
     'vote_set_weights': vote_set_weights,
+    'vote_set_attestation': vote_set_attestation,
+    'vote_attest_heartbeat': vote_attest_heartbeat,
 }

@@ -4,7 +4,7 @@ exactly when its component is in the list."""
 from __future__ import annotations
 
 import os
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from typing import Any, Callable, Dict, List, Optional, Tuple
 
 import bittensor as bt
@@ -20,17 +20,18 @@ from allways.validator_v2.chains.subtensor_view import SubtensorView
 from allways.validator_v2.chains.watcher import ChainWatcher
 from allways.validator_v2.export.component import Export
 from allways.validator_v2.feed.events import EventFeed, LiveFeed
-from allways.validator_v2.hubs import HubSpec, relayed_hubs
-from allways.validator_v2.relay.component import VAULT_ADAPTERS, HubRelay
+from allways.validator_v2.hubs import relayed_hubs
+from allways.validator_v2.relay.component import HubRelay
 from allways.validator_v2.runtime.bus import Latest, Topic
 from allways.validator_v2.runtime.component import Component
+from allways.validator_v2.runtime.deadline_queue import DeadlineQueue
 from allways.validator_v2.runtime.supervisor import Supervisor
 from allways.validator_v2.scoring.component import Scoring, WeightSetter
 from allways.validator_v2.serving.component import Serving
 from allways.validator_v2.store.db import Store
 from allways.validator_v2.world.snapshot import WorldReader
 
-# Components that record their own feed position; the feed resumes from the oldest of them.
+# Components that record their own feed position; the feed resumes from the oldest of them (each relay too).
 FEED_CONSUMERS = ('world', 'scoring')
 
 
@@ -47,8 +48,9 @@ class Config:
     wallet: Any = None
     weights_alpha: float = 1.0
     epoch_length: int = 150
+    # Vault clients by hub chain: a vault-custody hub is relayed exactly when its vault is configured.
+    vaults: Dict[str, Callable[[], Any]] = field(default_factory=dict)
     # Not ported yet: off, so nothing half-built runs.
-    relay: bool = False  # relay every vault-custody hub in hubs.HUBS
     serve: bool = False
     export: bool = False
 
@@ -88,17 +90,39 @@ def build(
         store,
     )
     watchers = chain_watchers(assets)
-    swaps = SwapPlanner(watchers, assets, SwapMemory(store), program_id=cfg.program_id)
+    inbox = DeadlineQueue()
+    relays = {
+        h.chain: HubRelay(
+            h,
+            world,
+            events.subscribe(f'relay-{h.chain}'),
+            feed_status,
+            cfg.vaults[h.chain],
+            inbox,
+            store,
+            cfg.keypair,
+            cfg.program_id,
+        )
+        for h in relayed_hubs()
+        if h.chain in cfg.vaults
+    }
+
+    def owes_settlement(swap: Any) -> bool:
+        relay = relays.get(str(swap.collateral_chain).lower())
+        return relay is not None and relay.has_pending_debit(str(swap.miner))
+
+    swaps = SwapPlanner(watchers, assets, SwapMemory(store), owes_settlement, program_id=cfg.program_id)
     actuator = Actuator(
         world,
         [swaps, PoolPlanner(), HygienePlanner(head, me=cfg.keypair.pubkey())],
         dict(EXECUTORS),
         lambda: meter.solana_client(cfg.solana_rpc_url, cfg.program_id, cfg.keypair, cls=SendingClient),
+        inbox,
     )
     feed = EventFeed(
         lambda: meter.solana_client(cfg.solana_rpc_url, cfg.program_id).rpc,
         LiveFeed(resolve_ws_url(cfg.solana_rpc_url), cfg.program_id),
-        lambda: store.resume_point(list(FEED_CONSUMERS)),
+        lambda: store.resume_point([*FEED_CONSUMERS, *(r.name for r in relays.values())]),
         events,
         gaps,
         cfg.program_id,
@@ -135,8 +159,7 @@ def build(
         UsageReport(meter, list(cfg.endpoints)),
         *{id(w): w for w in watchers.values()}.values(),
     ]
-    if cfg.relay:
-        components += [_relay(h, world, events, actuator, store) for h in relayed_hubs()]
+    components += relays.values()
     if cfg.serve:
         components.append(Serving(world, actuator.queue, store))
     if cfg.export and export_storage is not None:
@@ -162,10 +185,3 @@ def chain_watchers(assets: Dict[str, Any]) -> Dict[str, ChainWatcher]:
         watcher.assets[asset_id] = asset
         out[asset_id] = watcher
     return out
-
-
-def _relay(hub: HubSpec, world, events: Topic, actuator: Actuator, store) -> HubRelay:
-    adapter = VAULT_ADAPTERS.get(hub.vault_kind or '')
-    if adapter is None:
-        raise RuntimeError(f'no vault adapter registered for hub {hub.chain} ({hub.vault_kind})')
-    return HubRelay(hub, world, events.subscribe(f'relay-{hub.chain}'), lambda: adapter(hub), actuator.queue, store)
