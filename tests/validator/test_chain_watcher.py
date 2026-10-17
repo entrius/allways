@@ -132,13 +132,14 @@ def test_a_leg_nobody_asks_about_is_forgotten():
     assert btc.verifies == 1 and w._wanted == {}
 
 
-def test_assets_on_one_chain_share_a_watcher():
-    eth = _Chain()
+def test_assets_on_one_network_share_a_watcher():
+    # Each EVM token builds its own chain object for its network, so sharing goes by the network's name.
     assets = {
-        'eth': _Asset(eth, host=None, spb=12),
-        'ethusdc': _Asset(eth, host='eth', spb=12),
+        'eth': _Asset(_Chain(), host='ethereum', spb=12),
+        'ethusdc': _Asset(_Chain(), host='ethereum', spb=12),
         'btc': _Asset(_Chain()),
     }
     watchers = chain_watchers(assets)
     assert watchers['eth'] is watchers['ethusdc'] and watchers['btc'] is not watchers['eth']
+    assert {w.name for w in watchers.values()} == {'chain-ethereum', 'chain-btc'}
     assert watchers['eth'].interval_secs == 6.0 and watchers['btc'].interval_secs == 30.0
