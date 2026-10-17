@@ -188,7 +188,7 @@ def build(
     if serving is not None:
         components.append(serving)
     if export_storage is not None:
-        components.append(Export(rounds, export_storage))
+        components.append(Export(rounds, scoring.crown, export_storage))
 
     def on_fatal(why: str) -> None:
         bt.logging.error(f'supervisor: {why} — exiting for restart')

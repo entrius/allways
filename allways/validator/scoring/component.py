@@ -20,13 +20,21 @@ from allways.validator.feed.events import FeedStatus
 from allways.validator.runtime.bus import Latest, Subscription
 from allways.validator.runtime.component import Component
 from allways.validator.scoring.ledger import Ledger
-from allways.validator.scoring.rewards import AlphaPrices, RoundResult, fill_held_crown, halted_round, score_round
+from allways.validator.scoring.rewards import (
+    AlphaPrices,
+    RoundResult,
+    crown_now,
+    fill_held_crown,
+    halted_round,
+    score_round,
+)
 from allways.validator.store.db import Store
 from allways.validator.world.snapshot import World
 from neurons.base.utils.weight_utils import convert_weights_and_uids_for_emit, process_weights_for_netuid
 
 LAST_SCORED = 'scoring.last_scored_time'
 JUDGE_WAIT_SECS = 60.0  # a quote whose address check hasn't come back by then ingests unjudged
+CROWN_NOW_SECS = 30.0  # how often the live crown is replayed for the dashboard
 
 
 class Scoring(Component):
@@ -60,6 +68,8 @@ class Scoring(Component):
         self._dropped = 0
         row = store.conn().execute("SELECT slot FROM acks WHERE consumer = 'scoring'").fetchone()
         self._acked_slot = int(row['slot']) if row else 0  # the feed may replay from an older consumer's ack
+        self.crown: Latest[Dict] = Latest()  # who holds each quoted lane's crown right now (crown_now rows)
+        self._crown_at = 0.0
 
     def tick(self, now: float) -> None:
         world, _ = self.world.get()
@@ -77,6 +87,9 @@ class Scoring(Component):
         last = int(self.store.get_meta(LAST_SCORED) or now - SCORING_WINDOW_SECS)
         if caught_up and now - last >= SCORING_WINDOW_SECS:
             self._round(world, head, int(now), max(last, int(now) - MAX_SCORING_BACKFILL_SECS))
+        if caught_up and now - self._crown_at >= CROWN_NOW_SECS:
+            self._crown_at = now
+            self.crown.set(crown_now(world, tuple(head.metagraph.hotkeys), self.ledger, self.prices, int(now)))
 
     def _ingest(self, records: List[Any], world: World, head: Head, now: float, status: Optional[FeedStatus]) -> None:
         fill = partial(fill_held_crown, world, set(head.metagraph.hotkeys), self.ledger, self.prices)

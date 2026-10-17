@@ -4,7 +4,7 @@ from types import SimpleNamespace
 
 import numpy as np
 
-from allways.validator.export.component import Export, crown_rows, current_crown, pool_rows, score_rows
+from allways.validator.export.component import Export, crown_rows, pool_rows, score_rows
 from allways.validator.runtime.bus import Latest
 from allways.validator.scoring.rewards import DirectionTrace, RoundResult, ScoreRow
 
@@ -18,14 +18,13 @@ def _round(end=2000, halted=False):
     return RoundResult(1000, end, ('hk_a', 'hk_b'), np.zeros(2), halted, rows, traces, intervals)
 
 
-def test_a_round_becomes_its_crown_intervals_scores_pools_and_current_holders():
+def test_a_round_becomes_its_crown_intervals_scores_and_pools():
     result = _round()
     assert crown_rows(result)[LANE][-1] == (1500, 2000, *LANE, 'hk_b', 0.4, 1.0)
     assert crown_rows(result)[DEAD] == []  # the lane's window is still rewritten: nobody held it
     assert score_rows(result) == [(2000, 'hk_a', *LANE, True, 0.1, 1.0, 0.5, 0.04, 0.0)]
     # Liveness is the pair's: the reverse direction cleared nothing but its pair is live, so it is listed.
     assert pool_rows(result) == [(2000, *LANE, 0.1, 5, True), (2000, *DEAD, 0.0, 0, True)]
-    assert current_crown(result) == {LANE: [(*LANE, 'hk_a', 0.6, 1.0, 2000), (*LANE, 'hk_b', 0.4, 1.0, 2000)], DEAD: []}
 
 
 class _Storage:
@@ -51,13 +50,27 @@ class _Storage:
 
 def test_rounds_the_database_refused_are_written_oldest_first_once_it_is_back():
     rounds, storage = Latest(), _Storage()
-    export = Export(rounds, storage)
+    export = Export(rounds, Latest(), storage)
     rounds.set(_round(end=2000))
     export.tick(0)
     rounds.set(_round(end=3000, halted=True))
     export.tick(1)
     storage.up, storage.calls = True, []
     export.tick(2)
-    assert storage.calls == [('flush', 2000), ('halt', 3000), 'crown']  # only the newest round sets the tips
+    assert storage.calls == [('flush', 2000), ('halt', 3000)]  # a halted newest round has no score tip
     export.tick(3)
-    assert storage.calls == [('flush', 2000), ('halt', 3000), 'crown']  # nothing held, nothing rewritten
+    assert storage.calls == [('flush', 2000), ('halt', 3000)]  # nothing held, nothing rewritten
+
+
+def test_the_live_crown_is_written_when_its_holders_change_and_retried_until_it_lands():
+    crown, storage = Latest(), _Storage()
+    export = Export(Latest(), crown, storage)
+    crown.set({LANE: [(*LANE, 'hk_a', 1.0, 2.0, 100)]})
+    export.tick(0)
+    storage.up = True
+    export.tick(1)
+    crown.set({LANE: [(*LANE, 'hk_a', 1.0, 2.0, 130)]})  # same holder, later stamp: no write
+    export.tick(2)
+    crown.set({LANE: [(*LANE, 'hk_b', 1.0, 2.0, 160)]})
+    export.tick(3)
+    assert storage.calls == ['crown', 'crown', 'crown']

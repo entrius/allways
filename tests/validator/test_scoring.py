@@ -143,6 +143,17 @@ def test_a_quote_older_than_history_is_anchored_from_the_world_and_earns_from_th
     assert rounds.get()[0].rewards[0] > 0
 
 
+def test_the_live_crown_is_republished_between_rounds_once_caught_up(tmp_path):
+    scoring, *_ = _scoring(tmp_path, _world(quotes=[_quote('pk_a')]), catching_up=True)
+    scoring.tick(NOW)
+    assert scoring.crown.get()[0] is None  # behind the feed: "now" isn't known yet
+    scoring, *_ = _scoring(tmp_path, _world(quotes=[_quote('pk_a')]), db='caught.db')
+    scoring.tick(NOW)  # the round anchors the quote at NOW
+    scoring.tick(NOW + 60)
+    crown, _ = scoring.crown.get()
+    assert [row[3] for row in crown[('btc', 'sol', 'sol')]] == ['hk_a']
+
+
 def test_events_of_unbound_miners_are_skipped_and_the_feed_position_is_acked(tmp_path):
     scoring, events, _, store, *_ = _scoring(tmp_path, _world(), catching_up=True)
     events.publish_many([_quote_set('pk_a', NOW - 10), _quote_set('pk_unbound', NOW - 10)])

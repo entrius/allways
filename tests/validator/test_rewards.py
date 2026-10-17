@@ -33,6 +33,7 @@ from allways.validator.scoring.rewards import (
     crown_can_fund,
     crown_depth_shares,
     crown_holders_at_instant,
+    crown_now,
     fill_held_crown,
     make_crown_predicates,
     replay_crown_time_window,
@@ -699,6 +700,19 @@ def test_a_round_pays_the_crown_holder_its_lane_pool_and_recycles_the_rest():
 def test_an_ineligible_miner_is_no_crown_candidate_so_the_next_rate_earns():
     result = _score(_round_world(failed_b=MAX_FAILED_SWAPS + 1))
     assert result.rewards[0] > 0 and result.rewards[1] == 0
+
+
+def test_the_live_crown_is_who_holds_each_quoted_lane_right_now_and_moves_with_the_ledger():
+    ledger = _ledger({'hk_a': NEXT, 'hk_b': BEST})
+    prices = AlphaPrices({}, lambda: None)
+    assert crown_now(_round_world(), HOTKEYS, ledger, prices, NOW) == {LANE: [(*LANE, 'hk_b', 1.0, BEST, NOW)]}
+    ledger.put(NOW + 5, 'hk_b', ACTIVITY, int(ActivityTransition.RESERVE_START), hub='sol')
+    assert crown_now(_round_world(), HOTKEYS, ledger, prices, NOW + 10) == {
+        LANE: [(*LANE, 'hk_a', 1.0, NEXT, NOW + 10)]
+    }
+    halted = _round_world()
+    halted.config.halted = True
+    assert crown_now(halted, HOTKEYS, ledger, prices, NOW + 10) == {LANE: []}
 
 
 def test_a_fill_qualifies_only_if_its_miner_held_the_crown_when_reserved():
