@@ -74,6 +74,15 @@ def main() -> None:
         vaults[pdas.BACKING_CHAIN_TAO] = ink_vault(lambda: build_subtensor(config=cfg), wallet)
     except VaultConfigError as e:
         bt.logging.info(f'bond relay off: {e}')
+    # Serving: the axon unless --neuron.axon_off, the seam when ALLWAYS_SEAM_SECRET is set. It checks chains on
+    # its own connections, as the old axon handlers did.
+    serve_axon = not cfg.neuron.axon_off
+    secret = os.environ.get('ALLWAYS_SEAM_SECRET', '')
+    seam = (int(os.environ.get('ALLWAYS_SEAM_PORT', '8710')), secret) if secret else None
+    serving_assets = {}
+    if serve_axon or seam:
+        own = create_assets(subtensor=serialize_subtensor(build_subtensor(config=cfg)), solana_rpc_url=rpc_url)
+        serving_assets = {chain: provider for chain, provider in own.items() if chain in assets}
     app = build(
         Config(
             solana_rpc_url=rpc_url,
@@ -84,6 +93,10 @@ def main() -> None:
             endpoints=tuple(parse_endpoints(os.environ.get('ALLWAYS_RPC_ENDPOINTS', ''))),
             wallet=wallet if sets_weights else None,
             vaults=vaults,
+            axon_wallet=wallet if serve_axon else None,
+            neuron_config=cfg,
+            seam=seam,
+            serving_assets=serving_assets,
             weights_alpha=float(cfg.neuron.moving_average_alpha),
             epoch_length=int(cfg.neuron.epoch_length),
         ),

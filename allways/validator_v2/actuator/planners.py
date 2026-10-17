@@ -88,6 +88,8 @@ class SwapReport:
     decision: str
     reason: Optional[str]
     legs: Dict[str, Tuple[int, int]]  # chain → (confirmations seen, required)
+    from_chain: str = ''  # which of the legs is the source
+    checked_at: float = 0.0
 
 
 # Decision → (intent kind, which account carries its deadline)
@@ -138,7 +140,9 @@ class SwapPlanner:
             action = decide(swap, ctx, int(now), self.fee_divisor)
             self._log(key, swap, action)
             legs = {c: _conf_pair(c, leg.info) for c, leg in ctx.legs.items()}
-            report[key] = SwapReport(status_of(swap), action.decision.value, action.reason, legs)
+            report[key] = SwapReport(
+                status_of(swap), action.decision.value, action.reason, legs, str(swap.from_chain), float(now)
+            )
             send = _SENDS.get(action.decision.value)
             if send is not None:
                 kind, deadline_from = send
