@@ -64,7 +64,8 @@ class Actuator(Component):
         self.executors = executors
         self._client_factory = client_factory
         self._client: Any = None
-        self.queue = inbox or DeadlineQueue()  # writes submitted by serving and the relays
+        # `is None`, not `or`: an empty queue is falsy, and `or` would swap the shared inbox for a private one.
+        self.queue = inbox if inbox is not None else DeadlineQueue()  # writes submitted by serving and the relays
         self.confirms = ConfirmTracker()
         self._in_flight: Set[Tuple[Any, ...]] = set()
         self._submitted: Set[Tuple[Any, ...]] = set()  # in-flight keys that came from the inbox

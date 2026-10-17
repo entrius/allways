@@ -6,7 +6,7 @@ from allways.validator.actuator.actuator import LANDED_HOLD_SECS, Actuator
 from allways.validator.actuator.executors import StaleWorld
 from allways.validator.actuator.planners import ACTIONS, intent
 from allways.validator.runtime.bus import Latest
-from allways.validator.runtime.deadline_queue import Urgency
+from allways.validator.runtime.deadline_queue import DeadlineQueue, Urgency
 from allways.validator.world.snapshot import World
 
 NOW = 1_000_000.0
@@ -156,3 +156,19 @@ def test_a_landed_vote_is_not_re_sent_while_the_world_catches_up():
     world.set(_world(taken_at=NOW + 2 + LANDED_HOLD_SECS))
     act.tick(NOW + 2 + LANDED_HOLD_SECS)  # still planned after the hold: the World says it didn't take
     assert len(sent) == 2
+
+
+def test_writes_pushed_into_the_shared_inbox_after_boot_are_sent():
+    # The inbox is empty when the actuator is built (it always is at boot), and the relays push later.
+    world, inbox, sent = Latest(), DeadlineQueue(), []
+    world.set(_world())
+
+    def execute(client, it):
+        sent.append(it.key)
+        return f'sig-{it.key[1]}'
+
+    act = Actuator(world, [], {k: execute for k in ACTIONS}, lambda: SimpleNamespace(rpc=_Rpc()), inbox)
+    act.setup()
+    inbox.push(intent('vote_set_attestation', ('miner', 'tao'), None, NOW, payload=('miner', 'tao', 1, True, 1)))
+    act.tick(NOW)
+    assert sent == [('vote_set_attestation', ('miner', 'tao'))]
