@@ -420,7 +420,7 @@ class BondRelay:
             return
         self.vote('vote_attest_heartbeat', 'config', None)  # the executor skips a round already voted
         self._last_heartbeat_attempt = now
-        bt.logging.info('relay: heartbeat vote queued')
+        bt.logging.debug('relay: heartbeat vote queued')
         dev_signal.emit('relay_heartbeat')
 
     # ─── vault event polling (freshness, never truth) ────────────────────────

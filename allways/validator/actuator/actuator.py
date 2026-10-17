@@ -108,7 +108,7 @@ class Actuator(Component):
                     self.queue.requeue(intent)
                 continue
             if intent.deadline < now:
-                bt.logging.warning(f'actuator: {intent.key} past its deadline by {now - intent.deadline:.0f}s')
+                bt.logging.warning(f'actuator: {label(intent)} past its deadline by {now - intent.deadline:.0f}s')
             outcome = self._send(intent, now)
             if outcome == SENT:
                 if intent.key in submitted:
@@ -131,11 +131,11 @@ class Actuator(Component):
         try:
             signature = executor(self._client, intent)
         except StaleWorld as e:
-            bt.logging.warning(f'actuator: {intent.key} not sent, {e}')
+            bt.logging.warning(f'actuator: {label(intent)} not sent, {e}')
             self.refresh(e.keys)
             return NOOP
         except Exception as e:
-            bt.logging.warning(f'actuator: {intent.key} send failed: {e}')
+            bt.logging.warning(f'actuator: {label(intent)} send failed: {e}')
             return FAILED  # the planner re-plans it next tick if still due
         if not signature:
             return NOOP
@@ -148,12 +148,14 @@ class Actuator(Component):
             return
         resolved = self.confirms.resolve(self._client.rpc, now)
         for sent in resolved.landed:
+            bt.logging.success(f'actuator: {label(sent.intent)} landed ({sent.signature[:12]}…)')
             self._resting[sent.intent.key] = now + LANDED_HOLD_SECS
             self._done(sent.intent)
         for sent, err in resolved.failed:
-            bt.logging.warning(f'actuator: {sent.intent.key} failed on-chain: {err}')
+            bt.logging.warning(f'actuator: {label(sent.intent)} failed on-chain: {err}')
             self._done(sent.intent)
         for sent in resolved.expired:
+            bt.logging.warning(f'actuator: {label(sent.intent)} never landed, sending again')
             # Never landed. A planned intent is re-planned if still due; a submitted one goes back in.
             if sent.intent.key in self._submitted:
                 self.queue.requeue(sent.intent)
@@ -162,3 +164,12 @@ class Actuator(Component):
     def _done(self, intent: Intent) -> None:
         self._in_flight.discard(intent.key)
         self._submitted.discard(intent.key)
+
+
+def label(intent: Intent) -> str:
+    """``kind subject`` with long keys cut short: ``confirm_swap 9760359fcf51``."""
+    kind, *rest = intent.key
+    subject = rest[0] if rest else ''
+    if isinstance(subject, (tuple, list)):
+        subject = '/'.join(str(part)[:12] for part in subject)
+    return f'{kind} {str(subject)[:12]}'.rstrip()
