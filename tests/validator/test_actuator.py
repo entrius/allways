@@ -2,7 +2,7 @@ from types import SimpleNamespace
 
 from allways.solana import pdas
 from allways.validator import hubs
-from allways.validator.actuator.actuator import Actuator
+from allways.validator.actuator.actuator import LANDED_HOLD_SECS, Actuator
 from allways.validator.actuator.executors import StaleWorld
 from allways.validator.actuator.planners import ACTIONS, intent
 from allways.validator.runtime.bus import Latest
@@ -143,3 +143,16 @@ def test_a_send_the_chain_contradicts_is_dropped_and_its_accounts_re_read():
     assert sent == [('timeout_swap', 'a')] and refreshed == [{('Swap', 'pda')}]
     act.tick(NOW + 2)
     assert len(sent) == 1  # rests like any send that went nowhere, until the World is current again
+
+
+def test_a_landed_vote_is_not_re_sent_while_the_world_catches_up():
+    sent = []
+    act, rpc, world = _actuator([intent('vote_initiate', 'a', SimpleNamespace(reserved_until=NOW + 500), NOW)], sent)
+    act.tick(NOW)
+    rpc.statuses['sig-a'] = {'err': None, 'confirmationStatus': 'confirmed'}
+    act.tick(NOW + 2)  # landed; the World still shows the swap pending, so the planner asks again
+    act.tick(NOW + 4)
+    assert sent == [('vote_initiate', 'a')]
+    world.set(_world(taken_at=NOW + 2 + LANDED_HOLD_SECS))
+    act.tick(NOW + 2 + LANDED_HOLD_SECS)  # still planned after the hold: the World says it didn't take
+    assert len(sent) == 2

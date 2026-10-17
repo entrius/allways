@@ -23,6 +23,9 @@ from allways.validator.world.snapshot import World
 MAX_WORLD_AGE_SECS = 30.0
 SENDS_PER_TICK = 16
 SENT, NOOP, FAILED = 'sent', 'noop', 'failed'
+# A landed send is not re-planned for this long: the World needs a tick or two to show what it did, and a
+# vote whose quorum closed its vote account can't be told apart from one never cast.
+LANDED_HOLD_SECS = 30.0
 
 
 class Planner(Protocol):
@@ -144,6 +147,7 @@ class Actuator(Component):
             return
         resolved = self.confirms.resolve(self._client.rpc, now)
         for sent in resolved.landed:
+            self._resting[sent.intent.key] = now + LANDED_HOLD_SECS
             self._done(sent.intent)
         for sent, err in resolved.failed:
             bt.logging.warning(f'actuator: {sent.intent.key} failed on-chain: {err}')
