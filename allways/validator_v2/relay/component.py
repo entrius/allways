@@ -1,24 +1,18 @@
-"""One relay per vault-custody hub: it mirrors the vault onto Solana (attestations, the heartbeat) and
-carries Solana verdicts to the vault (slashes, fee true-ups, exits).
-
-The relay engine and its jobs are lifted unchanged from ``allways.validator.relay``. What changes is
-what they talk to: Solana reads come from the World, Solana votes go to the actuator's inbox, and the
-store is this hub's ``RelayLedger``. The relay thread is the only caller of its vault."""
+"""One relay per vault-custody hub, on its own thread: the only caller of its vault (``engine``)."""
 
 from __future__ import annotations
 
 import json
 import time
 from pathlib import Path
-from typing import Any, Callable, Dict, List, Optional, Tuple
+from typing import Any, Callable, List, Optional
 
 import bittensor as bt
 
-from allways.solana import pdas
-from allways.validator.relay.engine import BondRelay, RelayConfig
 from allways.validator_v2.actuator.planners import intent
 from allways.validator_v2.feed.events import HISTORY_HORIZON_SECS, FeedStatus
 from allways.validator_v2.hubs import HubSpec
+from allways.validator_v2.relay.engine import BondRelay, RelayConfig
 from allways.validator_v2.relay.ledger import RelayLedger
 from allways.validator_v2.runtime.bus import Latest, Subscription
 from allways.validator_v2.runtime.component import Component
@@ -27,82 +21,6 @@ from allways.validator_v2.store.db import Store
 from allways.validator_v2.world.snapshot import World
 
 RELAY_EVENTS = frozenset({'SwapCompleted', 'SwapTimedOut', 'MinerBackingChanged'})
-
-
-class _WorldSolana:
-    """The program as the relay engine sees it: reads answered from the World, votes queued for the
-    actuator. A vote is handed over, not confirmed; the engine's own throttle keeps it from re-asking."""
-
-    def __init__(self, world: Latest[World], queue: DeadlineQueue, keypair: Any, program_id: Any) -> None:
-        self.world, self.queue, self.keypair, self.program_id = world, queue, keypair, program_id
-
-    def _w(self) -> World:
-        world, _ = self.world.get()
-        if world is None:
-            raise RuntimeError('no World yet')
-        return world
-
-    def get_all(self, name: str) -> List[Tuple[str, Any]]:
-        return list(self._w().all(name))
-
-    def get_bond_attestation(self, miner: Any, chain: str) -> Optional[Any]:
-        return self._w().get('BondAttestation', pdas.bond_attestation_pda(miner, chain, self.program_id))
-
-    def get_miner_state(self, miner: Any) -> Optional[Any]:
-        return self._w().get('MinerState', pdas.miner_state_pda(miner, self.program_id))
-
-    def get_config(self) -> Any:
-        return self._w().config
-
-    def has_voted(self, *args: Any) -> bool:
-        return False  # the heartbeat executor reads the round itself, at send time
-
-    def vote_set_attestation(self, miner: Any, chain: str, balance: int, locked: bool, epoch: int) -> str:
-        payload = (str(miner), chain, int(balance), bool(locked), int(epoch))
-        self.queue.push(intent('vote_set_attestation', (str(miner), chain), None, time.time(), payload))
-        return 'queued'
-
-    def vote_attest_heartbeat(self) -> str:
-        self.queue.push(intent('vote_attest_heartbeat', 'config', None, time.time()))
-        return 'queued'
-
-
-class _Relay(BondRelay):
-    """The lifted engine, attributing miners off the World's verified bindings."""
-
-    def __init__(self, world: Latest[World], *args: Any, **kwargs: Any) -> None:
-        self._world = world
-        super().__init__(*args, **kwargs)
-
-    def attribution(self, refresh: bool = False) -> Dict[str, str]:
-        world, _ = self._world.get()
-        if world is not None:
-            self._attribution, self._attribution_fresh = dict(world.attribution), True
-        return self._attribution
-
-
-class _SettledOnce:
-    """The vault, with each miner's settled counter read at most once per tick: the attestation and the
-    fee ledger both ask for it."""
-
-    def __init__(self, vault: Any) -> None:
-        self._vault = vault
-        self._settled: Dict[str, Optional[int]] = {}
-
-    def __getattr__(self, name: str) -> Any:
-        return getattr(self._vault, name)
-
-    def clear(self) -> None:
-        self._settled.clear()
-
-    def get_settled_total(self, hotkey: str) -> Optional[int]:
-        if hotkey not in self._settled:
-            self._settled[hotkey] = self._vault.get_settled_total(hotkey)
-        return self._settled[hotkey]
-
-    def vote_collect_fees_batch(self, entries: Any) -> Any:
-        self._settled.clear()
-        return self._vault.vote_collect_fees_batch(entries)
 
 
 class HubRelay(Component):
@@ -121,7 +39,6 @@ class HubRelay(Component):
         vault_factory: Callable[[], Any],
         actuator_queue: DeadlineQueue,
         store: Store,
-        keypair: Any,
         program_id: Any = None,
         config: Optional[RelayConfig] = None,
         clock=time.time,
@@ -130,14 +47,13 @@ class HubRelay(Component):
         self.name = f'relay-{hub.chain}'
         self.hub, self.world, self.events, self.feed_status = hub, world, events, feed_status
         self._vault_factory, self.queue, self.store = vault_factory, actuator_queue, store
-        self.keypair, self.program_id = keypair, program_id
+        self.program_id = program_id
         self.cfg = config or RelayConfig.from_env()
         cadence = self.cfg.fee_cadence_secs
         self.ledger = RelayLedger(
             store, hub.chain, self._settled, boundary=lambda t: (t // cadence) * cadence, clock=lambda: self.clock()
         )
-        self.relay: Optional[_Relay] = None
-        self._vault: Optional[_SettledOnce] = None
+        self.relay: Optional[BondRelay] = None
         self._held: List[Any] = []  # events whose ledger write failed, retried next tick
         row = store.conn().execute('SELECT slot FROM acks WHERE consumer = ?', (self.name,)).fetchone()
         self._acked_slot = int(row['slot']) if row else 0
@@ -152,15 +68,24 @@ class HubRelay(Component):
 
     def _settled(self, miner: str) -> Optional[int]:
         hotkey = self.relay.hotkey_for(miner) if self.relay is not None else None
-        return self._vault.get_settled_total(hotkey) if hotkey is not None and self._vault is not None else None
+        return self.relay.settled_total(hotkey) if hotkey is not None else None
+
+    def _vote(self, kind: str, subject: Any, payload: Any) -> None:
+        self.queue.push(intent(kind, subject, None, self.clock(), payload))
 
     def _build(self) -> None:
-        self._vault = _SettledOnce(self._vault_factory())
-        solana = _WorldSolana(self.world, self.queue, self.keypair, self.program_id)
-        self.relay = _Relay(
-            self.world, solana, self._vault, self.ledger, backing=self.hub.chain, clock=self.clock, config=self.cfg
+        vault = self._vault_factory()
+        self.relay = BondRelay(
+            lambda: self.world.get()[0],
+            self._vote,
+            vault,
+            self.ledger,
+            backing=self.hub.chain,
+            program_id=self.program_id,
+            clock=self.clock,
+            config=self.cfg,
         )
-        bt.logging.info(f'{self.name}: on, vault {getattr(self._vault, "address", "?")}')
+        bt.logging.info(f'{self.name}: on, vault {getattr(vault, "address", "?")}')
 
     def tick(self, now: float) -> None:
         world, _ = self.world.get()
@@ -168,7 +93,6 @@ class HubRelay(Component):
             return
         if self.relay is None:
             self._build()  # a failure backs off and retries: a transient vault fault never disables the hub
-        self._vault.clear()
         status, _ = self.feed_status.get()  # read before draining: everything up to its cursor is drained below
         records = self._held + [
             r for r in self.events.drain() if r.name in RELAY_EVENTS and int(r.slot or 0) >= self._acked_slot
@@ -177,7 +101,7 @@ class HubRelay(Component):
         with self.store.tx() as c:
             for record in records:
                 try:
-                    self.relay._ingest_event(record)
+                    self.relay.ingest(record)
                 except Exception as e:  # a verdict must never be dropped: hold it and the heartbeat
                     bt.logging.warning(f'{self.name}: could not ingest {record.name}: {e}')
                     self._held.append(record)

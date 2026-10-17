@@ -140,7 +140,7 @@ def make_validator(solana_client, provider=None, vault=None):
 
 def with_vault(monkeypatch, validator):
     """Serve the handler's vault reads off the validator's fake instead of a real subtensor."""
-    monkeypatch.setattr(activation, 'axon_vault_client', lambda v: getattr(v, '_vault', None))
+    monkeypatch.setattr(activation, '_axon_vault', lambda v: getattr(v, '_vault', None))
     return validator
 
 

@@ -1,4 +1,4 @@
-"""Job 3 — the exit sequence and the fee true-up cadence (Solana → vault).
+"""The exit sequence and the fee true-up cadence (Solana → vault).
 
 **Exit.** Deactivating the TAO purse on Solana comes FIRST and is one-way until re-lock, which is
 what turns "no in-flight swaps" from a snapshot that races the next swap into a stable fact. Only
@@ -73,7 +73,7 @@ def _advance(relay, miner: str, now: int) -> bool:
     if generation is None:
         return False
     total = relay.store.accrued_fee_total(miner, relay.backing, vault_generation=generation)
-    settled = relay.vault.get_settled_total(hotkey)
+    settled = relay.settled_total(hotkey)
     if settled is None:
         return False
     if total > settled:
@@ -84,7 +84,7 @@ def _advance(relay, miner: str, now: int) -> bool:
 def _quiescence(relay, miner: str, now: int) -> Tuple[bool, str]:
     """Full quiescence per the active-lock protocol. The permanent swap_ref markers ARE the slash
     checklist — an unapplied verdict means the vault still owes a seizure against this bond."""
-    ms = relay.solana.get_miner_state(miner)
+    ms = relay.miner_state(miner)
     if ms is None:
         return False, 'miner state unreadable'
     if int(getattr(ms, 'active_backings', 0)) & relay.backing_bit:
@@ -111,11 +111,7 @@ def _settle_residual(relay, miner: str, hotkey: str, total: int, now: int) -> bo
     if not relay.can_write():
         return False
     relay.note_write()
-    if relay.read_only:
-        bt.logging.info(f'relay: WOULD settle residual {total} for {hotkey[:8]} (read-only)')
-        relay.note_vote(key, now)
-        return True
-    result = relay.vault.vote_collect_fees_batch([(hotkey, total)])
+    result = relay.collect_fees([(hotkey, total)])
     relay.note_vote(key, now)
     if not result.ok:
         bt.logging.warning(f'relay: residual settle rejected for {hotkey[:8]} ({result.error or "reverted"})')
@@ -132,10 +128,6 @@ def _unlock(relay, miner: str, hotkey: str, epoch: int, now: int) -> bool:
     if not relay.can_write():
         return False
     relay.note_write()
-    if relay.read_only:
-        bt.logging.info(f'relay: WOULD vote_unlock {hotkey[:8]} at epoch {epoch} (read-only)')
-        relay.note_vote(key, now)
-        return True
     result = relay.vault.vote_unlock(hotkey, epoch)
     relay.note_vote(key, now)
     if not result.ok:
@@ -173,12 +165,8 @@ def maybe_cadence_settle(relay, now: int) -> None:
         relay.store.set_relay_meta(_CADENCE_KEY, boundary)
         return
 
-    if relay.read_only:
-        bt.logging.info(f'relay: WOULD settle {len(entries)} fee entr(ies) at boundary {boundary} (read-only)')
-        relay.store.set_relay_meta(_CADENCE_KEY, boundary)
-        return
     for chunk in _chunks(entries, MAX_BATCH):
-        result = relay.vault.vote_collect_fees_batch(chunk)
+        result = relay.collect_fees(chunk)
         if not result.ok:
             bt.logging.warning(f'relay: fee cadence batch rejected ({result.error or "reverted"})')
             return  # boundary stays unmarked so the next tick retries the whole round
@@ -216,7 +204,7 @@ def _has_delta(relay, entries: Sequence[Tuple[str, int]]) -> Optional[bool]:
     skip/fire decision has to be made on facts, not on a defaulted zero."""
     found = False
     for hotkey, total in entries:
-        settled = relay.vault.get_settled_total(hotkey)
+        settled = relay.settled_total(hotkey)
         if settled is None:
             return None
         if total > settled:
