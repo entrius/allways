@@ -11,17 +11,17 @@ from solders.keypair import Keypair
 
 from allways.solana import pdas
 from allways.solana.events import EventRecord
-from allways.validator.state_store import tx_key
 from allways.validator_v2.actuator.planners import SwapReport
 from allways.validator_v2.actuator.swap_context import SwapMemory
 from allways.validator_v2.app import Config, build
 from allways.validator_v2.chains.subtensor_view import Head
 from allways.validator_v2.feed.events import FeedStatus
 from allways.validator_v2.runtime.bus import Latest, Topic
-from allways.validator_v2.serving.component import Serving, WorldClient
+from allways.validator_v2.serving import requests
+from allways.validator_v2.serving.component import Serving
 from allways.validator_v2.serving.store import ServingStore
 from allways.validator_v2.store.db import Store
-from allways.validator_v2.world.snapshot import DepositClaim, PayoutRoute, World
+from allways.validator_v2.world.snapshot import Accounts, DepositClaim, PayoutRoute, World, tx_key
 
 NOW = 1_000_000
 MINER = Keypair().pubkey()
@@ -70,25 +70,13 @@ def _latest(value):
     return latest
 
 
-def test_the_request_client_reads_accounts_from_the_world_and_resolves_hotkeys_by_its_bindings():
-    world = _latest(_world(_reservation()))
-    client = WorldClient(world, 'http://unused', keypair=Keypair())
-    assert client.get_reservation(MINER, 'sol').from_amount == 100_000
-    assert client.get_reservation(MINER, 'tao') is None
-    assert client.get_config().halted is False
-    assert client.get_hotkey_binding(bytes(HOTKEY.public_key)).miner == MINER
-    assert client.get_hotkey_binding(b'\x02' * 32) is None
-
-
-def test_the_pool_it_just_opened_is_read_live_once(monkeypatch):
-    world = _latest(_world())
-    client = WorldClient(world, 'http://unused', keypair=Keypair())
-    sent = SimpleNamespace(closes_at=NOW + 30)
-    monkeypatch.setattr('allways.solana.client.AllwaysSolanaClient.open_or_request', lambda self, *a: 'sig')
-    monkeypatch.setattr('allways.solana.client.AllwaysSolanaClient._get', lambda self, name, pda: sent)
-    assert client.open_or_request(MINER, 'btc', 'sol', 'sol') == 'sig'
-    assert client.get_pool(MINER, 'sol') is sent
-    assert client.get_pool(MINER, 'sol') is None  # then the World again
+def test_requests_read_accounts_from_the_world_and_resolve_hotkeys_by_its_verified_bindings():
+    accounts = Accounts(_world(_reservation()))
+    assert accounts.get_reservation(MINER, 'sol').from_amount == 100_000
+    assert accounts.get_reservation(MINER, 'tao') is None
+    assert accounts.get_config().halted is False
+    assert accounts.miner_for(HOTKEY.ss58_address) == MINER
+    assert accounts.miner_for(bt.Keypair.create_from_seed('0x' + '22' * 32).ss58_address) is None
 
 
 def _store(tmp_path, world):
@@ -143,7 +131,7 @@ def _serving(tmp_path, world, report=None):
         status,
         store,
         ServingStore(store, lambda: world, SwapMemory(store), {}),
-        lambda: WorldClient(world_latest, 'http://unused', keypair=Keypair()),
+        lambda: SimpleNamespace(keypair=Keypair()),
         {},
         _latest(report or {}),
         {},
@@ -161,7 +149,7 @@ def _get(serving, path):
 
 
 def test_the_seam_answers_status_off_the_world(tmp_path, monkeypatch):
-    monkeypatch.setattr('allways.validator.reserve_engine.time.time', lambda: NOW)
+    monkeypatch.setattr('allways.validator_v2.serving.requests.time.time', lambda: NOW)
     serving = _serving(tmp_path, _world(_reservation()))
     try:
         status = _get(serving, f'/status?miner_hotkey={HOTKEY.ss58_address}')
@@ -170,7 +158,8 @@ def test_the_seam_answers_status_off_the_world(tmp_path, monkeypatch):
         serving._server.shutdown()
 
 
-def test_status_reports_leg_confirmations_and_a_refusal_from_the_swap_planner(tmp_path):
+def test_status_reports_leg_confirmations_and_a_refusal_from_the_swap_planner(tmp_path, monkeypatch):
+    monkeypatch.setattr(requests, 'attest_reject_reason', lambda *a: None)  # the offline gates pass
     report = {
         'aa' * 32: SwapReport(
             'PendingAttestation', 'reject', 'stale deposit', {'btc': (2, 3), 'sol': (0, 32)}, 'btc', NOW
@@ -178,12 +167,14 @@ def test_status_reports_leg_confirmations_and_a_refusal_from_the_swap_planner(tm
     }
     serving = _serving(tmp_path, _world(), report)
     try:
-        loop = serving.view.solana_swap_loop
-        assert loop.leg_confs['aa' * 32] == {
+        detail = {}
+        requests._attach_leg_confs(serving, bytes.fromhex('aa' * 32), detail)
+        assert detail['leg_confs'] == {
             'source': {'have': 2, 'need': 3, 'at': NOW},
             'dest': {'have': 0, 'need': 32, 'at': NOW},
         }
-        assert loop.reject_reasons == {'aa' * 32: 'stale deposit'}
+        requests._add_reject_reason(serving, SimpleNamespace(), bytes.fromhex('aa' * 32), 'claimed', detail)
+        assert detail['reject_reason'] == 'stale deposit'
     finally:
         serving._server.shutdown()
 

@@ -14,8 +14,36 @@ from typing import Any, Optional, Protocol
 from allways.chains import compute_extension_target_secs, get_chain_def
 from allways.constants import CANCEL_REASON_INVALID_DEST, EXTENSION_PADDING_SECONDS, FEE_DIVISOR
 from allways.solana.client import swap_key_from_tx_hash
-from allways.utils.rate import apply_fee_deduction
-from allways.validator.solana_swap_loop import COLLATERAL_REJECT_REASON, attest_reject_reason, is_tx_fresh
+from allways.utils.rate import apply_fee_deduction, expected_swap_amounts
+
+COLLATERAL_REJECT_REASON = 'collateral does not match the alpha leg at fill block'
+
+
+def is_tx_fresh(info: Any, floor_unix: int, grace: int = 0) -> bool:
+    """Replay defense: mined at or after the on-chain floor (unix seconds, less the chain's grace). A deposit
+    in the same second as the reservation is honest, so only one that predates the floor is a replay.
+    Fails closed without a block time."""
+    block_time = getattr(info, 'block_time', None)
+    return block_time is not None and block_time >= floor_unix - grace
+
+
+def attest_reject_reason(providers: Any, swap: Any, fee_divisor: int) -> Optional[str]:
+    """Why a PendingAttestation claim must never attest, or None. Offline and deterministic (quorum votes)."""
+    from_provider = providers.get(swap.from_chain)
+    # Swap keys hash the raw string, so a claim must carry the chain's one canonical spelling.
+    if from_provider is not None and from_provider.chain.canonical_tx_hash(swap.from_tx_hash) != swap.from_tx_hash:
+        return 'source tx hash not in canonical form — refusing to attest'
+    to_provider = providers.get(swap.to_chain)
+    if to_provider is not None and not to_provider.chain.is_valid_address(swap.user_to_addr):
+        return 'dest address invalid — refusing to attest'
+    expected_to, _ = expected_swap_amounts(swap, fee_divisor)  # must agree with the pinned miner rate
+    if expected_to == 0 or abs(int(swap.to_amount) - expected_to) > 1:
+        return f'to_amount {swap.to_amount} != pinned-rate {expected_to}'
+    # A self-transfer is slashed; normalize per chain to catch the EVM checksum variants a raw compare misses.
+    norm = to_provider.chain.normalize_address if to_provider is not None else (lambda a: a)
+    if swap.miner_to_addr and norm(swap.user_to_addr) == norm(swap.miner_to_addr):
+        return 'dest == miner delivery address (poisoned) — refusing to attest'
+    return None
 
 
 class Decision(Enum):

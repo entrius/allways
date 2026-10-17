@@ -9,9 +9,8 @@ from __future__ import annotations
 from typing import Any, Callable, Dict, List, Optional, Set, Tuple
 
 from allways.constants import SWAP_OUTCOME_RETENTION_SECS
-from allways.validator.state_store import tx_key
 from allways.validator_v2.store.db import Store
-from allways.validator_v2.world.snapshot import World
+from allways.validator_v2.world.snapshot import World, tx_key
 
 OWNER, VERSION = 'serving', 1
 TABLES = [

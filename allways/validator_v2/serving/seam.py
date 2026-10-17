@@ -1,12 +1,9 @@
-"""Localhost HTTP seam — the offering transport onto the shared kernel ops (reserve/confirm/rate/status).
+"""Localhost HTTP seam: the request ops (reserve, confirm, rate, status) for a validator's product offering.
 
-Loopback-only by default, shared-secret auth. A validator's product offering (a separate process) calls IN
-here to enter the reservation lottery on a user's behalf and to read swap status; the kernel never calls
-out. Not for public exposure. Off by default: starts only when ``ALLWAYS_SEAM_SECRET`` is set (see
-``maybe_start_seam``). A containerized validator sets ``ALLWAYS_SEAM_HOST=0.0.0.0`` — a container-loopback
-bind is unreachable even from the offering — and relies on the docker network + secret for isolation,
-publishing no port.
-"""
+Loopback-only by default, shared-secret auth; the offering (a separate process) calls in, the validator never
+calls out. Not for public exposure: it runs only when ``ALLWAYS_SEAM_SECRET`` is set. A containerized
+validator sets ``ALLWAYS_SEAM_HOST=0.0.0.0`` (a container-loopback bind is unreachable even from the
+offering) and relies on the docker network and the secret for isolation, publishing no port."""
 
 import json
 import os
@@ -18,20 +15,17 @@ from urllib.parse import parse_qs, urlparse
 
 import bittensor as bt
 
-from allways.validator.reserve_engine import (
+from allways.validator_v2.serving.requests import (
     confirm_deposit,
     rate_quote,
     reserve_on_behalf,
     scan_deposit,
     swap_status,
-    verdict_epoch,
 )
 
 SEAM_HOST = os.environ.get('ALLWAYS_SEAM_HOST', '127.0.0.1')
 
-# Dedupes the identical reads the offering fires at once (many tabs, and its list view
-# reconciles every live row per poll) — uncached, that earned the validator an RPC 429.
-# Held at the consumer's fastest poll: longer would delay stage transitions without deduping more.
+# A deposit scan reads the source chain: identical scans from many tabs at once share one read.
 SEAM_READ_TTL_SECS = 3.0
 
 
@@ -40,20 +34,11 @@ def _ttl_bucket() -> int:
     return int(time.monotonic() / SEAM_READ_TTL_SECS)
 
 
-def _make_handler(validator, secret: str):
-    # Memos are per server, closing over this validator rather than keying on it: the validator
-    # is not required to be hashable, and no module-level table pins it alive. lru_cache does not
-    # store exceptions, so a transient RPC fault is retried rather than pinned for the bucket;
-    # maxsize caps the table so a long-lived seam can't grow an entry per swap ever polled.
-    # `_epoch` keys the memo on the pool-verdict epoch: a read still in flight when a 'rejected' verdict
-    # is published or cleared lands under the old key, so the next poll re-reads instead of inheriting it.
-    @lru_cache(maxsize=512)
-    def cached_status(miner_hotkey: str, swap_key: str, from_chain: str, to_chain: str, _bucket: int, _epoch: int):
-        return swap_status(validator, miner_hotkey, swap_key, from_chain, to_chain)
-
+def _make_handler(ctx, secret: str):
+    # lru_cache stores no exceptions, so a transient fault is retried rather than pinned for the bucket.
     @lru_cache(maxsize=512)
     def cached_deposit_scan(miner_hotkey: str, _bucket: int):
-        return scan_deposit(validator, miner_hotkey)
+        return scan_deposit(ctx, miner_hotkey)
 
     class SeamHandler(BaseHTTPRequestHandler):
         def log_message(self, *args):  # silence default stderr access log
@@ -85,7 +70,7 @@ def _make_handler(validator, secret: str):
                 if url.path == '/rate':
                     # Depth rides along on hit AND miss — the offering's size copy ("min/max right
                     # now is X") needs the true bounds exactly when no quote fits the asked size.
-                    rq = rate_quote(validator, q['from'], q['to'], int(q['amount']))
+                    rq = rate_quote(ctx, q['from'], q['to'], int(q['amount']))
                     depth = {
                         'levels': rq.levels,
                         'max_from_amount': rq.max_from_amount,
@@ -100,13 +85,8 @@ def _make_handler(validator, secret: str):
                     # swap directly — the only route to post-attestation stages, since vote_initiate
                     # consumes the reservation at quorum. Optional from_chain/to_chain pick the
                     # reservation slot carrying that pair (v3.1 holds one per hub).
-                    status = cached_status(
-                        q['miner_hotkey'],
-                        q.get('swap_key', ''),
-                        q.get('from_chain', ''),
-                        q.get('to_chain', ''),
-                        _ttl_bucket(),
-                        verdict_epoch(),
+                    status = swap_status(
+                        ctx, q['miner_hotkey'], q.get('swap_key', ''), q.get('from_chain', ''), q.get('to_chain', '')
                     )
                     return self._send(200, status.__dict__)
                 if url.path == '/deposit-scan':
@@ -130,7 +110,7 @@ def _make_handler(validator, secret: str):
                 body = self._body()
                 if url.path == '/reserve':
                     r = reserve_on_behalf(
-                        validator,
+                        ctx,
                         body['miner_hotkey'],
                         body['from_chain'],
                         body['to_chain'],
@@ -142,7 +122,7 @@ def _make_handler(validator, secret: str):
                     return self._send(200 if r.ok else 422, r.__dict__)
                 if url.path == '/confirm':
                     r = confirm_deposit(
-                        validator, body['miner_hotkey'], body['from_tx_hash'], int(body.get('from_tx_block', 0) or 0)
+                        ctx, body['miner_hotkey'], body['from_tx_hash'], int(body.get('from_tx_block', 0) or 0)
                     )
                     return self._send(200 if r.ok else 422, r.__dict__)
             except (KeyError, ValueError) as e:
@@ -155,18 +135,9 @@ def _make_handler(validator, secret: str):
     return SeamHandler
 
 
-def start_seam(validator, port: int, secret: str) -> ThreadingHTTPServer:
+def start_seam(ctx, port: int, secret: str) -> ThreadingHTTPServer:
     """Start the loopback seam server in a daemon thread. Returns the server (call shutdown() to stop)."""
-    server = ThreadingHTTPServer((SEAM_HOST, port), _make_handler(validator, secret))
+    server = ThreadingHTTPServer((SEAM_HOST, port), _make_handler(ctx, secret))
     threading.Thread(target=server.serve_forever, name='offering-seam', daemon=True).start()
     bt.logging.info(f'Offering seam listening on {SEAM_HOST}:{port}')
     return server
-
-
-def maybe_start_seam(validator):
-    """Start the seam iff an operator opted in (ALLWAYS_SEAM_SECRET set). Generic validators run without it."""
-    secret = os.environ.get('ALLWAYS_SEAM_SECRET', '')
-    if not secret:
-        return None
-    port = int(os.environ.get('ALLWAYS_SEAM_PORT', '8710'))
-    return start_seam(validator, port, secret)

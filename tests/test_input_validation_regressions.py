@@ -4,13 +4,13 @@
   not just shape-matched — else TAO could be sent to an address that decodes to nothing.
 - Empty/whitespace source-tx-hash rejection (PR #167): intake must reject a blank hash before any chain
   lookup. The original CLI guard was lost when reserve→initiate moved on-chain; the surviving guard is
-  in reserve_engine.confirm_deposit, which now strips + rejects whitespace again.
+  in the serving confirm_deposit op, which now strips + rejects whitespace again.
 """
 
 import bittensor as bt
 
 from allways.assets.tao import Tao
-from allways.validator.reserve_engine import confirm_deposit
+from allways.validator_v2.serving.requests import confirm_deposit
 
 
 def test_is_valid_address_verifies_checksum_not_just_shape():
@@ -30,7 +30,7 @@ def test_is_valid_address_verifies_checksum_not_just_shape():
 
 def test_confirm_deposit_rejects_empty_and_whitespace_hash():
     # PR #167: an empty or whitespace-only source tx hash must be rejected at intake, before any chain
-    # lookup or client access (validator is never dereferenced on this path). A real tx hash is never
+    # lookup or client access (the serving context is never dereferenced on this path). A real tx hash is never
     # blank, so stripping-then-rejecting is strictly correct.
     for bad in ('', '   ', '\t\n'):
         res = confirm_deposit(None, 'somehotkey', bad)

@@ -4,10 +4,7 @@ Mocks the solana_client; no chain. Asserts eligibility gating, SOL-numeraire amo
 a joiner quotes against the PINNED pool rate (not the live quote) so it stays rate-consistent for D1.
 """
 
-import tempfile
-import threading
 import time
-from pathlib import Path
 from types import SimpleNamespace
 
 import bittensor as bt
@@ -15,8 +12,9 @@ import pytest
 from solders.keypair import Keypair as SolKeypair
 
 from allways.constants import MAX_FAILED_SWAPS, RATE_PRECISION
-from allways.validator.reserve_engine import _best_offer, reserve_on_behalf
-from allways.validator.state_store import ValidatorStateStore
+from allways.validator_v2.actuator.planners import SwapReport
+from allways.validator_v2.serving.requests import _best_offer, reserve_on_behalf
+from tests.validator_v2.fakes import Ctx, record_fulfillment, record_outcome, serving_store
 
 HK = bt.Keypair.create_from_seed('0x' + '11' * 32)
 HOTKEY = HK.ss58_address
@@ -52,12 +50,8 @@ class FakeClient:
         self.collateral = collateral
         self.calls = []
 
-    # binding resolution (valid sr25519 binding)
-    def get_hotkey_binding(self, hotkey_bytes):
-        return SimpleNamespace(miner=MINER_PK)
-
-    def get_binding(self, miner):
-        return SimpleNamespace(miner=MINER_PK, hotkey=HOTKEY_BYTES, hotkey_sig=BINDING_SIG)
+    def miner_for(self, hotkey):
+        return MINER_PK if hotkey == HOTKEY else None
 
     def get_miner_state(self, miner):
         return self.miner_state
@@ -95,20 +89,14 @@ class FakeClient:
 
 
 def _validator(client):
-    store = ValidatorStateStore(db_path=Path(tempfile.mkdtemp()) / 'state.db')
-    scheduler = SimpleNamespace(
-        scheduled=[], schedule=lambda miner, closes_at: scheduler.scheduled.append((miner, closes_at))
-    )
-    return SimpleNamespace(
-        solana_client=client, axon_lock=threading.RLock(), state_store=store, crank_scheduler=scheduler
-    )
+    return Ctx(client, providers=_ALL_ASSETS())
 
 
 def _reserve(client, from_amount=1_000_000_000):
     # sol->btc: user sends 1 SOL, receives btc
     validator = _validator(client)
     result = reserve_on_behalf(validator, HOTKEY, 'sol', 'btc', USER_PK, str(USER_PK), 'userBTCaddr', from_amount)
-    return result, validator.state_store
+    return result, validator.store
 
 
 def test_reserve_refuses_a_fill_the_in_flight_obligations_leave_uncovered():
@@ -119,16 +107,8 @@ def test_reserve_refuses_a_fill_the_in_flight_obligations_leave_uncovered():
     assert not r.ok and 'collateral too low' in r.reason
 
 
-def test_reserve_reads_the_chain_not_the_held_states():
-    # The held states (what /rate quotes off) know no miner at all; a reserve still reads live.
-    client = FakeClient()
-    validator = _validator(client)
-    validator.held_states = (time.time(), {})
-    assert reserve_on_behalf(validator, HOTKEY, 'sol', 'btc', USER_PK, USER_PK, 'userBTCaddr', 10**9).ok
-
-
 def test_a_new_request_clears_the_pool_rejection_verdict():
-    from allways.validator import reserve_engine
+    from allways.validator_v2.serving import requests as reserve_engine
 
     key = (str(MINER_PK), 'sol', 'btc')
     reserve_engine._routed_rejections[key] = reserve_engine.RoutedRejection('Insufficient collateral', ['u'])
@@ -150,7 +130,6 @@ def test_open_happy_path_persists_routed_request():
     assert len(queued) == 1
     assert queued[0]['user_pubkey'] == USER_PK
     assert queued[0]['from_amount'] == 1_000_000_000
-    store.close()
 
 
 def test_open_normalizes_the_source_address_at_intake():
@@ -158,19 +137,23 @@ def test_open_normalizes_the_source_address_at_intake():
     # canonicalize at intake so a checksummed EVM-style entry can't mint a divergent lock.
     client = FakeClient()
     validator = _validator(client)
-    validator.axon_assets = {
+    validator.providers = {
+        **_ALL_ASSETS(),
         'sol': SimpleNamespace(
             transfers_enabled=lambda: True,
             send_blocker=lambda frm, to, amt: None,
             can_deliver_to=lambda address, amount: True,
             chain=SimpleNamespace(normalize_address=lambda a: a.lower(), is_valid_address=lambda address: True),
-        )
+        ),
     }
     r = reserve_on_behalf(validator, HOTKEY, 'sol', 'btc', USER_PK, 'MiXeDcAsE', 'userBTCaddr', 1_000_000_000)
     assert r.ok
-    queued = validator.state_store.pending_routed_requests(str(MINER_PK), 'sol', 'btc')
+    queued = validator.store.pending_routed_requests(str(MINER_PK), 'sol', 'btc')
     assert queued[0]['user_from_addr'] == 'mixedcase'
-    validator.state_store.close()
+
+
+def _ALL_ASSETS():
+    return {'sol': _gate_asset(lambda addr, amt: True), 'btc': _gate_asset(lambda addr, amt: True)}
 
 
 def _gate_asset(can_deliver, valid=lambda addr: True, enabled=True, blocker=None):
@@ -179,7 +162,9 @@ def _gate_asset(can_deliver, valid=lambda addr: True, enabled=True, blocker=None
         transfers_enabled=lambda: enabled,
         send_blocker=lambda frm, to, amt: blocker,
         can_deliver_to=lambda addr, amt, from_address=None: can_deliver(addr, amt),
-        chain=SimpleNamespace(is_valid_address=valid, normalize_address=lambda addr: addr),
+        chain=SimpleNamespace(
+            is_valid_address=valid, normalize_address=lambda addr: addr, canonical_tx_hash=lambda h: h
+        ),
     )
 
 
@@ -189,7 +174,7 @@ def test_reserve_does_not_predict_dest_deliverability():
     # reverted-tx proof (cancel_swap). Validity is still screened (see the malformed test below).
     client = FakeClient()
     validator = _validator(client)
-    validator.axon_assets = {'btc': _gate_asset(lambda addr, amt: False)}
+    validator.providers = {**_ALL_ASSETS(), 'btc': _gate_asset(lambda addr, amt: False)}
     result = reserve_on_behalf(validator, HOTKEY, 'sol', 'btc', USER_PK, str(USER_PK), 'userBTCaddr', 10**9)
     assert 'rejects incoming transfers' not in (result.reason or '')
 
@@ -197,8 +182,7 @@ def test_reserve_does_not_predict_dest_deliverability():
 def test_missing_spoke_provider_rejects_before_bid():
     client = FakeClient()
     validator = _validator(client)
-    validator.axon_assets = {'sol': _gate_asset(lambda addr, amt: True)}
-    validator.assets = {'sol': object()}
+    validator.providers = {'sol': _gate_asset(lambda addr, amt: True)}
     result = reserve_on_behalf(validator, HOTKEY, 'sol', 'btc', USER_PK, str(USER_PK), 'userBTCaddr', 10**9)
     assert not result.ok
     assert 'cannot verify btc' in result.reason
@@ -209,7 +193,7 @@ def test_leg_with_transfers_switched_off_rejects_before_any_bid():
     # A subnet owner's TransferToggle / SubtokenEnabled: no dest address can take it, so never open the swap.
     client = FakeClient()
     validator = _validator(client)
-    validator.axon_assets = {'btc': _gate_asset(lambda addr, amt: True, enabled=False)}
+    validator.providers = {**_ALL_ASSETS(), 'btc': _gate_asset(lambda addr, amt: True, enabled=False)}
     result = reserve_on_behalf(validator, HOTKEY, 'sol', 'btc', USER_PK, str(USER_PK), 'userBTCaddr', 10**9)
     assert not result.ok
     assert 'BTC transfers are switched off on-chain; SOL→BTC cannot settle' in result.reason
@@ -220,7 +204,10 @@ def test_malformed_destination_address_rejects_before_any_bid():
     # F4: address FORMAT is screened first — offline, and a malformed dest can never deliver.
     client = FakeClient()
     validator = _validator(client)
-    validator.axon_assets = {'btc': _gate_asset(lambda addr, amt: True, valid=lambda addr: addr != 'not-an-addr')}
+    validator.providers = {
+        **_ALL_ASSETS(),
+        'btc': _gate_asset(lambda addr, amt: True, valid=lambda addr: addr != 'not-an-addr'),
+    }
     result = reserve_on_behalf(validator, HOTKEY, 'sol', 'btc', USER_PK, str(USER_PK), 'not-an-addr', 10**9)
     assert not result.ok
     assert 'not a valid btc address' in result.reason
@@ -231,7 +218,10 @@ def test_malformed_miner_receive_address_rejects():
     client = FakeClient()
     client.quote.miner_from_addr = 'minerSOLaddr'
     validator = _validator(client)
-    validator.axon_assets = {'sol': _gate_asset(lambda addr, amt: True, valid=lambda addr: addr != 'minerSOLaddr')}
+    validator.providers = {
+        **_ALL_ASSETS(),
+        'sol': _gate_asset(lambda addr, amt: True, valid=lambda addr: addr != 'minerSOLaddr'),
+    }
     result = reserve_on_behalf(validator, HOTKEY, 'sol', 'btc', USER_PK, str(USER_PK), 'userBTCaddr', 10**9)
     assert not result.ok
     assert 'no eligible quote' in result.reason
@@ -243,7 +233,7 @@ def test_source_that_cannot_go_out_as_one_transfer_rejects_before_any_bid():
     client = FakeClient()
     client.quote.miner_from_addr = 'minerSOLaddr'
     validator = _validator(client)
-    validator.axon_assets = {'sol': _gate_asset(lambda addr, amt: True, blocker='split across hotkeys')}
+    validator.providers = {**_ALL_ASSETS(), 'sol': _gate_asset(lambda addr, amt: True, blocker='split across hotkeys')}
     result = reserve_on_behalf(validator, HOTKEY, 'sol', 'btc', USER_PK, str(USER_PK), 'userBTCaddr', 10**9)
     assert (result.ok, result.reason, client.calls) == (False, 'split across hotkeys', [])
 
@@ -255,7 +245,7 @@ def test_user_to_addr_equal_miner_delivery_address_rejects():
     client = FakeClient()
     client.quote.miner_to_addr = 'minerBTCdeliver'
     validator = _validator(client)
-    validator.axon_assets = {'btc': _gate_asset(lambda addr, amt: True)}
+    validator.providers = {**_ALL_ASSETS(), 'btc': _gate_asset(lambda addr, amt: True)}
     result = reserve_on_behalf(validator, HOTKEY, 'sol', 'btc', USER_PK, str(USER_PK), 'minerBTCdeliver', 10**9)
     assert not result.ok
     assert 'differ from the miner delivery address' in result.reason
@@ -267,7 +257,7 @@ def test_distinct_dest_addr_with_miner_to_addr_set_reserves():
     client = FakeClient()
     client.quote.miner_to_addr = 'minerBTCdeliver'
     validator = _validator(client)
-    validator.axon_assets = {'btc': _gate_asset(lambda addr, amt: True)}
+    validator.providers = {**_ALL_ASSETS(), 'btc': _gate_asset(lambda addr, amt: True)}
     result = reserve_on_behalf(validator, HOTKEY, 'sol', 'btc', USER_PK, str(USER_PK), 'userBTCaddr', 10**9)
     assert result.ok
 
@@ -289,7 +279,7 @@ def test_miner_receive_address_screened_on_source_chain():
     client = FakeClient()
     client.quote.miner_from_addr = 'minerSOLaddr'
     validator = _validator(client)
-    validator.axon_assets = {'sol': _gate_asset(lambda addr, amt: addr != 'minerSOLaddr')}
+    validator.providers = {**_ALL_ASSETS(), 'sol': _gate_asset(lambda addr, amt: addr != 'minerSOLaddr')}
     result = reserve_on_behalf(validator, HOTKEY, 'sol', 'btc', USER_PK, str(USER_PK), 'userBTCaddr', 10**9)
     assert not result.ok
     assert 'miner receive address' in result.reason
@@ -300,7 +290,7 @@ def test_miner_receive_address_clean_still_bids():
     client = FakeClient()
     client.quote.miner_from_addr = 'minerSOLaddr'
     validator = _validator(client)
-    validator.axon_assets = {'sol': _gate_asset(lambda addr, amt: True)}
+    validator.providers = {**_ALL_ASSETS(), 'sol': _gate_asset(lambda addr, amt: True)}
     result = reserve_on_behalf(validator, HOTKEY, 'sol', 'btc', USER_PK, str(USER_PK), 'userBTCaddr', 10**9)
     assert result.ok
     assert client.calls == [('open_or_request', 'sol', 'btc', 'sol')]
@@ -428,7 +418,10 @@ def test_joining_pool_rejects_an_unusable_pinned_quote():
     client = FakeClient(pool=pool)
     client.quote.miner_to_addr = 'bad'
     validator = _validator(client)
-    validator.axon_assets = {'btc': _gate_asset(lambda addr, amt: True, valid=lambda addr: addr != 'bad')}
+    validator.providers = {
+        **_ALL_ASSETS(),
+        'btc': _gate_asset(lambda addr, amt: True, valid=lambda addr: addr != 'bad'),
+    }
 
     result = reserve_on_behalf(validator, HOTKEY, 'sol', 'btc', USER_PK, str(USER_PK), 'userBTCaddr', 1_000_000_000)
 
@@ -460,30 +453,26 @@ def test_join_uses_pinned_pool_rate_not_live_quote():
 
 
 def _stage_validator(tmp_path):
-    from allways.validator.state_store import ValidatorStateStore
-
-    store = ValidatorStateStore(db_path=tmp_path / 'state.db')
-    return SimpleNamespace(state_store=store), store
+    store = serving_store(tmp_path / 'state.db')
+    return Ctx(None, store=store), store
 
 
 def test_closed_pda_with_recorded_slash_reports_timed_out(tmp_path):
-    from allways.validator.reserve_engine import _swap_stage
+    from allways.validator_v2.serving.requests import _swap_stage
 
     validator, store = _stage_validator(tmp_path)
     key = b'\x01' * 32
-    store.record_swap_outcome(key.hex(), 'timed_out', 100)
+    record_outcome(store, key.hex(), 'timed_out', 100)
     assert _swap_stage(validator, None, key) == 'timed_out'
-    store.close()
 
 
 def test_closed_pda_with_recorded_completion_reports_completed(tmp_path):
-    from allways.validator.reserve_engine import _swap_stage
+    from allways.validator_v2.serving.requests import _swap_stage
 
     validator, store = _stage_validator(tmp_path)
     key = b'\x02' * 32
-    store.record_swap_outcome(key.hex(), 'completed', 100)
+    record_outcome(store, key.hex(), 'completed', 100)
     assert _swap_stage(validator, None, key) == 'completed'
-    store.close()
 
 
 def test_closed_pda_with_unrecorded_outcome_reports_fulfilled(tmp_path):
@@ -491,24 +480,22 @@ def test_closed_pda_with_unrecorded_outcome_reports_fulfilled(tmp_path):
     # ingested the terminal event yet. The fallback must be NON-terminal so the consumer
     # keeps polling and picks up the real outcome next ingest — a 'completed' guess for a
     # fresh slash would resurrect the original bug through a one-forward-step window.
-    from allways.validator.reserve_engine import _swap_stage
+    from allways.validator_v2.serving.requests import _swap_stage
 
     validator, store = _stage_validator(tmp_path)
     assert _swap_stage(validator, None, b'\x03' * 32) == 'fulfilled'
-    store.close()
 
 
 def test_live_pda_status_maps_by_variant_name(tmp_path):
     # A still-open PDA never consults the outcome index — the borsh status variant wins.
-    from allways.validator.reserve_engine import _swap_stage
+    from allways.validator_v2.serving.requests import _swap_stage
 
     validator, store = _stage_validator(tmp_path)
     key = b'\x04' * 32
-    store.record_swap_outcome(key.hex(), 'completed', 100)  # must be ignored while the PDA is live
+    record_outcome(store, key.hex(), 'completed', 100)  # must be ignored while the PDA is live
     for variant, stage in [('Active', 'active'), ('Fulfilled', 'fulfilled'), ('TimedOut', 'timed_out')]:
         swap = SimpleNamespace(status=type(variant, (), {})())
         assert _swap_stage(validator, swap, key) == stage
-    store.close()
 
 
 # ─── swap_status by swap_key (post-attestation resolution) ──────────────────
@@ -535,11 +522,8 @@ class StatusClient:
             return self._reservation.get(backing)
         return self._reservation
 
-    def get_hotkey_binding(self, hotkey_bytes):
-        return SimpleNamespace(miner=MINER_PK)
-
-    def get_binding(self, miner):
-        return SimpleNamespace(miner=MINER_PK, hotkey=HOTKEY_BYTES, hotkey_sig=BINDING_SIG)
+    def miner_for(self, hotkey):
+        return MINER_PK if hotkey == HOTKEY else None
 
 
 def _live_swap(variant: str):
@@ -562,10 +546,8 @@ def _live_swap(variant: str):
 
 def _status_validator(tmp_path, client):
     validator, store = _stage_validator(tmp_path)
-    validator.solana_client = client
-    validator.solana_swap_loop = SimpleNamespace(
-        providers={'btc': _gate_asset(lambda addr, amt: True)}, fee_divisor=100, reject_reasons={}
-    )
+    validator.client = client
+    validator.providers = {**_ALL_ASSETS(), 'btc': _gate_asset(lambda addr, amt: True)}
     return validator, store
 
 
@@ -589,7 +571,7 @@ def test_expired_unclaimed_reservation_reports_none(tmp_path):
     user — the offering's win-detection would read it as another user holding the miner."""
     import time as _time
 
-    from allways.validator.reserve_engine import swap_status
+    from allways.validator_v2.serving.requests import swap_status
 
     client = StatusClient(reservation=_unclaimed_reservation(int(_time.time()) - 5))
     validator, _ = _status_validator(tmp_path, client)
@@ -597,8 +579,8 @@ def test_expired_unclaimed_reservation_reports_none(tmp_path):
 
 
 def test_pool_rejection_reports_rejected_with_its_users_until_a_seat_is_live(tmp_path):
-    from allways.validator import reserve_engine
-    from allways.validator.reserve_engine import swap_status
+    from allways.validator_v2.serving import requests as reserve_engine
+    from allways.validator_v2.serving.requests import swap_status
 
     key = (str(MINER_PK), 'btc', 'sol')
     reserve_engine._routed_rejections[key] = reserve_engine.RoutedRejection('Insufficient collateral', ['userA'])
@@ -608,14 +590,14 @@ def test_pool_rejection_reports_rejected_with_its_users_until_a_seat_is_live(tmp
         assert s.stage == 'rejected' and s.detail == {'reason': 'Insufficient collateral', 'users': ['userA']}
         assert swap_status(validator, HOTKEY, from_chain='sol', to_chain='btc').stage == 'none'  # other pool
         # A live reservation is a newer round — it speaks, the stale verdict does not.
-        validator.solana_client = StatusClient(reservation=_unclaimed_reservation(FUTURE))
+        validator.client = StatusClient(reservation=_unclaimed_reservation(FUTURE))
         assert swap_status(validator, HOTKEY, from_chain='btc', to_chain='sol').stage == 'reserved'
     finally:
         reserve_engine._routed_rejections.clear()
 
 
 def test_live_unclaimed_reservation_reports_reserved(tmp_path):
-    from allways.validator.reserve_engine import swap_status
+    from allways.validator_v2.serving.requests import swap_status
 
     client = StatusClient(reservation=_unclaimed_reservation(FUTURE))
     validator, _ = _status_validator(tmp_path, client)
@@ -643,7 +625,7 @@ def _declared_reservation(reserved_until: int):
 
 
 def test_reserved_seat_serves_the_pinned_collateral_verdict(tmp_path):
-    from allways.validator.reserve_engine import swap_status
+    from allways.validator_v2.serving.requests import swap_status
 
     validator, store = _status_validator(tmp_path, StatusClient(reservation=_declared_reservation(FUTURE)))
     assert swap_status(validator, HOTKEY).detail['collateral_ok'] is None  # pending: the consumer must hold
@@ -651,37 +633,34 @@ def test_reserved_seat_serves_the_pinned_collateral_verdict(tmp_path):
     assert swap_status(validator, HOTKEY).detail['collateral_ok'] is False
     store.record_collateral_verdict(str(MINER_PK), 'tao', 1_200, 10**9, True)
     assert swap_status(validator, HOTKEY).detail['collateral_ok'] is True
-    store.close()
 
 
 def test_exact_backing_leg_carries_no_collateral_verdict(tmp_path):
-    from allways.validator.reserve_engine import swap_status
+    from allways.validator_v2.serving.requests import swap_status
 
     exact = _declared_reservation(FUTURE)
     exact.from_chain = 'tao'  # the backing IS a leg: bound on-chain, nothing to verify
     validator, store = _status_validator(tmp_path, StatusClient(reservation=exact))
     store.record_collateral_verdict(str(MINER_PK), 'tao', 1_200, 10**9, False)
     assert 'collateral_ok' not in swap_status(validator, HOTKEY).detail
-    store.close()
 
 
 def test_claimed_swap_surfaces_the_loops_collateral_reject_reason(tmp_path):
-    from allways.validator.reserve_engine import swap_status
-    from allways.validator.solana_swap_loop import COLLATERAL_REJECT_REASON
+    from allways.validator_v2.actuator.swaps import COLLATERAL_REJECT_REASON
+    from allways.validator_v2.serving.requests import swap_status
 
     key = b'\x16' * 32
     swap = _live_swap('PendingAttestation')
     validator, store = _status_validator(tmp_path, StatusClient(swap=swap))
     assert 'reject_reason' not in swap_status(validator, HOTKEY, key.hex()).detail  # loop not there yet
-    validator.solana_swap_loop.reject_reasons[key.hex()] = COLLATERAL_REJECT_REASON
+    validator._report[key.hex()] = SwapReport('PendingAttestation', 'reject', COLLATERAL_REJECT_REASON, {}, 'sol', 0)
     assert swap_status(validator, HOTKEY, key.hex()).detail['reject_reason'] == COLLATERAL_REJECT_REASON
     swap.status = type('Active', (), {})()
     assert 'reject_reason' not in swap_status(validator, HOTKEY, key.hex()).detail
-    store.close()
 
 
 def test_initiated_swap_resolves_by_key_after_reservation_consumed(tmp_path):
-    from allways.validator.reserve_engine import swap_status
+    from allways.validator_v2.serving.requests import swap_status
 
     key = b'\x05' * 32
     consumed = SimpleNamespace(reserved_until=0)  # vote_initiate zeroed it at quorum
@@ -693,11 +672,10 @@ def test_initiated_swap_resolves_by_key_after_reservation_consumed(tmp_path):
     assert s.detail['from_chain'] == 'sol' and s.detail['to_amount'] == 210_000
     assert s.detail['user_from_addr'] == 'userSOLaddr'
     assert client.swap_keys_queried == [key]
-    store.close()
 
 
 def test_reject_reason_only_surfaces_for_invalid_pending_attestation(tmp_path):
-    from allways.validator.reserve_engine import swap_status
+    from allways.validator_v2.serving.requests import swap_status
 
     key = b'\x15' * 32
     reservation = SimpleNamespace(
@@ -714,54 +692,50 @@ def test_reject_reason_only_surfaces_for_invalid_pending_attestation(tmp_path):
     swap = _live_swap('PendingAttestation')
     validator, store = _status_validator(tmp_path, StatusClient(swap=swap, reservation=reservation))
 
-    validator.solana_swap_loop.providers['btc'].chain.is_valid_address = lambda address: False
+    validator.providers['btc'].chain.is_valid_address = lambda address: False
     reason = 'dest address invalid — refusing to attest'
     assert swap_status(validator, HOTKEY).detail['reject_reason'] == reason
     assert swap_status(validator, HOTKEY, key.hex()).detail['reject_reason'] == reason
 
-    validator.solana_swap_loop.providers['btc'].chain.is_valid_address = lambda address: True
+    validator.providers['btc'].chain.is_valid_address = lambda address: True
     assert 'reject_reason' not in swap_status(validator, HOTKEY).detail
 
     swap.status = type('Active', (), {})()
-    validator.solana_swap_loop.providers['btc'].chain.is_valid_address = lambda address: False
+    validator.providers['btc'].chain.is_valid_address = lambda address: False
     assert 'reject_reason' not in swap_status(validator, HOTKEY, key.hex()).detail
-    store.close()
 
 
 def test_closed_pda_by_key_with_recorded_slash_reports_timed_out(tmp_path):
-    from allways.validator.reserve_engine import swap_status
+    from allways.validator_v2.serving.requests import swap_status
 
     key = b'\x06' * 32
     validator, store = _status_validator(tmp_path, StatusClient(swap=None))
-    store.record_swap_outcome(key.hex(), 'timed_out', 100)
+    record_outcome(store, key.hex(), 'timed_out', 100)
     s = swap_status(validator, HOTKEY, key.hex())
     assert s.stage == 'timed_out' and s.swap_key == key.hex() and s.detail == {}
-    store.close()
 
 
 def test_closed_pda_by_key_carries_refund_facts(tmp_path):
-    from allways.validator.reserve_engine import swap_status
+    from allways.validator_v2.serving.requests import swap_status
 
     key = b'\x16' * 32
     validator, store = _status_validator(tmp_path, StatusClient(swap=None))
-    store.record_swap_outcome(key.hex(), 'timed_out', 100, refund=('sol', 123, 'refundTx'))
+    record_outcome(store, key.hex(), 'timed_out', 100, refund=('sol', 123, 'refundTx'))
     s = swap_status(validator, HOTKEY, key.hex())
     assert s.stage == 'timed_out'
     assert s.detail == {'refund_chain': 'sol', 'refund_amount': 123, 'refund_tx_hash': 'refundTx'}
-    store.close()
 
 
 def test_closed_pda_by_key_with_unrecorded_outcome_reports_fulfilled(tmp_path):
-    from allways.validator.reserve_engine import swap_status
+    from allways.validator_v2.serving.requests import swap_status
 
     validator, store = _status_validator(tmp_path, StatusClient(swap=None))
     assert swap_status(validator, HOTKEY, (b'\x07' * 32).hex()).stage == 'fulfilled'
-    store.close()
 
 
 def test_malformed_swap_key_raises_value_error(tmp_path):
     # Non-hex or wrong-length keys must raise ValueError (seam maps it to a 400).
-    from allways.validator.reserve_engine import swap_status
+    from allways.validator_v2.serving.requests import swap_status
 
     validator, store = _status_validator(tmp_path, StatusClient())
     for bad in ('zz', 'abcd'):
@@ -770,21 +744,20 @@ def test_malformed_swap_key_raises_value_error(tmp_path):
             assert False, f'expected ValueError for swap_key={bad!r}'
         except ValueError:
             pass
-    store.close()
 
 
 # ── confirm_deposit: deferred-confirmation intake. Accepts a content-valid deposit even before it fully
 # confirms (the crank defers voting until confirmations accrue); fast-fails without a claim on absent/mismatch
 # (None) or a stale MINED deposit, so the short reservation TTL frees the miner.
-import allways.validator.reserve_engine as rc  # noqa: E402
+import allways.validator_v2.serving.requests as rc  # noqa: E402
 from allways.assets.asset import ProviderUnreachableError, TransactionInfo  # noqa: E402
-from allways.validator.reserve_engine import confirm_deposit  # noqa: E402
+from allways.validator_v2.serving.requests import confirm_deposit  # noqa: E402
 
 CONFIRM_CREATED_AT = 1000
 
 
 def _store():
-    return ValidatorStateStore(db_path=Path(tempfile.mkdtemp()) / 'state.db')
+    return serving_store()
 
 
 class _ConfirmClient(FakeClient):
@@ -875,9 +848,7 @@ def _tx(*, confirmed, block_time, confirmations=0):
 def _confirm(reservation, tx_info, *, unreachable=False):
     client = _ConfirmClient(reservation)
     provider = _FakeProvider(tx_info, unreachable=unreachable)
-    validator = SimpleNamespace(
-        solana_client=client, axon_assets={'btc': provider}, axon_lock=threading.RLock(), state_store=_store()
-    )
+    validator = Ctx(client, providers={'btc': provider})
     return confirm_deposit(validator, HOTKEY, 'srctxhash'), client
 
 
@@ -942,9 +913,7 @@ def test_confirm_prefers_canonical_form_slot_over_case_variant():
     provider = _FakeProvider(
         _tx(confirmed=True, block_time=CONFIRM_CREATED_AT + 5, confirmations=6), normalize=str.lower
     )
-    validator = SimpleNamespace(
-        solana_client=client, axon_assets={'btc': provider}, axon_lock=threading.RLock(), state_store=_store()
-    )
+    validator = Ctx(client, providers={'btc': provider})
     r = confirm_deposit(validator, HOTKEY, 'srctxhash')
     assert r.ok and len(client.claims) == 1
     assert client.claims[0][3] == 'tao'  # the canonical slot's backing claimed, not the variant's
@@ -956,9 +925,7 @@ def test_confirm_prefers_the_oldest_slot_on_a_form_tie():
     older = _confirm_reservation(created_at=500)
     client = _ConfirmClient({'sol': younger, 'tao': older})
     provider = _FakeProvider(_tx(confirmed=True, block_time=CONFIRM_CREATED_AT + 5, confirmations=6))
-    validator = SimpleNamespace(
-        solana_client=client, axon_assets={'btc': provider}, axon_lock=threading.RLock(), state_store=_store()
-    )
+    validator = Ctx(client, providers={'btc': provider})
     r = confirm_deposit(validator, HOTKEY, 'srctxhash')
     assert r.ok and client.claims[0][3] == 'tao'
 
@@ -973,9 +940,7 @@ def test_confirm_fresh_match_on_one_hub_survives_stale_match_on_another():
         'btc': _FakeProvider(_tx(confirmed=True, block_time=CONFIRM_CREATED_AT - 1, confirmations=6)),
         'sol': _FakeProvider(_tx(confirmed=True, block_time=CONFIRM_CREATED_AT + 5, confirmations=6)),
     }
-    validator = SimpleNamespace(
-        solana_client=client, axon_assets=providers, axon_lock=threading.RLock(), state_store=_store()
-    )
+    validator = Ctx(client, providers=providers)
     r = confirm_deposit(validator, HOTKEY, 'srctxhash')
     assert r.ok and client.claims[0][3] == 'tao'
 
@@ -1010,12 +975,7 @@ def test_confirm_measures_runway_after_the_source_rpc(monkeypatch):
             clock['t'] += 60  # the RPC hung; the window shrank while we waited
             return super().verify_transaction(**kw)
 
-    validator = SimpleNamespace(
-        solana_client=client,
-        axon_assets={'btc': _SlowProvider(_tx(confirmed=False, block_time=None))},
-        axon_lock=threading.RLock(),
-        state_store=_store(),
-    )
+    validator = Ctx(client, providers={'btc': _SlowProvider(_tx(confirmed=False, block_time=None))})
     monkeypatch.setattr(rc.time, 'time', lambda: clock['t'])
     r = confirm_deposit(validator, HOTKEY, 'srctxhash')
     assert r.ok and client.claims
@@ -1045,9 +1005,7 @@ def test_confirm_claims_even_if_the_extension_fails():
     client = _ConfirmClient(_near_expiry(20))
     client.extend_raises = True
     provider = _FakeProvider(_tx(confirmed=False, block_time=None))
-    validator = SimpleNamespace(
-        solana_client=client, axon_assets={'btc': provider}, axon_lock=threading.RLock(), state_store=_store()
-    )
+    validator = Ctx(client, providers={'btc': provider})
     r = confirm_deposit(validator, HOTKEY, 'srctxhash')
     assert r.ok and client.claims
 
@@ -1059,9 +1017,7 @@ def test_confirm_uses_tao_slot_when_sol_slot_empty():
     resv = _near_expiry(20)  # near expiry so the runway extend also travels on the right hub
     client = _ConfirmClient({'sol': None, 'tao': resv})
     provider = _FakeProvider(_tx(confirmed=False, block_time=None))
-    validator = SimpleNamespace(
-        solana_client=client, axon_assets={'btc': provider}, axon_lock=threading.RLock(), state_store=_store()
-    )
+    validator = Ctx(client, providers={'btc': provider})
     r = confirm_deposit(validator, HOTKEY, 'srctxhash')
     assert r.ok and client.claims
     assert client.claims[0][3] == 'tao'  # claim submitted against the TAO hub, not the empty SOL slot
@@ -1072,9 +1028,7 @@ def test_confirm_no_live_unclaimed_slot_on_any_hub_rejects():
     # Empty SOL + expired TAO: nothing live+unclaimed anywhere → no claim, TTL frees the miner.
     client = _ConfirmClient({'sol': None, 'tao': _confirm_reservation(reserved_until=1)})
     provider = _FakeProvider(_tx(confirmed=False, block_time=None))
-    validator = SimpleNamespace(
-        solana_client=client, axon_assets={'btc': provider}, axon_lock=threading.RLock(), state_store=_store()
-    )
+    validator = Ctx(client, providers={'btc': provider})
     r = confirm_deposit(validator, HOTKEY, 'srctxhash')
     assert not r.ok and not client.claims
 
@@ -1111,9 +1065,7 @@ def test_confirm_matches_the_right_hub_when_both_slots_are_live_unclaimed():
     tao = _near_expiry(20, from_amount=777, miner_from_addr='minerBTC_tao')
     client = _ConfirmClient({'sol': sol, 'tao': tao})
     provider = _MatchingProvider(amount=777, recipient='minerBTC_tao')  # the real deposit is the TAO one
-    validator = SimpleNamespace(
-        solana_client=client, axon_assets={'btc': provider}, axon_lock=threading.RLock(), state_store=_store()
-    )
+    validator = Ctx(client, providers={'btc': provider})
     r = confirm_deposit(validator, HOTKEY, 'taoDeposit')
     assert r.ok and client.claims
     assert client.claims[0][3] == 'tao'  # claimed against the hub the deposit matched, not the first live slot
@@ -1148,11 +1100,11 @@ def _scan_reservation(reserved_until, claimed=False):
 
 
 def _scan_validator(tmp_path, reservation, provider):
-    from allways.validator.reserve_engine import scan_deposit
+    from allways.validator_v2.serving.requests import scan_deposit
 
     client = StatusClient(reservation=reservation)
     validator, store = _status_validator(tmp_path, client)
-    validator.axon_assets = {'btc': provider} if provider else {}
+    validator.providers = {**_ALL_ASSETS(), 'btc': provider} if provider else {}
     return scan_deposit, validator, store
 
 
@@ -1162,15 +1114,13 @@ def test_scan_deposit_finds_hash_for_live_unclaimed_reservation(tmp_path):
     assert scan_deposit(validator, HOTKEY) == 'depositTx'
     # Scans against the PINNED reservation triple — declared sender, miner deposit addr, exact amount.
     assert provider.calls == [('tb1quser', 'tb1qminer', 10_000)]
-    store.close()
 
 
 def test_scan_deposit_none_when_provider_cannot_scan(tmp_path):
     # A provider without find_recent_outgoing (hypothetical new chain) degrades to manual/wallet paths.
     scan_deposit, validator, store = _scan_validator(tmp_path, _scan_reservation(FUTURE), object())
-    validator.axon_assets = {'btc': object()}
+    validator.providers = {**_ALL_ASSETS(), 'btc': object()}
     assert scan_deposit(validator, HOTKEY) is None
-    store.close()
 
 
 def test_scan_deposit_none_when_reservation_expired_claimed_or_absent(tmp_path):
@@ -1179,12 +1129,11 @@ def test_scan_deposit_none_when_reservation_expired_claimed_or_absent(tmp_path):
     provider = _ScanProvider('depositTx')
     scan_deposit, validator, store = _scan_validator(tmp_path, _scan_reservation(int(_time.time()) - 5), provider)
     assert scan_deposit(validator, HOTKEY) is None  # expired — no late auto-claims, ever
-    validator.solana_client._reservation = _scan_reservation(FUTURE, claimed=True)
+    validator.client._reservation = _scan_reservation(FUTURE, claimed=True)
     assert scan_deposit(validator, HOTKEY) is None  # already claimed
-    validator.solana_client._reservation = None
+    validator.client._reservation = None
     assert scan_deposit(validator, HOTKEY) is None  # nothing reserved
     assert provider.calls == []
-    store.close()
 
 
 def test_scan_deposit_finds_hash_in_tao_slot_when_sol_empty(tmp_path):
@@ -1192,17 +1141,16 @@ def test_scan_deposit_finds_hash_in_tao_slot_when_sol_empty(tmp_path):
     provider = _ScanProvider('depositTx')
     client = StatusClient(reservation={'sol': None, 'tao': _scan_reservation(FUTURE)})
     validator, store = _status_validator(tmp_path, client)
-    validator.axon_assets = {'btc': provider}
-    from allways.validator.reserve_engine import scan_deposit
+    validator.providers = {**_ALL_ASSETS(), 'btc': provider}
+    from allways.validator_v2.serving.requests import scan_deposit
 
     assert scan_deposit(validator, HOTKEY) == 'depositTx'
-    store.close()
 
 
 def test_scan_deposit_scans_every_live_hub_not_just_the_first(tmp_path):
     # V-1 dual-live: SOL slot (btc, nothing to find) + TAO slot (eth, the real deposit). The scanner must
     # try every live hub — a first-match scan would stop at the SOL slot and miss the deposit entirely.
-    from allways.validator.reserve_engine import scan_deposit
+    from allways.validator_v2.serving.requests import scan_deposit
 
     sol = SimpleNamespace(
         reserved_until=FUTURE,
@@ -1222,25 +1170,23 @@ def test_scan_deposit_scans_every_live_hub_not_just_the_first(tmp_path):
     )
     client = StatusClient(reservation={'sol': sol, 'tao': tao})
     validator, store = _status_validator(tmp_path, client)
-    validator.axon_assets = {'btc': _ScanProvider(None), 'eth': _ScanProvider('ethDepositTx')}
+    validator.providers = {**_ALL_ASSETS(), 'btc': _ScanProvider(None), 'eth': _ScanProvider('ethDepositTx')}
     assert scan_deposit(validator, HOTKEY) == 'ethDepositTx'
-    store.close()
 
 
 def test_swap_status_reads_tao_slot_when_sol_empty(tmp_path):
     # V-1: status must surface a live TAO-hub reservation, not report 'none' off the empty SOL slot.
-    from allways.validator.reserve_engine import swap_status
+    from allways.validator_v2.serving.requests import swap_status
 
     client = StatusClient(reservation={'sol': None, 'tao': _unclaimed_reservation(FUTURE)})
     validator, store = _status_validator(tmp_path, client)
     assert swap_status(validator, HOTKEY).stage == 'reserved'
-    store.close()
 
 
 def test_swap_status_by_pair_reads_that_pairs_slot_not_the_freshest(tmp_path):
     # The offering tracks ONE seat; answering with the miner's other hub made it refund a won seat
     # ("another user holds this miner") or adopt a stranger's reservation under the same pubkey.
-    from allways.validator.reserve_engine import swap_status
+    from allways.validator_v2.serving.requests import swap_status
 
     sol = _unclaimed_reservation(FUTURE + 500)  # fresher, btc->sol, a stranger
     tao = SimpleNamespace(
@@ -1257,177 +1203,28 @@ def test_swap_status_by_pair_reads_that_pairs_slot_not_the_freshest(tmp_path):
     assert swap_status(validator, HOTKEY).user == 'staleUserSOLpk'  # no pair: freshest, as before
     assert swap_status(validator, HOTKEY, from_chain='tao', to_chain='btc').user == 'ourTaoUser'
     assert swap_status(validator, HOTKEY, from_chain='eth', to_chain='sol').stage == 'none'
-    store.close()
 
 
 def test_status_by_key_detail_carries_leg_hashes(tmp_path):
-    from allways.validator.reserve_engine import swap_status
+    from allways.validator_v2.serving.requests import swap_status
 
     client = StatusClient(swap=_live_swap('Fulfilled'), reservation=SimpleNamespace(reserved_until=0))
     validator, store = _status_validator(tmp_path, client)
     s = swap_status(validator, HOTKEY, (b'\x05' * 32).hex())
     assert s.detail['from_tx_hash'] == 'srcTxHash' and s.detail['to_tx_hash'] == ''
-    store.close()
 
 
 def test_closed_pda_by_key_serves_delivery_hash_from_fulfillment_index(tmp_path):
     # The Swap PDA (and its to_tx_hash) is gone at terminal — the receipt's delivery link must
     # survive via the SwapFulfilled ingest, served on the closed-PDA by-key path.
-    from allways.validator.reserve_engine import swap_status
+    from allways.validator_v2.serving.requests import swap_status
 
     key = b'\x08' * 32
     validator, store = _status_validator(tmp_path, StatusClient(swap=None))
-    store.record_swap_outcome(key.hex(), 'completed', 100)
-    store.record_swap_fulfillment(key.hex(), 'destTx', 90)
+    record_outcome(store, key.hex(), 'completed', 100)
+    record_fulfillment(store, key.hex(), 'destTx', 90)
     s = swap_status(validator, HOTKEY, key.hex())
     assert s.stage == 'completed' and s.detail == {'to_tx_hash': 'destTx'}
-    store.close()
-
-
-# ── event-driven crank ───────────────────────────────────────────────────────
-
-
-class _Loop:
-    def __init__(self, lock, calls):
-        self.lock, self.calls = lock, calls
-
-    def resolve_pools_once(self, now):
-        assert self.lock.locked()
-        self.calls.append('resolve')
-        return []
-
-
-class _FakeFeed:
-    """Stands in for ProgramEventFeed: records handlers, lets a test push decoded events."""
-
-    def __init__(self):
-        self.handlers = {}
-
-    def on(self, name, handler):
-        self.handlers[name] = handler
-
-    def push(self, name, **fields):
-        self.handlers[name](name, SimpleNamespace(**fields))
-
-
-def _wait(cond, secs=2.0):
-    deadline = time.time() + secs
-    while not cond() and time.time() < deadline:
-        time.sleep(0.02)
-    return cond()
-
-
-def _crank_validator(calls):
-    lock = threading.Lock()
-    return SimpleNamespace(
-        solana_swap_loop=_Loop(lock, calls),
-        crank_lock=lock,
-        solana_client=SimpleNamespace(rpc=SimpleNamespace(get_slot=lambda: 100)),
-    )
-
-
-def _crank_crank_validator(calls):
-    lock = threading.Lock()
-    return SimpleNamespace(
-        solana_swap_loop=_Loop(lock, calls),
-        crank_lock=lock,
-        solana_client=SimpleNamespace(rpc=SimpleNamespace(get_slot=lambda: 100)),
-    )
-
-
-def test_feed_events_drive_arm_draw_finalize(monkeypatch):
-    """One crank at close (arm), one at the seed slot (+ one retry), one on PoolResolved (finalize)."""
-    import allways.validator.reserve_engine as engine
-
-    monkeypatch.setattr(engine, 'CRANK_SKEW_SECS', 0)
-    monkeypatch.setattr(engine, 'SLOT_SECS', 0.01)
-    monkeypatch.setattr(engine, 'DRAW_SKEW_SECS', 0)
-    monkeypatch.setattr(engine, 'DRAW_RETRY_SECS', 0.05)
-    calls = []
-    monkeypatch.setattr(engine, 'finalize_won_seats', lambda v, now: (calls.append('finalize'), [])[1])
-    feed = _FakeFeed()
-    validator = _crank_validator(calls)
-    scheduler = engine.CrankScheduler(validator, feed)
-    assert set(feed.handlers) == {'PoolDrawArmed', 'PoolResolved'}
-
-    scheduler.schedule(MINER_PK, int(time.time()))
-    assert _wait(lambda: calls.count('resolve') == 1)
-    time.sleep(0.2)
-    assert calls.count('resolve') == 1, 'no blind retries after the arm'
-    feed.push('PoolDrawArmed', miner=MINER_PK, seed_slot=110, collateral_chain='sol')
-    assert _wait(lambda: calls.count('resolve') == 3)  # draw + its one retry, ~10 slots later
-    feed.push('PoolResolved', miner=MINER_PK, winner=MINER_PK, requests=1, collateral_chain='sol')
-    assert _wait(lambda: calls.count('resolve') == 4)
-    assert scheduler._pools == {}
-    time.sleep(0.2)
-    assert calls.count('resolve') == 4, calls
-
-
-def test_feed_events_for_untracked_pools_are_ignored():
-    import allways.validator.reserve_engine as engine
-
-    feed = _FakeFeed()
-    calls = []
-    engine.CrankScheduler(_crank_validator(calls), feed)
-    feed.push('PoolDrawArmed', miner=MINER_PK, seed_slot=110, collateral_chain='sol')
-    feed.push('PoolResolved', miner=MINER_PK, winner=MINER_PK, requests=1, collateral_chain='sol')
-    time.sleep(0.1)
-    assert calls == []
-
-
-def test_reserve_schedules_a_crank_at_the_pool_close():
-    client = FakeClient()
-    closes = int(time.time()) + 30
-    client.get_pool = lambda miner, backing='sol': SimpleNamespace(
-        miner=MINER_PK, opened_at=0, requests=[], closes_at=closes
-    )
-    validator = _validator(client)
-    result = reserve_on_behalf(validator, HOTKEY, 'sol', 'btc', USER_PK, str(USER_PK), 'userBTCaddr', 1_000_000_000)
-    assert result.ok
-    assert validator.crank_scheduler.scheduled == [(MINER_PK, closes)]
-
-
-# ── Seam serves published leg confirmations, never recomputes them ───────────────────────────
-def test_attach_leg_confs_serves_the_loops_cache():
-    from allways.validator.reserve_engine import _attach_leg_confs
-
-    key = bytes(range(32))
-    published = {'source': {'have': 1, 'need': 2, 'at': 1_700_000_000}}
-    validator = SimpleNamespace(solana_swap_loop=SimpleNamespace(leg_confs={key.hex(): published}))
-    detail = {}
-    _attach_leg_confs(validator, key, detail)
-    assert detail['leg_confs'] == published
-
-
-def test_attach_leg_confs_is_silent_when_the_loop_has_nothing_yet():
-    from allways.validator.reserve_engine import _attach_leg_confs
-
-    key = bytes(range(32))
-    for loop in (SimpleNamespace(leg_confs={}), SimpleNamespace(), None):
-        detail = {}
-        _attach_leg_confs(SimpleNamespace(solana_swap_loop=loop), key, detail)
-        # Absent, never a fabricated zero — a consumer must be able to tell "not observed yet"
-        # apart from "observed zero confirmations".
-        assert 'leg_confs' not in detail
-
-
-def test_attach_leg_confs_does_no_chain_work():
-    # The whole point: /status is polled per swap per tab, so this path must stay pure lookup.
-    from allways.validator.reserve_engine import _attach_leg_confs
-
-    key = bytes(range(32))
-
-    class Exploding:
-        def __getattr__(self, name):
-            raise AssertionError(f'seam touched the chain client ({name}) while attaching confs')
-
-    validator = SimpleNamespace(
-        solana_swap_loop=SimpleNamespace(leg_confs={key.hex(): {'source': {'have': 0, 'need': 2, 'at': 1}}}),
-        solana_client=Exploding(),
-    )
-    detail = {}
-    _attach_leg_confs(validator, key, detail)
-    assert detail['leg_confs']['source']['need'] == 2
 
 
 def test_confirm_resolves_an_extrinsic_id_through_the_source_chain_and_claims_the_inner_hash():
@@ -1451,9 +1248,7 @@ def test_confirm_resolves_an_extrinsic_id_through_the_source_chain_and_claims_th
 
     client = _ConfirmClient(_confirm_reservation(from_chain='sn19'))
     provider = _AlphaProvider(_tx(confirmed=True, block_time=CONFIRM_CREATED_AT + 5, confirmations=6))
-    validator = SimpleNamespace(
-        solana_client=client, axon_assets={'sn19': provider}, axon_lock=threading.RLock(), state_store=_store()
-    )
+    validator = Ctx(client, providers={'sn19': provider})
     r = confirm_deposit(validator, HOTKEY, '8083554-7')
     assert r.ok and r.from_tx_hash == INNER_HASH
     assert (provider.verified['tx_hash'], provider.verified['block_hint']) == (INNER_HASH, 8083554)
