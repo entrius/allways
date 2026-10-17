@@ -209,3 +209,24 @@ def test_empty_event_list_is_unknown_not_a_no_credit():
     p = _provider(events=[])
     with pytest.raises(ProviderUnreachableError):
         p.settled_credit(BLOCK, 0, MINER)
+
+
+def test_a_node_behind_the_hinted_block_is_unreachable_not_absent():
+    # A not-found leg can slash; a node that hasn't imported the hinted block yet knows nothing.
+    p = _provider(events=[_transfer_event(MINER, 5_000, USER)], head=BLOCK - 5)
+    p.get_block = lambda n: None
+    with pytest.raises(ProviderUnreachableError):
+        p.verify_transaction(tx_hash=TXID, expected_recipient=MINER, expected_amount=5_000, block_hint=BLOCK)
+
+
+def test_hinted_blocks_the_node_cannot_serve_are_unreachable_not_absent():
+    p = _provider(events=[], head=BLOCK + 10)
+    p.get_block = lambda n: None
+    with pytest.raises(ProviderUnreachableError):
+        p.verify_transaction(tx_hash=TXID, expected_recipient=MINER, expected_amount=5_000, block_hint=BLOCK)
+
+
+def test_a_hash_absent_from_readable_hinted_blocks_is_still_absent():
+    p = _provider(events=[], head=BLOCK + 10)
+    p.get_block = lambda n: {'_raw': True, 'extrinsics': []}
+    assert p.verify_transaction(tx_hash=TXID, expected_recipient=MINER, expected_amount=5_000, block_hint=BLOCK) is None

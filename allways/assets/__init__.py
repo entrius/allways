@@ -232,8 +232,12 @@ def create_assets(
             admit(chain_id, name, provider, failed.get(position) if error is None else error)
 
     if check and providers:
-        bt.logging.info('Chain providers ready:')
+        alphas = [c for c in providers if c.startswith('sn') and c[2:].isdigit()]
+        others = [c for c in providers if c not in alphas]
+        bt.logging.info(
+            f'Chain providers ready: {", ".join(others)}' + (f' + {len(alphas)} subnet alphas' if alphas else '')
+        )
         for chain_id, provider in providers.items():
-            bt.logging.info(f'  {chain_id} → {provider.describe()}')
+            bt.logging.debug(f'  {chain_id} → {provider.describe()}')
 
     return providers

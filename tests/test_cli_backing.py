@@ -359,9 +359,21 @@ class _RoutingClient:
         return None
 
 
+def _permissive(*chains):
+    """Providers that verify both legs and wave every deliverability gate through."""
+    chain = SimpleNamespace(normalize_address=lambda a: a, is_valid_address=lambda address: True)
+    provider = SimpleNamespace(
+        chain=chain,
+        transfers_enabled=lambda: True,
+        can_deliver_to=lambda address, amount: True,
+        send_blocker=lambda frm, to, amt: None,
+    )
+    return {c: provider for c in chains}
+
+
 def _pick(client, from_amount=10**9):
     from allways.cli.swap_commands.swap_intake import bounds_from_config
-    from allways.validator.reserve_engine import _best_offer
+    from allways.validator.serving.requests import _best_offer
 
     state = client.get_miner_state('m1')
     bounds = bounds_from_config(client.get_config())
@@ -415,22 +427,17 @@ def test_a_tao_offer_whose_bond_is_too_thin_says_so_in_tao():
 
 
 def test_the_routed_bid_names_the_backing_it_won():
-    import threading
     from unittest.mock import patch
 
-    from allways.validator.reserve_engine import reserve_on_behalf
+    from allways.validator.serving.requests import reserve_on_behalf
+    from tests.validator.fakes import Ctx
 
     client = _RoutingClient()
     client.open_or_request = lambda miner, f, t, backing='sol': client.bids.append(backing) or 'sig'
-    validator = SimpleNamespace(
-        solana_client=client,
-        axon_lock=threading.RLock(),
-        state_store=SimpleNamespace(upsert_routed_request=lambda *a: None),
-        axon_assets={},
-    )
-    with patch('allways.validator.reserve_engine.resolve_miner_pubkey', return_value='m1'):
+    ctx = Ctx(client, store=SimpleNamespace(upsert_routed_request=lambda *a: None), providers=_permissive('sol', 'tao'))
+    with patch('allways.validator.serving.requests.resolve_miner_pubkey', return_value='m1'):
         res = reserve_on_behalf(
-            validator,
+            ctx,
             'hk',
             'sol',
             'tao',

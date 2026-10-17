@@ -1,0 +1,223 @@
+"""Axon handlers: miner activation, and reserve and confirm from the CLI.
+
+Each synapse has a blacklist (fast auth), a priority (ordering) and a forward handler, attached to the
+axon with the serving component (``ctx``) bound in."""
+
+import time
+from typing import Tuple
+
+import bittensor as bt
+
+from allways.solana import pdas
+from allways.synapses import MinerActivateSynapse, SwapConfirmSynapse, SwapReserveSynapse
+from allways.utils.logging import miner_label as _miner_label
+from allways.validator.serving import activation
+from allways.validator.serving.requests import confirm_deposit, reserve_on_behalf, resolve_miner_pubkey
+
+
+def reject_synapse(synapse: bt.Synapse, reason: str, context: str = '') -> None:
+    """Mark a synapse as rejected with a reason and log it."""
+    synapse.accepted = False
+    synapse.rejection_reason = reason
+    if context:
+        bt.logging.info(f'{context}: {reason}')
+
+
+def miner_label(ctx, miner_hotkey: str) -> str:
+    """Return ``UID N / hotkey[:8]`` — leads every miner log line with the UID."""
+    return _miner_label(ctx.metagraph, miner_hotkey)
+
+
+# =============================================================================
+# MinerActivateSynapse handlers
+# =============================================================================
+
+
+async def blacklist_miner_activate(
+    ctx,
+    synapse: MinerActivateSynapse,
+) -> Tuple[bool, str]:
+    """Reject synapses from unregistered hotkeys."""
+    if synapse.dendrite is None or synapse.dendrite.hotkey is None:
+        return True, 'Missing dendrite or hotkey'
+    if synapse.dendrite.hotkey not in ctx.metagraph.hotkeys:
+        bt.logging.debug(f'serving: refused an unregistered hotkey {synapse.dendrite.hotkey}')
+        return True, 'Unregistered hotkey'
+    return False, 'Hotkey recognized'
+
+
+async def priority_miner_activate(
+    ctx,
+    synapse: MinerActivateSynapse,
+) -> float:
+    """Priority by stake — higher stake processed first."""
+    try:
+        uid = ctx.metagraph.hotkeys.index(synapse.dendrite.hotkey)
+        return float(ctx.metagraph.S[uid])
+    except (ValueError, IndexError):
+        return 0.0
+
+
+async def handle_miner_activate(
+    ctx,
+    synapse: MinerActivateSynapse,
+) -> MinerActivateSynapse:
+    """Process miner activation: confirm the named purse's eligibility + vote_activate that backing.
+
+    The miner flags down a validator naming ONE purse; the validator resolves its bound Solana pubkey
+    (A5 HotkeyBinding) and checks that purse's own facts (see `activation.check`) before voting. Purses
+    activate independently since W2, so the gate is the backing's bit, never the `active` OR view."""
+    miner_hotkey = synapse.dendrite.hotkey
+    backing = (synapse.backing or pdas.BACKING_CHAIN_SOL).lower()
+    label = miner_label(ctx, miner_hotkey)
+    tag = f'[{label}] MinerActivate {backing.upper()}'
+    bt.logging.debug(f'{tag}: request from {miner_hotkey}')
+
+    try:
+        # Fresh registration check (cached metagraph can be stale) — substrate read, hold axon_lock.
+        with ctx.lock:
+            registered = ctx.subtensor.is_hotkey_registered(
+                netuid=ctx.netuid,
+                hotkey_ss58=miner_hotkey,
+            )
+        if not registered:
+            reject_synapse(synapse, 'Hotkey not registered on subnet', tag)
+            return synapse
+
+        miner_pk = resolve_miner_pubkey(ctx, miner_hotkey)
+        if miner_pk is None:
+            reject_synapse(synapse, 'Hotkey not bound to a Solana miner (call bind_hotkey first)', tag)
+            return synapse
+
+        miner_state = ctx.accounts().get_miner_state(miner_pk)
+        if miner_state is None:
+            reject_synapse(synapse, 'Miner has no on-chain state yet (post collateral first)', tag)
+            return synapse
+
+        verdict = activation.check(ctx, miner_hotkey, miner_pk, miner_state, backing, int(time.time()))
+        if not verdict.ok:
+            reject_synapse(synapse, verdict.reason, tag)
+            return synapse
+
+        ctx.client.vote_activate(miner_pk, backing=backing)
+        synapse.accepted = True
+        bt.logging.success(f'{tag}: activated')
+
+    except Exception as e:
+        bt.logging.error(f'{tag} failed: {e}')
+        reject_synapse(synapse, str(e))
+
+    return synapse
+
+
+# =============================================================================
+# SwapReserveSynapse handlers
+# =============================================================================
+
+
+async def blacklist_swap_reserve(
+    ctx,
+    synapse: SwapReserveSynapse,
+) -> Tuple[bool, str]:
+    """Pass-through — custom field checks happen in forward handler.
+
+    Bittensor's axon middleware constructs the synapse from HTTP headers (default values)
+    before calling blacklist. Custom fields (from_address, proof, etc.) are only available
+    in the JSON body, which is parsed later for the forward handler.
+    """
+    return False, 'Passed'
+
+
+async def priority_swap_reserve(
+    ctx,
+    synapse: SwapReserveSynapse,
+) -> float:
+    """Flat priority for user requests."""
+    return 1.0
+
+
+async def handle_swap_reserve(
+    ctx,
+    synapse: SwapReserveSynapse,
+) -> SwapReserveSynapse:
+    """Enter a miner's reservation pool on the caller's behalf (validator = router → high win odds).
+
+    Thin transport wrapper over the shared `reserve_on_behalf` kernel op (same op the HTTP seam calls) —
+    it validates eligibility + rate-consistency and submits open_or_request (open or free upsert)."""
+    miner = synapse.miner_hotkey
+    label = miner_label(ctx, miner)
+    direction = f'{(synapse.from_chain or "?").upper()}->{(synapse.to_chain or "?").upper()}'
+    tag = f'[miner {label}] SwapReserve {direction}'
+    try:
+        result = reserve_on_behalf(
+            ctx,
+            miner,
+            synapse.from_chain,
+            synapse.to_chain,
+            synapse.user_pubkey,
+            synapse.user_from_addr,
+            synapse.user_to_addr,
+            synapse.from_amount,
+        )
+        if not result.ok:
+            reject_synapse(synapse, result.reason, tag)
+            return synapse
+        synapse.accepted = True
+        synapse.pool_closes_at = result.pool_closes_at
+        bt.logging.info(f'{tag}: entered pool on-behalf (closes_at={result.pool_closes_at}, tx={result.sig[:16]}…)')
+    except ValueError as e:
+        # Malformed caller input (bad ss58/pubkey) is a client error, not a validator fault —
+        # reject at INFO like every other rejection, don't spam ERROR on garbage synapses.
+        reject_synapse(synapse, str(e), tag)
+    except Exception as e:
+        bt.logging.error(f'{tag} failed: {e}')
+        reject_synapse(synapse, str(e))
+    return synapse
+
+
+# =============================================================================
+# SwapConfirmSynapse handlers
+# =============================================================================
+
+
+async def blacklist_swap_confirm(
+    ctx,
+    synapse: SwapConfirmSynapse,
+) -> Tuple[bool, str]:
+    """Pass-through — custom field checks happen in forward handler.
+
+    See blacklist_swap_reserve docstring for rationale.
+    """
+    return False, 'Passed'
+
+
+async def priority_swap_confirm(
+    ctx,
+    synapse: SwapConfirmSynapse,
+) -> float:
+    """Flat priority for user requests."""
+    return 1.0
+
+
+async def handle_swap_confirm(
+    ctx,
+    synapse: SwapConfirmSynapse,
+) -> SwapConfirmSynapse:
+    """Claim relay: verify the user's source deposit against the pinned Reservation, relay submit_swap_claim
+    (→ PendingAttestation). Thin wrapper over the shared `confirm_deposit` kernel op (same op the HTTP seam
+    calls). reservation_id is the miner hotkey (reservations are keyed by miner)."""
+    miner_hotkey = synapse.reservation_id
+    label = miner_label(ctx, miner_hotkey)
+    tag = f'[{label}] SwapConfirm'
+    bt.logging.debug(f'{tag}: request (from_tx={synapse.from_tx_hash} block_hint={synapse.from_tx_block})')
+    try:
+        result = confirm_deposit(ctx, miner_hotkey, synapse.from_tx_hash, synapse.from_tx_block)
+        if not result.ok:
+            reject_synapse(synapse, result.reason, tag)
+            return synapse
+        synapse.accepted = True
+        bt.logging.info(f'{tag}: CLAIM relayed (swap_key={result.swap_key[:16]}…, tx={synapse.from_tx_hash[:16]}…)')
+    except Exception as e:
+        bt.logging.error(f'{tag} failed: {e}')
+        reject_synapse(synapse, str(e))
+    return synapse

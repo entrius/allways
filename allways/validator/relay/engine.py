@@ -1,9 +1,14 @@
-"""BondRelay — the relayer's clock, its ledger of obligations, and the restart barrier.
+"""BondRelay — one hub's relayer: its clock, its ledger of obligations, and the restart barrier.
 
-One instance per validator, ticked once per forward step. It holds the shared context the three
-jobs run against (Solana client, vault client, state store, pubkey↔hotkey attribution) and
-sequences them; the jobs themselves live in the sibling modules and take the relay as their first
-argument, the way ``floor_sweep`` / ``forward`` take the validator.
+Solana is the transaction ledger; the hub's vault is the collateral, and neither can read the other.
+The relay carries verdicts between them in three jobs (sibling modules, each taking the relay):
+
+* **slash** (Solana → vault): a timeout verdict becomes ``vote_slash``, netted into the attestation first.
+* **attestation** (vault → Solana): the effective bond Solana's guards read, event-driven only.
+* **exits** (Solana → vault): the quiescence-gated residual settle and unlock, and the fee true-up.
+
+Solana is read from the World and written through ``vote`` (the actuator's inbox); the vault is
+this relay's own client, read and written only from the relay's thread.
 
 **Ordering is the safety property.** Within a tick, attestation writes go out before the vault
 writes they anticipate — the mirror must lead the vault pessimistically, never trail it. Across a
@@ -30,13 +35,13 @@ from allways.constants import (
     RELAY_RECONCILE_INTERVAL_SECS,
     RELAY_SWAP_RETENTION_SECS,
     VOTE_ROUND_TTL_SECS,
-    family,
 )
 from allways.solana import pdas
-from allways.validator.binding import build_attribution
 from allways.validator.relay import attestation as attestation_job
-from allways.validator.relay import exit_relay
+from allways.validator.relay import exits
 from allways.validator.relay import slash as slash_job
+from allways.validator.runtime.logs import Episodes
+from allways.validator.world.snapshot import World
 
 # Vault events that move a miner's bond or its books — each one makes that miner's attestation
 # stale. Polling them is a latency optimisation only: the reconcile loop re-derives the same
@@ -49,7 +54,6 @@ VAULT_DIRTYING_EVENTS = {
     'MinerSlashed': 'miner',
 }
 
-_ATTRIBUTION_TTL_SECS = 300
 _VAULT_CURSOR_KEY = 'vault_event_block'
 _VAULT_POLL_MAX_BLOCKS = 50  # two substrate reads per block; keeps one step's catch-up under the stall watchdog
 _EXIT_KEY_PREFIX = 'exit:'
@@ -66,8 +70,7 @@ class RelayConfig:
     quiescence_grace_secs: int = RELAY_QUIESCENCE_GRACE_SECS
     swap_retention_secs: int = RELAY_SWAP_RETENTION_SECS
     vote_retry_secs: int = VOTE_ROUND_TTL_SECS
-    # Vault writes per tick. Each is an extrinsic waiting on block inclusion, and the relay rides
-    # the forward pass — a large backlog has to drain across ticks, not stall the forward watchdog.
+    # Vault writes per tick. Each waits on block inclusion, so a large backlog drains across ticks.
     max_writes_per_tick: int = 8
 
     @classmethod
@@ -93,30 +96,32 @@ class RelayConfig:
 class BondRelay:
     def __init__(
         self,
-        solana_client: Any,
+        world: Callable[[], Optional[World]],
+        vote: Callable[[str, Any, Any], None],
         vault: Any,
-        state_store: Any,
+        ledger: Any,
         backing: str = pdas.BACKING_CHAIN_TAO,
-        read_only: bool = False,
+        program_id: Any = None,
         clock: Optional[Callable[[], float]] = None,
         config: Optional[RelayConfig] = None,
-        config_fn: Optional[Callable[[], Any]] = None,
         sleep: Optional[Callable[[float], None]] = None,
         timer: Optional[Callable[[], float]] = None,
     ):
-        self.solana = solana_client
+        self._world = world
+        self._episodes = Episodes()
+        self.vote = vote  # (kind, subject, payload): handed to the actuator, landed or retried there
         self.vault = vault
-        self.store = state_store
+        self.store = ledger
         self.backing = backing
         self.backing_bit = pdas.BACKING_BITS.get(backing, 0)
-        self.read_only = read_only
+        self.program_id = program_id
         self.clock = clock or time.time
         self.cfg = config or RelayConfig()
         self._sleep = sleep or time.sleep
         # Elapsed time for pacing — monotonic, where `clock` is wall time and may be stepped.
         self._timer = timer or time.monotonic
         self._last_miner_read = 0.0
-        self._config_fn = config_fn or solana_client.get_config
+        self._settled: Dict[str, Optional[int]] = {}  # each miner's settled counter, read once per step
 
         # Miners whose attestation needs recomputing. Event-driven ONLY: an idle miner never
         # enters this set, so it never gets a write (its old attestation is old-but-correct).
@@ -130,10 +135,6 @@ class BondRelay:
         self._ring: List[str] = []
         self._ring_pos = 0
         self._next_reconcile = 0.0
-        self._attribution: Dict[str, str] = {}
-        self._attribution_at = 0.0
-        # Whether the last refresh of the map succeeded (see `reconcile`).
-        self._attribution_fresh = True
         self._last_heartbeat_attempt = 0.0
         # Per-subject re-vote throttles, so an unlanded round isn't re-submitted every 12s pass.
         self._voted_at: Dict[str, float] = {}
@@ -142,19 +143,36 @@ class BondRelay:
         # until the relay has caught up — the fuse must not report "live" over a lost verdict.
         self._ingest_healthy = True
 
-    # ─── attribution (Solana pubkey ↔ Bittensor hotkey, via the A5 binding) ──
+    # ─── Solana, as the World holds it ───────────────────────────────────────
 
-    def attribution(self, refresh: bool = False) -> Dict[str, str]:
-        now = self.clock()
-        if refresh or not self._attribution or now - self._attribution_at >= _ATTRIBUTION_TTL_SECS:
-            try:
-                self._attribution = build_attribution(self.solana)
-                self._attribution_at = now
-                self._attribution_fresh = True
-            except Exception as e:
-                self._attribution_fresh = False
-                bt.logging.warning(f'relay: attribution refresh failed ({e}); using the previous map')
-        return self._attribution
+    def world(self) -> World:
+        world = self._world()
+        if world is None:
+            raise RuntimeError('no World yet')
+        return world
+
+    def attribution(self) -> Dict[str, str]:
+        """Solana pubkey → hotkey, off the bindings the World verified. Empty until the World is complete:
+        an audit of nobody must never come back clean."""
+        world = self._world()
+        return dict(world.attribution) if world is not None and world.complete else {}
+
+    def miner_state(self, miner: str) -> Optional[Any]:
+        return self.world().get('MinerState', pdas.miner_state_pda(miner, self.program_id))
+
+    def attestation(self, miner: str) -> Optional[Any]:
+        return self.world().get('BondAttestation', pdas.bond_attestation_pda(miner, self.backing, self.program_id))
+
+    def settled_total(self, hotkey: str) -> Optional[int]:
+        """The vault's settled counter for ``hotkey``, read once per step (the attestation and the fee
+        ledger both ask)."""
+        if hotkey not in self._settled:
+            self._settled[hotkey] = self.vault.get_settled_total(hotkey)
+        return self._settled[hotkey]
+
+    def collect_fees(self, entries: Any) -> Any:
+        self._settled.clear()
+        return self.vault.vote_collect_fees_batch(entries)
 
     def hotkey_for(self, miner: str) -> Optional[str]:
         """The vault keys bonds by hotkey (D3); every vault call for a miner goes through here.
@@ -167,41 +185,7 @@ class BondRelay:
                 return pubkey
         return None
 
-    # ─── inputs from the swap loop + the event ingest ────────────────────────
-
-    def observe_swap(self, swap: Any) -> None:
-        """Snapshot a live off-chain-backed swap's reimbursement target.
-
-        The verdict event does not carry the user's backing-chain address and the Swap PDA closes
-        the moment it lands, so this is the ONLY window in which the ``vote_slash`` payee can be
-        read. Called for every live swap the loop walks, hence the first-sighting-wins insert."""
-        backing = str(getattr(swap, 'collateral_chain', '') or '').lower()
-        if backing != self.backing:
-            return
-        addr = self.user_backing_address(swap)
-        if not addr:
-            return
-        # F1: pin the bonded hotkey now (H1). A rebind before the timeout must not move the seizure.
-        hotkey = self.hotkey_for(str(swap.miner))
-        try:
-            self.store.record_relay_swap(_hex(swap.swap_key), str(swap.miner), backing, addr, int(self.clock()), hotkey)
-        except Exception as e:
-            bt.logging.warning(f'relay: could not snapshot swap facts: {e}')
-
-    def user_backing_address(self, swap: Any) -> str:
-        """The user's address on the collateral chain — the leg denominated in it, else the leg that
-        settles in its family (an sn<N> leg is paid out in TAO), as ``backing.rs::collateral_leg_user_addr``.
-        Needs no new on-chain field: both legs are pinned at finalize (the D5 verification)."""
-        backing = str(getattr(swap, 'collateral_chain', '') or '').lower()
-        legs = [
-            (str(getattr(swap, 'from_chain', '')).lower(), str(getattr(swap, 'user_from_addr', '') or '')),
-            (str(getattr(swap, 'to_chain', '')).lower(), str(getattr(swap, 'user_to_addr', '') or '')),
-        ]
-        for matches in (lambda chain: chain == backing, lambda chain: family(chain) == backing):
-            for chain, addr in legs:
-                if matches(chain):
-                    return addr
-        return ''
+    # ─── inputs from the event feed ──────────────────────────────────────────
 
     def has_pending_debit(self, miner: str) -> bool:
         """Off-chain backstop to busy-until-settled: while a miner owes the vault an unapplied
@@ -214,37 +198,19 @@ class BondRelay:
             bt.logging.warning(f'relay: pending-debit check failed for {str(miner)[:8]} ({e}); assuming owed')
             return True  # fail closed: an unreadable ledger must not open a new swap
 
-    def ingest_events(self, records: List[Any]) -> bool:
-        """Fold Solana program events into the relay ledger. Runs beside (not inside) the crown
-        index: this one keys by Solana pubkey and keeps events from unbound miners, because a
-        binding can land after the swap did.
-
-        F3: returns False if any record failed to write, so the caller holds the relay cursor and
-        re-reads the window next step (the inserts are ON CONFLICT DO NOTHING — replay is safe). A
-        failed verdict write must never be swallowed: it would lose the slash forever."""
-        ok = True
-        for rec in records:
-            try:
-                self._ingest_event(rec)
-            except Exception as e:
-                bt.logging.warning(f'relay: could not ingest {getattr(rec, "name", "?")}: {e}')
-                ok = False
-        self._ingest_healthy = ok
-        return ok
-
-    def _ingest_event(self, rec: Any) -> None:
+    def ingest(self, rec: Any) -> None:
+        """Fold one program event into the ledger. Keyed by Solana pubkey and kept for unbound miners too,
+        because a binding can land after the swap did. Raises when the write fails: the caller holds the
+        event and the heartbeat, since a lost verdict would lose the slash for good."""
         name = rec.name
         fields = rec.fields
         block_time = rec.block_time
         if name == 'SwapCompleted':
             if str(fields['collateral_chain']).lower() != self.backing or block_time is None:
                 return
-            # Absolute rao figure (the confirm-events seam W2b landed): Solana moved nothing, the
-            # fee is owed on the vault and nets off the effective bond until it settles there.
+            # Solana moved nothing: the fee is owed on the vault and nets off the bond until it settles.
+            # Never under a guessed generation: a mis-tagged accrual would charge the wrong vault forever.
             miner = str(fields['miner'])
-            # The fee is owed to the vault in service NOW. Refuse to record it under a guessed
-            # generation — ingest holds the cursor and replays, so an unreadable config costs a
-            # retry, while a mis-tagged accrual would be charged against the wrong vault forever.
             generation = self.vault_generation()
             if generation is None:
                 raise RuntimeError('vault generation unreadable — cannot tag the fee accrual')
@@ -273,7 +239,7 @@ class BondRelay:
         guessed generation would either land in a retired namespace or be refused as stale, and
         "unknown" must never be spelled as 0 — same contract as an unreadable vault read."""
         try:
-            return int(getattr(self._config_fn(), 'vault_generation', 0) or 0)
+            return int(getattr(self.world().config, 'vault_generation', 0) or 0)
         except Exception as e:
             bt.logging.warning(f'relay: vault generation read failed: {e}')
             return None
@@ -293,9 +259,10 @@ class BondRelay:
     # ─── the tick ────────────────────────────────────────────────────────────
 
     def step(self, now: Optional[int] = None) -> None:
-        """One forward-step tick. Never raises: a relay hiccup must not break the swap loop."""
+        """One tick. Never raises: a relay hiccup is retried next tick."""
         now = int(now if now is not None else self.clock())
         self._writes = 0
+        self._settled.clear()
         try:
             if not self._reconciled:
                 # STARTUP BARRIER. Until every owed write is submitted, the heartbeat stays down
@@ -303,10 +270,13 @@ class BondRelay:
                 # our vote, not by waiting for quorum — waiting would deadlock a fleet-wide
                 # restart, where every validator is behind at once.
                 if not self.reconcile(now):
-                    bt.logging.info('relay: startup reconcile still draining — heartbeat held down')
+                    self._episodes.start(
+                        'reconcile', 'relay: startup reconcile draining, heartbeat held', bt.logging.info
+                    )
                     return
                 self._reconciled = True
-                bt.logging.success('relay: startup reconcile clean — heartbeat released')
+                self._episodes.end('reconcile')
+                bt.logging.info('relay: startup reconcile clean, heartbeat released')
                 dev_signal.emit('relay_reconciled', backing=self.backing)
 
             self.poll_vault_events()
@@ -314,8 +284,8 @@ class BondRelay:
             slash_job.arm_verdicts(self, now)
             attestation_job.flush(self, now)
             slash_job.relay_verdicts(self, now)
-            exit_relay.run_exits(self, now)
-            exit_relay.maybe_cadence_settle(self, now)
+            exits.run_exits(self, now)
+            exits.maybe_cadence_settle(self, now)
             self.maybe_heartbeat(now)
         except Exception as e:
             bt.logging.warning(f'relay: step failed: {e}')
@@ -325,7 +295,7 @@ class BondRelay:
 
         The bound set is laid out as a ring and walked once per ``reconcile_interval_secs``: each
         tick marks dirty the miners the clock says are due by now, and the tick's own flush re-reads
-        them. Every miner is still re-checked once an interval, but no forward step carries the
+        them. Every miner is still re-checked once an interval, but no tick carries the
         whole walk — which is ~0.5s of paced vault reads per bound miner. A lap that ticks came too
         slowly to finish is finished at its boundary, so the interval stays a guarantee."""
         interval = self.cfg.reconcile_interval_secs
@@ -343,7 +313,6 @@ class BondRelay:
         # rather than whenever the walk reaches it, so one that bound mid-lap waits at most an
         # interval for its first audit — the same bound the full walk gave.
         known = set(self._ring)
-        self.attribution(refresh=True)
         bonded = self.bonded_miners()
         for miner in bonded:
             if miner not in known:
@@ -364,13 +333,9 @@ class BondRelay:
         Returns True when nothing was left undone — the condition the startup barrier waits on.
         Repairs the one hole the event path structurally can't cover: a crash BETWEEN paired
         writes (vault mutated, attestation refresh never sent)."""
-        # Rediscover WHO exists before asking what they owe: the bound set is the iteration set
-        # below, so a cached map would hide a miner that bound since the last pass for a whole TTL
-        # — including one that bound and bonded in the same minute.
-        self.attribution(refresh=True)
-        # A refresh that failed leaves the previous map — at boot, an empty one — and an audit of
-        # nobody would come back "clean". Not knowing who exists is owed, not settled.
-        ok = self._attribution_fresh
+        # Not knowing who exists (no complete World yet) is owed, not settled.
+        world = self._world()
+        ok = world is not None and world.complete
         bonded = self.bonded_miners()
         for miner in bonded:
             self.mark_dirty(miner)
@@ -381,7 +346,7 @@ class BondRelay:
         slash_job.arm_verdicts(self, now)
         ok = slash_job.relay_verdicts(self, now) and ok
         self._refresh_exiting(bonded)
-        ok = exit_relay.run_exits(self, now) and ok
+        ok = exits.run_exits(self, now) and ok
         self._prune(now)
         return ok
 
@@ -401,12 +366,10 @@ class BondRelay:
         miner with no bond costs three vault reads and produces no write (see
         ``attestation._write_one``)."""
         miners: Set[str] = set(self.attribution())
-        try:
-            for _pda, att in self.solana.get_all('BondAttestation'):
-                if str(getattr(att, 'chain', self.backing)).lower() == self.backing:
-                    miners.add(str(att.miner))
-        except Exception as e:
-            bt.logging.warning(f'relay: attestation scan failed ({e}); reconciling the ledger only')
+        world = self._world()
+        for _pda, att in world.all('BondAttestation') if world is not None else ():
+            if str(getattr(att, 'chain', self.backing)).lower() == self.backing:
+                miners.add(str(att.miner))
         try:
             miners.update(row['miner'] for row in self.store.open_relay_slashes(self.backing))
             miners.update(self.store.accrued_fee_totals(self.backing))
@@ -439,7 +402,7 @@ class BondRelay:
             bt.logging.warning(f'relay: could not reload the exit set: {e}')
         for miner in list(self._exiting):
             try:
-                ms = self.solana.get_miner_state(miner)
+                ms = self.miner_state(miner)
             except Exception:
                 continue
             if ms is not None and int(getattr(ms, 'active_backings', 0)) & self.backing_bit:
@@ -452,34 +415,19 @@ class BondRelay:
         the whole relay, not fifty questions about individual miners — so one round, and quiet
         miners can never false-positive a staleness fuse."""
         if not self._ingest_healthy:
-            bt.logging.info('relay: a verdict write is still dirty — heartbeat held down')
+            self._episodes.start('dirty', 'relay: a verdict is waiting to be written, heartbeat held')
             return
-        try:
-            cfg = self._config_fn()
-            last = int(getattr(cfg, 'last_attest_heartbeat', 0) or 0)
-        except Exception as e:
-            bt.logging.warning(f'relay: heartbeat config read failed: {e}')
+        self._episodes.end('dirty', 'relay: verdicts written, heartbeat free')
+        world = self._world()
+        if world is None or world.config is None:
             return
+        last = int(getattr(world.config, 'last_attest_heartbeat', 0) or 0)
         if now - max(last, self._last_heartbeat_attempt) < self.cfg.heartbeat_interval_secs:
             return
-        if self.read_only:
-            bt.logging.info('relay: WOULD vote_attest_heartbeat (read-only)')
-            self._last_heartbeat_attempt = now
-            return
-        try:
-            if self.solana.has_voted(pdas.REQ_ATTEST_HEARTBEAT, pdas.config_pda(self.solana.program_id), self.me()):
-                self._last_heartbeat_attempt = now
-                return
-            sig = self.solana.vote_attest_heartbeat()
-        except Exception as e:
-            bt.logging.warning(f'relay: heartbeat vote failed: {e}')
-            return
+        self.vote('vote_attest_heartbeat', 'config', None)  # the executor skips a round already voted
         self._last_heartbeat_attempt = now
-        bt.logging.info(f'relay: heartbeat vote cast ({sig[:16]}…)')
-        dev_signal.emit('relay_heartbeat', sig=sig)
-
-    def me(self):
-        return self.solana.keypair.pubkey()
+        bt.logging.debug('relay: heartbeat vote queued')
+        dev_signal.emit('relay_heartbeat')
 
     # ─── vault event polling (freshness, never truth) ────────────────────────
 
@@ -543,12 +491,3 @@ class BondRelay:
 
 def _hex(value) -> str:
     return bytes(value).hex() if isinstance(value, (bytes, bytearray, list)) else str(value)
-
-
-def maybe_relay(validator) -> None:
-    """One never-raises relay tick off the validator's forward pass. Absent vault config, the
-    relayer isn't constructed at all and this is a no-op — a SOL-only deployment pays nothing."""
-    relay = getattr(validator, 'bond_relay', None)
-    if relay is None:
-        return
-    relay.step()

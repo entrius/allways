@@ -374,7 +374,7 @@ def build_subtensor(network: Optional[str] = None, config: Optional['bt.Config']
     fallbacks, archives = _same_chain(primary_network, fallbacks), _same_chain(primary_network, archives)
     if not fallbacks and not archives:
         return bt.Subtensor(**kwargs)
-    bt.logging.info(
+    bt.logging.debug(
         f'Subtensor {redact_endpoint(primary)} with fallbacks [{", ".join(map(redact_endpoint, fallbacks))}], '
         f'archive [{", ".join(map(redact_endpoint, archives))}]'
     )
