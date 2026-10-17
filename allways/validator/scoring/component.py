@@ -198,13 +198,7 @@ class WeightSetter(Component):
 
     def fold(self, result: RoundResult) -> None:
         """EMA over the round, aligned to its metagraph: a uid whose hotkey changed starts from zero."""
-        old = np.array(
-            [
-                self.scores[uid] if uid < len(self.hotkeys) and self.hotkeys[uid] == hk else 0.0
-                for uid, hk in enumerate(result.hotkeys)
-            ],
-            dtype=np.float32,
-        )
+        old = self._aligned(result.hotkeys)
         rewards = np.nan_to_num(np.asarray(result.rewards, dtype=np.float32), nan=0.0)
         self.scores = self.alpha * rewards + (1 - self.alpha) * old
         self.hotkeys = list(result.hotkeys)
@@ -214,6 +208,16 @@ class WeightSetter(Component):
                 'INSERT INTO weights_scores VALUES (?, ?, ?)',
                 [(uid, hk, float(s)) for uid, (hk, s) in enumerate(zip(self.hotkeys, self.scores))],
             )
+
+    def _aligned(self, hotkeys) -> np.ndarray:
+        """Scores laid over `hotkeys` by uid; a uid whose hotkey changed (or is new) gets zero."""
+        return np.array(
+            [
+                self.scores[uid] if uid < len(self.hotkeys) and self.hotkeys[uid] == hk else 0.0
+                for uid, hk in enumerate(hotkeys)
+            ],
+            dtype=np.float32,
+        )
 
     def _due(self, head: Head) -> bool:
         hotkeys = list(head.metagraph.hotkeys)
@@ -226,7 +230,7 @@ class WeightSetter(Component):
     def _set(self, head: Head) -> None:
         metagraph = head.metagraph
         n = len(metagraph.hotkeys)
-        scores = self.scores if list(metagraph.hotkeys) == self.hotkeys else np.zeros(n, dtype=np.float32)
+        scores = self._aligned(metagraph.hotkeys)
         norm = float(np.sum(np.abs(scores)))
         if norm == 0 or np.isnan(norm):
             # Without this, an empty vector would spread emissions uniformly over every uid.

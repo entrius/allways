@@ -230,6 +230,26 @@ def test_weights_are_set_once_per_epoch(tmp_path, monkeypatch):
     assert len(subtensor.sets) == 2
 
 
+def test_a_uid_registered_after_the_round_keeps_everyone_elses_weights(tmp_path, monkeypatch):
+    seen = {}
+
+    def process(**kwargs):
+        seen['weights'] = kwargs['weights']
+        return kwargs['uids'], kwargs['weights']
+
+    monkeypatch.setattr('allways.validator.scoring.component.process_weights_for_netuid', process)
+    setter, rounds, head, _ = _setter(tmp_path)
+    rounds.set(_round(HOTKEYS, [1.0] + [0.0] * (len(HOTKEYS) - 1)))
+    grown = _head(block=200)
+    grown.metagraph.hotkeys.append('newcomer')
+    grown.metagraph.uids = np.arange(len(HOTKEYS) + 1)
+    grown.metagraph.last_update.append(0)
+    head.set(grown)
+    setter.tick(NOW)
+    assert len(seen['weights']) == len(HOTKEYS) + 1
+    assert seen['weights'][0] == 1.0 and seen['weights'][-1] == 0.0
+
+
 def test_no_scores_route_the_whole_pool_to_the_recycle_uid(tmp_path, monkeypatch):
     seen = {}
 
