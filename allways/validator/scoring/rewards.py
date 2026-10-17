@@ -667,6 +667,48 @@ def halted_round(hotkeys: Tuple[str, ...], window_start: int, window_end: int) -
     return RoundResult(window_start, window_end, hotkeys, rewards, halted=True)
 
 
+def replay_lane(
+    ledger, lane, states, rewardable, recent_fills, swap_bounds, prices, start, end, **out
+) -> Dict[str, float]:
+    """One lane's crown replay over ``[start, end]``, with the lane's candidates, bounds and unit value."""
+    from_chain, to_chain, backing = lane
+    min_swap, max_swap = swap_bounds.get(backing, (0, 0))
+    candidates = lane_eligible_hotkeys(states, rewardable, from_chain, to_chain, end, backing, recent_fills)
+    return replay_crown_time_window(
+        ledger,
+        from_chain,
+        to_chain,
+        start,
+        end,
+        candidates,
+        min_swap_hub=min_swap,
+        max_swap_hub=max_swap,
+        backing=backing,
+        unit_value=prices.unit_value(from_chain, to_chain, backing, end),
+        **out,
+    )
+
+
+def crown_now(world: World, hotkeys: Tuple[str, ...], ledger: Any, prices: AlphaPrices, now: int) -> Dict[Lane, List]:
+    """``current_crown_holders`` rows per quoted lane as of ``now``: the round's replay over the last second.
+    Reads only; the round's reconcile is what corrects the ledger."""
+    lanes = [lane for lane in ledger.quoted_lanes() if lane[:2] in DIRECTION_POOLS]
+    if world.config is None or world.config.halted:
+        return {lane: [] for lane in lanes}
+    rewardable = set(hotkeys)
+    states = without_address_banned(ledger, miner_states(world, rewardable), now)
+    recent_fills, swap_bounds = recent_fill_hotkeys(ledger, now), bounds_from_config(world.config)
+    out: Dict[Lane, List] = {}
+    for lane in lanes:
+        intervals: List[Interval] = []
+        replay_lane(
+            ledger, lane, states, rewardable, recent_fills, swap_bounds, prices, now - 1, now, intervals_out=intervals
+        )
+        last = intervals[-1] if intervals and intervals[-1][1] >= now else None
+        out[lane] = [(*lane, hk, share, last[3], now) for hk, share in last[2].items()] if last else []
+    return out
+
+
 def score_round(
     world: World,
     hotkeys: Tuple[str, ...],
@@ -717,21 +759,18 @@ def score_round(
         lane_intervals = intervals.setdefault(lane, [])  # a quoted dead lane still has its window rewritten
         if pool <= 0:
             continue  # a dead pair this window: nothing to pay
-        min_swap, max_swap = swap_bounds.get(backing, (0, 0))
-        candidates = lane_eligible_hotkeys(states, rewardable, from_chain, to_chain, now, backing, recent_fills)
-        crown_time = replay_crown_time_window(
+        crown_time = replay_lane(
             ledger,
-            from_chain,
-            to_chain,
+            lane,
+            states,
+            rewardable,
+            recent_fills,
+            swap_bounds,
+            prices,
             window_start,
             window_end,
-            candidates,
             trace=trace,
             intervals_out=lane_intervals,
-            min_swap_hub=min_swap,
-            max_swap_hub=max_swap,
-            backing=backing,
-            unit_value=prices.unit_value(from_chain, to_chain, backing, now),
         )
         if not sum(crown_time.values()) and not qvol:
             continue

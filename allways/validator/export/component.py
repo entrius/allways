@@ -1,14 +1,14 @@
 """Dashboard export (opt-in, ``STORE_DB_RESULTS``): each scoring round's result, written to Postgres for
 das-allways.
 
-It writes what the round computed and nothing more: the crown intervals, the score rows and the pools, the
-crown holders as of the round's end, and those rows again as the live score tip. A round the database
-refused is kept and retried, oldest first, so a slow or down database never touches scoring."""
+Each round's crown intervals, score rows and pools, plus those rows again as the live score tip; and the
+live crown, rewritten whenever scoring's replay of "now" changes. A round the database refused is kept and
+retried, oldest first, so a slow or down database never touches scoring."""
 
 from __future__ import annotations
 
 import time
-from typing import Any, Dict, List, Tuple
+from typing import Any, Dict, List, Optional, Tuple
 
 import bittensor as bt
 
@@ -53,16 +53,6 @@ def pool_rows(result: RoundResult) -> List[Tuple]:
     return rows
 
 
-def current_crown(result: RoundResult) -> Dict[Lane, List[Tuple]]:
-    """Who holds each lane's crown at the round's end: the holders of an interval that reaches it."""
-    out: Dict[Lane, List[Tuple]] = {}
-    for lane, intervals in result.intervals.items():
-        last = intervals[-1] if intervals else None
-        held = last is not None and last[1] >= result.window_end
-        out[lane] = [(*lane, hk, share, last[3], result.window_end) for hk, share in last[2].items()] if held else []
-    return out
-
-
 class Export(Component):
     """Not critical: a lagging export only leaves the dashboard behind."""
 
@@ -70,11 +60,12 @@ class Export(Component):
     interval_secs = 30.0
     stall_secs = 1800.0
 
-    def __init__(self, rounds: Latest[RoundResult], storage: Any, clock=time.time) -> None:
+    def __init__(self, rounds: Latest[RoundResult], crown: Latest[Dict], storage: Any, clock=time.time) -> None:
         super().__init__(clock)
-        self.rounds, self.storage = rounds, storage
+        self.rounds, self.crown, self.storage = rounds, crown, storage
         self._seen = 0
         self._held: List[RoundResult] = []
+        self._crown_written: Optional[Dict] = None
 
     def tick(self, now: float) -> None:
         result, version = self.rounds.get()
@@ -83,13 +74,16 @@ class Export(Component):
             self._held = (self._held + [result])[-MAX_HELD_ROUNDS:]
         while self._held and self._write(self._held[0]):
             self._held.pop(0)
+        live, _ = self.crown.get()
+        if live is not None and _holders(live) != _holders(self._crown_written):
+            if self.storage.upsert_current_crown_snapshot(live).success:
+                self._crown_written = live
 
     def _write(self, result: RoundResult) -> bool:
         window = (result.window_start, result.window_end)
         if result.halted:
             lanes = [(f, t, b) for f, t in DIRECTION_POOLS for b in declarable_backings(f, t)]
-            done = self.storage.flush_halt_window(lanes, *window, max_ts=result.window_end).success
-            return done and self.storage.upsert_current_crown_snapshot({lane: [] for lane in lanes}).success
+            return self.storage.flush_halt_window(lanes, *window, max_ts=result.window_end).success
         flushed = self.storage.flush_scoring_window(
             crown_rows_by_direction=crown_rows(result),
             crown_window_bounds_by_direction={lane: window for lane in result.traces},
@@ -99,9 +93,11 @@ class Export(Component):
         )
         if not flushed.success:
             return False
-        if result is self._held[-1]:  # the tips show the newest round only
-            tips = self.storage.upsert_current_crown_snapshot(current_crown(result)).success
-            tips = self.storage.replace_current_miner_scores(score_rows(result)).success and tips
-            if not tips:
-                bt.logging.warning('export: round written, live tips not refreshed')
+        if result is self._held[-1] and not self.storage.replace_current_miner_scores(score_rows(result)).success:
+            bt.logging.warning('export: round written, live score tip not refreshed')  # the newest round only
         return True
+
+
+def _holders(rows: Optional[Dict]) -> Optional[Dict]:
+    """The snapshot without its timestamps: only a change of holder, share or rate is worth a write."""
+    return None if rows is None else {lane: [r[:-1] for r in held] for lane, held in rows.items()}

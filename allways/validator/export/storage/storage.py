@@ -235,8 +235,9 @@ class DatabaseStorage:
     ) -> StorageResult:
         """Replace current_crown_holders rows for the given lanes.
 
-        The dashboard's "who holds the crown" surface, as of the latest
-        round's end; ``flush_scoring_window`` writes the historical ledger.
+        The dashboard's "who holds the crown right now" surface, rewritten
+        when the live replay's holders change; ``flush_scoring_window`` writes
+        the historical ledger.
 
         Row format per lane: ``(from_chain, to_chain, backing, hotkey,
         credit, rate, ts)``. Empty list for a lane means "no qualifying
