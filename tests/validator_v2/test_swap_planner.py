@@ -7,13 +7,12 @@ from solders.keypair import Keypair
 from allways.chains import get_chain_def
 from allways.solana import pdas
 from allways.solana.client import swap_key_from_tx_hash
-from allways.validator.state_store import tx_key
 from allways.validator_v2.actuator.planners import SwapPlanner
 from allways.validator_v2.actuator.swap_context import SwapMemory
 from allways.validator_v2.chains.watcher import Verdict
 from allways.validator_v2.runtime.deadline_queue import Urgency
 from allways.validator_v2.store.db import Store
-from allways.validator_v2.world.snapshot import DepositClaim, Fulfillment, PayoutRoute, World
+from allways.validator_v2.world.snapshot import DepositClaim, Fulfillment, PayoutRoute, World, tx_key
 
 MINER, USER = Keypair().pubkey(), Keypair().pubkey()
 NOW = 10_000

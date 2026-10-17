@@ -6,9 +6,6 @@ against the same shared intake/rate utils the CLI, validator router, and scoring
 "no program diff / no provider diff" half of the acceptance is a review fact (git diff), not a test.
 """
 
-import tempfile
-import threading
-from pathlib import Path
 from types import SimpleNamespace
 
 import bittensor as bt
@@ -43,8 +40,8 @@ from allways.constants import (
     is_hub,
 )
 from allways.utils.rate import is_executable_rate, min_executable_hub_leg
-from allways.validator.reserve_engine import _best_offer, reserve_on_behalf
-from allways.validator.state_store import ValidatorStateStore
+from allways.validator_v2.serving.requests import _best_offer, reserve_on_behalf
+from tests.validator_v2.fakes import Ctx
 
 TAO = 1_000_000_000  # 1 TAO in rao (9 dec)
 SOL = 1_000_000_000  # 1 SOL in lamports (9 dec)
@@ -265,8 +262,6 @@ class TestHubNumeraireQuotes:
 HK = bt.Keypair.create_from_seed('0x' + '22' * 32)
 HOTKEY = HK.ss58_address
 MINER_PK = SolKeypair().pubkey()
-HOTKEY_BYTES = bytes.fromhex(HK.public_key.hex())
-BINDING_SIG = HK.sign(bytes(MINER_PK))
 USER_PK = str(SolKeypair().pubkey())
 FUTURE = 9_999_999_999
 
@@ -288,11 +283,8 @@ class TaoHubClient:
         self.attestation = SimpleNamespace(locked=True, effective_balance=required_collateral(TAO))
         self.calls = []
 
-    def get_hotkey_binding(self, hotkey_bytes):
-        return SimpleNamespace(miner=MINER_PK)
-
-    def get_binding(self, miner):
-        return SimpleNamespace(miner=MINER_PK, hotkey=HOTKEY_BYTES, hotkey_sig=BINDING_SIG)
+    def miner_for(self, hotkey_ss58):
+        return MINER_PK if hotkey_ss58 == HOTKEY else None
 
     def get_all(self, account):
         return [(str(MINER_PK), self.quote)]
@@ -321,6 +313,18 @@ class TaoHubClient:
     def open_or_request(self, miner, from_chain, to_chain, backing='sol'):
         self.calls.append(('open_or_request', from_chain, to_chain, backing))
         return 'sig-tao-eth'
+
+
+def _permissive(*chains):
+    """Providers that verify both legs and wave every deliverability gate through."""
+    chain = SimpleNamespace(normalize_address=lambda a: a, is_valid_address=lambda address: True)
+    provider = SimpleNamespace(
+        chain=chain,
+        transfers_enabled=lambda: True,
+        can_deliver_to=lambda address, amount: True,
+        send_blocker=lambda frm, to, amt: None,
+    )
+    return {c: provider for c in chains}
 
 
 class TestTaoEthAcceptance:
@@ -354,21 +358,31 @@ class TestTaoEthAcceptance:
 
     def test_routed_reservation_bids_the_tao_backing(self):
         client = TaoHubClient()
-        store = ValidatorStateStore(db_path=Path(tempfile.mkdtemp()) / 'state.db')
-        validator = SimpleNamespace(
-            solana_client=client, axon_lock=threading.RLock(), state_store=store, axon_assets={}
+        result = reserve_on_behalf(
+            Ctx(client, providers=_permissive('tao', 'eth')),
+            HOTKEY,
+            'tao',
+            'eth',
+            USER_PK,
+            'userTAOaddr',
+            'userETHaddr',
+            TAO,
         )
-        result = reserve_on_behalf(validator, HOTKEY, 'tao', 'eth', USER_PK, 'userTAOaddr', 'userETHaddr', TAO)
         assert result.ok, result.reason
         assert client.calls == [('open_or_request', 'tao', 'eth', 'tao')]
 
     def test_oversize_swap_rejected_in_rao(self):
         client = TaoHubClient()
-        store = ValidatorStateStore(db_path=Path(tempfile.mkdtemp()) / 'state.db')
-        validator = SimpleNamespace(
-            solana_client=client, axon_lock=threading.RLock(), state_store=store, axon_assets={}
+        result = reserve_on_behalf(
+            Ctx(client, providers=_permissive('tao', 'eth')),
+            HOTKEY,
+            'tao',
+            'eth',
+            USER_PK,
+            'userTAOaddr',
+            'userETHaddr',
+            3 * TAO,
         )
-        result = reserve_on_behalf(validator, HOTKEY, 'tao', 'eth', USER_PK, 'userTAOaddr', 'userETHaddr', 3 * TAO)
         assert not result.ok
         assert 'max swap' in result.reason
 

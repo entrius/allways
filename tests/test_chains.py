@@ -318,11 +318,11 @@ class TestReplayGrace:
         assert CHAIN_SOLUSDC.replay_grace_secs == 0
 
     def test_freshness_consumer_absorbs_the_eth_grace(self):
-        # The validator reads grace off chain_def (solana_swap_loop._is_fresh) — a deposit
+        # The validator reads grace off chain_def (actuator.swaps.is_tx_fresh) — a deposit
         # stamped inside the grace window is fresh; one predating it is still a replay.
         from types import SimpleNamespace
 
-        from allways.validator.solana_swap_loop import is_tx_fresh
+        from allways.validator_v2.actuator.swaps import is_tx_fresh
 
         floor = 1_755_000_000
         grace = CHAIN_ETH.replay_grace_secs

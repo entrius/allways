@@ -11,8 +11,8 @@ import threading
 from unittest.mock import MagicMock, patch
 
 from allways.synapses import SwapReserveSynapse
-from allways.validator.axon_handlers import handle_swap_reserve
-from allways.validator.reserve_engine import ReserveResult
+from allways.validator_v2.serving.axon import handle_swap_reserve
+from allways.validator_v2.serving.requests import ReserveResult
 
 _MINER_SS58 = '5GrwvaEF5zXb26Fz9rcQpDWS57CtERHpNehXCPcNoHGKutQY'
 
@@ -32,12 +32,12 @@ def make_reserve_synapse(**overrides) -> SwapReserveSynapse:
 
 
 def _run(synapse, result=None, raises=None):
-    validator = MagicMock()
-    validator.metagraph = None  # miner_label falls back to a hotkey-only label
-    validator.axon_lock = threading.Lock()
+    ctx = MagicMock()
+    ctx.metagraph = None  # miner_label falls back to a hotkey-only label
+    ctx.lock = threading.Lock()
     side = (lambda *a, **k: (_ for _ in ()).throw(raises)) if raises else (lambda *a, **k: result)
-    with patch('allways.validator.axon_handlers.reserve_on_behalf', side_effect=side):
-        return asyncio.run(handle_swap_reserve(validator, synapse))
+    with patch('allways.validator_v2.serving.axon.reserve_on_behalf', side_effect=side):
+        return asyncio.run(handle_swap_reserve(ctx, synapse))
 
 
 def test_maps_ok_result():

@@ -9,12 +9,11 @@ from typing import Any, Callable, Dict, Optional, Tuple
 from allways.cli.swap_commands.swap_intake import collateral_matches, leg_value
 from allways.solana import pdas
 from allways.solana.client import swap_key_from_tx_hash
-from allways.validator.state_store import tx_key
 from allways.validator_v2.actuator.swaps import Leg, NotReady, status_of
 from allways.validator_v2.chains.watcher import ChainWatcher, Probe, Verdict, verify_probe
 from allways.validator_v2.feed.events import HISTORY_HORIZON_SECS
 from allways.validator_v2.store.db import Store
-from allways.validator_v2.world.snapshot import World
+from allways.validator_v2.world.snapshot import World, tx_key
 
 OWNER, VERSION = 'actuator', 1
 TABLES = [

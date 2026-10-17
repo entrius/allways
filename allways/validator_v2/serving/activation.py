@@ -14,12 +14,10 @@ owner can walk away with; the epoch check below is what closes it.
 from __future__ import annotations
 
 from dataclasses import dataclass
-from typing import Optional
 
 from allways.cli.swap_commands.swap_intake import floors_from_config
 from allways.solana import pdas
 from allways.solana.layouts import split_attestation_epoch
-from allways.vault import BondVaultClient
 
 
 @dataclass(frozen=True)
@@ -48,7 +46,7 @@ def active_bits(miner_state) -> int:
     return int(getattr(miner_state, 'active_backings', 0) or 0)
 
 
-def check(validator, miner_hotkey: str, miner_pk, miner_state, backing: str, now: int) -> Eligibility:
+def check(ctx, miner_hotkey: str, miner_pk, miner_state, backing: str, now: int) -> Eligibility:
     """Whether this validator will vote to activate `backing` for this miner, and why not if it won't.
     Refuses rather than queues: the facts are about now, and a miner retrying beats a validator
     holding an obligation it may never be able to discharge."""
@@ -59,17 +57,17 @@ def check(validator, miner_hotkey: str, miner_pk, miner_state, backing: str, now
     if active_bits(miner_state) & bit:
         return _no(f'Purse already active: {backing.upper()}')
 
-    config = validator.solana_client.get_config()
+    config = ctx.accounts().get_config()
     floor = floors_from_config(config).get(backing, 0)
     if settles_locally(backing):
         # Byte-identical to the pre-W2 SOL path, message included.
         if int(miner_state.collateral) < floor:
             return _no(f'Insufficient collateral: {miner_state.collateral} < {floor}')
         return _OK
-    return _attested(validator, miner_hotkey, miner_pk, backing, floor, config, now)
+    return _attested(ctx, miner_hotkey, miner_pk, backing, floor, config, now)
 
 
-def _attested(validator, miner_hotkey: str, miner_pk, backing: str, floor: int, config, now: int) -> Eligibility:
+def _attested(ctx, miner_hotkey: str, miner_pk, backing: str, floor: int, config, now: int) -> Eligibility:
     """The off-chain-backing gate, in the order `vote_activate` applies it: fuse, then attestation."""
     unit = backing.upper()
     age = now - int(getattr(config, 'last_attest_heartbeat', 0) or 0)
@@ -80,7 +78,7 @@ def _attested(validator, miner_hotkey: str, miner_pk, backing: str, floor: int, 
             f'Retry once the relay fleet is live again.'
         )
 
-    attestation = validator.solana_client.get_bond_attestation(miner_pk, backing)
+    attestation = ctx.accounts().get_bond_attestation(miner_pk, backing)
     if attestation is None:
         return _no(
             f'Bond attestation for your {unit} purse is missing. Validators mirror the vault on their '
@@ -93,17 +91,17 @@ def _attested(validator, miner_hotkey: str, miner_pk, backing: str, floor: int, 
             f'Bond below the {unit} floor: {attestation.effective_balance} < {floor} (the attested figure '
             f'is your gross bond net of accrued fees and voted slashes).'
         )
-    return _vault(validator, miner_hotkey, backing, attestation, floor, config)
+    return _vault(ctx, miner_hotkey, backing, attestation, floor, config)
 
 
-def _vault(validator, miner_hotkey: str, backing: str, attestation, floor: int, config) -> Eligibility:
+def _vault(ctx, miner_hotkey: str, backing: str, attestation, floor: int, config) -> Eligibility:
     """Verify the attestation against the bond it asserts. A stale mirror is the dangerous direction:
     it can only ever say a withdrawn bond is still there, never the reverse."""
     unit = backing.upper()
-    vault = _axon_vault(validator)
+    vault = ctx.vault()
     if vault is None:
         return _no(f'Bond relay not configured on this validator, so it cannot verify your {unit} bond.')
-    with validator.axon_lock:
+    with ctx.lock:
         lock = vault.get_lock_state(miner_hotkey)
         gross = vault.get_collateral(miner_hotkey)
     if lock is None or gross is None:
@@ -130,11 +128,3 @@ def _vault(validator, miner_hotkey: str, backing: str, attestation, floor: int, 
     if int(gross) < floor:
         return _no(f'Bond on the {unit} vault is {gross} < {floor}.')
     return _OK
-
-
-def _axon_vault(validator) -> Optional[BondVaultClient]:
-    """A read-only vault client on the axon's own subtensor, so a request never touches the relay's."""
-    relay, subtensor = getattr(validator, 'bond_relay', None), getattr(validator, 'axon_subtensor', None)
-    if relay is None or subtensor is None:
-        return None
-    return BondVaultClient(subtensor, relay.vault.address, metadata=relay.vault.metadata)

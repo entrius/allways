@@ -5,7 +5,6 @@ from __future__ import annotations
 
 import os
 from dataclasses import dataclass, field
-from functools import partial
 from typing import Any, Callable, Dict, List, Optional, Tuple
 
 import bittensor as bt
@@ -28,7 +27,7 @@ from allways.validator_v2.runtime.component import Component
 from allways.validator_v2.runtime.deadline_queue import DeadlineQueue
 from allways.validator_v2.runtime.supervisor import Supervisor
 from allways.validator_v2.scoring.component import Scoring, WeightSetter
-from allways.validator_v2.serving.component import Serving, WorldClient
+from allways.validator_v2.serving.component import Serving
 from allways.validator_v2.serving.store import ServingStore
 from allways.validator_v2.store.db import Store
 from allways.validator_v2.world.snapshot import WorldReader
@@ -128,9 +127,7 @@ def build(
             feed_status,
             store,
             ServingStore(store, lambda: world.get()[0], memory, cfg.serving_assets),
-            lambda: meter.solana_client(
-                cfg.solana_rpc_url, cfg.program_id, cfg.keypair, cls=partial(WorldClient, world)
-            ),
+            lambda: meter.solana_client(cfg.solana_rpc_url, cfg.program_id, cfg.keypair),
             cfg.serving_assets,
             swaps.report,
             relays,
@@ -138,6 +135,7 @@ def build(
             cfg.axon_wallet,
             cfg.neuron_config,
             cfg.seam,
+            cfg.program_id,
         )
     actuator = Actuator(
         world,

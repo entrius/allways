@@ -11,22 +11,31 @@ on its own."""
 from __future__ import annotations
 
 import base64
+import re
 import time
 from dataclasses import dataclass, field
 from typing import Any, Callable, Dict, Iterable, List, Mapping, Optional, Set, Tuple
 
 import bittensor as bt
+from solders.pubkey import Pubkey
 
 from allways.solana import layouts, pdas
 from allways.solana.client import swap_key_from_tx_hash
 from allways.validator.binding import build_attribution
-from allways.validator.state_store import tx_key
 from allways.validator_v2.feed.events import HISTORY_HORIZON_SECS, FeedStatus
 from allways.validator_v2.runtime.bus import Latest, Subscription
 from allways.validator_v2.runtime.component import Component
 from allways.validator_v2.store.db import Store
 from allways.validator_v2.world import persist
 from allways.validator_v2.world.touches import AccountKey, touches
+
+_HEX_HASH = re.compile(r'(0x)?[0-9a-f]{64}', re.IGNORECASE)
+
+
+def tx_key(tx_hash: str) -> str:
+    """Ledger key for a tx hash: hex-shaped hashes lowercase (events carry no chain to ask)."""
+    return tx_hash.lower() if _HEX_HASH.fullmatch(tx_hash) else tx_hash
+
 
 ACCOUNT_TYPES = ('Swap', 'Reservation', 'Pool', 'MinerState', 'MinerQuote', 'BondAttestation', 'Binding')
 MULTIPLE_ACCOUNTS_MAX = 100
@@ -80,6 +89,49 @@ class World:
 
     def hotkey_for(self, miner: Any) -> Optional[str]:
         return self.attribution.get(str(miner))
+
+
+class Accounts:
+    """The World under the program client's read names, for the code it shares with the CLI (swap intake,
+    the request ops). Reads only: sends go through a real client."""
+
+    def __init__(self, world: World, program_id: Any = None) -> None:
+        self.world, self.program_id = world, program_id
+
+    def get_all(self, name: str) -> List[Tuple[str, Any]]:
+        return list(self.world.all(name))
+
+    def get_config(self) -> Any:
+        return self.world.config
+
+    def get_miner_state(self, miner: Any) -> Optional[Any]:
+        return self.world.get('MinerState', pdas.miner_state_pda(miner, self.program_id))
+
+    def get_reservation(self, miner: Any, backing: str = 'sol') -> Optional[Any]:
+        return self.world.get('Reservation', pdas.reservation_pda(miner, backing, self.program_id))
+
+    def get_pool(self, miner: Any, backing: str = 'sol') -> Optional[Any]:
+        return self.world.get('Pool', pdas.pool_pda(miner, backing, self.program_id))
+
+    def get_swap(self, swap_key: Any) -> Optional[Any]:
+        return self.world.get('Swap', pdas.swap_pda(swap_key, self.program_id))
+
+    def get_quote(self, miner: Any, from_chain: str, to_chain: str, backing: str = 'sol') -> Optional[Any]:
+        return self.world.get('MinerQuote', pdas.quote_pda(miner, from_chain, to_chain, backing, self.program_id))
+
+    def get_quotes_for_direction(self, miner: Any, from_chain: str, to_chain: str) -> List[Any]:
+        quotes = (self.get_quote(miner, from_chain, to_chain, backing) for backing in pdas.BACKING_BITS)
+        return [q for q in quotes if q is not None]
+
+    def get_bond_attestation(self, miner: Any, chain: str = 'tao') -> Optional[Any]:
+        return self.world.get('BondAttestation', pdas.bond_attestation_pda(miner, chain, self.program_id))
+
+    def miner_for(self, hotkey: str) -> Optional[Pubkey]:
+        """The miner a hotkey is bound to, off the bindings the World verified (first bound wins)."""
+        for miner, bound in self.world.attribution.items():
+            if bound == hotkey:
+                return Pubkey.from_string(miner)
+        return None
 
 
 class _BindingSource:

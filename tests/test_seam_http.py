@@ -1,4 +1,5 @@
-"""Unit tests for the localhost offering seam (auth gate + routing + JSON), engine ops stubbed."""
+"""Unit tests for the localhost offering seam (auth gate + routing + JSON + the deposit-scan memo), request
+ops stubbed."""
 
 import json
 import urllib.error
@@ -7,8 +8,8 @@ from types import SimpleNamespace
 
 import pytest
 
-from allways.validator import seam_http
-from allways.validator.reserve_engine import BestQuote, ConfirmResult, RateQuote, ReserveResult, SwapStatus
+from allways.validator_v2.serving import seam as seam_http
+from allways.validator_v2.serving.requests import BestQuote, ConfirmResult, RateQuote, ReserveResult, SwapStatus
 
 SECRET = 'test-secret'
 CANDIDATES = [
@@ -146,7 +147,7 @@ def test_status_forwards_optional_swap_key(server, monkeypatch):
     (and default it to '' when absent, preserving the reservation-path behavior)."""
     seen = []
 
-    def fake_status(validator, miner_hotkey, swap_key_hex='', from_chain='', to_chain=''):
+    def fake_status(ctx, miner_hotkey, swap_key_hex='', from_chain='', to_chain=''):
         seen.append((miner_hotkey, swap_key_hex, from_chain, to_chain))
         return SwapStatus('timed_out', 0, '', swap_key_hex)
 
@@ -157,3 +158,84 @@ def test_status_forwards_optional_swap_key(server, monkeypatch):
     _req(server, 'GET', '/status?miner_hotkey=hk')
     _req(server, 'GET', '/status?miner_hotkey=hk&from_chain=tao&to_chain=btc')
     assert seen == [('hk', key, '', ''), ('hk', '', '', ''), ('hk', '', 'tao', 'btc')]
+
+
+# ── the deposit-scan memo: repeat polls from many tabs share one source-chain read ──
+
+
+@pytest.fixture
+def scans(monkeypatch):
+    """A seam whose deposit scans are counted — each fixture builds a fresh memo."""
+    calls = {'scan': 0}
+
+    def fake_scan(_ctx, _miner_hotkey):
+        calls['scan'] += 1
+        return f'hash-{calls["scan"]}'
+
+    monkeypatch.setattr(seam_http, 'scan_deposit', fake_scan)
+    srv = seam_http.start_seam(SimpleNamespace(), 0, SECRET)
+    yield srv, calls
+    srv.shutdown()
+
+
+def _scan(server, hotkey='hk'):
+    return _req(server, 'GET', f'/deposit-scan?miner_hotkey={hotkey}')
+
+
+def test_bucket_is_stable_within_the_ttl_and_rolls_after(monkeypatch):
+    ttl = seam_http.SEAM_READ_TTL_SECS
+    base = ttl * 1000  # start on a bucket boundary, so the assertions hold for any TTL
+    monkeypatch.setattr(seam_http.time, 'monotonic', lambda: base)
+    first = seam_http._ttl_bucket()
+    monkeypatch.setattr(seam_http.time, 'monotonic', lambda: base + ttl * 0.9)
+    assert seam_http._ttl_bucket() == first  # same window → cache hit
+    monkeypatch.setattr(seam_http.time, 'monotonic', lambda: base + ttl * 1.1)
+    assert seam_http._ttl_bucket() != first  # rolled → refresh
+
+
+def test_ttl_stays_under_the_transitions_the_offering_reacts_to():
+    """Reservations live minutes — a scan this stale changes no decision. A TTL that crept up would start
+    hiding a deposit the offering is waiting on."""
+    assert 0 < seam_http.SEAM_READ_TTL_SECS <= 5
+
+
+def test_deposit_scan_is_memoized(scans):
+    server, calls = scans
+    hashes = [_scan(server)[1]['tx_hash'] for _ in range(10)]
+    assert calls['scan'] == 1
+    assert hashes == ['hash-1'] * 10
+
+
+def test_distinct_miners_do_not_share_a_scan(scans):
+    server, calls = scans
+    assert _scan(server, 'hkA')[1]['tx_hash'] != _scan(server, 'hkB')[1]['tx_hash']
+    assert calls['scan'] == 2
+
+
+def test_a_new_bucket_refreshes(scans, monkeypatch):
+    server, calls = scans
+    monkeypatch.setattr(seam_http, '_ttl_bucket', lambda: 7)
+    _scan(server)
+    _scan(server)
+    assert calls['scan'] == 1
+    monkeypatch.setattr(seam_http, '_ttl_bucket', lambda: 8)
+    _scan(server)
+    assert calls['scan'] == 2
+
+
+def test_scan_failures_are_not_cached(scans, monkeypatch):
+    """A transient RPC fault must not pin an error for the whole bucket."""
+    server, calls = scans
+    state = {'fail': True}
+
+    def flaky(_ctx, _miner_hotkey):
+        if state['fail']:
+            raise RuntimeError('getSignaturesForAddress: HTTP 429')
+        calls['scan'] += 1
+        return 'recovered'
+
+    monkeypatch.setattr(seam_http, 'scan_deposit', flaky)
+    assert _scan(server)[0] == 500
+    state['fail'] = False
+    # Same bucket: the retry reaches the producer instead of replaying the failure.
+    assert _scan(server) == (200, {'tx_hash': 'recovered'})

@@ -1,11 +1,10 @@
 """Product serving: the axon (miner activation, reserve and confirm from the CLI) and the localhost seam
 (the same ops, plus rate and status, for a validator's product offering).
 
-The request ops are lifted unchanged from ``allways.validator.reserve_engine`` and run on the request's
-own thread, answering synchronously as before. Their program reads come from the World, so a request costs
-no RPC to read; their sends (open_or_request, submit_swap_claim, finalize, vote_activate) still go out
-from the request and wait to land, because the caller needs the verdict. Chain checks use serving's own
-chain connections. The tick finalizes routed seats this validator won and records swap outcomes."""
+The component is the request ops' context (``ctx``). Requests run on their own threads: program reads
+come from the World (``accounts``), so a request costs no RPC to read; sends go out on ``client`` and
+wait to land, because the caller needs the verdict. Chain checks use serving's own chain connections.
+The tick finalizes routed seats this validator won and records swap outcomes."""
 
 from __future__ import annotations
 
@@ -13,68 +12,24 @@ import threading
 import time
 from functools import partial
 from types import SimpleNamespace
-from typing import Any, Callable, Dict, List, Optional, Tuple
+from typing import Any, Callable, Dict, Optional, Tuple
 
 import bittensor as bt
 
-from allways.constants import FEE_DIVISOR
-from allways.solana import pdas
-from allways.solana.client import AllwaysSolanaClient
-from allways.validator import axon_handlers as handlers
-from allways.validator.binding import hotkey_ss58
-from allways.validator.reserve_engine import finalize_won_seats
-from allways.validator.seam_http import start_seam
 from allways.validator_v2.chains.subtensor_view import Head
 from allways.validator_v2.feed.events import FeedStatus
 from allways.validator_v2.runtime.bus import Latest, Subscription
 from allways.validator_v2.runtime.component import Component
+from allways.validator_v2.scoring.rewards import miner_states
+from allways.validator_v2.serving import axon as handlers
+from allways.validator_v2.serving.requests import finalize_won_seats
+from allways.validator_v2.serving.seam import start_seam
 from allways.validator_v2.serving.store import OUTCOMES, ServingStore
 from allways.validator_v2.store.db import Store
-from allways.validator_v2.world.snapshot import ACCOUNT_TYPES, World
+from allways.validator_v2.world.snapshot import Accounts, World
+from allways.vault import BondVaultClient
 
 SERVING_EVENTS = frozenset({*OUTCOMES, 'SwapFulfilled'})
-
-
-class WorldClient(AllwaysSolanaClient):
-    """The program client for requests: account reads come from the World, sends go out as usual."""
-
-    def __init__(self, world: Latest[World], *args: Any, **kwargs: Any) -> None:
-        super().__init__(*args, **kwargs)
-        self._latest = world
-        self._just_sent: Dict[Tuple[str, str], Any] = {}  # read once, live, right after our own send
-
-    def _world(self) -> World:
-        world, _ = self._latest.get()
-        if world is None:
-            raise RuntimeError('no World yet')
-        return world
-
-    def _get(self, name: str, pda: Any) -> Any:
-        if (name, str(pda)) in self._just_sent:
-            return self._just_sent.pop((name, str(pda)))
-        if name == 'Config':
-            return self._world().config
-        if name in ACCOUNT_TYPES:
-            return self._world().get(name, pda)
-        return super()._get(name, pda)
-
-    def open_or_request(self, miner: Any, from_chain: str, to_chain: str, backing: str = 'sol') -> str:
-        """The caller reads the pool straight back for its close time, before the World can have seen it."""
-        sig = super().open_or_request(miner, from_chain, to_chain, backing)
-        pda = pdas.pool_pda(miner, backing, self.program_id)
-        self._just_sent[('Pool', str(pda))] = super()._get('Pool', pda)
-        return sig
-
-    def get_all(self, name: str) -> List[Tuple[str, Any]]:
-        return list(self._world().all(name)) if name in ACCOUNT_TYPES else super().get_all(name)
-
-    def get_hotkey_binding(self, hotkey: bytes) -> Optional[Any]:
-        """The miner the World attributes this hotkey to: bindings it already verified, first bound wins."""
-        world, ss58 = self._world(), hotkey_ss58(bytes(hotkey))
-        for _, binding in world.all('Binding'):
-            if world.hotkey_for(binding.miner) == ss58:
-                return SimpleNamespace(miner=binding.miner)
-        return None
 
 
 class _PerThread:
@@ -88,68 +43,6 @@ class _PerThread:
         if client is None:
             client = self._local.client = self._factory()
         return getattr(client, name)
-
-
-class _View:
-    """Exactly what the lifted request ops and axon handlers read off the old validator object."""
-
-    def __init__(self, serving: 'Serving') -> None:
-        self._s = serving
-        self.solana_client = _PerThread(serving._client_factory)
-        self.state_store = serving.store
-        self.axon_assets = self.assets = serving.providers
-        self.axon_lock = threading.RLock()
-        self.solana_config_cache = SimpleNamespace(config=lambda: self.solana_client.get_config())
-        self.crank_scheduler = SimpleNamespace(schedule=lambda miner, closes_at: None)  # the actuator cranks pools
-        self.config = serving.neuron_config
-
-    @property
-    def metagraph(self) -> Any:
-        head, _ = self._s.head.get()
-        if head is None:
-            return SimpleNamespace(hotkeys=[], S=[], n=SimpleNamespace(item=lambda: 0))
-        return head.metagraph
-
-    @property
-    def held_states(self) -> Optional[Tuple[float, Dict[str, Any]]]:
-        """{hotkey: MinerState} of bound miners on the metagraph, which /rate quotes off."""
-        world, _ = self._s.world.get()
-        if world is None:
-            return None
-        hotkeys = set(self.metagraph.hotkeys)
-        states = {}
-        for _, ms in world.all('MinerState'):
-            hotkey = world.hotkey_for(ms.miner)
-            if hotkey is not None and hotkey in hotkeys:
-                states[hotkey] = ms
-        return world.taken_at, states
-
-    @property
-    def axon_subtensor(self) -> Any:
-        return self._s.subtensor
-
-    @property
-    def bond_relay(self) -> Any:
-        return getattr(self._s.relays.get('tao'), 'relay', None)  # None until its vault client is up
-
-    @property
-    def solana_swap_loop(self) -> Any:
-        """The swap planner's last report, in the shape /status reads."""
-        report, _ = self._s.swap_report.get()
-        confs: Dict[str, Dict[str, Dict[str, int]]] = {}
-        for key, r in (report or {}).items():
-            confs[key] = {
-                ('source' if chain == r.from_chain else 'dest'): {'have': have, 'need': need, 'at': int(r.checked_at)}
-                for chain, (have, need) in r.legs.items()
-            }
-        reasons = {k: r.reason for k, r in (report or {}).items() if r.decision == 'reject' and r.reason}
-        return SimpleNamespace(
-            leg_confs=confs,
-            reject_reasons=reasons,
-            providers=self.axon_assets,
-            fee_divisor=FEE_DIVISOR,
-            read_only=False,
-        )
 
 
 class Serving(Component):
@@ -175,25 +68,60 @@ class Serving(Component):
         wallet: Any = None,  # with neuron_config: serve the axon
         neuron_config: Any = None,
         seam: Optional[Tuple[int, str]] = None,  # (port, secret): serve the seam
+        program_id: Any = None,
         clock=time.time,
     ) -> None:
         super().__init__(clock)
         self.world, self.head, self.events, self.feed_status = world, head, events, feed_status
-        self.db, self.store, self._client_factory = store, serving_store, client_factory
+        self.db, self.store, self.client = store, serving_store, _PerThread(client_factory)
         self.providers, self.swap_report, self.relays = providers, swap_report, relays
         self._subtensor_factory, self.wallet = subtensor_factory, wallet
-        self.neuron_config, self.seam = neuron_config, seam
+        self.neuron_config, self.seam, self.program_id = neuron_config, seam, program_id
+        self.netuid = getattr(neuron_config, 'netuid', 0)
         self.subtensor: Any = None
-        self.view = _View(self)
+        self.lock = threading.RLock()  # the axon's subtensor socket is not thread-safe
         self._axon: Any = None
         self._server: Any = None
         row = store.conn().execute("SELECT slot FROM acks WHERE consumer = 'serving'").fetchone()
         self._acked_slot = int(row['slot']) if row else 0
 
+    # ── what the request ops read (``ctx``) ─────────────────────────────────
+
+    def accounts(self) -> Accounts:
+        world, _ = self.world.get()
+        if world is None:
+            raise RuntimeError('no World yet')
+        return Accounts(world, self.program_id)
+
+    @property
+    def metagraph(self) -> Any:
+        head, _ = self.head.get()
+        if head is None:
+            return SimpleNamespace(hotkeys=[], S=[], n=SimpleNamespace(item=lambda: 0))
+        return head.metagraph
+
+    def miner_states(self) -> Dict[str, Any]:
+        """``{hotkey: MinerState}`` of bound miners on the metagraph: the ones a request may route to."""
+        return miner_states(self.accounts().world, set(self.metagraph.hotkeys))
+
+    def report(self) -> Dict[str, Any]:
+        """The swap planner's last report: leg confirmations and refusals, by swap key."""
+        report, _ = self.swap_report.get()
+        return report or {}
+
+    def vault(self) -> Optional[Any]:
+        """A read-only client for the TAO hub's vault on serving's own subtensor; None without a relay."""
+        relay = getattr(self.relays.get('tao'), 'relay', None)
+        if relay is None or self.subtensor is None:
+            return None
+        return BondVaultClient(self.subtensor, relay.vault.address, metadata=relay.vault.metadata)
+
+    # ── the component ───────────────────────────────────────────────────────
+
     def setup(self) -> None:
         self.subtensor = self._subtensor_factory()
         if self.seam is not None:
-            self._server = start_seam(self.view, *self.seam)
+            self._server = start_seam(self, *self.seam)
         if self.wallet is not None and self.neuron_config is not None:
             self._serve_axon()
 
@@ -202,9 +130,9 @@ class Serving(Component):
         self.subtensor.serve_axon(netuid=self.neuron_config.netuid, axon=axon)
         for name in ('miner_activate', 'swap_reserve', 'swap_confirm'):
             axon.attach(
-                forward_fn=partial(getattr(handlers, f'handle_{name}'), self.view),
-                blacklist_fn=partial(getattr(handlers, f'blacklist_{name}'), self.view),
-                priority_fn=partial(getattr(handlers, f'priority_{name}'), self.view),
+                forward_fn=partial(getattr(handlers, f'handle_{name}'), self),
+                blacklist_fn=partial(getattr(handlers, f'blacklist_{name}'), self),
+                priority_fn=partial(getattr(handlers, f'priority_{name}'), self),
             )
         axon.start()
         self._axon = axon
@@ -222,7 +150,7 @@ class Serving(Component):
             if status is not None and status.cursor is not None:
                 Store.ack(c, self.name, *status.cursor)
         if self.store.distinct_routed_pools():
-            finalized = finalize_won_seats(self.view, int(now))
+            finalized = finalize_won_seats(self, int(now))
             if finalized:
                 bt.logging.info(f'serving: finalized routed seat(s) for {len(finalized)} miner(s)')
         self.store.prune(int(now))

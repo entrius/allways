@@ -1,8 +1,8 @@
 """Unit tests for the routed-reservation finalize sweep (`finalize_won_seats`).
 
-Mocks the solana_client; no chain. The sweep must finalize a won drawn seat for the FIFO
+Mocks the program client; no chain. The sweep must finalize a won drawn seat for the FIFO
 queued user at the PINNED rate, drop queues on every terminal outcome (lost, filled,
-lapsed), drop only a contract-rejected request, and retain them across transient faults and read-only mode.
+lapsed), drop only a contract-rejected request, and retain them across transient faults.
 """
 
 from types import SimpleNamespace
@@ -10,9 +10,9 @@ from types import SimpleNamespace
 from solders.keypair import Keypair as SolKeypair
 
 from allways.constants import RATE_PRECISION
-from allways.validator import reserve_engine
-from allways.validator.reserve_engine import ROUTED_REQUEST_TTL_SECS, draw_pool_winner, finalize_won_seats
-from allways.validator.state_store import ValidatorStateStore
+from allways.validator_v2.serving import requests
+from allways.validator_v2.serving.requests import ROUTED_REQUEST_TTL_SECS, draw_pool_winner, finalize_won_seats
+from tests.validator_v2.fakes import Ctx, serving_store
 
 NOW = 1_000_000
 MINER = str(SolKeypair().pubkey())
@@ -68,11 +68,8 @@ def _drawn_seat(client, *, router=None, finalize_by=NOW + 100, reserved_until=0,
     )
 
 
-def _validator(tmp_path, client, *, read_only=False):
-    store = ValidatorStateStore(db_path=tmp_path / 'state.db')
-    return SimpleNamespace(
-        state_store=store, solana_client=client, solana_swap_loop=SimpleNamespace(read_only=read_only)
-    )
+def _validator(tmp_path, client):
+    return Ctx(client, store=serving_store(tmp_path / 'state.db'))
 
 
 def _queue(store, user, *, created_at=NOW - 10, from_amount=1_000_000_000):
@@ -85,8 +82,8 @@ def test_won_seat_finalizes_fifo_user_at_pinned_rate(tmp_path):
     client = SweepClient(None)
     client._reservation = _drawn_seat(client)
     v = _validator(tmp_path, client)
-    _queue(v.state_store, USER_B, created_at=NOW - 5)
-    _queue(v.state_store, USER_A, created_at=NOW - 50)  # oldest → FIFO winner
+    _queue(v.store, USER_B, created_at=NOW - 5)
+    _queue(v.store, USER_A, created_at=NOW - 50)  # oldest → FIFO winner
     assert finalize_won_seats(v, NOW) == [MINER]
     assert len(client.finalized) == 1
     miner, user, _src, _dst, collateral_amount, from_amount, to_amount = client.finalized[0]
@@ -95,8 +92,7 @@ def test_won_seat_finalizes_fifo_user_at_pinned_rate(tmp_path):
     assert collateral_amount == from_amount == 1_000_000_000
     assert to_amount == 210_000
     # Whole queue dropped: winner served, losers re-request via their clients.
-    assert v.state_store.distinct_routed_pools() == []
-    v.state_store.close()
+    assert v.store.distinct_routed_pools() == []
 
 
 def test_finalize_commits_the_canonical_source_form(tmp_path):
@@ -105,11 +101,10 @@ def test_finalize_commits_the_canonical_source_form(tmp_path):
     client = SweepClient(None)
     client._reservation = _drawn_seat(client)
     v = _validator(tmp_path, client)
-    v.axon_assets = {'sol': SimpleNamespace(chain=SimpleNamespace(normalize_address=lambda a: a.lower()))}
-    v.state_store.upsert_routed_request(MINER, 'sol', 'btc', 'sol', USER_A, '0xAbCsrc', 'dst', 1_000_000_000, NOW - 10)
+    v.providers = {'sol': SimpleNamespace(chain=SimpleNamespace(normalize_address=lambda a: a.lower()))}
+    v.store.upsert_routed_request(MINER, 'sol', 'btc', 'sol', USER_A, '0xAbCsrc', 'dst', 1_000_000_000, NOW - 10)
     assert finalize_won_seats(v, NOW) == [MINER]
     assert client.finalized[0][2] == '0xabcsrc'
-    v.state_store.close()
 
 
 def _live_sibling(*, from_chain='sol', from_addr='', reserved_until=NOW + 300):
@@ -130,13 +125,12 @@ def test_duplicate_source_addr_on_other_hub_is_refused(tmp_path):
     client._reservation = _drawn_seat(client)  # the sol seat we're about to finalize
     client.siblings['tao'] = _live_sibling(from_chain='sol', from_addr=f'{USER_A[:6]}src')
     v = _validator(tmp_path, client)
-    _queue(v.state_store, USER_A)  # user_from_addr == f'{USER_A[:6]}src' → collides
+    _queue(v.store, USER_A)  # user_from_addr == f'{USER_A[:6]}src' → collides
     assert finalize_won_seats(v, NOW) == []
     assert not client.finalized, 'colliding-source seat must not be finalized'
     # Queue is NOT dropped: the only user collides, so nothing finalizes this pass, but the entry persists
     # (its sibling may clear, or the TTL prunes it) — dropping it would be a griefing lever (see below).
-    assert v.state_store.distinct_routed_pools() != [], 'colliding queue must persist, not be dropped'
-    v.state_store.close()
+    assert v.store.distinct_routed_pools() != [], 'colliding queue must persist, not be dropped'
 
 
 def test_colliding_front_user_does_not_block_an_honest_user(tmp_path):
@@ -147,11 +141,10 @@ def test_colliding_front_user_does_not_block_an_honest_user(tmp_path):
     client._reservation = _drawn_seat(client)
     client.siblings['tao'] = _live_sibling(from_chain='sol', from_addr=f'{USER_A[:6]}src')  # USER_A collides
     v = _validator(tmp_path, client)
-    _queue(v.state_store, USER_A, created_at=NOW - 50)  # oldest, colliding — the griefer
-    _queue(v.state_store, USER_B, created_at=NOW - 5)  # honest, non-colliding
+    _queue(v.store, USER_A, created_at=NOW - 50)  # oldest, colliding — the griefer
+    _queue(v.store, USER_B, created_at=NOW - 5)  # honest, non-colliding
     assert finalize_won_seats(v, NOW) == [MINER]
     assert len(client.finalized) == 1 and client.finalized[0][1] == USER_B, 'honest user must still be served'
-    v.state_store.close()
 
 
 def test_different_source_addr_on_other_hub_finalizes(tmp_path):
@@ -160,10 +153,9 @@ def test_different_source_addr_on_other_hub_finalizes(tmp_path):
     client._reservation = _drawn_seat(client)
     client.siblings['tao'] = _live_sibling(from_chain='sol', from_addr='someone-elses-src')
     v = _validator(tmp_path, client)
-    _queue(v.state_store, USER_A)  # user_from_addr == f'{USER_A[:6]}src' → no collision
+    _queue(v.store, USER_A)  # user_from_addr == f'{USER_A[:6]}src' → no collision
     assert finalize_won_seats(v, NOW) == [MINER]
     assert len(client.finalized) == 1
-    v.state_store.close()
 
 
 def _declared_seat(client, *, price_at_block):
@@ -183,15 +175,18 @@ def _declared_seat(client, *, price_at_block):
     client.finalize_reservation = finalize
 
     chain = SimpleNamespace(block_at=lambda ts: 777, normalize_address=str)
-    # The sweep prices the fill at head via axon_assets; the pin prices at the fill block via assets.
-    client.axon_assets = {'sn7': SimpleNamespace(value_rao=lambda amount, block=None: amount, chain=chain)}
-    client.assets = {'sn7': SimpleNamespace(value_rao=lambda amount, block=None: price_at_block(amount), chain=chain)}
+    # The sweep prices the fill at head; the pin prices at the fill block.
+    client.providers = {
+        'sn7': SimpleNamespace(
+            value_rao=lambda amount, block=None: amount if block is None else price_at_block(amount), chain=chain
+        )
+    }
 
 
 def _declared_validator(tmp_path, client):
     v = _validator(tmp_path, client)
-    v.axon_assets, v.assets = client.axon_assets, client.assets
-    v.state_store.upsert_routed_request(MINER, 'sn7', 'btc', 'tao', USER_A, 'src', 'dst', 10**9, NOW - 10)
+    v.providers = client.providers
+    v.store.upsert_routed_request(MINER, 'sn7', 'btc', 'tao', USER_A, 'src', 'dst', 10**9, NOW - 10)
     return v
 
 
@@ -200,8 +195,7 @@ def test_declared_seat_pins_its_collateral_verdict_at_finalize(tmp_path):
     _declared_seat(client, price_at_block=lambda amount: amount)
     v = _declared_validator(tmp_path, client)
     assert finalize_won_seats(v, NOW) == [MINER]
-    assert v.state_store.collateral_verdict(MINER, 'tao', NOW, 10**9) is True
-    v.state_store.close()
+    assert v.store.collateral_verdict(MINER, 'tao', NOW, 10**9) is True
 
 
 def test_price_fault_at_finalize_leaves_verdict_to_ingest(tmp_path):
@@ -212,8 +206,7 @@ def test_price_fault_at_finalize_leaves_verdict_to_ingest(tmp_path):
     _declared_seat(client, price_at_block=unreachable)
     v = _declared_validator(tmp_path, client)
     assert finalize_won_seats(v, NOW) == [MINER]
-    assert v.state_store.collateral_verdict(MINER, 'tao', NOW, 10**9) is None
-    v.state_store.close()
+    assert v.store.collateral_verdict(MINER, 'tao', NOW, 10**9) is None
 
 
 def test_draw_pool_winner_is_fifo_stub():
@@ -225,31 +218,28 @@ def test_seat_lost_to_other_router_drops_queue_without_tx(tmp_path):
     client = SweepClient(None)
     client._reservation = _drawn_seat(client, router=SolKeypair().pubkey())
     v = _validator(tmp_path, client)
-    _queue(v.state_store, USER_A)
+    _queue(v.store, USER_A)
     assert finalize_won_seats(v, NOW) == []
     assert not client.finalized
-    assert v.state_store.distinct_routed_pools() == []
-    v.state_store.close()
+    assert v.store.distinct_routed_pools() == []
 
 
 def test_lapsed_finalize_window_drops_queue(tmp_path):
     client = SweepClient(None)
     client._reservation = _drawn_seat(client, finalize_by=NOW - 1)
     v = _validator(tmp_path, client)
-    _queue(v.state_store, USER_A)
+    _queue(v.store, USER_A)
     assert finalize_won_seats(v, NOW) == []
-    assert not client.finalized and v.state_store.distinct_routed_pools() == []
-    v.state_store.close()
+    assert not client.finalized and v.store.distinct_routed_pools() == []
 
 
 def test_already_filled_reservation_drops_queue(tmp_path):
     client = SweepClient(None)
     client._reservation = _drawn_seat(client, reserved_until=NOW + 300)
     v = _validator(tmp_path, client)
-    _queue(v.state_store, USER_A)
+    _queue(v.store, USER_A)
     assert finalize_won_seats(v, NOW) == []
-    assert not client.finalized and v.state_store.distinct_routed_pools() == []
-    v.state_store.close()
+    assert not client.finalized and v.store.distinct_routed_pools() == []
 
 
 def test_stale_lapsed_residue_from_previous_round_waits(tmp_path):
@@ -259,21 +249,19 @@ def test_stale_lapsed_residue_from_previous_round_waits(tmp_path):
     client = SweepClient(None)
     client._reservation = _drawn_seat(client, finalize_by=NOW - 500)
     v = _validator(tmp_path, client)
-    _queue(v.state_store, USER_A, created_at=NOW - 10)
+    _queue(v.store, USER_A, created_at=NOW - 10)
     assert finalize_won_seats(v, NOW) == []
     assert not client.finalized
-    assert v.state_store.distinct_routed_pools() == [(MINER, 'sol', 'btc', 'sol')]  # kept — our draw is pending
-    v.state_store.close()
+    assert v.store.distinct_routed_pools() == [(MINER, 'sol', 'btc', 'sol')]  # kept — our draw is pending
 
 
 def test_stale_expired_reservation_residue_waits(tmp_path):
     client = SweepClient(None)
     client._reservation = _drawn_seat(client, reserved_until=NOW - 500, finalize_by=0)
     v = _validator(tmp_path, client)
-    _queue(v.state_store, USER_A, created_at=NOW - 10)
+    _queue(v.store, USER_A, created_at=NOW - 10)
     assert finalize_won_seats(v, NOW) == []
-    assert v.state_store.distinct_routed_pools() == [(MINER, 'sol', 'btc', 'sol')]
-    v.state_store.close()
+    assert v.store.distinct_routed_pools() == [(MINER, 'sol', 'btc', 'sol')]
 
 
 def test_residue_then_fresh_draw_finalizes(tmp_path):
@@ -281,22 +269,20 @@ def test_residue_then_fresh_draw_finalizes(tmp_path):
     client = SweepClient(None)
     client._reservation = _drawn_seat(client, finalize_by=NOW - 500)
     v = _validator(tmp_path, client)
-    _queue(v.state_store, USER_A, created_at=NOW - 10)
+    _queue(v.store, USER_A, created_at=NOW - 10)
     assert finalize_won_seats(v, NOW) == []
     client._reservation = _drawn_seat(client, finalize_by=NOW + 100)
     assert finalize_won_seats(v, NOW) == [MINER]
     assert len(client.finalized) == 1
-    v.state_store.close()
 
 
 def test_undrawn_pool_keeps_queue_for_next_step(tmp_path):
     # No reservation yet (pool still open / crank pending) → wait, don't drop.
     client = SweepClient(None)
     v = _validator(tmp_path, client)
-    _queue(v.state_store, USER_A)
+    _queue(v.store, USER_A)
     assert finalize_won_seats(v, NOW) == []
-    assert v.state_store.distinct_routed_pools() == [(MINER, 'sol', 'btc', 'sol')]
-    v.state_store.close()
+    assert v.store.distinct_routed_pools() == [(MINER, 'sol', 'btc', 'sol')]
 
 
 def test_transient_finalize_fault_retains_queue(tmp_path):
@@ -308,10 +294,9 @@ def test_transient_finalize_fault_retains_queue(tmp_path):
 
     client.finalize_reservation = _raise
     v = _validator(tmp_path, client)
-    _queue(v.state_store, USER_A)
+    _queue(v.store, USER_A)
     assert finalize_won_seats(v, NOW) == []
-    assert v.state_store.distinct_routed_pools() == [(MINER, 'sol', 'btc', 'sol')]  # retry next step
-    v.state_store.close()
+    assert v.store.distinct_routed_pools() == [(MINER, 'sol', 'btc', 'sol')]  # retry next step
 
 
 def test_contract_rejection_drops_only_that_request(tmp_path):
@@ -330,38 +315,25 @@ def test_contract_rejection_drops_only_that_request(tmp_path):
 
     client.finalize_reservation = refuse_a
     v = _validator(tmp_path, client)
-    _queue(v.state_store, USER_A, created_at=NOW - 50)
-    _queue(v.state_store, USER_B, created_at=NOW - 5)
+    _queue(v.store, USER_A, created_at=NOW - 50)
+    _queue(v.store, USER_B, created_at=NOW - 5)
     assert finalize_won_seats(v, NOW) == []
-    verdict = reserve_engine._routed_rejections.pop((MINER, 'sol', 'btc'))
+    verdict = requests._routed_rejections.pop((MINER, 'sol', 'btc'))
     assert verdict.reason == 'Miner already has an active reservation' and verdict.users == [USER_A]
     assert finalize_won_seats(v, NOW) == [MINER]
     assert [f[1] for f in client.finalized] == [USER_B]
-    v.state_store.close()
-
-
-def test_read_only_mode_finalizes_nothing_and_retains_queue(tmp_path):
-    client = SweepClient(None)
-    client._reservation = _drawn_seat(client)
-    v = _validator(tmp_path, client, read_only=True)
-    _queue(v.state_store, USER_A)
-    assert finalize_won_seats(v, NOW) == []
-    assert not client.finalized
-    assert v.state_store.distinct_routed_pools() == [(MINER, 'sol', 'btc', 'sol')]
-    v.state_store.close()
 
 
 def test_stale_queue_pruned_by_ttl_backstop(tmp_path):
     client = SweepClient(None)  # miner never drawn — reservation stays None forever
     v = _validator(tmp_path, client)
-    _queue(v.state_store, USER_A, created_at=NOW - ROUTED_REQUEST_TTL_SECS - 1)
+    _queue(v.store, USER_A, created_at=NOW - ROUTED_REQUEST_TTL_SECS - 1)
     assert finalize_won_seats(v, NOW) == []
-    assert v.state_store.distinct_routed_pools() == []
-    v.state_store.close()
+    assert v.store.distinct_routed_pools() == []
 
 
 def test_upsert_retry_keeps_fifo_position(tmp_path):
-    store = ValidatorStateStore(db_path=tmp_path / 'state.db')
+    store = serving_store(tmp_path / 'state.db')
     store.upsert_routed_request(MINER, 'sol', 'btc', 'sol', USER_A, 'src1', 'dst1', 100, created_at=NOW - 50)
     store.upsert_routed_request(MINER, 'sol', 'btc', 'sol', USER_B, 'src2', 'dst2', 200, created_at=NOW - 20)
     # A retries with fresh details — position (created_at) must survive, fields must refresh.
@@ -370,4 +342,3 @@ def test_upsert_retry_keeps_fifo_position(tmp_path):
     assert [r['user_pubkey'] for r in queue] == [USER_A, USER_B]
     assert queue[0]['created_at'] == NOW - 50
     assert (queue[0]['user_from_addr'], queue[0]['from_amount']) == ('src1b', 150)
-    store.close()
