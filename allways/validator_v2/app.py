@@ -107,7 +107,6 @@ def build(
             cfg.vaults[h.chain],
             inbox,
             store,
-            cfg.keypair,
             cfg.program_id,
         )
         for h in relayed_hubs()

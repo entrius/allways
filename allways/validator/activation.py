@@ -14,11 +14,12 @@ owner can walk away with; the epoch check below is what closes it.
 from __future__ import annotations
 
 from dataclasses import dataclass
+from typing import Optional
 
 from allways.cli.swap_commands.swap_intake import floors_from_config
 from allways.solana import pdas
 from allways.solana.layouts import split_attestation_epoch
-from allways.validator.relay.wiring import axon_vault_client
+from allways.vault import BondVaultClient
 
 
 @dataclass(frozen=True)
@@ -99,7 +100,7 @@ def _vault(validator, miner_hotkey: str, backing: str, attestation, floor: int, 
     """Verify the attestation against the bond it asserts. A stale mirror is the dangerous direction:
     it can only ever say a withdrawn bond is still there, never the reverse."""
     unit = backing.upper()
-    vault = axon_vault_client(validator)
+    vault = _axon_vault(validator)
     if vault is None:
         return _no(f'Bond relay not configured on this validator, so it cannot verify your {unit} bond.')
     with validator.axon_lock:
@@ -129,3 +130,11 @@ def _vault(validator, miner_hotkey: str, backing: str, attestation, floor: int, 
     if int(gross) < floor:
         return _no(f'Bond on the {unit} vault is {gross} < {floor}.')
     return _OK
+
+
+def _axon_vault(validator) -> Optional[BondVaultClient]:
+    """A read-only vault client on the axon's own subtensor, so a request never touches the relay's."""
+    relay, subtensor = getattr(validator, 'bond_relay', None), getattr(validator, 'axon_subtensor', None)
+    if relay is None or subtensor is None:
+        return None
+    return BondVaultClient(subtensor, relay.vault.address, metadata=relay.vault.metadata)

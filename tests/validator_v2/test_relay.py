@@ -6,13 +6,13 @@ from solders.keypair import Keypair
 
 from allways.solana import pdas
 from allways.solana.events import EventRecord
-from allways.validator.relay.engine import RelayConfig
 from allways.validator_v2.actuator.actuator import Actuator
 from allways.validator_v2.actuator.executors import vote_attest_heartbeat, vote_set_attestation
 from allways.validator_v2.actuator.planners import intent
 from allways.validator_v2.feed.events import FeedStatus
 from allways.validator_v2.hubs import hub
 from allways.validator_v2.relay.component import HubRelay
+from allways.validator_v2.relay.engine import RelayConfig
 from allways.validator_v2.relay.ledger import RelayLedger
 from allways.validator_v2.runtime.bus import Latest, Topic
 from allways.validator_v2.runtime.deadline_queue import DeadlineQueue
@@ -126,7 +126,6 @@ def _relay(tmp_path):
         _Vault,
         inbox,
         store,
-        SimpleNamespace(pubkey=lambda: 'me'),
         config=RelayConfig(max_writes_per_tick=8),
         clock=lambda: NOW,
     )
@@ -147,7 +146,7 @@ def _timed_out(swap_key=b'\x01' * 32, payee='5' + 'A' * 47):
 
 
 def test_the_relay_attests_through_the_actuator_inbox_and_acks_the_feed(tmp_path, monkeypatch):
-    monkeypatch.setattr('allways.validator.relay.engine.RELAY_MINER_READ_INTERVAL_SECS', 0)
+    monkeypatch.setattr('allways.validator_v2.relay.engine.RELAY_MINER_READ_INTERVAL_SECS', 0)
     relay, events, inbox, store = _relay(tmp_path)
     relay.tick(NOW)
     (queued,) = inbox.snapshot()
@@ -156,7 +155,7 @@ def test_the_relay_attests_through_the_actuator_inbox_and_acks_the_feed(tmp_path
 
 
 def test_a_verdict_it_cannot_write_is_held_with_the_heartbeat(tmp_path, monkeypatch):
-    monkeypatch.setattr('allways.validator.relay.engine.RELAY_MINER_READ_INTERVAL_SECS', 0)
+    monkeypatch.setattr('allways.validator_v2.relay.engine.RELAY_MINER_READ_INTERVAL_SECS', 0)
     relay, events, _, _ = _relay(tmp_path)
     relay.tick(NOW)
     broken = relay.ledger.record_relay_slash
