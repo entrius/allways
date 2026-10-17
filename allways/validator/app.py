@@ -209,8 +209,9 @@ def chain_watchers(
     by_chain: Dict[str, ChainWatcher] = {}
     out: Dict[str, ChainWatcher] = {}
     for asset_id, asset in assets.items():
-        # Keyed by network name: each EVM token builds its own chain object for the same network.
-        network = asset.chain_def.host_chain or asset_id
+        # Keyed by network name: each EVM token builds its own chain object for the same network, and every
+        # subnet alpha rides the subtensor.
+        network = asset.chain_def.host_chain or ('tao' if _on_subtensor(asset) else asset_id)
         watcher = by_chain.get(network)
         if watcher is None:
             reconnect = SubtensorSwap(assets, fresh_subtensor) if fresh_subtensor and _on_subtensor(asset) else None
@@ -226,8 +227,8 @@ def _on_subtensor(asset: Any) -> bool:
 
 
 class SubtensorSwap:
-    """Gives every TAO and alpha provider one new subtensor in place of the wedged shared one. Each TAO
-    watcher holds one; the first to notice the freeze reconnects, the rest skip for a minute."""
+    """Gives every TAO and alpha provider one new subtensor in place of the wedged shared one, at most once
+    a minute."""
 
     _lock = threading.Lock()
     _done_at = 0.0
