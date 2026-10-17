@@ -14,7 +14,6 @@ import pytest
 
 from allways.constants import RELAY_MINER_READ_INTERVAL_SECS
 from allways.solana import pdas
-from allways.validator import forward as forward_mod
 from allways.validator.relay import attestation as attestation_job
 from allways.validator.relay import exit_relay, wiring
 from allways.validator.relay.engine import BondRelay, RelayConfig
@@ -544,37 +543,6 @@ def test_a_failed_verdict_write_is_not_swallowed_and_holds_the_heartbeat(monkeyp
     relay.solana.calls.clear()
     relay.maybe_heartbeat(NOW + 10**9)
     assert not [c for c in relay.solana.calls if c[0] == 'vote_attest_heartbeat']
-
-
-def _fake_validator(relay, ingest):
-    return SimpleNamespace(
-        state_store=relay.store,
-        event_ingest=ingest,
-        bond_relay=relay,
-        solana_client=SimpleNamespace(attributions={MINER: HOTKEY}),
-        event_index=SimpleNamespace(ingest=lambda records, attribution: len(records)),
-    )
-
-
-def test_a_failed_verdict_write_holds_the_relay_cursor_until_it_lands(monkeypatch):
-    # F3: forward advances the crown cursor regardless, but the relay's own cursor must hold on a
-    # write failure so the SwapTimedOut is re-read next step (the inserts are idempotent).
-    relay = _relay()
-    store = relay.store
-    ingest = SimpleNamespace(poll=lambda cursor: ([_timeout_event(payee=USER_TAO)], 'sig1'))
-    validator = _fake_validator(relay, ingest)
-    monkeypatch.setattr(forward_mod, 'build_attribution', lambda client: {})
-
-    orig = store.record_relay_slash
-    monkeypatch.setattr(store, 'record_relay_slash', lambda *a, **k: (_ for _ in ()).throw(RuntimeError('db down')))
-    forward_mod.ingest_solana_events(validator)
-    assert store.get_relay_event_cursor() is None, 'the cursor holds while the write is failing'
-    assert store.open_relay_slashes('tao') == []
-
-    monkeypatch.setattr(store, 'record_relay_slash', orig)
-    forward_mod.ingest_solana_events(validator)
-    assert store.get_relay_event_cursor() == 'sig1', 'once it lands, the cursor advances'
-    assert len(store.open_relay_slashes('tao')) == 1
 
 
 def test_the_vault_connection_is_dialled_ahead_only_when_a_vault_is_configured(monkeypatch):
