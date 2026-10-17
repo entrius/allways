@@ -57,8 +57,6 @@ class Config:
     neuron_config: Any = None
     seam: Optional[Tuple[int, str]] = None
     serving_assets: Dict[str, Any] = field(default_factory=dict)
-    # Not ported yet: off, so nothing half-built runs.
-    export: bool = False
 
 
 @dataclass
@@ -72,7 +70,7 @@ def build(
     cfg: Config,
     assets: Dict[str, Any],
     subtensor_factory: Callable[[], Any],
-    export_storage: Optional[Any] = None,
+    export_storage: Optional[Any] = None,  # the dashboard's Postgres writer: export runs when given
 ) -> App:
     store = Store(os.path.join(cfg.state_dir, 'validator.db'))
     meter = Meter(list(cfg.endpoints))
@@ -189,7 +187,7 @@ def build(
     components += relays.values()
     if serving is not None:
         components.append(serving)
-    if cfg.export and export_storage is not None:
+    if export_storage is not None:
         components.append(Export(rounds, export_storage))
 
     def on_fatal(why: str) -> None:
