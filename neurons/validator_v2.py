@@ -24,6 +24,7 @@ from allways.utils.config import add_args, add_validator_args, check_config, con
 from allways.utils.subtensor import build_subtensor, serialize_subtensor  # noqa: E402
 from allways.validator_v2.app import Config, build  # noqa: E402
 from allways.validator_v2.chain.gateway import parse_endpoints  # noqa: E402
+from neurons.base.neuron import validator_mode  # noqa: E402
 
 
 class ValidatorV2:
@@ -42,6 +43,12 @@ def main() -> None:
     netuid = int(cfg.netuid)
     if netuid != NETUID_FINNEY and (applied := apply_testnet_network_defaults()):
         bt.logging.warning(f'testnet neuron (netuid {netuid}): unset spoke networks default to testnet {applied}')
+
+    mode = validator_mode()
+    if mode == 'watch':
+        raise SystemExit('VALIDATOR_MODE=watch is not supported by validator_v2: it always casts its votes')
+    # 'vote' casts program votes but leaves Bittensor weights alone.
+    sets_weights = mode == 'full' and not cfg.neuron.disable_set_weights
 
     rpc_url = resolve_rpc_url()
     keypair = keys.load_or_create()
@@ -67,6 +74,9 @@ def main() -> None:
             state_dir=state_dir,
             netuid=netuid,
             endpoints=tuple(parse_endpoints(os.environ.get('ALLWAYS_RPC_ENDPOINTS', ''))),
+            wallet=bt.Wallet(config=cfg) if sets_weights else None,
+            weights_alpha=float(cfg.neuron.moving_average_alpha),
+            epoch_length=int(cfg.neuron.epoch_length),
         ),
         assets=assets,
         subtensor_factory=lambda: build_subtensor(config=cfg),

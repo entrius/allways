@@ -9,6 +9,7 @@ from typing import Any, Callable, Dict, List, Optional, Tuple
 
 import bittensor as bt
 
+from allways import __spec_version__
 from allways.solana.rpc import resolve_ws_url
 from allways.validator_v2.actuator.actuator import Actuator
 from allways.validator_v2.actuator.executors import EXECUTORS, SendingClient
@@ -30,7 +31,7 @@ from allways.validator_v2.store.db import Store
 from allways.validator_v2.world.snapshot import WorldReader
 
 # Components that record their own feed position; the feed resumes from the oldest of them.
-FEED_CONSUMERS = ('world',)
+FEED_CONSUMERS = ('world', 'scoring')
 
 
 @dataclass(frozen=True)
@@ -42,6 +43,10 @@ class Config:
     netuid: int
     # Rate limits and daily budgets per endpoint host. Unlisted hosts are still counted, never throttled.
     endpoints: Tuple[Endpoint, ...] = ()
+    # Bittensor weights: set only with a wallet. The EMA alpha and epoch are the neuron's CLI settings.
+    wallet: Any = None
+    weights_alpha: float = 1.0
+    epoch_length: int = 150
     # Not ported yet: off, so nothing half-built runs.
     relay: bool = False  # relay every vault-custody hub in hubs.HUBS
     serve: bool = False
@@ -99,14 +104,34 @@ def build(
         cfg.program_id,
         status=feed_status,
     )
-    scoring = Scoring(world, events.subscribe('scoring'), gaps.subscribe('scoring'), store, rounds)
+    scoring = Scoring(
+        world,
+        head,
+        events.subscribe('scoring'),
+        gaps.subscribe('scoring'),
+        feed_status,
+        store,
+        rounds,
+        assets,
+        watchers,
+    )
     components: List[Component] = [
         world_reader,
         actuator,
         feed,
         scoring,
         SubtensorView(subtensor_factory, cfg.netuid, head),
-        WeightSetter(rounds, subtensor_factory),
+        WeightSetter(
+            rounds,
+            head,
+            subtensor_factory,
+            store,
+            cfg.wallet,
+            cfg.netuid,
+            cfg.weights_alpha,
+            cfg.epoch_length,
+            version_key=__spec_version__,
+        ),
         UsageReport(meter, list(cfg.endpoints)),
         *{id(w): w for w in watchers.values()}.values(),
     ]
