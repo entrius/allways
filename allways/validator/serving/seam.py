@@ -139,5 +139,5 @@ def start_seam(ctx, port: int, secret: str) -> ThreadingHTTPServer:
     """Start the loopback seam server in a daemon thread. Returns the server (call shutdown() to stop)."""
     server = ThreadingHTTPServer((SEAM_HOST, port), _make_handler(ctx, secret))
     threading.Thread(target=server.serve_forever, name='offering-seam', daemon=True).start()
-    bt.logging.info(f'Offering seam listening on {SEAM_HOST}:{port}')
+    bt.logging.info(f'serving: seam listening on {SEAM_HOST}:{port}')
     return server

@@ -179,25 +179,36 @@ UNMETERED = 'websocket traffic (subtensor, Solana log subscription)'
 
 
 class UsageReport(Component):
-    """Logs each endpoint's usage and projected day once an hour, warning when a budget would be exceeded."""
+    """Once an hour, two lines: how the validator stands (``status``) and what it spent (``usage``), with a
+    warning for any endpoint headed over its daily budget."""
 
     name = 'usage'
     interval_secs = 3600.0
     stall_secs = 3 * 3600.0
 
-    def __init__(self, meter: Meter, endpoints: List[Endpoint], clock=time.time) -> None:
+    def __init__(
+        self, meter: Meter, endpoints: List[Endpoint], status: Optional[Callable[[], str]] = None, clock=time.time
+    ) -> None:
         super().__init__(clock)
         self.meter = meter
+        self.status = status
         self.budgets = {e.name: e.daily_budget for e in endpoints if e.daily_budget}
+        self._skip = False
+
+    def setup(self) -> None:
+        self._skip = True  # the runtime ticks once at boot: nothing to report yet
 
     def tick(self, now: float) -> None:
+        if self._skip:
+            self._skip = False
+            return
+        if self.status is not None:
+            bt.logging.info(f'status: {self.status()}')
         projected = self.meter.projected_daily(now)
-        for endpoint, total in sorted(self.meter.totals().items()):
-            day = projected.get(endpoint, 0)
-            budget = self.budgets.get(endpoint)
-            line = f'usage {endpoint}: {total} requests so far, ~{day}/day projected'
+        parts = []
+        for endpoint, total in sorted(self.meter.totals().items(), key=lambda kv: -kv[1]):
+            day, budget = projected.get(endpoint, 0), self.budgets.get(endpoint)
+            parts.append(f'{endpoint} {total} (~{day}/day' + (f' of {budget}' if budget else '') + ')')
             if budget and day > budget:
-                bt.logging.warning(f'{line} — over its {budget}/day budget')
-            else:
-                bt.logging.info(line + (f' (budget {budget}/day)' if budget else ''))
-        bt.logging.info(f'usage: {UNMETERED} not metered')
+                bt.logging.warning(f'usage: {endpoint} is on course for ~{day}/day, over its {budget}/day budget')
+        bt.logging.info(f'usage since boot: {", ".join(parts) or "no metered requests"}; {UNMETERED} not metered')

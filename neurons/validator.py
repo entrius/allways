@@ -46,7 +46,7 @@ def main() -> None:
     bt.logging.set_config(config=cfg.logging)
     netuid = int(cfg.netuid)
     if netuid != NETUID_FINNEY and (applied := apply_testnet_network_defaults()):
-        bt.logging.warning(f'testnet neuron (netuid {netuid}): unset spoke networks default to testnet {applied}')
+        bt.logging.info(f'testnet (netuid {netuid}): unset spoke networks default to their testnets: {applied}')
 
     mode = validator_mode()
     if mode == 'watch':

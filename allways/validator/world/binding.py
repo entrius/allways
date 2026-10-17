@@ -8,10 +8,19 @@ hotkey→≤1 pubkey (set-once `HotkeyBinding`); we mirror that off-chain (first
 so a struck pubkey can't rotate to dodge strikes.
 """
 
-from typing import Dict, Optional
+from typing import Dict, Optional, Set
 
 import bittensor as bt
 from bittensor import Keypair
+
+# Attribution is rebuilt whenever a Binding changes and on every rescan: say each bad binding once.
+_REPORTED: Set[str] = set()
+
+
+def _warn_once(message: str) -> None:
+    if message not in _REPORTED:
+        _REPORTED.add(message)
+        bt.logging.warning(message)
 
 
 def _hotkey_keypair(hotkey_bytes: bytes) -> Keypair:
@@ -46,7 +55,7 @@ def warn_if_unbound(solana_client) -> None:
         return
     if unbound:
         bt.logging.warning(
-            'solana pubkey has no hotkey binding — run `alw bind-hotkey` so peers can post your stake weight'
+            "binding: this validator's Solana key has no hotkey binding; run `alw bind-hotkey` so peers count its stake"
         )
 
 
@@ -67,14 +76,14 @@ def build_attribution(solana_client) -> Dict[str, str]:
     for b in bindings:
         miner = str(b.miner)
         if not verify_binding(b.miner, b.hotkey, b.hotkey_sig):
-            bt.logging.warning(f'binding for {miner[:8]}: invalid sr25519 sig, skipping')
+            _warn_once(f'binding: {miner[:8]} has an invalid sr25519 signature, not attributed')
             continue
         ss58 = hotkey_ss58(b.hotkey)
         if ss58 is None:
             continue
         owner = hotkey_owner.get(ss58)
         if owner is not None and owner != miner:
-            bt.logging.warning(f'hotkey {ss58[:8]} already bound to {owner[:8]}; rejecting {miner[:8]}')
+            _warn_once(f'binding: hotkey {ss58[:8]} is already bound to {owner[:8]}, not attributing {miner[:8]}')
             continue
         hotkey_owner[ss58] = miner
         pubkey_to_hotkey[miner] = ss58

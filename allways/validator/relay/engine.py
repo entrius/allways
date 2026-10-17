@@ -40,6 +40,7 @@ from allways.solana import pdas
 from allways.validator.relay import attestation as attestation_job
 from allways.validator.relay import exits
 from allways.validator.relay import slash as slash_job
+from allways.validator.runtime.logs import Episodes
 from allways.validator.world.snapshot import World
 
 # Vault events that move a miner's bond or its books — each one makes that miner's attestation
@@ -107,6 +108,7 @@ class BondRelay:
         timer: Optional[Callable[[], float]] = None,
     ):
         self._world = world
+        self._episodes = Episodes()
         self.vote = vote  # (kind, subject, payload): handed to the actuator, landed or retried there
         self.vault = vault
         self.store = ledger
@@ -268,10 +270,13 @@ class BondRelay:
                 # our vote, not by waiting for quorum — waiting would deadlock a fleet-wide
                 # restart, where every validator is behind at once.
                 if not self.reconcile(now):
-                    bt.logging.info('relay: startup reconcile still draining — heartbeat held down')
+                    self._episodes.start(
+                        'reconcile', 'relay: startup reconcile draining, heartbeat held', bt.logging.info
+                    )
                     return
                 self._reconciled = True
-                bt.logging.success('relay: startup reconcile clean — heartbeat released')
+                self._episodes.end('reconcile')
+                bt.logging.info('relay: startup reconcile clean, heartbeat released')
                 dev_signal.emit('relay_reconciled', backing=self.backing)
 
             self.poll_vault_events()
@@ -410,8 +415,9 @@ class BondRelay:
         the whole relay, not fifty questions about individual miners — so one round, and quiet
         miners can never false-positive a staleness fuse."""
         if not self._ingest_healthy:
-            bt.logging.info('relay: a verdict write is still dirty — heartbeat held down')
+            self._episodes.start('dirty', 'relay: a verdict is waiting to be written, heartbeat held')
             return
+        self._episodes.end('dirty', 'relay: verdicts written, heartbeat free')
         world = self._world()
         if world is None or world.config is None:
             return

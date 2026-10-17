@@ -144,7 +144,10 @@ class Scoring(Component):
         with self.store.tx() as c:
             Store.set_meta(c, LAST_SCORED, str(now))
         self.out.set(result)
-        bt.logging.info(f'scoring: round [{last}, {now}] scored' + (' (halted: recycled)' if result.halted else ''))
+        if result.halted:
+            bt.logging.warning('scoring: the program is halted, the whole round recycled')
+        else:
+            bt.logging.debug(f'scoring: round [{last}, {now}] scored')
 
 
 def quote_usable(
@@ -272,9 +275,9 @@ class WeightSetter(Component):
         )
         if ok is True:
             self._set_at_block = head.block
-            bt.logging.info('weights: set on chain')
+            bt.logging.success(f'weights: submitted at block {head.block} ({len(uint_uids)} uids)')
         else:
-            bt.logging.error(f'weights: set_weights failed: {msg}')
+            bt.logging.warning(f'weights: set_weights failed, retrying next epoch: {msg}')
 
 
 _SCORES_DDL = (

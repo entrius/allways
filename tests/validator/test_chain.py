@@ -115,3 +115,19 @@ def test_confirm_tracker_resolves_in_one_batched_read():
     assert [s.signature for s, _ in resolved.failed] == ['bad']
     assert [s.signature for s in resolved.expired] == ['lost']
     assert [s.signature for s in tracker.pending()] == ['pending']
+
+
+def test_the_hourly_report_is_a_status_line_and_one_usage_line(monkeypatch):
+    clock = _Clock()
+    meter = Meter([Endpoint('helius', 'h.example', rate=1000, burst=1000, daily_budget=0)], clock=clock)
+    session = _metered(monkeypatch, meter)
+    session.post('https://h.example/', json={'method': 'getSlot'})
+    clock.t = 3600
+    info = []
+    monkeypatch.setattr('bittensor.logging.info', info.append)
+    report = UsageReport(meter, [], status=lambda: 'slot 5, 0 live swap(s)')
+    report.setup()
+    report.tick(clock.t)  # the boot tick reports nothing
+    report.tick(clock.t)
+    assert info[0] == 'status: slot 5, 0 live swap(s)'
+    assert info[1].startswith('usage since boot: helius 1 (~24/day)') and len(info) == 2

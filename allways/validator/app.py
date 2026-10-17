@@ -7,12 +7,14 @@ import os
 import threading
 import time
 from dataclasses import dataclass, field
+from functools import partial
 from typing import Any, Callable, Dict, List, Optional, Tuple
 
 import bittensor as bt
 
 from allways import __spec_version__
 from allways.assets.tao import Tao
+from allways.constants import RECYCLE_UID
 from allways.solana.rpc import resolve_ws_url
 from allways.validator.actuator.actuator import Actuator
 from allways.validator.actuator.executors import EXECUTORS, SendingClient
@@ -186,7 +188,7 @@ def build(
             cfg.epoch_length,
             version_key=__spec_version__,
         ),
-        UsageReport(meter, list(cfg.endpoints)),
+        UsageReport(meter, list(cfg.endpoints), partial(status_line, world, feed_status, rounds)),
         *{id(w): w for w in watchers.values()}.values(),
     ]
     components += relays.values()
@@ -252,3 +254,30 @@ class SubtensorSwap:
                 except Exception:
                     pass
             SubtensorSwap._done_at = time.time()
+
+
+def status_line(world: Latest, feed_status: Latest, rounds: Latest) -> str:
+    """One line on how the validator stands, for the hourly report."""
+    w, _ = world.get()
+    feed, _ = feed_status.get()
+    result, _ = rounds.get()
+    if w is None:
+        return 'no World yet'
+    swaps = len(w.accounts.get('Swap', {}))
+    states = list(w.accounts.get('MinerState', {}).values())
+    active = sum(1 for ms in states if getattr(ms, 'active', False))
+    halted = ' — PROGRAM HALTED' if getattr(w.config, 'halted', False) else ''
+    if feed is None:
+        feed_part = 'feed not started'
+    else:
+        quiet = f', last event {int(time.time() - feed.last_event_at)}s ago' if feed.last_event_at else ''
+        feed_part = ('feed catching up' if feed.catching_up else 'feed live') + quiet
+    if result is None:
+        round_part = 'no round scored yet'
+    else:
+        paid = 1.0 - float(result.rewards[RECYCLE_UID]) if len(result.rewards) > RECYCLE_UID else 0.0
+        ended = time.strftime('%H:%M UTC', time.gmtime(result.window_end))
+        round_part = f'last round {ended}' + (' (halted)' if result.halted else f', {paid:.0%} paid to miners')
+    return (
+        f'slot {w.slot}, {swaps} live swap(s), {active}/{len(states)} miners active, {feed_part}, {round_part}{halted}'
+    )

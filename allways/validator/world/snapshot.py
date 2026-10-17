@@ -205,7 +205,7 @@ class WorldReader(Component):
         if self.gaps.drain() or self.events.dropped != self._dropped:
             self._dropped, self._need_scan = self.events.dropped, True
         if self._need_scan or now - self._scanned_at >= RESCAN_SECS:
-            self._scan()
+            self._scan(routine=not self._need_scan)
             self._scanned_at = now
         for record in self.events.drain():
             try:
@@ -261,7 +261,7 @@ class WorldReader(Component):
         bt.logging.info(f'world: restored at slot {self._slot}')
         return self._config is not None
 
-    def _scan(self) -> None:
+    def _scan(self, routine: bool = False) -> None:
         """Every account of every tracked type. The slot is read first, so everything the scan returns
         is at least that new and older events must not overwrite it."""
         slot = int(self._client.rpc.get_slot())
@@ -273,9 +273,12 @@ class WorldReader(Component):
                 fresh[name][str(pda)] = raw
         config_pda = str(pdas.config_pda(program_id))
         config_raw = self._client.rpc.get_account_info(config_pda)
+        missed = 0
         for name, old in self._accounts.items():
             for pda in set(old) - set(fresh[name]):
                 self._drop(name, pda, slot)
+                missed += 1
+            missed += len(set(fresh[name]) - set(old))
         for name, accounts in fresh.items():
             for pda, raw in accounts.items():
                 self._put_raw(name, pda, raw, slot)
@@ -286,9 +289,13 @@ class WorldReader(Component):
         self._slot = max(self._slot, slot)
         self._refresh_attribution()
         self._need_scan = False
-        bt.logging.info(
-            f'world: scanned at slot {slot}: ' + ', '.join(f'{t}={len(v)}' for t, v in self._accounts.items())
-        )
+        counts = ', '.join(f'{t}={len(v)}' for t, v in self._accounts.items())
+        if not routine:
+            bt.logging.info(f'world: scanned at slot {slot}: {counts}')
+        elif missed:
+            bt.logging.warning(f'world: the hourly rescan found {missed} account(s) the events missed ({counts})')
+        else:
+            bt.logging.debug(f'world: hourly rescan matched the events ({counts})')
 
     # ── state changes ───────────────────────────────────────────────────────
 

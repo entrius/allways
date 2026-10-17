@@ -4,6 +4,7 @@ presentation — never mutates state."""
 
 from __future__ import annotations
 
+import time
 from dataclasses import dataclass
 from typing import TYPE_CHECKING, Any, Dict, List, Optional, Sequence, Set, Tuple
 
@@ -140,7 +141,27 @@ def log_scoring_trace(
         cause = '; '.join(parts) or 'no crown winners'
         lines.append(f'  recycled={recycled:.3f} → UID{recycle_uid} (subnet owner) cause={cause}')
 
-    bt.logging.info('\n'.join(lines))
+    bt.logging.info(round_summary(window_start, window_end, direction_traces, rewards, recycle_uid, distributed))
+    bt.logging.debug('\n'.join(lines))
+
+
+def round_summary(
+    window_start: int,
+    window_end: int,
+    direction_traces: Dict[Tuple[str, str, str], 'DirectionTrace'],
+    rewards: np.ndarray,
+    recycle_uid: int,
+    distributed: float,
+) -> str:
+    """The round in one line: the window, what share went to miners, over how many lanes, and to whom."""
+    span = '–'.join(time.strftime('%H:%M', time.gmtime(t)) for t in (window_start, window_end))
+    paid_lanes = sum(1 for t in direction_traces.values() if t.pool > 0 and any(v > 0 for v in t.crown_time.values()))
+    top = sorted(((float(r), uid) for uid, r in enumerate(rewards) if r > 0 and uid != recycle_uid), reverse=True)[:5]
+    earners = ', '.join(f'uid{uid} {r:.1%}' for r, uid in top)
+    return (
+        f'scoring: round {span} UTC, {distributed:.1%} to miners over {paid_lanes} lane(s), '
+        f'{1 - distributed:.1%} recycled' + (f'; top: {earners}' if earners else '')
+    )
 
 
 def non_earner_lines(

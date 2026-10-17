@@ -116,7 +116,7 @@ def _settle_residual(relay, miner: str, hotkey: str, total: int, now: int) -> bo
     if not result.ok:
         bt.logging.warning(f'relay: residual settle rejected for {hotkey[:8]} ({result.error or "reverted"})')
         return False
-    bt.logging.info(f'relay: residual fee settle voted for {hotkey[:8]} (cumulative {total})')
+    bt.logging.success(f'relay: residual fee settle voted for {hotkey[:8]} (cumulative {total})')
     dev_signal.emit('relay_residual_settle', miner=miner, hotkey=hotkey, cumulative=total)
     return True  # unlock waits for the next pass, once the vault confirms the settle applied
 
@@ -133,7 +133,7 @@ def _unlock(relay, miner: str, hotkey: str, epoch: int, now: int) -> bool:
     if not result.ok:
         bt.logging.warning(f'relay: vote_unlock rejected for {hotkey[:8]} ({result.error or "reverted"})')
         return False
-    bt.logging.info(f'relay: vote_unlock cast for {hotkey[:8]} at epoch {epoch}')
+    bt.logging.success(f'relay: vote_unlock cast for {hotkey[:8]} at epoch {epoch}')
     dev_signal.emit('relay_unlock_voted', miner=miner, hotkey=hotkey, epoch=epoch)
     relay.mark_dirty(miner)
     return True
@@ -170,7 +170,7 @@ def maybe_cadence_settle(relay, now: int) -> None:
         if not result.ok:
             bt.logging.warning(f'relay: fee cadence batch rejected ({result.error or "reverted"})')
             return  # boundary stays unmarked so the next tick retries the whole round
-    bt.logging.info(f'relay: fee true-up voted for {len(entries)} miner(s) at boundary {boundary}')
+    bt.logging.success(f'relay: fee true-up voted for {len(entries)} miner(s) at boundary {boundary}')
     dev_signal.emit('relay_fee_cadence', boundary=boundary, entries=len(entries))
     relay.store.set_relay_meta(_CADENCE_KEY, boundary)
 

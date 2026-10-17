@@ -150,7 +150,5 @@ class Serving(Component):
             if status is not None and status.cursor is not None:
                 Store.ack(c, self.name, *status.cursor)
         if self.store.distinct_routed_pools():
-            finalized = finalize_won_seats(self, int(now))
-            if finalized:
-                bt.logging.info(f'serving: finalized routed seat(s) for {len(finalized)} miner(s)')
+            finalize_won_seats(self, int(now))  # logs each seat it finalizes
         self.store.prune(int(now))

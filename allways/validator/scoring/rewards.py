@@ -729,7 +729,7 @@ def score_round(
 
     # The World's live state corrects any transition the ingest lost, before the replay reads the ledger.
     states = miner_states(world, rewardable)
-    ledger.reconcile_live_state(states, now=now, live_bonds=bond_balances(world, rewardable))
+    made = ledger.reconcile_live_state(states, now=now, live_bonds=bond_balances(world, rewardable))
     unbanned = without_address_banned(ledger, states, now)
     if len(unbanned) < len(states):
         bt.logging.warning(
@@ -737,7 +737,10 @@ def score_round(
         )
     # The book is read for every miner: a banned miner's quotes still have to match the chain.
     live_rates = quote_rates(world, providers, states)
-    ledger.reconcile_live_quotes(live_rates, now=now)
+    made['rate'] = ledger.reconcile_live_quotes(live_rates, now=now)
+    if any(made.values()):
+        # Expected on a fresh ledger; afterwards each one is an event the feed missed.
+        bt.logging.info('reconcile: the chain corrected ' + ', '.join(f'{n} {kind}' for kind, n in made.items() if n))
     states = unbanned
     recent_fills = recent_fill_hotkeys(ledger, now)
     eligibility = {hk: is_eligible(ms, now, hotkey=hk, recent_fills=recent_fills) for hk, ms in states.items()}

@@ -4,11 +4,13 @@ from __future__ import annotations
 
 import threading
 import time
+import traceback
 from typing import Callable, Optional
 
 import bittensor as bt
 
 MAX_ERROR_BACKOFF_SECS = 60.0
+ERROR_AFTER_FAILURES = 10  # a failure this persistent is an operator problem, not a blip
 
 
 class Component:
@@ -29,6 +31,7 @@ class Component:
         self.ticks = 0
         self.errors = 0
         self._consecutive_errors = 0
+        self._last_error = ''
         self._thread: Optional[threading.Thread] = None
 
     def setup(self) -> None:
@@ -47,14 +50,26 @@ class Component:
             started = time.monotonic()
             try:
                 self.tick(self.clock())
-                self._consecutive_errors = 0
+                if self._consecutive_errors:
+                    bt.logging.info(f'{self.name}: recovered after {self._consecutive_errors} failed tick(s)')
+                self._consecutive_errors, self._last_error = 0, ''
             except Exception as e:
                 self.errors += 1
                 self._consecutive_errors += 1
-                bt.logging.warning(f'{self.name}: tick failed ({self._consecutive_errors} in a row): {e}')
+                self._log_failure(e)
             self.ticks += 1
             self.last_heartbeat = time.monotonic()
             stop.wait(max(0.0, self._next_delay() - (time.monotonic() - started)))
+
+    def _log_failure(self, e: Exception) -> None:
+        """The first failure and every new error, not each retry of the same one; an error once it persists."""
+        n, error = self._consecutive_errors, f'{type(e).__name__}: {e}'
+        if n == ERROR_AFTER_FAILURES:
+            bt.logging.error(f'{self.name}: failing for {n} ticks in a row: {error}')
+        elif error != self._last_error:
+            bt.logging.warning(f'{self.name}: tick failed: {error}' + (f' ({n} in a row)' if n > 1 else ''))
+            bt.logging.debug(traceback.format_exc())
+        self._last_error = error
 
     def _next_delay(self) -> float:
         if not self._consecutive_errors:

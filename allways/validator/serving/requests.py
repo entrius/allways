@@ -381,7 +381,7 @@ def finalize_won_seats(ctx, now: int) -> list:
             _routed_rejections[(miner, from_chain, to_chain)] = RoutedRejection(reason, [req['user_pubkey']])
             store.delete_routed_request(miner, from_chain, to_chain, backing, req['user_pubkey'])
             continue
-        bt.logging.info(f'routed sweep {miner[:8]}: finalized seat for {req["user_pubkey"][:8]} (FIFO of queue)')
+        bt.logging.success(f'routed sweep {miner[:8]}: finalized the seat for {req["user_pubkey"][:8]}')
         store.delete_routed_requests(miner, from_chain, to_chain, backing)
         finalized.append(miner)
         if backing not in (from_chain, to_chain):
@@ -520,7 +520,7 @@ def _deposit_ref(provider, from_tx_hash: str, from_tx_block: int) -> Optional[Tu
     try:
         tx_hash, block = provider.locate_transfer(*extrinsic_id)
     except ValueError as e:
-        bt.logging.info(f'extrinsic id {from_tx_hash} names no creditable transfer: {e}')
+        bt.logging.debug(f'extrinsic id {from_tx_hash} names no creditable transfer: {e}')
         return None
     return tx_hash, block
 
