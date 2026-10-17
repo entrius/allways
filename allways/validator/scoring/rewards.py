@@ -735,9 +735,10 @@ def score_round(
         bt.logging.warning(
             f'address-banned miners score zero this round: {sorted(hk[:8] for hk in states.keys() - unbanned.keys())}'
         )
-    states = unbanned
+    # The book is read for every miner: a banned miner's quotes still have to match the chain.
     live_rates = quote_rates(world, providers, states)
     ledger.reconcile_live_quotes(live_rates, now=now)
+    states = unbanned
     recent_fills = recent_fill_hotkeys(ledger, now)
     eligibility = {hk: is_eligible(ms, now, hotkey=hk, recent_fills=recent_fills) for hk, ms in states.items()}
     swap_bounds = bounds_from_config(world.config)
