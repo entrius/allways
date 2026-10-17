@@ -516,3 +516,74 @@ def under_relay_ledger(test_module: str, skip=()) -> dict:
     mod.ValidatorStateStore = RelayLedgerStore
     mod.BondRelay = ledger_bond_relay()
     return {k: v for k, v in vars(mod).items() if not k.startswith('__') and k not in skip}
+
+
+class ServingStoreShim:
+    """``ValidatorStateStore(db_path=...)`` for the request-op tests: the v2 ``ServingStore``. Facts the old
+    store recorded on ingest (claimed deposits, reported deliveries, payout routes) land in a stand-in World,
+    as the event feed would put them there; verified deliveries and collateral verdicts land in the
+    actuator's ``SwapMemory``."""
+
+    LEDGER_SINCE_KEY = 'clearing_ledger_since'
+
+    def __new__(cls, db_path=None, **kwargs: Any):
+        from allways.validator.state_store import tx_key
+        from allways.validator_v2.actuator.swap_context import SwapMemory
+        from allways.validator_v2.serving.store import ServingStore
+        from allways.validator_v2.store.db import Store
+        from allways.validator_v2.world.snapshot import DepositClaim, Fulfillment, PayoutRoute, World
+
+        world = World(taken_at=0, slot=0, complete=True, config=None, accounts={}, deposits={}, fulfillments={})
+        world = World(**{**world.__dict__, 'routes': {}})
+
+        class Shim(ServingStore):
+            def record_deposit_claim(self, tx_hash, swap_key, seen_at):
+                world.deposits.setdefault(tx_key(tx_hash), DepositClaim(swap_key, 0, int(seen_at)))
+
+            def mark_deposit_initiated(self, swap_key):
+                for k, claim in list(world.deposits.items()):
+                    if claim.swap_key == swap_key:
+                        world.deposits[k] = DepositClaim(claim.swap_key, claim.slot, claim.seen_at, True)
+
+            def record_swap_fulfillment(self, swap_key, to_tx_hash, block_time):
+                world.fulfillments[swap_key] = Fulfillment(to_tx_hash, int(block_time), '')
+                self._exec(
+                    'INSERT INTO serving_outcomes (swap_key, to_tx_hash, at) VALUES (?, ?, ?) '
+                    'ON CONFLICT(swap_key) DO UPDATE SET to_tx_hash = excluded.to_tx_hash',
+                    (swap_key, to_tx_hash, int(block_time)),
+                )
+
+            def record_swap_outcome(self, swap_key, outcome, block_time, refund=None):
+                chain, amount, tx = refund or (None, None, None)
+                self._exec(
+                    'INSERT INTO serving_outcomes (swap_key, outcome, refund_chain, refund_amount, refund_tx, at) '
+                    'VALUES (?, ?, ?, ?, ?, ?) ON CONFLICT(swap_key) DO UPDATE SET outcome = excluded.outcome',
+                    (swap_key, outcome, chain, None if amount is None else str(amount), tx, int(block_time)),
+                )
+
+            def record_payout_route(self, chain, sender, recipient, swap_key, seen_at):
+                world.routes[swap_key] = PayoutRoute(chain, sender, recipient, int(seen_at))
+
+            def claim_delivery(self, miner, tx_hash, swap_key, seen_at, settled=False):
+                if settled:
+                    self.memory.deliveries[(str(miner), tx_key(tx_hash))] = (swap_key, int(seen_at))
+                    return True
+                return self.memory.claim_delivery(str(miner), tx_key(tx_hash), swap_key, int(seen_at))
+
+            def close(self):
+                pass
+
+        Path(db_path).parent.mkdir(parents=True, exist_ok=True)
+        store = Store(str(db_path))
+        return Shim(store, lambda: world, SwapMemory(store), {})
+
+
+def under_serving_store(test_module: str, skip=()) -> dict:
+    import importlib.util
+
+    path = Path(__file__).parent.parent / f'{test_module}.py'
+    spec = importlib.util.spec_from_file_location(f'tests.validator_v2._{test_module}_under_serving', path)
+    mod = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(mod)
+    mod.ValidatorStateStore = ServingStoreShim
+    return {k: v for k, v in vars(mod).items() if not k.startswith('__') and k not in skip}

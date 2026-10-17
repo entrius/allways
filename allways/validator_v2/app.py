@@ -5,6 +5,7 @@ from __future__ import annotations
 
 import os
 from dataclasses import dataclass, field
+from functools import partial
 from typing import Any, Callable, Dict, List, Optional, Tuple
 
 import bittensor as bt
@@ -27,7 +28,8 @@ from allways.validator_v2.runtime.component import Component
 from allways.validator_v2.runtime.deadline_queue import DeadlineQueue
 from allways.validator_v2.runtime.supervisor import Supervisor
 from allways.validator_v2.scoring.component import Scoring, WeightSetter
-from allways.validator_v2.serving.component import Serving
+from allways.validator_v2.serving.component import Serving, WorldClient
+from allways.validator_v2.serving.store import ServingStore
 from allways.validator_v2.store.db import Store
 from allways.validator_v2.world.snapshot import WorldReader
 
@@ -50,8 +52,13 @@ class Config:
     epoch_length: int = 150
     # Vault clients by hub chain: a vault-custody hub is relayed exactly when its vault is configured.
     vaults: Dict[str, Callable[[], Any]] = field(default_factory=dict)
+    # Serving runs when the axon (a wallet and the neuron config) or the seam ((port, secret)) is on. Its chain
+    # checks use their own connections: request threads must not share the watchers'.
+    axon_wallet: Any = None
+    neuron_config: Any = None
+    seam: Optional[Tuple[int, str]] = None
+    serving_assets: Dict[str, Any] = field(default_factory=dict)
     # Not ported yet: off, so nothing half-built runs.
-    serve: bool = False
     export: bool = False
 
 
@@ -111,7 +118,28 @@ def build(
         relay = relays.get(str(swap.collateral_chain).lower())
         return relay is not None and relay.has_pending_debit(str(swap.miner))
 
-    swaps = SwapPlanner(watchers, assets, SwapMemory(store), owes_settlement, program_id=cfg.program_id)
+    memory = SwapMemory(store)
+    swaps = SwapPlanner(watchers, assets, memory, owes_settlement, program_id=cfg.program_id)
+    serving = None
+    if (cfg.axon_wallet is not None and cfg.neuron_config is not None) or cfg.seam is not None:
+        serving = Serving(
+            world,
+            head,
+            events.subscribe('serving'),
+            feed_status,
+            store,
+            ServingStore(store, lambda: world.get()[0], memory, cfg.serving_assets),
+            lambda: meter.solana_client(
+                cfg.solana_rpc_url, cfg.program_id, cfg.keypair, cls=partial(WorldClient, world)
+            ),
+            cfg.serving_assets,
+            swaps.report,
+            relays,
+            subtensor_factory,
+            cfg.axon_wallet,
+            cfg.neuron_config,
+            cfg.seam,
+        )
     actuator = Actuator(
         world,
         [swaps, PoolPlanner(), HygienePlanner(head, me=cfg.keypair.pubkey())],
@@ -122,7 +150,9 @@ def build(
     feed = EventFeed(
         lambda: meter.solana_client(cfg.solana_rpc_url, cfg.program_id).rpc,
         LiveFeed(resolve_ws_url(cfg.solana_rpc_url), cfg.program_id),
-        lambda: store.resume_point([*FEED_CONSUMERS, *(r.name for r in relays.values())]),
+        lambda: store.resume_point(
+            [*FEED_CONSUMERS, *(r.name for r in relays.values()), *(['serving'] if serving is not None else [])]
+        ),
         events,
         gaps,
         cfg.program_id,
@@ -160,8 +190,8 @@ def build(
         *{id(w): w for w in watchers.values()}.values(),
     ]
     components += relays.values()
-    if cfg.serve:
-        components.append(Serving(world, actuator.queue, store))
+    if serving is not None:
+        components.append(serving)
     if cfg.export and export_storage is not None:
         components.append(Export(rounds, export_storage))
 
