@@ -373,7 +373,7 @@ def _permissive(*chains):
 
 def _pick(client, from_amount=10**9):
     from allways.cli.swap_commands.swap_intake import bounds_from_config
-    from allways.validator_v2.serving.requests import _best_offer
+    from allways.validator.serving.requests import _best_offer
 
     state = client.get_miner_state('m1')
     bounds = bounds_from_config(client.get_config())
@@ -429,13 +429,13 @@ def test_a_tao_offer_whose_bond_is_too_thin_says_so_in_tao():
 def test_the_routed_bid_names_the_backing_it_won():
     from unittest.mock import patch
 
-    from allways.validator_v2.serving.requests import reserve_on_behalf
-    from tests.validator_v2.fakes import Ctx
+    from allways.validator.serving.requests import reserve_on_behalf
+    from tests.validator.fakes import Ctx
 
     client = _RoutingClient()
     client.open_or_request = lambda miner, f, t, backing='sol': client.bids.append(backing) or 'sig'
     ctx = Ctx(client, store=SimpleNamespace(upsert_routed_request=lambda *a: None), providers=_permissive('sol', 'tao'))
-    with patch('allways.validator_v2.serving.requests.resolve_miner_pubkey', return_value='m1'):
+    with patch('allways.validator.serving.requests.resolve_miner_pubkey', return_value='m1'):
         res = reserve_on_behalf(
             ctx,
             'hk',
