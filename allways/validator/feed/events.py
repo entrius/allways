@@ -256,7 +256,7 @@ class EventFeed(Component):
         self.resume_from = resume_from  # the oldest position any consumer durably applied (None = horizon)
         self.out = out
         self.gaps = gaps  # publishes a HistoryGap when the horizon cut history short
-        self.status: Latest = status or Latest()
+        self.status: Latest = status if status is not None else Latest()
         self.program_id = program_id
         self.seen = SeenSignatures()
         self._rpc: Any = None
