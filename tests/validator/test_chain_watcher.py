@@ -159,3 +159,13 @@ def test_a_tip_frozen_while_checks_wait_reconnects_the_chain():
         clock.t += w.interval_secs
         w.tick(clock.t)
     assert reconnects == [1]
+
+
+def test_every_subnet_alpha_shares_the_tao_watcher():
+    from allways.assets.tao import Tao
+
+    subtensor = Tao.__new__(Tao)
+    assets = {'tao': _Asset(subtensor, spb=12), 'sn3': _Asset(Tao.__new__(Tao), spb=12), 'btc': _Asset(_Chain())}
+    watchers = chain_watchers(assets)
+    assert watchers['sn3'] is watchers['tao'] and watchers['tao'].name == 'chain-tao'
+    assert len({id(w) for w in watchers.values()}) == 2
