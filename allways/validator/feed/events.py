@@ -269,6 +269,7 @@ class EventFeed(Component):
         self._cursor: Optional[Tuple[int, str]] = None
         self._last_event_at = 0.0
         self._empty_tries: dict = {}
+        self._recovered = 0  # events the current backfill published
 
     def setup(self) -> None:
         self._rpc = self._rpc_factory()
@@ -330,11 +331,13 @@ class EventFeed(Component):
                 block_time = tx.get('blockTime') or entry.get('blockTime') or self._clock.time_of(slot)
                 logs = (tx.get('meta') or {}).get('logMessages') or []
                 if self.seen.add(sig):
-                    self.out.publish_many(
-                        [EventRecord(n, f, entry.get('slot'), block_time, sig) for n, f in events_from_logs(logs)]
-                    )
+                    records = [EventRecord(n, f, entry.get('slot'), block_time, sig) for n, f in events_from_logs(logs)]
+                    self.out.publish_many(records)
+                    self._recovered += len(records)
             self._cursor = (slot, sig)
             bf.pop()
         if bf.done:
-            bt.logging.info('feed: backfill complete')
-            self._backfill = None
+            # A resubscribe on a quiet socket backfills nothing; only a recovery is news.
+            log = bt.logging.info if self._recovered else bt.logging.debug
+            log(f'feed: backfill complete, {self._recovered} missed event(s) recovered')
+            self._backfill, self._recovered = None, 0

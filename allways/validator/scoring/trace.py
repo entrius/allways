@@ -70,7 +70,11 @@ def log_scoring_trace(
 
     lines = [f'scoring: window=[{window_start}, {window_end}], distributed={distributed:.6f}, recycled={recycled:.6f}']
 
+    idle = 0
     for (from_c, to_c, backing), trace in direction_traces.items():
+        if trace.pool <= 0 and not any(secs > 0 for secs in trace.crown_time.values()):
+            idle += 1  # most of the registry, most of the time: counted, not listed
+            continue
         holders = ', '.join(
             f'UID{hotkey_to_uid[hk]}: {secs:.0f}s'
             for hk, secs in sorted(trace.crown_time.items(), key=lambda kv: -kv[1])
@@ -80,6 +84,9 @@ def log_scoring_trace(
             f'  [{from_c}→{to_c}|{backing}] pool={trace.pool:g} holders={{{holders}}} '
             f'unfilled={trace.unfilled_time}s qvol={trace.qualified_volume}'
         )
+
+    if idle:
+        lines.append(f'  {idle} lane(s) with no pool and no crown holder')
 
     # Log everyone paid OR holding crown — an ineligible crown holder earning 0 must appear.
     crown_holders = {hk for t in direction_traces.values() for hk, secs in t.crown_time.items() if secs > 0}
