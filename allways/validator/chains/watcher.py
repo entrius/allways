@@ -16,7 +16,6 @@ from typing import Any, Callable, Dict, Optional, Tuple
 import bittensor as bt
 
 from allways.assets.asset import ProviderUnreachableError
-from allways.validator.runtime.bus import Latest
 from allways.validator.runtime.component import Component
 
 MEMPOOL_RECHECK_SECS = 12.0
@@ -78,7 +77,6 @@ class ChainWatcher(Component):
         self.chain = chain  # allways.assets Chain: one tip for every asset on it
         self.assets = assets  # asset chain id → Asset on this chain
         self.interval_secs = min(30.0, max(2.0, seconds_per_block / 2))
-        self.tip: Latest[int] = Latest()
         self._verdicts: Dict[Probe, Verdict] = {}
         self._wanted: 'OrderedDict[Probe, float]' = OrderedDict()  # request → last asked (wall time)
         self._lock = threading.Lock()
@@ -96,18 +94,23 @@ class ChainWatcher(Component):
     # ── the watcher's own thread ────────────────────────────────────────────
 
     def tick(self, now: float) -> None:
+        if not self._open(now):
+            return  # nothing to judge: an idle chain costs no tip read
         self.chain.clear_pass_tip()
         tip = self.chain.cached_block_height()  # the one tip read this tick; every check below shares it
-        if tip is not None:
-            self.tip.set(tip)
         for request in self._due(now, tip):
             self._check(request, tip, now)
 
-    def _due(self, now: float, tip: Optional[int]) -> list:
+    def _open(self, now: float) -> bool:
+        """Forget requests nobody asked about lately; True if any left can still change."""
         with self._lock:
             for request in [r for r, asked in self._wanted.items() if now - asked > REQUEST_IDLE_SECS]:
                 del self._wanted[request]
                 self._verdicts.pop(request, None)
+            return any(not getattr(self._verdicts.get(r), 'settled', False) for r in self._wanted)
+
+    def _due(self, now: float, tip: Optional[int]) -> list:
+        with self._lock:
             due = []
             for request in self._wanted:
                 v = self._verdicts.get(request)
