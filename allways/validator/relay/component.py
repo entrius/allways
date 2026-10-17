@@ -98,15 +98,20 @@ class HubRelay(Component):
             r for r in self.events.drain() if r.name in RELAY_EVENTS and int(r.slot or 0) >= self._acked_slot
         ]
         self._held = []
-        with self.store.tx() as c:
-            for record in records:
-                try:
-                    self.relay.ingest(record)
-                except Exception as e:  # a verdict must never be dropped: hold it and the heartbeat
-                    bt.logging.warning(f'{self.name}: could not ingest {record.name}: {e}')
-                    self._held.append(record)
-            if status is not None and status.cursor is not None:
-                Store.ack(c, self.name, *status.cursor)
+        try:
+            with self.store.tx() as c:
+                for record in records:
+                    try:
+                        self.relay.ingest(record)
+                    except Exception as e:  # a verdict must never be dropped: hold it and the heartbeat
+                        bt.logging.warning(f'{self.name}: could not ingest {record.name}: {e}')
+                        self._held.append(record)
+                # While a verdict is held the ack stays put, so a restart replays it from the feed.
+                if not self._held and status is not None and status.cursor is not None:
+                    Store.ack(c, self.name, *status.cursor)
+        except Exception:
+            self._held = records  # the transaction itself failed: nothing above landed
+            raise
         self.relay._ingest_healthy = not self._held
         self.relay.step(int(now))
         boundary = int(self.ledger.get_relay_meta('fee_cadence_boundary') or 0)
