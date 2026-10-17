@@ -1254,3 +1254,10 @@ def test_confirm_resolves_an_extrinsic_id_through_the_source_chain_and_claims_th
     assert (provider.verified['tx_hash'], provider.verified['block_hint']) == (INNER_HASH, 8083554)
     assert client.claims[0][1] == INNER_HASH and client.claims[0][0] == rc.swap_key_from_tx_hash(INNER_HASH)
     assert not confirm_deposit(validator, HOTKEY, '8083554-6').ok  # names no transfer → not visible, no claim
+
+
+def test_a_halted_program_rejects_a_reservation_before_any_chain_work():
+    client = FakeClient()
+    client.get_config = lambda: SimpleNamespace(halted=True)
+    r, _ = _reserve(client)
+    assert not r.ok and 'halted' in r.reason and client.calls == []
