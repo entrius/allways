@@ -238,3 +238,19 @@ def test_the_heartbeat_executor_skips_a_round_it_already_voted_in():
     voted = _Client(voted=True)
     assert vote_attest_heartbeat(voted, i) is None and voted.calls == []
     assert vote_attest_heartbeat(_Client(), i) == 'sig'
+
+
+def test_a_verdict_the_ledger_refused_holds_the_ack_until_it_lands(tmp_path, monkeypatch):
+    monkeypatch.setattr('allways.validator.relay.engine.RELAY_MINER_READ_INTERVAL_SECS', 0)
+    relay, events, _, store = _relay(tmp_path)
+    relay.tick(NOW)
+    write = relay.ledger.record_relay_slash
+    relay.ledger.record_relay_slash = lambda *a, **k: (_ for _ in ()).throw(RuntimeError('disk'))
+    events.publish(EventRecord('SwapTimedOut', _timed_out().fields, 20, NOW - 5, 'sig20'))
+    relay.feed_status.set(FeedStatus(False, 1, NOW, (20, 'sig20')))
+    relay.tick(NOW)
+    assert relay._held and store.resume_point(['relay-tao']) != 'sig20'  # a restart replays the verdict
+    relay.ledger.record_relay_slash = write
+    relay.tick(NOW)
+    assert not relay._held and store.resume_point(['relay-tao']) == 'sig20'
+    assert relay.has_pending_debit(MINER)
