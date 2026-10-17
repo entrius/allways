@@ -60,7 +60,6 @@ def test_asking_never_blocks_and_the_check_runs_on_the_watcher():
     assert btc.verifies == 0
     w.tick(clock.t)
     assert btc.verifies == 1 and w.verdict(REQ).info.tx_hash == 'aa' * 32
-    assert w.tip.get()[0] == 100
 
 
 def test_a_pending_leg_is_rechecked_when_the_tip_moves_not_every_tick():
@@ -91,6 +90,17 @@ def test_a_settled_leg_is_never_checked_again():
     chain.tip = 150
     w.tick(clock.t + 100)
     assert btc.verifies == 1 and w.verdict(REQ).settled
+
+
+def test_an_idle_chain_and_a_settled_leg_cost_no_tip_read():
+    w, chain, btc, clock = _watcher()
+    w.tick(clock.t)
+    assert chain.tip_reads == 0  # nothing asked
+    btc.confirmed_at_tip = 100
+    w.verdict(REQ)
+    w.tick(clock.t)
+    w.tick(clock.t + 100)
+    assert chain.tip_reads == 1  # the one read that settled it
 
 
 def test_every_check_in_a_tick_shares_one_tip_read():
