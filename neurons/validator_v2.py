@@ -24,6 +24,7 @@ from allways.utils.config import add_args, add_validator_args, check_config, con
 from allways.utils.subtensor import build_subtensor, serialize_subtensor  # noqa: E402
 from allways.validator_v2.app import Config, build  # noqa: E402
 from allways.validator_v2.chain.gateway import parse_endpoints  # noqa: E402
+from allways.validator_v2.export.storage import DatabaseStorage, export_enabled  # noqa: E402
 from allways.validator_v2.relay.component import ink_vault  # noqa: E402
 from allways.vault import VaultConfigError  # noqa: E402
 from neurons.base.neuron import validator_mode  # noqa: E402
@@ -102,6 +103,7 @@ def main() -> None:
         ),
         assets=assets,
         subtensor_factory=lambda: build_subtensor(config=cfg),
+        export_storage=DatabaseStorage() if export_enabled() else None,
     )
     bt.logging.info(f'validator_v2: {len(app.components)} components, state in {state_dir}')
     app.supervisor.run_forever()

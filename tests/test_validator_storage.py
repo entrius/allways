@@ -13,9 +13,9 @@ test-local ``OperationalError``, which ``is_connection_failure`` matches by clas
 
 import contextlib
 
-from allways.validator.storage import storage as storage_mod
-from allways.validator.storage.database import is_connection_failure
-from allways.validator.storage.storage import DatabaseStorage
+from allways.validator_v2.export.storage import storage as storage_mod
+from allways.validator_v2.export.storage.database import is_connection_failure
+from allways.validator_v2.export.storage.storage import DatabaseStorage
 
 
 class OperationalError(Exception):

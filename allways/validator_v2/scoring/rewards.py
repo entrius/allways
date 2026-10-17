@@ -712,8 +712,11 @@ def score_round(
         from_chain, to_chain, backing = lane
         trace = traces[lane] = DirectionTrace(pool=pool)
         qvol, trace.qualified_volume = qualified_volume_shares(lane_volumes.get(lane, {}), from_chain, to_chain)
-        if lane not in quoted or pool <= 0:
-            continue  # never quoted, or a dead pair this window: nothing to pay
+        if lane not in quoted:
+            continue  # never quoted: no crown, no dashboard rows to rewrite
+        lane_intervals = intervals.setdefault(lane, [])  # a quoted dead lane still has its window rewritten
+        if pool <= 0:
+            continue  # a dead pair this window: nothing to pay
         min_swap, max_swap = swap_bounds.get(backing, (0, 0))
         candidates = lane_eligible_hotkeys(states, rewardable, from_chain, to_chain, now, backing, recent_fills)
         crown_time = replay_crown_time_window(
@@ -724,7 +727,7 @@ def score_round(
             window_end,
             candidates,
             trace=trace,
-            intervals_out=intervals.setdefault(lane, []),
+            intervals_out=lane_intervals,
             min_swap_hub=min_swap,
             max_swap_hub=max_swap,
             backing=backing,

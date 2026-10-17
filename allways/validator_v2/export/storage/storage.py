@@ -28,7 +28,7 @@ class StorageResult:
     stored_counts: Dict[str, int] = field(default_factory=dict)
 
 
-def _flag_enabled() -> bool:
+def export_enabled() -> bool:
     return os.getenv('STORE_DB_RESULTS', '').lower() in ('1', 'true', 'yes')
 
 
@@ -36,7 +36,7 @@ class DatabaseStorage:
     """Single connection per validator instance; one transactional flush per
     scoring round. Caller decides what to pass in. A dead connection (aw-db
     restart, boot-order race) is dropped and lazily re-established on a later
-    write — failures are logged, never raised into the forward loop.
+    write — failures are logged, never raised into scoring.
 
     Methods accept already-shaped row tuples — the validator's scoring code
     is responsible for producing them, not this class. That keeps the
@@ -47,7 +47,7 @@ class DatabaseStorage:
         self.logger = bt.logging
         self.db_connection = None
         self.repo = None
-        self._enabled = _flag_enabled()
+        self._enabled = export_enabled()
         self._last_reconnect_attempt = 0.0
 
         if not self._enabled:
@@ -105,7 +105,7 @@ class DatabaseStorage:
 
     def _handle_write_failure(self, ex: Exception, context: str) -> str:
         """Best-effort rollback, then drop the connection on connection-class failures so the
-        next write reconnects. Never raises — dashboard writes must not kill the forward loop."""
+        next write reconnects. Never raises — dashboard writes must not break the export."""
         if self.db_connection is not None:
             try:
                 self.db_connection.rollback()
@@ -235,10 +235,8 @@ class DatabaseStorage:
     ) -> StorageResult:
         """Replace current_crown_holders rows for the given lanes.
 
-        Called per forward step (~12s) — the dashboard's live "who holds
-        the crown right now" surface. Distinct cadence from
-        ``flush_scoring_window``, which writes the historical interval
-        ledger at round end (~1h).
+        The dashboard's "who holds the crown" surface, as of the latest
+        round's end; ``flush_scoring_window`` writes the historical ledger.
 
         Row format per lane: ``(from_chain, to_chain, backing, hotkey,
         credit, rate, ts)``. Empty list for a lane means "no qualifying
@@ -251,8 +249,7 @@ class DatabaseStorage:
         try:
             assert self.db_connection is not None and self.repo is not None
             self.db_connection.autocommit = False
-            # One delete (and maybe an insert) per quoted lane, every forward step: pipelined, they
-            # are one network flight instead of a round trip each.
+            # One delete (and maybe an insert) per quoted lane: pipelined, one network flight.
             with self.db_connection.pipeline():
                 count = self.repo.replace_current_crown(rows_by_direction, commit=False)
             self.db_connection.commit()
@@ -265,11 +262,8 @@ class DatabaseStorage:
         return result
 
     def replace_current_miner_scores(self, rows: List[Tuple]) -> StorageResult:
-        """Wipe + rewrite current_miner_scores — the live mid-round tip of
-        miner_scores. Called per forward step alongside the current-crown
-        snapshot; ``miner_scores`` gets the same factors at round end. Rows
-        are ``miner_score_tuples`` shaped, ts first. An empty list clears
-        the tip (no qualifying holder right now)."""
+        """Wipe + rewrite current_miner_scores, the latest round's rows (ts first).
+        An empty list clears the tip."""
         if not self._ensure_connection():
             return StorageResult(success=False, errors=['Validator DB storage not enabled'])
 

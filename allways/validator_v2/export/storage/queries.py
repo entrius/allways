@@ -46,9 +46,8 @@ VALUES (%s, %s, NOW())
 ON CONFLICT (name) DO UPDATE SET value = EXCLUDED.value, updated_at = NOW()
 """
 
-# current_crown_holders: live "who holds the crown right now" per direction,
-# refreshed per forward step (~12s). Distinct from crown_holders, which is
-# the historical interval ledger flushed at end-of-round (~1h). A direction's
+# current_crown_holders: "who holds the crown" per direction as of the last
+# round's end. Distinct from crown_holders, the historical interval ledger. A direction's
 # rows are deleted before re-insertion so a k-way tied holder set is
 # consistent — readers never see a partial tie.
 DELETE_CURRENT_CROWN_BY_DIRECTION = """
@@ -95,8 +94,8 @@ DO UPDATE SET pool             = EXCLUDED.pool,
               live             = EXCLUDED.live
 """
 
-# current_miner_scores: the live mid-round tip of miner_scores, wiped and
-# rewritten every forward step. The table only ever holds the in-progress round,
+# current_miner_scores: the tip of miner_scores, wiped and rewritten each round.
+# The table only ever holds the latest round,
 # so the wipe is unconditional (no per-direction bookkeeping needed).
 DELETE_CURRENT_MINER_SCORES = """
 DELETE FROM current_miner_scores
