@@ -12,6 +12,7 @@ from __future__ import annotations
 
 import base64
 import re
+import threading
 import time
 from dataclasses import dataclass, field
 from typing import Any, Callable, Dict, Iterable, List, Mapping, Optional, Set, Tuple
@@ -41,6 +42,9 @@ ACCOUNT_TYPES = ('Swap', 'Reservation', 'Pool', 'MinerState', 'MinerQuote', 'Bon
 MULTIPLE_ACCOUNTS_MAX = 100
 # With nothing changed, the World still saves this often, so its saved-at time stays fresh for a restore.
 SAVE_HEARTBEAT_SECS = 30
+# A full re-read this often, so a lost event (a dropped notification, an empty getTransaction) can't
+# leave an account stale for longer: ~7 getProgramAccounts an hour.
+RESCAN_SECS = 3600.0
 
 
 @dataclass(frozen=True)
@@ -183,24 +187,38 @@ class WorldReader(Component):
         self._scan_slot = 0
         self._slot = 0
         self._need_scan = True
+        self._scanned_at = 0.0
+        self._pending_reads: Set[AccountKey] = set()  # cleared only by a read that landed
+        self._requested: Set[AccountKey] = set()  # from other threads, via request_reads
+        self._request_lock = threading.Lock()
         self._saved_at = 0.0
         self._saved_cursor: Optional[Tuple[int, str]] = None
+        self._dropped = 0
 
     def setup(self) -> None:
         self._client = self._client_factory()
         self._need_scan = not self._restore()
+        self._scanned_at = self.clock()  # a restore is as good as a scan until the next rescan
 
     def tick(self, now: float) -> None:
         status, _ = self.feed_status.get()  # read before draining: everything up to its cursor is drained below
-        if self.gaps.drain():
-            self._need_scan = True
-        if self._need_scan:
+        if self.gaps.drain() or self.events.dropped != self._dropped:
+            self._dropped, self._need_scan = self.events.dropped, True
+        if self._need_scan or now - self._scanned_at >= RESCAN_SECS:
             self._scan()
-        reads: Set[AccountKey] = set()
+            self._scanned_at = now
         for record in self.events.drain():
-            reads |= self._apply(record)
-        if reads:
-            self._read(reads)
+            try:
+                self._pending_reads |= self._apply(record)
+            except Exception as e:  # one bad event must not lose the rest of the drain
+                bt.logging.warning(f'world: {record.name} at {record.signature} not applied: {e}')
+                self._need_scan = True
+        with self._request_lock:
+            self._pending_reads |= self._requested
+            self._requested = set()
+        if self._pending_reads:
+            self._read(set(self._pending_reads))  # raises on a failed read: the set is kept for the next tick
+            self._pending_reads.clear()
         self._prune(now)
         cursor = status.cursor if status is not None else None
         if self._changes or cursor != self._saved_cursor or now - self._saved_at >= SAVE_HEARTBEAT_SECS:
@@ -209,6 +227,11 @@ class WorldReader(Component):
             self._changes, self._saved_at, self._saved_cursor = {}, now, cursor
         # Published every tick: taken_at is how the actuator knows this reader is alive.
         self._publish(now, complete=status is not None and not status.catching_up)
+
+    def request_reads(self, keys: Set[AccountKey]) -> None:
+        """Thread-safe: re-read these accounts on the next tick (the actuator found its copy stale)."""
+        with self._request_lock:
+            self._requested |= set(keys)
 
     # ── restore and scan ────────────────────────────────────────────────────
 
@@ -275,11 +298,25 @@ class WorldReader(Component):
             self._config = decoded
         else:
             self._accounts[name][pda] = decoded
-        if name == 'Swap' and record:
-            self._note_route(decoded)
+        if name == 'Swap':
+            self._note_initiated(decoded, slot)
+            if record:
+                self._note_route(decoded)
         self._slot_of[(name, pda)] = slot
         if record:
             self._changes.setdefault('world_accounts', {})[pda] = (pda, name, slot, raw)
+
+    def _note_initiated(self, swap: Any, slot: int) -> None:
+        """A live Swap spends its deposit, whether or not this reader saw the SwapInitiated event."""
+        status = swap.status if isinstance(swap.status, str) else type(swap.status).__name__
+        if status not in ('Active', 'Fulfilled'):
+            return
+        key, swap_key = tx_key(str(swap.from_tx_hash)), swap_key_from_tx_hash(swap.from_tx_hash).hex()
+        held = self._deposits.get(key)
+        if held is None:
+            self._set_deposit(key, DepositClaim(swap_key, slot, int(self.clock()), True))
+        elif not held.initiated:
+            self._set_deposit(key, DepositClaim(held.swap_key, held.slot, held.seen_at, True))
 
     def _note_route(self, swap: Any) -> None:
         key = swap_key_from_tx_hash(swap.from_tx_hash).hex()
