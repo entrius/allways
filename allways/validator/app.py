@@ -141,6 +141,7 @@ def build(
         dict(EXECUTORS),
         lambda: meter.solana_client(cfg.solana_rpc_url, cfg.program_id, cfg.keypair, cls=SendingClient),
         inbox,
+        refresh=world_reader.request_reads,
     )
     feed = EventFeed(
         lambda: meter.solana_client(cfg.solana_rpc_url, cfg.program_id).rpc,
