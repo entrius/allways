@@ -1,4 +1,5 @@
 from allways.validator.feed.events import (
+    EMPTY_TX_RETRIES,
     HISTORY_HORIZON_SECS,
     Backfill,
     EventFeed,
@@ -52,7 +53,7 @@ def test_backfill_stops_at_the_horizon_and_marks_the_gap():
     bf = Backfill(rpc, 'prog', until_sig=None, now=NOW)
     bf.page(max_pages=10)
     assert bf.paging_done and bf.truncated
-    chunk = bf.next_chunk(limit=100_000)
+    chunk = bf.peek(limit=100_000)
     assert len(chunk) == HISTORY_HORIZON_SECS // 10 + 1
     assert chunk[0]['blockTime'] >= NOW - HISTORY_HORIZON_SECS  # oldest first, inside the horizon
     assert chunk[-1]['blockTime'] == NOW
@@ -63,7 +64,7 @@ def test_backfill_from_a_recent_cursor_is_not_truncated():
     bf = Backfill(_SigRpc(history), 'prog', until_sig=history[100]['signature'], now=NOW)
     bf.page()
     assert bf.paging_done and not bf.truncated
-    assert len(bf.next_chunk(limit=1000)) == 100
+    assert len(bf.peek(limit=1000)) == 100
 
 
 def test_backfill_hands_out_bounded_chunks():
@@ -71,7 +72,10 @@ def test_backfill_hands_out_bounded_chunks():
     bf.page()
     sizes = []
     while not bf.done:
-        sizes.append(len(bf.next_chunk(limit=100)))
+        chunk = bf.peek(limit=100)
+        sizes.append(len(chunk))
+        for _ in chunk:
+            bf.pop()
     assert sizes == [100, 100, 50]
 
 
@@ -146,3 +150,57 @@ def test_live_events_need_no_transaction_read(tmp_path):
     assert (record.name, record.signature, record.block_time) == ('QuoteRemoved', 'live-1', NOW + 7)
     assert rpc.tx_reads == []
     assert feed.status.get()[0].cursor == (7, 'live-1')
+
+
+class _FlakyRpc(_SigRpc):
+    """Fails one signature's read once (an outage), or serves it empty for a while (not indexed yet)."""
+
+    def __init__(self, history, sig, mode, times=1):
+        super().__init__(history)
+        self.sig, self.mode, self.left = sig, mode, times
+
+    def get_transaction(self, sig):
+        if sig == self.sig and self.left > 0:
+            self.left -= 1
+            self.tx_reads.append(sig)
+            if self.mode == 'raise':
+                raise RuntimeError('HTTP 429 after retries')
+            return None
+        return super().get_transaction(sig)
+
+
+def _replay(rpc, ticks):
+    feed, events, gaps = _feed(None, rpc, _FakeLive(), resume='before-history')
+    feed.setup()
+    feed._backfill.until_sig = None
+    for _ in range(ticks):
+        try:
+            feed.tick(NOW)
+        except RuntimeError:
+            pass  # the component backs off and ticks again
+    return feed, gaps
+
+
+def test_a_failed_read_mid_chunk_resumes_at_that_entry():
+    history = _history(10, spacing=10)
+    oldest_first = [e['signature'] for e in reversed(history)]
+    rpc = _FlakyRpc(history, oldest_first[3], 'raise')
+    feed, _ = _replay(rpc, 5)
+    assert [s for s in oldest_first if s not in rpc.tx_reads] == []  # nothing after the failure was skipped
+    assert rpc.tx_reads.count(oldest_first[3]) == 2 and feed._backfill is None
+
+
+def test_an_empty_transaction_holds_the_feed_then_becomes_a_gap():
+    history = _history(10, spacing=10)
+    stuck = [e['signature'] for e in reversed(history)][3]
+    after = [e['signature'] for e in reversed(history)][4]
+
+    feed, gaps = _replay(_FlakyRpc(history, stuck, 'empty', times=1), 3)
+    assert feed._backfill is None and gaps.drain() == []  # served on the retry: no gap
+
+    rpc = _FlakyRpc(history, stuck, 'empty', times=EMPTY_TX_RETRIES)
+    _replay(rpc, 2)
+    assert after not in rpc.tx_reads  # held at the empty entry: nothing after it is published first
+
+    feed, gaps = _replay(_FlakyRpc(history, stuck, 'empty', times=EMPTY_TX_RETRIES), 10)
+    assert feed._backfill is None and len(gaps.drain()) == 1  # given up as a gap, then the rest read

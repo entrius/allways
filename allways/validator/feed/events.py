@@ -36,6 +36,9 @@ SLOT_SECS = 0.4
 # No notification for this long and the socket is presumed dead: resubscribe, and the catch-up that
 # every resubscribe triggers fills whatever was missed. Costs ~one signature listing on a quiet socket.
 SILENT_SOCKET_SECS = 90.0
+# A listed signature whose getTransaction keeps coming back empty is retried this many ticks, then given
+# up as a history gap (consumers rescan) rather than skipped silently.
+EMPTY_TX_RETRIES = 5
 
 
 class SeenSignatures:
@@ -216,9 +219,12 @@ class Backfill:
         self._paged = []
         self.paging_done = True
 
-    def next_chunk(self, limit: int = BACKFILL_DECODES_PER_TICK) -> List[dict]:
-        chunk, self._queue = self._queue[:limit], self._queue[limit:]
-        return chunk
+    def peek(self, limit: int = BACKFILL_DECODES_PER_TICK) -> List[dict]:
+        """The next entries, oldest first. Each stays queued until ``pop``: a failure resumes at it."""
+        return self._queue[:limit]
+
+    def pop(self) -> None:
+        self._queue.pop(0)
 
     @property
     def done(self) -> bool:
@@ -262,6 +268,7 @@ class EventFeed(Component):
         self._newest_live: Optional[Tuple[int, str]] = None
         self._cursor: Optional[Tuple[int, str]] = None
         self._last_event_at = 0.0
+        self._empty_tries: dict = {}
 
     def setup(self) -> None:
         self._rpc = self._rpc_factory()
@@ -307,18 +314,27 @@ class EventFeed(Component):
                 return
             if bf.truncated:
                 self.gaps.publish(HistoryGap(bf.floor))
-        for entry in bf.next_chunk():
-            sig = entry['signature']
-            if entry.get('err') is not None or sig in self.seen:
-                continue
-            tx = self._rpc.get_transaction(sig) or {}
-            block_time = tx.get('blockTime') or entry.get('blockTime')
-            logs = (tx.get('meta') or {}).get('logMessages') or []
-            if self.seen.add(sig):
-                self.out.publish_many(
-                    [EventRecord(n, f, entry.get('slot'), block_time, sig) for n, f in events_from_logs(logs)]
-                )
-            self._cursor = (int(entry.get('slot') or 0), sig)
+        for entry in bf.peek():
+            sig, slot = entry['signature'], int(entry.get('slot') or 0)
+            if entry.get('err') is None and sig not in self.seen:
+                tx = self._rpc.get_transaction(sig)  # raises after its retries: this entry is retried next tick
+                if tx is None:
+                    tries = self._empty_tries[sig] = self._empty_tries.get(sig, 0) + 1
+                    if tries < EMPTY_TX_RETRIES:
+                        return  # not served yet: hold here, so nothing after it is published first
+                    bt.logging.warning(f'feed: {sig} has no transaction after {tries} tries, marking a gap')
+                    self.gaps.publish(HistoryGap(entry.get('blockTime') or now))
+                    tx = {}
+                self._empty_tries.pop(sig, None)
+                self._clock.anchor(slot, now)
+                block_time = tx.get('blockTime') or entry.get('blockTime') or self._clock.time_of(slot)
+                logs = (tx.get('meta') or {}).get('logMessages') or []
+                if self.seen.add(sig):
+                    self.out.publish_many(
+                        [EventRecord(n, f, entry.get('slot'), block_time, sig) for n, f in events_from_logs(logs)]
+                    )
+            self._cursor = (slot, sig)
+            bf.pop()
         if bf.done:
             bt.logging.info('feed: backfill complete')
             self._backfill = None

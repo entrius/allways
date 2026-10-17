@@ -144,6 +144,7 @@ _TRANSIENT_HTTP_STATUS = frozenset({429, 500, 502, 503, 504})
 _RETRYABLE_METHODS = frozenset(
     {
         'getAccountInfo',
+        'getMultipleAccounts',
         'getProgramAccounts',
         'getSlot',
         'getBalance',

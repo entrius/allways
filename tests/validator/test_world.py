@@ -1,4 +1,5 @@
 import base64
+from types import SimpleNamespace
 
 from solders.keypair import Keypair
 
@@ -7,7 +8,7 @@ from allways.solana.events import EventRecord
 from allways.validator.feed.events import FeedStatus, HistoryGap
 from allways.validator.runtime.bus import Latest, Topic
 from allways.validator.store.db import Store
-from allways.validator.world.snapshot import WorldReader
+from allways.validator.world.snapshot import RESCAN_SECS, WorldReader
 from allways.validator.world.touches import touches
 
 MINER = Keypair().pubkey()
@@ -249,3 +250,75 @@ def test_an_idle_world_saves_only_on_its_heartbeat(tmp_path):
     assert commits == []
     reader.tick(NOW + 30)
     assert commits == [1]
+
+
+# ── lost events: the World recovers instead of trusting the stream ──────────
+
+
+def test_a_failed_account_read_is_retried_until_it_lands(tmp_path):
+    client = _Client()
+    reader, events, _, _, out = _reader(client, tmp_path)
+    reader.tick(NOW)
+    swap_pda = str(pdas.swap_pda(bytes(range(32))))
+    reader._accounts['Swap'][swap_pda] = 'stale'
+    real, calls = client.rpc._call, []
+
+    def flaky(method, params):
+        calls.append(method)
+        if len(calls) == 1:
+            raise RuntimeError('HTTP 429')
+        return real(method, params)
+
+    client.rpc._call = flaky
+    events.publish(_ev('SwapCompleted', {'swap_key': bytes(range(32)), 'miner': MINER, 'collateral_chain': 'sol'}, 200))
+    try:
+        reader.tick(NOW)
+    except RuntimeError:
+        pass  # the component backs off and ticks again
+    reader.tick(NOW)
+    assert len(calls) == 2 and out.get()[0].get('Swap', swap_pda) is None  # the retry read it back closed
+
+
+def test_an_account_the_actuator_found_stale_is_read_on_the_next_tick(tmp_path):
+    client = _Client()
+    reader, _, _, _, out = _reader(client, tmp_path)
+    reader.tick(NOW)
+    swap_pda = str(pdas.swap_pda(bytes(range(32))))
+    reader._accounts['Swap'][swap_pda] = 'stale'
+    reader.request_reads({('Swap', swap_pda)})
+    reader.tick(NOW)
+    assert out.get()[0].get('Swap', swap_pda) is None
+
+
+def test_the_world_rescans_every_account_once_an_hour(tmp_path):
+    client = _Client()
+    reader, *_ = _reader(client, tmp_path)
+    reader.tick(NOW)
+    scans = client.scans
+    reader.tick(NOW + RESCAN_SECS - 1)
+    assert client.scans == scans
+    reader.tick(NOW + RESCAN_SECS)
+    assert client.scans > scans
+
+
+def test_a_bad_event_does_not_lose_the_rest_of_the_drain(tmp_path):
+    client = _Client()
+    reader, events, _, _, out = _reader(client, tmp_path)
+    reader.tick(NOW)
+    events.publish(_ev('QuoteSet', {'miner': MINER}, slot=200))  # malformed: no lane
+    events.publish(_ev('QuoteSet', _quote_fields(rate=5), slot=201))
+    reader.tick(NOW)
+    assert out.get()[0].get('MinerQuote', _quote_pda()).rate == 5
+
+
+def test_a_live_swap_spends_its_deposit_even_without_its_events(tmp_path):
+    client = _Client()
+    reader, _, _, _, out = _reader(client, tmp_path)
+    reader.tick(NOW)
+    tx_hash = 'ABCDEF' * 10 + 'ab12'
+    reader._note_initiated(SimpleNamespace(status='Active', from_tx_hash=tx_hash), slot=300)
+    reader.tick(NOW)
+    (held,) = out.get()[0].deposits.values()
+    assert held.initiated
+    reader._note_initiated(SimpleNamespace(status='PendingAttestation', from_tx_hash='ab' * 32), slot=301)
+    assert len(reader._deposits) == 1  # a claim not yet attested spends nothing
