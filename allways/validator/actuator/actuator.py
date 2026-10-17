@@ -11,6 +11,7 @@ from typing import Any, Callable, Dict, Iterable, Optional, Protocol, Set, Tuple
 
 import bittensor as bt
 
+from allways.validator.actuator.executors import StaleWorld
 from allways.validator.actuator.planners import ACTIONS
 from allways.validator.chain.confirm import ConfirmTracker
 from allways.validator.runtime.bus import Latest
@@ -50,10 +51,12 @@ class Actuator(Component):
         executors: Dict[str, Executor],
         client_factory: Callable[[], Any],
         inbox: Optional[DeadlineQueue] = None,
+        refresh: Callable[[Set[Tuple[str, str]]], None] = lambda keys: None,
         clock=time.time,
     ) -> None:
         super().__init__(clock)
         self.world = world
+        self.refresh = refresh  # asks the World to re-read accounts a send found stale
         self.planners = list(planners)
         self.executors = executors
         self._client_factory = client_factory
@@ -91,14 +94,14 @@ class Actuator(Component):
         ]
         for key, held in submitted.items():
             if key in self._resting:
-                self.queue.push(held)  # submitted work exists only in the inbox: never drop it while it rests
+                self.queue.requeue(held)  # submitted work exists only in the inbox: never drop it while it rests
         due.sort(key=lambda i: (int(i.urgency), i.deadline))
         sent = 0
         for intent in due:
             action = ACTIONS.get(intent.key[0])
             if sent >= SENDS_PER_TICK or (action is not None and action.needs_ledgers and not world.complete):
                 if intent.key in submitted:
-                    self.queue.push(intent)
+                    self.queue.requeue(intent)
                 continue
             if intent.deadline < now:
                 bt.logging.warning(f'actuator: {intent.key} past its deadline by {now - intent.deadline:.0f}s')
@@ -111,7 +114,7 @@ class Actuator(Component):
                 # no-op (already voted, lost a race) is done; one that failed goes back in the inbox.
                 self._resting[intent.key] = now + (action.retry_secs if action is not None else 6.0)
                 if intent.key in submitted and outcome == FAILED:
-                    self.queue.push(intent)
+                    self.queue.requeue(intent)
             sent += 1
 
     def _send(self, intent: Intent, now: float) -> str:
@@ -123,6 +126,10 @@ class Actuator(Component):
             return FAILED
         try:
             signature = executor(self._client, intent)
+        except StaleWorld as e:
+            bt.logging.warning(f'actuator: {intent.key} not sent, {e}')
+            self.refresh(e.keys)
+            return NOOP
         except Exception as e:
             bt.logging.warning(f'actuator: {intent.key} send failed: {e}')
             return FAILED  # the planner re-plans it next tick if still due
@@ -144,7 +151,7 @@ class Actuator(Component):
         for sent in resolved.expired:
             # Never landed. A planned intent is re-planned if still due; a submitted one goes back in.
             if sent.intent.key in self._submitted:
-                self.queue.push(sent.intent)
+                self.queue.requeue(sent.intent)
             self._done(sent.intent)
 
     def _done(self, intent: Intent) -> None:

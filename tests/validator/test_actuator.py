@@ -3,6 +3,7 @@ from types import SimpleNamespace
 from allways.solana import pdas
 from allways.validator import hubs
 from allways.validator.actuator.actuator import Actuator
+from allways.validator.actuator.executors import StaleWorld
 from allways.validator.actuator.planners import ACTIONS, intent
 from allways.validator.runtime.bus import Latest
 from allways.validator.runtime.deadline_queue import Urgency
@@ -120,3 +121,25 @@ def test_hub_registry_matches_the_program_backings():
     assert {h.chain for h in hubs.HUBS} == set(pdas.BACKING_BITS)
     assert [h.chain for h in hubs.relayed_hubs()] == ['tao']
     assert hubs.hub('TAO').backing_bit == pdas.BACKING_BIT_TAO
+
+
+def test_a_send_the_chain_contradicts_is_dropped_and_its_accounts_re_read():
+    world, refreshed, sent = Latest(), [], []
+    world.set(_world())
+
+    def stale(client, it):
+        sent.append(it.key)
+        raise StaleWorld({('Swap', 'pda')})
+
+    act = Actuator(
+        world,
+        [_Planner([intent('timeout_swap', 'a', SimpleNamespace(), NOW)])],
+        {k: stale for k in ACTIONS},
+        lambda: SimpleNamespace(rpc=_Rpc()),
+        refresh=refreshed.append,
+    )
+    act.setup()
+    act.tick(NOW)
+    assert sent == [('timeout_swap', 'a')] and refreshed == [{('Swap', 'pda')}]
+    act.tick(NOW + 2)
+    assert len(sent) == 1  # rests like any send that went nowhere, until the World is current again

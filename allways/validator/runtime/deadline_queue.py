@@ -61,6 +61,13 @@ class DeadlineQueue:
             self._by_key[intent.key] = entry
             heapq.heappush(self._heap, entry)
 
+    def requeue(self, intent: Intent) -> None:
+        """Put back an intent that was taken but not sent, unless a newer one with its key arrived meanwhile."""
+        with self._lock:
+            if intent.key in self._by_key:
+                return
+        self.push(intent)
+
     def discard(self, key: Tuple[Any, ...]) -> None:
         with self._lock:
             entry = self._by_key.pop(key, None)

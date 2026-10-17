@@ -16,7 +16,7 @@ from solders.transaction import Transaction
 
 from allways.constants import CANCEL_REASON_OTHER
 from allways.solana import pdas
-from allways.solana.client import AllwaysSolanaClient, benign_marker, swap_key_from_tx_hash
+from allways.solana.client import AllwaysSolanaClient, benign_marker, swap_from_solana, swap_key_from_tx_hash
 from allways.validator.runtime.deadline_queue import Intent
 
 # A peer already slid it, or it is at the ceiling.
@@ -30,6 +30,14 @@ BENIGN_RESOLVE = ('NoRequests', 'PoolNotClosed', 'SeedSlotNotYetProduced')
 BENIGN_WEIGHTS = ('AlreadyVoted', 'WeightsUpdateTooSoon', 'NotValidator')
 
 Executor = Callable[[Any, Intent], Optional[str]]
+
+
+class StaleWorld(Exception):
+    """The chain no longer matches the World the intent was planned on: send nothing, re-read ``keys``."""
+
+    def __init__(self, keys) -> None:
+        super().__init__(f'world stale for {sorted(keys)}')
+        self.keys = set(keys)
 
 
 class SendingClient(AllwaysSolanaClient):
@@ -62,6 +70,14 @@ def _swap_key(swap: Any) -> bytes:
 
 def _voted(client: Any, req: int, swap: Any) -> bool:
     return client.has_voted(req, _swap_key(swap), client.keypair.pubkey())
+
+
+def _as_planned(client: Any, swap: Any) -> None:
+    """A vote that costs someone (a slash, a cancel, a reap) is cast only on the swap as it is on-chain now."""
+    key = _swap_key(swap)
+    raw = client.get_swap(key)
+    if raw is None or swap_from_solana(raw, key) != swap:
+        raise StaleWorld({('Swap', str(pdas.swap_pda(key, client.program_id)))})
 
 
 def _benign(e: Exception, markers) -> bool:
@@ -97,6 +113,7 @@ def timeout_swap(client: Any, intent: Intent) -> Optional[str]:
     swap = intent.payload.swap
     if _voted(client, pdas.REQ_TIMEOUT, swap):
         return None
+    _as_planned(client, swap)
     return client.timeout_swap(_swap_key(swap), swap.miner, swap.user)
 
 
@@ -104,11 +121,16 @@ def cancel_swap(client: Any, intent: Intent) -> Optional[str]:
     swap = intent.payload.swap
     if _voted(client, pdas.REQ_CANCEL, swap):
         return None
+    _as_planned(client, swap)
     return client.cancel_swap(_swap_key(swap), swap.miner, intent.payload.action.reason_code or CANCEL_REASON_OTHER)
 
 
 def close_stale_claim(client: Any, intent: Intent) -> Optional[str]:
     swap = intent.payload.swap
+    reservation_pda = pdas.reservation_pda(swap.miner, str(swap.collateral_chain), client.program_id)
+    resv = client.get_reservation(swap.miner, str(swap.collateral_chain))
+    if resv is not None and int(resv.reserved_until) >= time.time() and bytes(resv.claimed_swap_key) == _swap_key(swap):
+        raise StaleWorld({('Reservation', str(reservation_pda))})  # still live on-chain: the World's copy is old
     try:
         return client.close_stale_claim(swap.miner, _swap_key(swap), str(swap.collateral_chain))
     except Exception as e:

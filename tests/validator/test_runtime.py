@@ -114,3 +114,14 @@ def test_only_a_critical_stall_is_fatal():
     assert len(fatal) == 1 and fatal[0].startswith('actuator stalled')
     hang.set()
     sup.stop.set()
+
+
+def test_a_requeued_intent_never_replaces_a_newer_one_with_its_key():
+    q = DeadlineQueue()
+    q.push(Intent(('k',), Urgency.VOTE, 5.0, payload='old'))
+    (taken,) = q.pop_due(now=0)
+    q.push(Intent(('k',), Urgency.VOTE, 5.0, payload='new'))
+    q.requeue(taken)  # its send failed meanwhile
+    assert [i.payload for i in q.pop_due(now=0)] == ['new']
+    q.requeue(taken)
+    assert [i.payload for i in q.pop_due(now=0)] == ['old']
