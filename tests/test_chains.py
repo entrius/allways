@@ -322,7 +322,7 @@ class TestReplayGrace:
         # stamped inside the grace window is fresh; one predating it is still a replay.
         from types import SimpleNamespace
 
-        from allways.validator_v2.actuator.swaps import is_tx_fresh
+        from allways.validator.actuator.swaps import is_tx_fresh
 
         floor = 1_755_000_000
         grace = CHAIN_ETH.replay_grace_secs
