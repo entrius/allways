@@ -279,14 +279,14 @@ class Bitcoin(Asset, Chain):
     # --- Esplora API methods (blockstream.info + mempool.space fallback) ---
     # The sole data source for tx verification, confirmations, and balances.
 
-    def api_calc_confirmations(self, block_number: int) -> int:
+    def api_calc_confirmations(self, block_number: int, tip: Optional[int] = None) -> int:
         """Confirmations for a mined block from the pass-cached chain tip, so N BTC legs in one
         forward pass share a single ``/blocks/tip/height`` instead of one each (mirrors the shipped
         SOL hoist, #542/#543). The validator clears the tip each pass (one fetch/pass); the base's
         15s TTL caps staleness for callers that never clear (miner fulfillment, axon-reserve), so the
         tip can never freeze. A stale-low tip biases confirmations low — conservative, never a false
         confirm. A failed tip fetch (None) is not cached and yields 0, so it retries next call."""
-        tip_height = self.chain.cached_block_height()
+        tip_height = tip if tip is not None else self.chain.cached_block_height()
         if tip_height is None:
             return 0
         return max(0, tip_height - block_number + 1)
@@ -309,13 +309,15 @@ class Bitcoin(Asset, Chain):
         if cached is not None:
             bt.logging.debug(f'{LOG_ESPLORA} tx {tx_hash[:16]}... pending @tip {tip} (cached, no refetch)')
             return cached
-        info = self._fetch_verify_transaction(tx_hash, expected_recipient, expected_amount)
+        # Confirmations come from the same tip that keys the cache: a second read could land on a lagging
+        # backend and park a short count under the newer tip until the next block.
+        info = self._fetch_verify_transaction(tx_hash, expected_recipient, expected_amount, tip)
         if info is not None and not info.confirmed and tip is not None:
             self._verify_cache[key] = info
         return info
 
     def _fetch_verify_transaction(
-        self, tx_hash: str, expected_recipient: str, expected_amount: int
+        self, tx_hash: str, expected_recipient: str, expected_amount: int, tip: Optional[int] = None
     ) -> Optional[TransactionInfo]:
         try:
             resp = self.btc_api_get(f'/tx/{tx_hash}', timeout=15)
@@ -331,7 +333,7 @@ class Bitcoin(Asset, Chain):
             confirmations = 0
 
             if confirmed and block_number:
-                confirmations = self.api_calc_confirmations(block_number)
+                confirmations = self.api_calc_confirmations(block_number, tip)
 
             min_confs = self.chain_def.min_confirmations
             is_confirmed = confirmations >= min_confs if confirmed else False

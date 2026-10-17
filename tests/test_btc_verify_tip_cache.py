@@ -148,3 +148,26 @@ def test_unreachable_is_not_cached(monkeypatch):
     except ProviderUnreachableError:
         pass
     assert p._verify_cache == {}
+
+
+class _LaggingTip(_Session):
+    """Answers tip reads from a script: the first is the new block, later ones a backend one behind."""
+
+    def __init__(self, tips, **kw):
+        super().__init__(**kw)
+        self.tips = iter(tips)
+
+    def request(self, method, url, **kw):
+        if url.endswith('/blocks/tip/height'):
+            return _Resp(text=str(next(self.tips)))
+        return super().request(method, url, **kw)
+
+
+def test_confirmations_use_the_tip_that_keys_the_cache(monkeypatch):
+    # The tip TTL lapses mid-verify and a lagging backend answers one block behind: counting from that
+    # second read parked "1/2 pending" under the newer tip until the next block (testnet swap a779bbf9).
+    s = _LaggingTip([101, 100, 100], tx=_tx(confirmed=True, height=100))
+    p = _provider(monkeypatch, s)
+    monkeypatch.setattr(type(p.chain), '_TIP_TTL_SECONDS', 0.0)
+    info = _verify(p)
+    assert info.confirmed is True and info.confirmations == 2
