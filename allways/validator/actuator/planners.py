@@ -6,6 +6,7 @@ decision rules (freshness gates, attest/confirm/refuse checks) move here as pure
 
 from __future__ import annotations
 
+import re
 from dataclasses import dataclass
 from typing import Any, Callable, Dict, Iterable, List, Optional, Tuple
 
@@ -154,13 +155,16 @@ class SwapPlanner:
         return out
 
     def _log(self, key: str, swap: Any, action: Any) -> None:
-        said = (action.decision.value, action.reason)
+        said = (action.decision.value, _COUNTDOWN.sub('_in', action.reason or ''))  # a ticking clock isn't news
         if self._said.get(key) != said:
             self._said[key] = said
             reason = f' — {action.reason}' if action.reason else ''
             bt.logging.info(
                 f'swap {key[:16]} [{status_of(swap)} {swap.from_chain}->{swap.to_chain}]: {said[0]}{reason}'
             )
+
+
+_COUNTDOWN = re.compile(r'_in=-?\d+s')
 
 
 def _conf_pair(chain: str, info: Any) -> Tuple[int, int]:
