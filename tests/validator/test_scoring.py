@@ -285,3 +285,28 @@ def test_without_a_wallet_scores_fold_but_no_weights_are_set(tmp_path):
     rounds.set(_round(['a'], [1.0]))
     setter.tick(NOW)
     assert setter.scores.tolist() == [1.0]
+
+
+def test_a_fill_is_judged_only_once_the_feed_has_caught_up(tmp_path):
+    scoring, events, _, store, _, status = _scoring(tmp_path, _world(), catching_up=True)
+    fields = {
+        'miner': 'pk_a',
+        'swap_key': bytes(32),
+        'from_chain': 'btc',
+        'to_chain': 'sol',
+        'collateral_chain': 'sol',
+        'from_amount': 1,
+        'to_amount': 1,
+        'collateral_amount': 1,
+    }
+    events.publish(EventRecord('SwapCompleted', fields, 6, NOW - 5, 'sig6'))
+    scoring.tick(NOW)
+
+    def fills():
+        return store.conn().execute('SELECT COUNT(*) FROM scoring_fills').fetchone()[0]
+
+    assert fills() == 0  # the quotes around its reservation may still be on their way
+    assert store.conn().execute("SELECT 1 FROM acks WHERE consumer = 'scoring'").fetchone() is None
+    status.set(FeedStatus(False, 1, NOW, (6, 'sig6')))
+    scoring.tick(NOW + 5)
+    assert fills() == 1

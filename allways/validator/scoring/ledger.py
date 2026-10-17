@@ -129,8 +129,10 @@ class Ledger:
         busy = list(self.get_activity_state_at(now))
         with self.store.tx() as c:
             c.execute(
-                'DELETE FROM scoring_events WHERE at < ? AND kind != ? AND id NOT IN (SELECT MAX(id) FROM '
-                'scoring_events WHERE kind != ? GROUP BY kind, hotkey, from_chain, to_chain, backing)',
+                # Each key's anchor is its latest row by time: events arrive out of order, so not by insertion.
+                'DELETE FROM scoring_events WHERE at < ? AND kind != ? AND id NOT IN (SELECT id FROM (SELECT id, '
+                'ROW_NUMBER() OVER (PARTITION BY kind, hotkey, from_chain, to_chain, backing ORDER BY at DESC, '
+                'id DESC) AS rn FROM scoring_events WHERE kind != ?) WHERE rn = 1)',
                 (cutoff, ACTIVITY, ACTIVITY),
             )
             marks = ','.join('?' * len(busy))
@@ -235,15 +237,19 @@ class Ledger:
                     bt.logging.warning(f'reconcile {hk[:8]}: {backing} collateral corrected to {amount}')
 
     def reconcile_live_quotes(self, live_quotes: Dict[Tuple[str, str, str, str], float], now: int) -> None:
-        """The quote book's anchor: a lane with no live quote is zeroed, a differing rate corrected, and a
-        live lane the ledger never saw (quoted before its history) added. An empty book reads as a failed
+        """The quote book's anchor: a lane with no live quote is zeroed, a differing live rate corrected, and
+        a live lane the ledger never saw (quoted before its history) added. An empty book reads as a failed
         read and changes nothing."""
         if not live_quotes:
             bt.logging.warning('reconcile: empty quote book, skipping')
             return
         quiet = self._touched(now)
-        held = self._live_rates(now)
-        for lane in set(held) | {k for k, rate in live_quotes.items() if rate > 0}:
+        rows = self._latest(RATE, now, partition='hotkey, from_chain, to_chain, backing')
+        latest = {(r['hotkey'], r['from_chain'], r['to_chain'], r['backing']): r['value'] for r in rows}
+        held = {lane: rate for lane, rate in latest.items() if rate > 0}
+        # A lane the ledger zeroed (a refused address, a dropped purse) is never revived from the book: only a
+        # fresh QuoteSet, judged again, brings it back. A lane it never saw is added.
+        for lane in set(held) | {k for k, rate in live_quotes.items() if rate > 0 and k not in latest}:
             hk, from_chain, to_chain, backing = lane
             live = live_quotes.get(lane, 0.0)
             if (RATE, hk, lane[1:]) not in quiet and held.get(lane, 0.0) != live:

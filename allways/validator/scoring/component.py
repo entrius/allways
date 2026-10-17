@@ -96,10 +96,15 @@ class Scoring(Component):
         ttl = int(getattr(world.config, 'reservation_ttl_secs', 0) or 0)
         fresh = [(r, _hotkey(r, world), now) for r in records if int(r.slot or 0) >= self._acked_slot]
         pending, self._held = self._held + fresh, []
+        catching_up = status is None or status.catching_up
         with self.store.tx() as c:
             for record, hotkey, since in pending:
                 if hotkey is None or record.block_time is None:
                     continue  # unbound: no uid to credit; the round's anchors heal what it changed
+                if record.name == 'SwapCompleted' and catching_up:
+                    # A fill is judged once, against the quotes around its reservation: wait for all of them.
+                    self._held.append((record, hotkey, since))
+                    continue
                 usable = self._quote_usable(record) if record.name == 'QuoteSet' else None
                 if record.name == 'QuoteSet' and usable is None and now - since < JUDGE_WAIT_SECS:
                     self._held.append((record, hotkey, since))
@@ -108,8 +113,8 @@ class Scoring(Component):
                     self.ledger.ingest(record, hotkey, ttl, usable, fill)
                 except Exception as e:  # one malformed event must not hold back the rest
                     bt.logging.warning(f'scoring: {record.name} at {record.signature} not ingested: {e}')
-            if status is not None and status.cursor is not None:
-                Store.ack(c, 'scoring', *status.cursor)
+            if not self._held and status is not None and status.cursor is not None:
+                Store.ack(c, 'scoring', *status.cursor)  # a held event keeps the ack, so a restart replays it
 
     def _quote_usable(self, record: Any) -> Optional[bool]:
         if 'miner_from_addr' not in record.fields:
