@@ -241,7 +241,14 @@ class SubtensorSwap:
             if time.time() - SubtensorSwap._done_at < 60:
                 return
             new = self.fresh()
+            old = {}
             for asset in self.assets.values():
                 if _on_subtensor(asset):
+                    old[id(asset.chain.subtensor)] = asset.chain.subtensor
                     asset.chain.subtensor = new
+            for subtensor in old.values():
+                try:
+                    subtensor.close()  # or each reconnect leaves a socket and its threads behind
+                except Exception:
+                    pass
             SubtensorSwap._done_at = time.time()

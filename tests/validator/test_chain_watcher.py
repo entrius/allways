@@ -169,3 +169,16 @@ def test_every_subnet_alpha_shares_the_tao_watcher():
     watchers = chain_watchers(assets)
     assert watchers['sn3'] is watchers['tao'] and watchers['tao'].name == 'chain-tao'
     assert len({id(w) for w in watchers.values()}) == 2
+
+
+def test_a_reconnect_hands_every_tao_provider_the_new_subtensor_and_closes_the_old(monkeypatch):
+    from allways.assets.tao import Tao
+    from allways.validator.app import SubtensorSwap
+
+    monkeypatch.setattr(SubtensorSwap, '_done_at', 0.0)
+    old, new = SimpleNamespace(closed=0), SimpleNamespace()
+    old.close = lambda: setattr(old, 'closed', old.closed + 1)
+    tao, alpha = Tao.__new__(Tao), Tao.__new__(Tao)
+    tao.subtensor = alpha.subtensor = old
+    SubtensorSwap({'tao': _Asset(tao), 'sn3': _Asset(alpha), 'btc': _Asset(_Chain())}, lambda: new)()
+    assert tao.subtensor is new and alpha.subtensor is new and old.closed == 1
