@@ -51,17 +51,36 @@ class SendingClient(AllwaysSolanaClient):
         retries: int = 8,
     ) -> str:
         signers = signers or [self.keypair]
+        tried: List[str] = []
         for attempt in range(retries):
             blockhash = Hash.from_string(self.rpc.get_latest_blockhash())
             tx = Transaction.new_signed_with_payer(instructions, self.keypair.pubkey(), signers, blockhash)
             try:
                 return self.rpc.send_transaction(base64.b64encode(bytes(tx)).decode(), skip_preflight=skip_preflight)
-            except Exception as e:  # only a stale blockhash is retried: that tx never entered the ledger
+            except Exception as e:
+                # A lagging RPC can answer "blockhash not found" for a tx it still forwarded: before calling a
+                # retry's rejection a failure, see whether an earlier attempt landed.
+                landed = self._landed(tried)
+                if landed is not None:
+                    return landed
                 msg = str(e).lower()
                 if 'blockhash not found' not in msg and 'block height exceeded' not in msg:
                     raise
+                tried.append(str(tx.signatures[0]))
                 time.sleep(min(2.0, 0.25 * 2**attempt))
         raise RuntimeError(f'send failed after {retries} blockhash retries')
+
+    def _landed(self, signatures: List[str]) -> Optional[str]:
+        if not signatures:
+            return None
+        try:
+            statuses = self.rpc.get_signature_statuses(signatures)
+        except Exception:
+            return None
+        for sig, status in zip(signatures, statuses):
+            if status is not None and status.get('err') is None:
+                return sig
+        return None
 
 
 def _swap_key(swap: Any) -> bytes:

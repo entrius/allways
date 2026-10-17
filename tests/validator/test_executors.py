@@ -1,8 +1,12 @@
+import base64
 import time
 from types import SimpleNamespace
 
 import pytest
+from solders.hash import Hash
+from solders.instruction import Instruction
 from solders.keypair import Keypair
+from solders.transaction import Transaction
 
 from allways.solana.client import swap_from_solana, swap_key_from_tx_hash
 from allways.validator.actuator.executors import SWAP_EXECUTORS, SendingClient, StaleWorld
@@ -154,3 +158,32 @@ def test_a_stale_claim_is_reaped_only_if_its_reservation_has_lapsed_on_chain():
         SWAP_EXECUTORS['close_stale_claim'](_Chain(reservation=live), _planned('close_stale_claim'))
     lapsed = SimpleNamespace(reserved_until=time.time() - 1, claimed_swap_key=key)
     assert SWAP_EXECUTORS['close_stale_claim'](_Chain(reservation=lapsed), _planned('close_stale_claim'))
+
+
+class _LaggingRpc:
+    """Answers the first send with "blockhash not found" though that tx landed; the resend then fails
+    preflight against it."""
+
+    def __init__(self):
+        self.sent, self.landed = [], set()
+
+    def get_latest_blockhash(self):
+        return str(Hash.new_unique())
+
+    def send_transaction(self, raw, skip_preflight=False):
+        sig = str(Transaction.from_bytes(base64.b64decode(raw)).signatures[0])
+        self.sent.append(sig)
+        if len(self.sent) == 1:
+            self.landed.add(sig)
+            raise RuntimeError('sendTransaction: Blockhash not found')
+        raise RuntimeError('sendTransaction: simulation failed: custom program error NotPending')
+
+    def get_signature_statuses(self, sigs):
+        return [{'err': None} if s in self.landed else None for s in sigs]
+
+
+def test_a_send_the_rpc_called_stale_but_that_landed_is_reported_as_sent():
+    client = SendingClient.__new__(SendingClient)
+    client.keypair, client.rpc = Keypair(), _LaggingRpc()
+    ix = Instruction(Keypair().pubkey(), b'', [])
+    assert client._send([ix]) == client.rpc.sent[0]
