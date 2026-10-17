@@ -15,12 +15,12 @@ class Episodes:
         """Log ``message`` if ``key`` isn't already open, or if its message changed."""
         if self._open.get(key) != message:
             self._open[key] = message
-            log(message)
+            log(message, stacklevel=2)  # the line is the caller's, not this helper's
 
     def end(self, key: Hashable, message: str = '', log: Callable[[str], None] = bt.logging.info) -> None:
         """Close ``key``; log ``message`` only if it was open."""
         if self._open.pop(key, None) is not None and message:
-            log(message)
+            log(message, stacklevel=2)
 
     def is_open(self, key: Hashable) -> bool:
         return key in self._open
