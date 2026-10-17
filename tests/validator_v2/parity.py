@@ -451,3 +451,68 @@ def under_ledger(test_module: str, skip=()) -> dict:
     mod.ValidatorStateStore = LedgerStore
     mod.SolanaEventIndex = LedgerStore
     return {k: v for k, v in vars(mod).items() if not k.startswith('__') and k not in skip}
+
+
+class RelayLedgerStore:
+    """``ValidatorStateStore(db_path=...)`` for the relay tests: a v2 ``RelayLedger`` for the tao hub. The
+    vault's settled counter and the relay's clock are bound when the relay is built (``LedgerBondRelay``)."""
+
+    LEDGER_SINCE_KEY = 'clearing_ledger_since'
+
+    def __new__(cls, db_path=None, **kwargs: Any):
+        from allways.validator_v2.relay.ledger import RelayLedger
+        from allways.validator_v2.store.db import Store
+
+        class TestLedger(RelayLedger):
+            """Plus the old live-swap snapshot, which several slash tests seed their payee through. v2
+            keeps none (the verdict carries the payee and the pinned hotkey)."""
+
+            def record_relay_swap(self, swap_key, miner, backing, user_addr, seen_at, hotkey=None):
+                self.__dict__.setdefault('_swaps', {}).setdefault(
+                    swap_key,
+                    dict(
+                        swap_key=swap_key,
+                        miner=miner,
+                        backing=backing,
+                        user_addr=user_addr,
+                        seen_at=seen_at,
+                        hotkey=hotkey,
+                    ),
+                )
+
+            def get_relay_swap(self, swap_key):
+                return self.__dict__.get('_swaps', {}).get(swap_key)
+
+            def close(self):
+                self.store.conn().close()  # later reads raise, as on the old store
+
+        Path(db_path).parent.mkdir(parents=True, exist_ok=True)
+        return TestLedger(Store(str(db_path)), 'tao', settled=lambda miner: 0, boundary=lambda t: 0)
+
+
+def ledger_bond_relay():
+    """``BondRelay`` over the v2 relay ledger."""
+    from allways.validator.relay.engine import BondRelay
+
+    class LedgerBondRelay(BondRelay):
+        """The old tests' ledger holds every fee since the vault generation began, so this one is seeded
+        at zero from the start: base 0, every row counted. Seeding from the vault and healing a short
+        count are v2's own, covered in test_relay.py."""
+
+        def __init__(self, solana_client, vault, state_store, *args: Any, **kwargs: Any) -> None:
+            super().__init__(solana_client, vault, state_store, *args, **kwargs)
+            state_store.clock = self.clock
+
+    return LedgerBondRelay
+
+
+def under_relay_ledger(test_module: str, skip=()) -> dict:
+    import importlib.util
+
+    path = Path(__file__).parent.parent / f'{test_module}.py'
+    spec = importlib.util.spec_from_file_location(f'tests.validator_v2._{test_module}_under_relay', path)
+    mod = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(mod)
+    mod.ValidatorStateStore = RelayLedgerStore
+    mod.BondRelay = ledger_bond_relay()
+    return {k: v for k, v in vars(mod).items() if not k.startswith('__') and k not in skip}
