@@ -105,6 +105,7 @@ def main() -> None:
         ),
         assets=assets,
         subtensor_factory=lambda: build_subtensor(config=cfg),
+        spoke_subtensor_factory=lambda: serialize_subtensor(build_subtensor(config=cfg)),
         export_storage=DatabaseStorage() if export_enabled() else None,
     )
     bt.logging.info(f'validator: {len(app.components)} components, state in {state_dir}')

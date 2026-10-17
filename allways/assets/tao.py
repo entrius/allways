@@ -569,10 +569,9 @@ class Tao(Asset, Chain):
                     f'{LOG_SUB} scan: tx {tx_hash[:16]}... NOT FOUND — hint={block_hint} head={current_block} '
                     f'retrieved={retrieved}/{len(blocks_to_check)} unretrievable={unretrievable[:8]}'
                 )
-                if block_hint > 0 and retrieved == 0:
-                    bt.logging.warning(
-                        summary + ' — ALL hinted blocks unretrievable (stale node view, not an absent tx)'
-                    )
+                if block_hint > 0 and (retrieved == 0 or current_block < block_hint):
+                    # Our node can't see the hinted blocks: unknown, never "absent" (an absent leg can slash).
+                    raise ProviderUnreachableError(summary + ' — stale node view, not an absent tx')
                 elif block_hint > 0 and not tx_hash_seen and retrieved > 0:
                     bt.logging.warning(
                         summary + ' — hinted blocks retrieved but tx absent from them (hint points at wrong blocks?)'
