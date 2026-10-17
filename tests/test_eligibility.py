@@ -1,10 +1,5 @@
-"""B3.3 — flat eligibility gate, end-to-end pubkey→hotkey→UID attribution.
-
-Unlike ``tests/test_scoring_v1.py`` (which patches attribution to identity for
-the crown tests), this exercises ``build_eligibility`` through the *real*
-sr25519 ``build_attribution`` path, so the on-chain pubkey-keyed ``MinerState``
-counters are attributed to actual hotkey ss58 addresses before the gate runs.
-"""
+"""The flat eligibility gate, end to end: pubkey-keyed ``MinerState`` counters attributed to hotkeys through
+the real sr25519 binding check, then gated."""
 
 from types import SimpleNamespace
 
@@ -12,7 +7,10 @@ import bittensor as bt
 from solders.keypair import Keypair as SolKeypair
 
 from allways.constants import MAX_FAILED_SWAPS
-from allways.validator.scoring import build_eligibility, direction_eligible, is_eligible
+from allways.eligibility import direction_eligible, is_eligible
+from allways.validator.binding import build_attribution
+from allways.validator_v2.scoring.rewards import miner_states
+from allways.validator_v2.world.snapshot import World
 
 
 def _hotkey():
@@ -45,6 +43,12 @@ class _Client:
         if name == 'MinerState':
             return [(f'mpda{i}', s) for i, s in enumerate(self._states)]
         return []
+
+
+def build_eligibility(client, metagraph, now=None, recent_fills=None):
+    world = World(0, 0, True, None, {'MinerState': dict(client.get_all('MinerState'))}, build_attribution(client))
+    states = miner_states(world, set(metagraph.hotkeys))
+    return {hk: is_eligible(ms, now, hotkey=hk, recent_fills=recent_fills) for hk, ms in states.items()}
 
 
 def test_attributes_pubkey_to_hotkey_then_gates():

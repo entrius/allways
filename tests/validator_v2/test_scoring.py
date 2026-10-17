@@ -8,7 +8,6 @@ import pytest
 from allways.constants import RATE_PRECISION, RECYCLE_UID, SCORING_WINDOW_SECS
 from allways.solana import pdas
 from allways.solana.events import EventRecord
-from allways.validator import scoring as scoring_mod
 from allways.validator_v2.chains.subtensor_view import Head
 from allways.validator_v2.chains.watcher import Verdict
 from allways.validator_v2.feed.events import FeedStatus
@@ -21,11 +20,6 @@ from allways.validator_v2.world.snapshot import World
 NOW = 1_000_000
 HOTKEYS = ['hk_a', 'hk_b'] + [f'filler{i}' for i in range(RECYCLE_UID)]
 RATE_FIXED = int(0.0002 * RATE_PRECISION)
-
-
-@pytest.fixture(autouse=True)
-def _attribution(monkeypatch):
-    monkeypatch.setattr(scoring_mod, 'build_attribution', lambda client: {'pk_a': 'hk_a', 'pk_b': 'hk_b'})
 
 
 def _miner(pk):

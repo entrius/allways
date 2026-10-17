@@ -5,7 +5,7 @@ presentation — never mutates state."""
 from __future__ import annotations
 
 from dataclasses import dataclass
-from typing import TYPE_CHECKING, Dict, List, Optional, Set, Tuple
+from typing import TYPE_CHECKING, Any, Dict, List, Optional, Sequence, Set, Tuple
 
 import bittensor as bt
 import numpy as np
@@ -19,8 +19,7 @@ from allways.constants import (
 from allways.utils.rate import min_executable_hub_leg
 
 if TYPE_CHECKING:
-    from allways.validator.scoring import DirectionTrace
-    from neurons.validator import Validator
+    from allways.validator_v2.scoring.rewards import DirectionTrace
 
 
 NON_EARNER_LINE_CAP = 30
@@ -51,7 +50,8 @@ class WeightingTrace:
 
 
 def log_scoring_trace(
-    self: Validator,
+    hotkeys: Sequence[str],
+    ledger: Any,
     *,
     window_start: int,
     window_end: int,
@@ -64,14 +64,11 @@ def log_scoring_trace(
     swap_bounds: Optional[Dict[str, Tuple[int, int]]] = None,
     live_rates: Optional[Dict[Tuple[str, str, str, str], float]] = None,
 ) -> None:
-    hotkeys = self.metagraph.hotkeys
     recycle_uid = RECYCLE_UID if RECYCLE_UID < len(rewards) else 0
     hotkey_to_uid = {hk: uid for uid, hk in enumerate(hotkeys)}
     weighting_traces = weighting_traces or {}
 
-    lines = [
-        f'V1 scoring: window=[{window_start}, {window_end}], distributed={distributed:.6f}, recycled={recycled:.6f}'
-    ]
+    lines = [f'scoring: window=[{window_start}, {window_end}], distributed={distributed:.6f}, recycled={recycled:.6f}']
 
     for (from_c, to_c, backing), trace in direction_traces.items():
         holders = ', '.join(
@@ -109,10 +106,11 @@ def log_scoring_trace(
     # state, so the non-earner diagnosis can tell "excluded by collateral"
     # from "genuinely outbid". Absent hotkey == unknown (fail-open), per the
     # gate in scoring.py.
-    collaterals = dict(self.event_index.get_miner_collaterals_at(window_start))
+    collaterals = dict(ledger.get_miner_collaterals_at(window_start))
     lines.extend(
         non_earner_lines(
-            self,
+            hotkeys,
+            ledger,
             window_start,
             window_end,
             rewards,
@@ -139,7 +137,8 @@ def log_scoring_trace(
 
 
 def non_earner_lines(
-    self: Validator,
+    hotkeys: Sequence[str],
+    ledger: Any,
     window_start: int,
     window_end: int,
     rewards: np.ndarray,
@@ -153,8 +152,8 @@ def non_earner_lines(
 ) -> List[str]:
     collaterals = collaterals or {}
     covered = covered or set()
-    ever_active = set(self.event_index.get_active_miners_at(window_start))
-    for e in self.event_index.get_active_events_in_range(window_start, window_end):
+    ever_active = set(ledger.get_active_miners_at(window_start))
+    for e in ledger.get_active_events_in_range(window_start, window_end):
         if e['active']:
             ever_active.add(e['hotkey'])
 
@@ -166,7 +165,7 @@ def non_earner_lines(
             rates_by_hotkey.setdefault(hk, {})[(from_c, to_c)] = r
 
     out: List[str] = []
-    for uid, hk in enumerate(self.metagraph.hotkeys):
+    for uid, hk in enumerate(hotkeys):
         # crown holders already got a full factor line above
         if uid == recycle_uid or rewards[uid] > 0 or hk in covered:
             continue
