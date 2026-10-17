@@ -4,12 +4,15 @@ exactly when its component is in the list."""
 from __future__ import annotations
 
 import os
+import threading
+import time
 from dataclasses import dataclass, field
 from typing import Any, Callable, Dict, List, Optional, Tuple
 
 import bittensor as bt
 
 from allways import __spec_version__
+from allways.assets.tao import Tao
 from allways.solana.rpc import resolve_ws_url
 from allways.validator.actuator.actuator import Actuator
 from allways.validator.actuator.executors import EXECUTORS, SendingClient
@@ -71,6 +74,7 @@ def build(
     assets: Dict[str, Any],
     subtensor_factory: Callable[[], Any],
     export_storage: Optional[Any] = None,  # the dashboard's Postgres writer: export runs when given
+    spoke_subtensor_factory: Optional[Callable[[], Any]] = None,  # rebuilds the TAO watchers' wedged connection
 ) -> App:
     store = Store(os.path.join(cfg.state_dir, 'validator.db'))
     meter = Meter(list(cfg.endpoints))
@@ -93,7 +97,7 @@ def build(
         world,
         store,
     )
-    watchers = chain_watchers(assets)
+    watchers = chain_watchers(assets, spoke_subtensor_factory)
     inbox = DeadlineQueue()
     relays = {
         h.chain: HubRelay(
@@ -198,7 +202,9 @@ def build(
     return App(components, Supervisor(components, on_fatal), meter)
 
 
-def chain_watchers(assets: Dict[str, Any]) -> Dict[str, ChainWatcher]:
+def chain_watchers(
+    assets: Dict[str, Any], fresh_subtensor: Optional[Callable[[], Any]] = None
+) -> Dict[str, ChainWatcher]:
     """One watcher per chain, shared by every asset on it (EVM tokens share their network's tip)."""
     by_chain: Dict[str, ChainWatcher] = {}
     out: Dict[str, ChainWatcher] = {}
@@ -207,8 +213,34 @@ def chain_watchers(assets: Dict[str, Any]) -> Dict[str, ChainWatcher]:
         network = asset.chain_def.host_chain or asset_id
         watcher = by_chain.get(network)
         if watcher is None:
-            watcher = ChainWatcher(network, asset.chain, {}, asset.chain_def.seconds_per_block)
+            reconnect = SubtensorSwap(assets, fresh_subtensor) if fresh_subtensor and _on_subtensor(asset) else None
+            watcher = ChainWatcher(network, asset.chain, {}, asset.chain_def.seconds_per_block, reconnect)
             by_chain[network] = watcher
         watcher.assets[asset_id] = asset
         out[asset_id] = watcher
     return out
+
+
+def _on_subtensor(asset: Any) -> bool:
+    return isinstance(asset.chain, Tao)
+
+
+class SubtensorSwap:
+    """Gives every TAO and alpha provider one new subtensor in place of the wedged shared one. Each TAO
+    watcher holds one; the first to notice the freeze reconnects, the rest skip for a minute."""
+
+    _lock = threading.Lock()
+    _done_at = 0.0
+
+    def __init__(self, assets: Dict[str, Any], fresh: Callable[[], Any]) -> None:
+        self.assets, self.fresh = assets, fresh
+
+    def __call__(self) -> None:
+        with SubtensorSwap._lock:
+            if time.time() - SubtensorSwap._done_at < 60:
+                return
+            new = self.fresh()
+            for asset in self.assets.values():
+                if _on_subtensor(asset):
+                    asset.chain.subtensor = new
+            SubtensorSwap._done_at = time.time()

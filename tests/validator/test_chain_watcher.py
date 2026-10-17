@@ -1,7 +1,7 @@
 from types import SimpleNamespace
 
 from allways.validator.app import chain_watchers
-from allways.validator.chains.watcher import MEMPOOL_RECHECK_SECS, ChainWatcher, verify_probe
+from allways.validator.chains.watcher import MEMPOOL_RECHECK_SECS, STALE_TIP_BLOCKS, ChainWatcher, verify_probe
 
 
 class _Chain:
@@ -143,3 +143,19 @@ def test_assets_on_one_network_share_a_watcher():
     assert watchers['eth'] is watchers['ethusdc'] and watchers['btc'] is not watchers['eth']
     assert {w.name for w in watchers.values()} == {'chain-ethereum', 'chain-btc'}
     assert watchers['eth'].interval_secs == 6.0 and watchers['btc'].interval_secs == 30.0
+
+
+def test_a_tip_frozen_while_checks_wait_reconnects_the_chain():
+    clock, chain, reconnects = _Clock(), _Chain(), []
+    w = ChainWatcher('tao', chain, {'btc': _Asset(chain)}, 12, reconnect=lambda: reconnects.append(1), clock=clock)
+    w.verdict(REQ)
+    for _ in range(int(STALE_TIP_BLOCKS * 12 / w.interval_secs)):
+        w.tick(clock.t)
+        clock.t += w.interval_secs
+    w.tick(clock.t)
+    assert reconnects == [1]
+    chain.tip += 1  # moving again: no further reconnects
+    for _ in range(10):
+        clock.t += w.interval_secs
+        w.tick(clock.t)
+    assert reconnects == [1]

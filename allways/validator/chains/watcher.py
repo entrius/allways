@@ -65,14 +65,29 @@ class Verdict:
     settled: bool = False  # the answer can never change
 
 
+# A tip frozen for this many block times while checks wait means a wedged connection, not a quiet chain.
+STALE_TIP_BLOCKS = 30
+
+
 class ChainWatcher(Component):
     """Not critical on its own: a dead endpoint means that chain's legs stay unknown, which planners
     treat as "not yet", and the supervisor logs it."""
 
     stall_secs = 300.0
 
-    def __init__(self, chain_id: str, chain: Any, assets: Dict[str, Any], seconds_per_block: float, clock=time.time):
+    def __init__(
+        self,
+        chain_id: str,
+        chain: Any,
+        assets: Dict[str, Any],
+        seconds_per_block: float,
+        reconnect: Optional[Callable[[], None]] = None,
+        clock=time.time,
+    ):
         super().__init__(clock)
+        self.reconnect = reconnect  # rebuilds the chain's connection when its tip freezes
+        self._stale_secs = max(120.0, STALE_TIP_BLOCKS * seconds_per_block)
+        self._tip_since: Tuple[Optional[int], float] = (None, 0.0)
         self.name = f'chain-{chain_id}'
         self.chain = chain  # allways.assets Chain: one tip for every asset on it
         self.assets = assets  # asset chain id → Asset on this chain
@@ -98,8 +113,18 @@ class ChainWatcher(Component):
             return  # nothing to judge: an idle chain costs no tip read
         self.chain.clear_pass_tip()
         tip = self.chain.cached_block_height()  # the one tip read this tick; every check below shares it
+        self._watch_tip(tip, now)
         for request in self._due(now, tip):
             self._check(request, tip, now)
+
+    def _watch_tip(self, tip: Optional[int], now: float) -> None:
+        last, since = self._tip_since
+        if tip is None or tip != last:
+            self._tip_since = (tip, now)
+        elif self.reconnect is not None and now - since >= self._stale_secs:
+            bt.logging.warning(f'{self.name}: tip frozen at {tip} for {now - since:.0f}s, reconnecting')
+            self._tip_since = (None, now)
+            self.reconnect()
 
     def _open(self, now: float) -> bool:
         """Forget requests nobody asked about lately; True if any left can still change."""
