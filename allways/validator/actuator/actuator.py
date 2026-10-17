@@ -177,9 +177,9 @@ class Actuator(Component):
 
 
 def label(intent: Intent) -> str:
-    """``kind subject`` with long keys cut short: ``confirm_swap 9760359fcf51``."""
+    """``kind subject`` with long keys cut to the 16 characters the swap log uses: ``confirm_swap 9760359fcf51f12f``."""
     kind, *rest = intent.key
     subject = rest[0] if rest else ''
     if isinstance(subject, (tuple, list)):
-        subject = '/'.join(str(part)[:12] for part in subject)
-    return f'{kind} {str(subject)[:12]}'.rstrip()
+        subject = '/'.join(str(part)[:16] for part in subject)
+    return f'{kind} {str(subject)[:16]}'.rstrip()

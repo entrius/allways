@@ -164,9 +164,9 @@ class SwapPlanner:
         if self._said.get(key) != said:
             self._said[key] = said
             reason = f' — {action.reason}' if action.reason else ''
-            bt.logging.info(
-                f'swap {key[:16]} [{status_of(swap)} {swap.from_chain}->{swap.to_chain}]: {said[0]}{reason}'
-            )
+            # A skip is a probe still in flight (seconds): detail, not progress.
+            log = bt.logging.debug if action.decision.value == 'skip' else bt.logging.info
+            log(f'swap {key[:16]} [{status_of(swap)} {swap.from_chain}->{swap.to_chain}]: {said[0]}{reason}')
 
 
 _COUNTDOWN = re.compile(r'_in=-?\d+s')
