@@ -134,7 +134,15 @@ def reserve_on_behalf(
     if src_asset is not None:
         user_from_addr = src_asset.chain.normalize_address(user_from_addr)
 
+    try:
+        user_pk = Pubkey.from_string(user_pubkey)
+    except Exception:
+        return ReserveResult(False, 'invalid user Solana pubkey')
+
     client = ctx.accounts()
+    cfg = client.get_config()
+    if getattr(cfg, 'halted', False):
+        return ReserveResult(False, 'the program is halted: no new reservations')  # it would refuse the bid
     miner_pk = resolve_miner_pubkey(ctx, miner_hotkey)
     if miner_pk is None:
         return ReserveResult(False, 'miner hotkey is not bound to a Solana miner')
@@ -144,7 +152,6 @@ def reserve_on_behalf(
         return ReserveResult(False, 'miner is not active')
 
     now = int(time.time())
-    cfg = client.get_config()
     bounds = bounds_from_config(cfg)
     quote = None
     # Contest slots are per (miner, hub) since v3.1 — a joinable pool may exist on any backing.
@@ -236,11 +243,6 @@ def reserve_on_behalf(
         blocker = miner_from_addr and src_provider.send_blocker(user_from_addr, miner_from_addr, from_amount)
         if blocker:
             return ReserveResult(False, blocker)
-
-    try:
-        user_pk = Pubkey.from_string(user_pubkey)
-    except Exception:
-        return ReserveResult(False, 'invalid user Solana pubkey')
 
     # Two-phase: this places a BID only (the pair). The taker + amounts computed above are a
     # pre-flight viability check; naming them on-chain is the winner's `finalize_reservation` step.
