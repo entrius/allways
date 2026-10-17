@@ -41,7 +41,7 @@ async def blacklist_miner_activate(
     if synapse.dendrite is None or synapse.dendrite.hotkey is None:
         return True, 'Missing dendrite or hotkey'
     if synapse.dendrite.hotkey not in ctx.metagraph.hotkeys:
-        bt.logging.info(f'Blacklisted unregistered hotkey: {synapse.dendrite.hotkey}')
+        bt.logging.debug(f'serving: refused an unregistered hotkey {synapse.dendrite.hotkey}')
         return True, 'Unregistered hotkey'
     return False, 'Hotkey recognized'
 
@@ -71,7 +71,7 @@ async def handle_miner_activate(
     backing = (synapse.backing or pdas.BACKING_CHAIN_SOL).lower()
     label = miner_label(ctx, miner_hotkey)
     tag = f'[{label}] MinerActivate {backing.upper()}'
-    bt.logging.info(f'{tag}: REQUEST received (full hotkey={miner_hotkey})')
+    bt.logging.debug(f'{tag}: request from {miner_hotkey}')
 
     try:
         # Fresh registration check (cached metagraph can be stale) — substrate read, hold axon_lock.
@@ -101,7 +101,7 @@ async def handle_miner_activate(
 
         ctx.client.vote_activate(miner_pk, backing=backing)
         synapse.accepted = True
-        bt.logging.info(f'{tag}: ACTIVATED — vote_activate submitted')
+        bt.logging.success(f'{tag}: activated')
 
     except Exception as e:
         bt.logging.error(f'{tag} failed: {e}')
@@ -209,7 +209,7 @@ async def handle_swap_confirm(
     miner_hotkey = synapse.reservation_id
     label = miner_label(ctx, miner_hotkey)
     tag = f'[{label}] SwapConfirm'
-    bt.logging.info(f'{tag}: REQUEST (from_tx={synapse.from_tx_hash} block_hint={synapse.from_tx_block})')
+    bt.logging.debug(f'{tag}: request (from_tx={synapse.from_tx_hash} block_hint={synapse.from_tx_block})')
     try:
         result = confirm_deposit(ctx, miner_hotkey, synapse.from_tx_hash, synapse.from_tx_block)
         if not result.ok:

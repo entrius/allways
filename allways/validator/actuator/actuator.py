@@ -17,6 +17,7 @@ from allways.validator.chain.confirm import ConfirmTracker
 from allways.validator.runtime.bus import Latest
 from allways.validator.runtime.component import Component
 from allways.validator.runtime.deadline_queue import DeadlineQueue, Intent
+from allways.validator.runtime.logs import Episodes
 from allways.validator.world.snapshot import World
 
 # A World older than this is too stale to decide deadline-bound actions on; the actuator waits instead.
@@ -70,6 +71,7 @@ class Actuator(Component):
         self._in_flight: Set[Tuple[Any, ...]] = set()
         self._submitted: Set[Tuple[Any, ...]] = set()  # in-flight keys that came from the inbox
         self._resting: Dict[Tuple[Any, ...], float] = {}  # key → when a send that went nowhere may be retried
+        self._episodes = Episodes()
 
     def setup(self) -> None:
         self._client = self._client_factory()
@@ -77,16 +79,21 @@ class Actuator(Component):
     def tick(self, now: float) -> None:
         self._settle(now)
         world, _ = self.world.get()
-        if world is None or now - world.taken_at > MAX_WORLD_AGE_SECS:
-            bt.logging.warning('actuator: no fresh World, holding sends')
+        if world is None:
+            self._episodes.start('world', 'actuator: waiting for the first World, holding sends', bt.logging.info)
             return
+        if now - world.taken_at > MAX_WORLD_AGE_SECS:
+            self._episodes.start('world', f'actuator: the World is {now - world.taken_at:.0f}s old, holding sends')
+            return
+        self._episodes.end('world', 'actuator: World current, sending')
         planned: Dict[Tuple[Any, ...], Intent] = {}
         for planner in self.planners:
             try:
                 for intent in planner.plan(world, now):
                     planned[intent.key] = intent
+                self._episodes.end(('planner', planner.name), f'actuator: planner {planner.name} recovered')
             except Exception as e:
-                bt.logging.warning(f'actuator: planner {planner.name} failed: {e}')
+                self._episodes.start(('planner', planner.name), f'actuator: planner {planner.name} failed: {e}')
         # Planned intents are rebuilt from the World every tick, so an unsent one is simply re-planned.
         # Submitted ones (serving, relays) exist only in the inbox, so an unsent one goes back in.
         submitted = {i.key: i for i in self.queue.pop_due(now)}
@@ -108,7 +115,9 @@ class Actuator(Component):
                     self.queue.requeue(intent)
                 continue
             if intent.deadline < now:
-                bt.logging.warning(f'actuator: {label(intent)} past its deadline by {now - intent.deadline:.0f}s')
+                self._episodes.start(
+                    ('late', intent.key), f'actuator: {label(intent)} is past its deadline, sending anyway'
+                )
             outcome = self._send(intent, now)
             if outcome == SENT:
                 if intent.key in submitted:
@@ -162,6 +171,7 @@ class Actuator(Component):
             self._done(sent.intent)
 
     def _done(self, intent: Intent) -> None:
+        self._episodes.end(('late', intent.key))
         self._in_flight.discard(intent.key)
         self._submitted.discard(intent.key)
 

@@ -217,9 +217,11 @@ class Ledger:
 
     def reconcile_live_state(
         self, live_states: Dict[str, Any], now: int, live_bonds: Optional[Dict[str, int]] = None
-    ) -> None:
+    ) -> Dict[str, int]:
         """Write the chain's active flag and purses where the ledger disagrees, unless a real event touched
-        that key in the last ``RECONCILE_QUIET_SECS`` (a fresher event wins). Corrections apply from now."""
+        that key in the last ``RECONCILE_QUIET_SECS`` (a fresher event wins). Corrections apply from now;
+        returns how many of each kind were made."""
+        made = {'active': 0, 'collateral': 0}
         quiet = self._touched(now)
         active = self.get_active_miners_at(now)
         purses = [('sol', {hk: int(ms.collateral) for hk, ms in live_states.items()})]
@@ -228,21 +230,25 @@ class Ledger:
         for hk, ms in live_states.items():
             if (ACTIVE, hk, None) not in quiet and bool(ms.active) != (hk in active):
                 self.put(now, hk, ACTIVE, int(bool(ms.active)))
-                bt.logging.warning(f'reconcile {hk[:8]}: active corrected to {bool(ms.active)}')
+                made['active'] += 1
+                bt.logging.debug(f'reconcile {hk[:8]}: active corrected to {bool(ms.active)}')
         for backing, live in purses:
             held = self.get_miner_collaterals_at(now, backing=backing)
             for hk, amount in live.items():
                 if (COLLATERAL, hk, backing) not in quiet and held.get(hk) != amount:
                     self.put(now, hk, COLLATERAL, amount, backing=backing)
-                    bt.logging.warning(f'reconcile {hk[:8]}: {backing} collateral corrected to {amount}')
+                    made['collateral'] += 1
+                    bt.logging.debug(f'reconcile {hk[:8]}: {backing} collateral corrected to {amount}')
+        return made
 
-    def reconcile_live_quotes(self, live_quotes: Dict[Tuple[str, str, str, str], float], now: int) -> None:
+    def reconcile_live_quotes(self, live_quotes: Dict[Tuple[str, str, str, str], float], now: int) -> int:
         """The quote book's anchor: a lane with no live quote is zeroed, a differing live rate corrected, and
         a live lane the ledger never saw (quoted before its history) added. An empty book reads as a failed
         read and changes nothing."""
         if not live_quotes:
             bt.logging.warning('reconcile: empty quote book, skipping')
-            return
+            return 0
+        made = 0
         quiet = self._touched(now)
         rows = self._latest(RATE, now, partition='hotkey, from_chain, to_chain, backing')
         latest = {(r['hotkey'], r['from_chain'], r['to_chain'], r['backing']): r['value'] for r in rows}
@@ -254,7 +260,9 @@ class Ledger:
             live = live_quotes.get(lane, 0.0)
             if (RATE, hk, lane[1:]) not in quiet and held.get(lane, 0.0) != live:
                 self.put(now, hk, RATE, live, from_chain, to_chain, backing)
-                bt.logging.warning(f'reconcile {hk[:8]}: {lane[1:]} rate corrected to {live}')
+                made += 1
+                bt.logging.debug(f'reconcile {hk[:8]}: {lane[1:]} rate corrected to {live}')
+        return made
 
     def _touched(self, now: int) -> Set[Tuple[int, str, Any]]:
         rows = self._rows(

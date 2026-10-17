@@ -54,9 +54,8 @@ class DatabaseStorage:
             bt.logging.info('STORE_DB_RESULTS not set — validator DB storage disabled')
             return
 
-        bt.logging.info('STORE_DB_RESULTS=1 — connecting to Postgres for dashboard writes')
         if self._connect():
-            bt.logging.success('Validator DB storage enabled')
+            bt.logging.success('export: connected to the dashboard database')
         else:
             bt.logging.error(
                 'STORE_DB_RESULTS=1 but Postgres connection failed — dashboard writes paused until reconnect'

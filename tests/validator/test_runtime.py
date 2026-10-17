@@ -2,8 +2,9 @@ import threading
 import time
 
 from allways.validator.runtime.bus import Latest, Topic
-from allways.validator.runtime.component import Component
+from allways.validator.runtime.component import ERROR_AFTER_FAILURES, Component
 from allways.validator.runtime.deadline_queue import DeadlineQueue, Intent, Urgency
+from allways.validator.runtime.logs import Episodes
 from allways.validator.runtime.supervisor import Supervisor
 
 
@@ -125,3 +126,52 @@ def test_a_requeued_intent_never_replaces_a_newer_one_with_its_key():
     assert [i.payload for i in q.pop_due(now=0)] == ['new']
     q.requeue(taken)
     assert [i.payload for i in q.pop_due(now=0)] == ['old']
+
+
+# ── logging: a lasting condition is said when it starts and when it ends ─────
+
+
+def test_an_episode_logs_its_start_once_a_change_again_and_its_end():
+    said = []
+    episodes = Episodes()
+    for _ in range(5):
+        episodes.start('world', 'stale', said.append)
+    episodes.start('world', 'staler', said.append)
+    episodes.end('world', 'fresh', said.append)
+    episodes.end('world', 'fresh again', said.append)  # not open: silent
+    assert said == ['stale', 'staler', 'fresh']
+
+
+def test_a_failing_tick_is_logged_once_escalated_once_and_its_recovery_noted(monkeypatch):
+    warned, errors, info = [], [], []
+    monkeypatch.setattr('bittensor.logging.warning', warned.append)
+    monkeypatch.setattr('bittensor.logging.error', errors.append)
+    monkeypatch.setattr('bittensor.logging.info', info.append)
+    monkeypatch.setattr('bittensor.logging.debug', lambda *_: None)
+
+    class Flaky(Component):
+        name = 'flaky'
+        interval_secs = 0.0
+
+        def __init__(self):
+            super().__init__()
+            self.left = ERROR_AFTER_FAILURES + 2
+
+        def tick(self, now):
+            if self.left:
+                self.left -= 1
+                if not self.left:
+                    stop.set()
+                raise RuntimeError('endpoint down')
+
+    stop = threading.Event()
+    flaky = Flaky()
+    flaky._next_delay = lambda: 0.0
+    flaky.run(stop)
+    stop.clear()
+    flaky.left = 0
+    flaky.tick = lambda now: stop.set()
+    flaky.run(stop)
+    assert warned == ['flaky: tick failed: RuntimeError: endpoint down']
+    assert len(errors) == 1 and f'failing for {ERROR_AFTER_FAILURES} ticks' in errors[0]
+    assert info == [f'flaky: recovered after {ERROR_AFTER_FAILURES + 2} failed tick(s)']

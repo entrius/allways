@@ -4,6 +4,7 @@ replay, a full round and fill qualification over the ledger."""
 from functools import partial
 from types import SimpleNamespace
 
+import numpy as np
 import pytest
 
 from allways.classes import ActivityTransition
@@ -745,3 +746,14 @@ def test_alpha_prices_come_from_the_price_table_first_and_are_kept_for_their_ttl
     assert prices.unit_value('sol', 'sn7', 'tao', NOW + 1) == 0.25  # kept
     assert prices.unit_value('sol', 'sn7', 'tao', NOW + ALPHA_PRICE_TTL_SECS) == 0.5  # read on its own
     assert prices.unit_value('btc', 'sol', 'sol', NOW) == 1.0 and alpha.reads == 1
+
+
+def test_a_round_reads_as_one_line():
+    from allways.validator.scoring.trace import round_summary
+
+    traces = {LANE: DirectionTrace(pool=0.3), ('sol', 'btc', 'sol'): DirectionTrace(pool=0.0)}
+    traces[LANE].crown_time = {'hk_b': 3600.0}
+    rewards = np.zeros(len(HOTKEYS), dtype=np.float32)
+    rewards[1], rewards[RECYCLE_UID] = 0.25, 0.75
+    line = round_summary(3600, 7200, traces, rewards, RECYCLE_UID, distributed=0.25)
+    assert line == 'scoring: round 01:00–02:00 UTC, 25.0% to miners over 1 lane(s), 75.0% recycled; top: uid1 25.0%'

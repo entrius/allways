@@ -118,7 +118,7 @@ def _relay_one(relay, row: Dict[str, Any], now: int) -> bool:
     result = relay.vault.vote_slash(hotkey, swap_key, int(row['penalty']), row['user_addr'], int(row['reimbursement']))
     relay.note_vote(f'slash:{swap_key}', now)
     if result.ok:
-        bt.logging.info(f'relay: vote_slash cast for {hotkey[:8]} swap {swap_key[:16]}')
+        bt.logging.success(f'relay: vote_slash cast for {hotkey[:8]} swap {swap_key[:16]}')
         dev_signal.emit('relay_slash_voted', swap_key=swap_key, miner=miner, hotkey=hotkey)
         # Our vote may have been the one that reached quorum; the marker says which.
         if relay.vault.is_slashed(swap_key):

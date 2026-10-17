@@ -150,6 +150,11 @@ class SwapPlanner:
                 out.append(intent(kind, key, account or swap, now, payload=SwapIntent(swap, action)))
         for gone in set(self._said) - set(report):
             del self._said[gone]
+            delivered = world.fulfillments.get(gone)
+            outcome = (
+                'completed' if delivered is not None and delivered.settled else 'closed without a confirmed delivery'
+            )
+            bt.logging.info(f'swap {gone[:16]}: {outcome}')
         self.memory.prune(int(now))
         self.report.set(report)
         return out
