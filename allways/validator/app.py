@@ -199,14 +199,15 @@ def build(
 
 def chain_watchers(assets: Dict[str, Any]) -> Dict[str, ChainWatcher]:
     """One watcher per chain, shared by every asset on it (EVM tokens share their network's tip)."""
-    by_chain: Dict[int, ChainWatcher] = {}
+    by_chain: Dict[str, ChainWatcher] = {}
     out: Dict[str, ChainWatcher] = {}
     for asset_id, asset in assets.items():
-        chain = asset.chain
-        watcher = by_chain.get(id(chain))
+        # Keyed by network name: each EVM token builds its own chain object for the same network.
+        network = asset.chain_def.host_chain or asset_id
+        watcher = by_chain.get(network)
         if watcher is None:
-            watcher = ChainWatcher(asset.chain_def.host_chain or asset_id, chain, {}, asset.chain_def.seconds_per_block)
-            by_chain[id(chain)] = watcher
+            watcher = ChainWatcher(network, asset.chain, {}, asset.chain_def.seconds_per_block)
+            by_chain[network] = watcher
         watcher.assets[asset_id] = asset
         out[asset_id] = watcher
     return out
