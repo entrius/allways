@@ -11,7 +11,7 @@
 use {
     anchor_lang::{
         prelude::Pubkey, solana_program::clock::Clock, solana_program::instruction::Instruction,
-        AccountDeserialize, InstructionData, ToAccountMetas,
+        AccountDeserialize, AccountSerialize, InstructionData, ToAccountMetas,
     },
     allways_swap_manager::constants::{
         discounted_reservation_fee, FINALIZE_WINDOW_SECS, POOL_WINDOW_SECS,
@@ -1042,6 +1042,27 @@ fn test_open_blocked_during_pending_finalize_window() {
         &vals[1],
     );
     assert!(e.is_err(), "a fresh contest must not evict the pending seat winner");
+}
+
+#[test]
+fn test_open_allowed_once_a_filled_seat_is_consumed() {
+    // Regression: a seat consumed by its swap (reserved_until reset to 0, created_at kept) must not
+    // read as "drawn, awaiting fill" and hold the miner until finalize_by after the swap is over.
+    let (mut svm, _admin, vals, miner) = setup(0, 0);
+    let user = Keypair::new().pubkey();
+    bid_and_draw(&mut svm, &vals, &miner.pubkey());
+    finalize_btc_sol(&mut svm, &vals[0], &miner.pubkey(), &user, "u", "uSOL", 2_000_000_000, 1).expect("fill");
+    let mut acct = svm.get_account(&resv_pda(&miner.pubkey())).unwrap();
+    let mut r = Reservation::try_deserialize(&mut acct.data.as_slice()).unwrap();
+    r.reserved_until = 0; // what vote_initiate does when the swap takes the seat
+    let mut buf = Vec::new();
+    r.try_serialize(&mut buf).unwrap();
+    acct.data[..buf.len()].copy_from_slice(&buf);
+    svm.set_account(resv_pda(&miner.pubkey()), acct).unwrap();
+    let r = reservation(&svm, &miner.pubkey());
+    assert!(r.created_at != 0 && r.finalize_by > BASE_TS + POOL_WINDOW_SECS + 1, "still inside finalize_by");
+    send(&mut svm, open_ix(&vals[1].pubkey(), &miner.pubkey(), "btc", "sol"), &vals[1].pubkey(), &vals[1])
+        .expect("a consumed seat no longer holds the miner");
 }
 
 #[test]
