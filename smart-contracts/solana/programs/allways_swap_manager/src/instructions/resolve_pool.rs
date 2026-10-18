@@ -233,6 +233,7 @@ pub fn handler(ctx: Context<ResolvePool>) -> Result<()> {
     r.to_amount = 0;
     r.created_at = 0;
     r.max_extend_at = 0;
+    let finalize_by = r.finalize_by;
 
     // Do NOT write busy_until here: the bid set it to cover closes_at + finalize_window + ttl. Writing
     // `now + ttl` would SHORTEN it and free the miner during the finalize window (a live-reservation
@@ -250,6 +251,7 @@ pub fn handler(ctx: Context<ResolvePool>) -> Result<()> {
         winner: winner_router,
         requests: req_count,
         collateral_chain,
+        finalize_by,
     });
     Ok(())
 }

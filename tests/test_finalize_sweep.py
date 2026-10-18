@@ -2,7 +2,7 @@
 
 Mocks the solana_client; no chain. The sweep must finalize a won drawn seat for the FIFO
 queued user at the PINNED rate, drop queues on every terminal outcome (lost, filled,
-lapsed, contract-rejected), and retain them across transient faults and read-only mode.
+lapsed), drop only a contract-rejected request, and retain them across transient faults and read-only mode.
 """
 
 from types import SimpleNamespace
@@ -47,6 +47,7 @@ class SweepClient:
         backing='sol',
         *,
         from_chain=None,
+        miner_from_addr=None,
     ):
         self.finalized.append(
             (str(miner), str(user), user_from_addr, user_to_addr, collateral_amount, from_amount, to_amount)
@@ -63,6 +64,7 @@ def _drawn_seat(client, *, router=None, finalize_by=NOW + 100, reserved_until=0,
         reserved_until=reserved_until,
         finalize_by=finalize_by,
         collateral_chain='sol',
+        miner_from_addr='minerDepositAddr',
     )
 
 
@@ -171,7 +173,9 @@ def _declared_seat(client, *, price_at_block):
     seat.rate = RATE_FIXED
     client._reservation = seat
 
-    def finalize(miner, user, src, dst, collateral_amount, from_amount, to_amount, backing='sol', *, from_chain=None):
+    def finalize(
+        miner, user, src, dst, collateral_amount, from_amount, to_amount, backing='sol', *, from_chain=None, **_
+    ):
         client.finalized.append((str(miner), str(user), src, dst, collateral_amount, from_amount, to_amount))
         client._reservation = SimpleNamespace(created_at=NOW, collateral_amount=collateral_amount)
         return 'finalizesig'
@@ -310,24 +314,29 @@ def test_transient_finalize_fault_retains_queue(tmp_path):
     v.state_store.close()
 
 
-def test_contract_rejection_drops_queue(tmp_path):
+def test_contract_rejection_drops_only_that_request(tmp_path):
+    # The pre-check can miss a busy source (another miner's lock, a claimed seat, a case variant); the
+    # program refuses that request alone, and the users behind it keep their place for the same seat.
     client = SweepClient(None)
     client._reservation = _drawn_seat(client)
+    finalize = client.finalize_reservation
 
-    def _raise(*_a, **_k):
-        raise RuntimeError(
-            'AnchorError ... Error Message: Miner already has an active reservation. custom program error'
-        )
+    def refuse_a(miner, user, *args, **kwargs):
+        if str(user) == USER_A:
+            raise RuntimeError(
+                'AnchorError ... Error Message: Miner already has an active reservation. custom program error'
+            )
+        return finalize(miner, user, *args, **kwargs)
 
-    client.finalize_reservation = _raise
+    client.finalize_reservation = refuse_a
     v = _validator(tmp_path, client)
-    _queue(v.state_store, USER_A)
-    _queue(v.state_store, USER_B)
+    _queue(v.state_store, USER_A, created_at=NOW - 50)
+    _queue(v.state_store, USER_B, created_at=NOW - 5)
     assert finalize_won_seats(v, NOW) == []
-    assert v.state_store.distinct_routed_pools() == []
-    # The verdict outlives the queue so /status can fail every queued user at once.
     verdict = reserve_engine._routed_rejections.pop((MINER, 'sol', 'btc'))
-    assert verdict.reason == 'Miner already has an active reservation' and verdict.users == [USER_A, USER_B]
+    assert verdict.reason == 'Miner already has an active reservation' and verdict.users == [USER_A]
+    assert finalize_won_seats(v, NOW) == [MINER]
+    assert [f[1] for f in client.finalized] == [USER_B]
     v.state_store.close()
 
 

@@ -16,6 +16,12 @@ from allways.solana import events
 from allways.solana.events import SolanaEventIngest, decode_event
 
 
+@pytest.fixture(autouse=True)
+def _no_history_horizon(monkeypatch):
+    # These fixtures stamp entries with fixed historic blockTimes; the lookback cut has its own tests.
+    monkeypatch.setattr(events, 'HISTORY_HORIZON_SECS', 10**12)
+
+
 def _event_disc(name: str) -> bytes:
     return hashlib.sha256(f'event:{name}'.encode()).digest()[:8]
 
@@ -45,10 +51,13 @@ def test_decode_quote_set_roundtrip():
             'liquidity': 1_000,
             'updated_at': 1_700_000_000,
             'update_fee': 50_000,
+            'miner_from_addr': 'bc1qsrc',
+            'miner_to_addr': '5Cdst',
         },
     )
     name, f = decode_event(raw)
     assert name == 'QuoteSet'
+    assert (f.miner_from_addr, f.miner_to_addr) == ('bc1qsrc', '5Cdst'), 'judged without reading the account'
     assert f.miner == miner  # converted to Pubkey
     assert f.from_chain == 'btc' and f.to_chain == 'tao'
     assert f.collateral_chain == 'tao', 'the backing tells two quotes on one direction apart'
@@ -78,11 +87,12 @@ def test_decode_pool_entry_events_carry_the_effective_fee():
 
     raw = _encode(
         'ReservationRequested',
-        {'miner': bytes(miner), 'router': bytes(router), 'requests': 2, 'fee_paid': 0},
+        {'miner': bytes(miner), 'router': bytes(router), 'requests': 2, 'fee_paid': 0, 'collateral_chain': 'tao'},
     )
     name, f = decode_event(raw)
     assert name == 'ReservationRequested'
     assert f.requests == 2
+    assert f.collateral_chain == 'tao', "names which of the miner's per-hub pools was bid on"
     assert f.fee_paid == 0, 'a same-router in-window bid update is free'
 
 
@@ -210,6 +220,64 @@ def test_decode_fulfillment_grace_applied_roundtrip():
     assert f.miner == miner
     assert bytes(f.swap_key) == bytes(range(32))  # stays raw bytes
     assert f.timeout_at == 1_700_000_222
+
+
+def test_decode_pool_resolved_carries_the_finalize_deadline():
+    miner, winner = Keypair().pubkey(), Keypair().pubkey()
+    raw = _encode(
+        'PoolResolved',
+        {'miner': bytes(miner), 'winner': bytes(winner), 'requests': 3, 'collateral_chain': 'sol', 'finalize_by': 77},
+    )
+    name, f = decode_event(raw)
+    assert name == 'PoolResolved' and f.winner == winner and f.finalize_by == 77
+
+
+def test_decode_config_changed():
+    name, f = decode_event(_encode('ConfigChanged', {'setting': 'reservation_ttl'}))
+    assert (name, f.setting) == ('ConfigChanged', 'reservation_ttl')
+
+
+PRIOR_VALUES = {
+    'QuoteSet': {
+        'miner': bytes(32),
+        'from_chain': 'btc',
+        'to_chain': 'tao',
+        'collateral_chain': 'tao',
+        'rate': 1,
+        'liquidity': 2,
+        'updated_at': 3,
+        'update_fee': 4,
+    },
+    'ReservationRequested': {'miner': bytes(32), 'router': bytes(32), 'requests': 1, 'fee_paid': 5},
+    'PoolResolved': {'miner': bytes(32), 'winner': bytes(32), 'requests': 1, 'collateral_chain': 'sol'},
+}
+
+
+APPENDED_VALUES = {
+    'QuoteSet': {'miner_from_addr': 'bc1qsrc', 'miner_to_addr': '5Cdst'},
+    'ReservationRequested': {'collateral_chain': 'tao'},
+    'PoolResolved': {'finalize_by': 77},
+}
+
+
+@pytest.mark.parametrize('name', sorted(events.EVENT_PRIOR_LAYOUTS))
+def test_events_emitted_before_the_upgrade_still_decode(name):
+    # History from before an upgrade stays in the logs; a backfill must not drop it.
+    (prior,) = events.EVENT_PRIOR_LAYOUTS[name]
+    decoded = decode_event(events.EVENT_DISCRIMINATORS[name] + prior.build(PRIOR_VALUES[name]))
+    assert decoded is not None and decoded[0] == name
+    assert all(getattr(decoded[1], k) is not None for k in PRIOR_VALUES[name])
+
+
+@pytest.mark.parametrize('name', sorted(events.EVENT_PRIOR_LAYOUTS))
+def test_a_decoder_from_before_the_upgrade_reads_the_new_shape(name):
+    # Validators, miners and the indexer on the previous package see the appended fields as trailing
+    # bytes; the older layout must parse the new body to the same leading values.
+    (prior,) = events.EVENT_PRIOR_LAYOUTS[name]
+    current = events.EVENT_LAYOUTS[name]
+    extra = APPENDED_VALUES[name]
+    parsed = prior.parse(current.build({**PRIOR_VALUES[name], **extra}))
+    assert {k: parsed[k] for k in PRIOR_VALUES[name]} == PRIOR_VALUES[name]
 
 
 def test_decode_unknown_discriminator_returns_none():
@@ -387,6 +455,28 @@ def test_pagination_drains_a_backlog_across_ticks_without_dropping_the_gap():
     records, cursor = ingest.poll(until_sig=None)
     assert [r.signature for r in records] == ['s1', 's2', 's3', 's4', 's5'], 'full window, oldest-first'
     assert cursor == 's5'
+
+
+def test_a_fresh_cursor_reads_back_only_to_the_horizon():
+    # A fresh database (or long outage) must not page back to the program's first tx.
+    ev = _encode('MinerActivated', {'miner': bytes(Keypair().pubkey()), 'at': 1})
+    now = 1_700_010_000
+    sigs = [{'signature': f's{i}', 'slot': i, 'blockTime': now - 1000 * (5 - i), 'err': None} for i in range(5, 0, -1)]
+    ingest = SolanaEventIngest(PagingClient(sigs, ev), page_size=2, horizon_secs=2500, clock=lambda: now)
+    records, cursor = ingest.poll(until_sig=None)
+    assert [r.signature for r in records] == ['s3', 's4', 's5'] and cursor == 's5'
+
+
+def test_a_backlog_is_decoded_a_budget_per_pass_and_resumes_from_the_cursor():
+    # Each pass decodes at most max_decode entries and stops the cursor there; the next pass carries on.
+    ev = _encode('MinerActivated', {'miner': bytes(Keypair().pubkey()), 'at': 1})
+    sigs = [{'signature': f's{i}', 'slot': i, 'blockTime': 1_700_000_000 + i, 'err': None} for i in range(5, 0, -1)]
+    ingest = SolanaEventIngest(PagingClient(sigs, ev), max_decode=2)
+    seen, cursor = [], None
+    for _ in range(3):
+        records, cursor = ingest.poll(until_sig=cursor)
+        seen.append([r.signature for r in records])
+    assert seen == [['s1', 's2'], ['s3', 's4'], ['s5']] and cursor == 's5'
 
 
 class FlakyPagingRpc(PagingRpc):

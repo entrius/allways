@@ -9,6 +9,7 @@ close_legacy_quote.rs, vote_set_attestation.rs, vote_attest_heartbeat.rs, admin.
 """
 
 import hashlib
+from types import SimpleNamespace
 
 import pytest
 from solders.keypair import Keypair
@@ -62,6 +63,7 @@ def _metas(ix):
         'open_or_request',
         'deactivate',
         'close_legacy_quote',
+        'close_unlocked_quote',
         'close_legacy_pool',
         'close_legacy_reservation',
         'vote_set_attestation',
@@ -105,6 +107,8 @@ def test_set_quote_names_the_miner_state_and_the_backed_quote(client):
             'miner_to_addr': '5dst',
             'rate': 10**18,
             'liquidity': 0,
+            'from_addr_lock_key': pdas.addr_lock_key('So1src'),
+            'to_addr_lock_key': pdas.addr_lock_key('5dst'),
         }
     )
     assert _metas(ix) == [
@@ -112,8 +116,42 @@ def test_set_quote_names_the_miner_state_and_the_backed_quote(client):
         # miner_state is read-only: set_quote checks the activation bit, it never writes one.
         (pdas.miner_state_pda(miner, PID), False, False),
         (pdas.quote_pda(miner, 'sol', 'tao', 'tao', PID), False, True),
+        (pdas.addr_lock_pda('So1src', PID), False, True),
+        (pdas.addr_lock_pda('5dst', PID), False, True),
         (pdas.treasury_pda(PID), False, True),
         (SYSTEM_PROGRAM, False, False),
+    ]
+
+
+def test_set_quote_omits_the_payout_lock_when_it_is_the_deposit_wallet(client):
+    client.set_quote('sol', 'solusdc', 'So1wallet', 'SO1WALLET', 10**18, 0)
+    metas = _metas(_ix(client))
+    assert metas[3] == (pdas.addr_lock_pda('So1wallet', PID), False, True)
+    assert metas[4] == (PID, False, False), 'one wallet on both legs is one lock: the optional slot is absent'
+
+
+def test_addr_lock_key_matches_program_vector():
+    # Same vector as test_quote.rs::test_addr_lock_key_matches_client_vector.
+    key = pdas.addr_lock_key('0xAbCdEf0123456789aBcDeF0123456789AbCdEf01')
+    assert key.hex() == '1f887d4531c70c54739bc5682ffc477b35c5582aeea8c577b4e6c5565b4c9137'
+    assert pdas.addr_lock_pda('0xabcdef0123456789abcdef0123456789abcdef01', PID) == pdas.addr_lock_pda(
+        '0xAbCdEf0123456789aBcDeF0123456789AbCdEf01', PID
+    )
+
+
+def test_close_unlocked_quote_names_the_quote_and_both_wallet_locks(client):
+    miner = Keypair().pubkey()
+    quote = SimpleNamespace(miner=miner, miner_from_addr='bc1qwallet', miner_to_addr='So1payout')
+    qpda = pdas.quote_pda(miner, 'btc', 'sol', 'sol', PID)
+    client.close_unlocked_quote(qpda, quote)
+    ix = _ix(client)
+    assert ix.data == layouts.IX_DISCRIMINATORS['close_unlocked_quote']
+    assert _metas(ix) == [
+        (client.keypair.pubkey(), True, False),
+        (miner, False, True),
+        (qpda, False, True),
+        (pdas.addr_lock_pda('bc1qwallet', PID), False, False),
+        (pdas.addr_lock_pda('So1payout', PID), False, False),
     ]
 
 
@@ -322,3 +360,23 @@ def test_split_collateral_setters(client, method, name, arg, layout):
     key = 'amount' if layout == 'IX_AMOUNT_ARGS' else 'value'
     assert _body(ix) == getattr(layouts, layout).build({key: arg})
     assert _metas(ix) == [(admin, True, False), (pdas.config_pda(PID), False, True)]
+
+
+def test_unlocked_quotes_lists_quotes_whose_wallets_are_not_both_their_miners(client, monkeypatch):
+    owner, other = Keypair().pubkey(), Keypair().pubkey()
+
+    def q(miner, mfrom, mto):
+        return SimpleNamespace(miner=miner, miner_from_addr=mfrom, miner_to_addr=mto)
+
+    locks = [
+        (pdas.addr_lock_pda('ownerbtc', PID), SimpleNamespace(owner=owner)),
+        (pdas.addr_lock_pda('ownerSol', PID), SimpleNamespace(owner=owner)),
+    ]
+    quotes = [
+        ('locked', q(owner, 'OWNERBTC', 'ownerSol')),
+        ('no-locks', q(other, 'otherBtc', 'otherSol')),
+        ('copied', q(other, 'ownerBtc', 'otherSol')),
+        ('half', q(owner, 'ownerBtc', 'freshSol')),
+    ]
+    monkeypatch.setattr(client, 'get_all', lambda name: {'AddrLock': locks, 'MinerQuote': quotes}[name])
+    assert [pda for pda, _ in client.unlocked_quotes()] == ['no-locks', 'copied', 'half']

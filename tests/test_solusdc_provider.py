@@ -393,6 +393,19 @@ class TestSendGuards:
         # Recorded for the dedup guard under this obligation.
         assert list(p.chain.broadcasted_txids.values())[0][:3] == (self.TO, AMOUNT, 'swap-1')
 
+    def test_existing_ata_gets_the_transfer_only(self, monkeypatch):
+        # Its owner may have been reassigned, which would fail a CreateIdempotent and the whole send.
+        import base64
+
+        from solders.transaction import Transaction
+
+        rpc = self.rich(dst_ata=True)
+        p = provider_with(rpc, keypair=MINER, monkeypatch=monkeypatch)
+        assert p.send_amount(self.TO, AMOUNT) == ('SIG' * 20, 200)
+        tx = Transaction.from_bytes(base64.b64decode(rpc.sent[0]))
+        ixs = tx.message.instructions
+        assert len(ixs) == 1 and tx.message.account_keys[ixs[0].program_id_index] == TOKEN_PROGRAM_ID
+
     def test_prior_broadcast_is_reused_not_repaid(self, monkeypatch):
         rpc = self.rich()
         rpc.get_signature_statuses = lambda sigs: [{'confirmationStatus': 'finalized', 'err': None, 'slot': 7}]

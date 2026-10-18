@@ -544,8 +544,10 @@ class AllwaysSolanaClient:
     ) -> str:
         """Publish a standing quote for one direction AND one backing. The contract requires `backing`
         to be a hub on one of the legs and to be a purse this miner has already activated, so posting
-        a quote now follows activation instead of preceding it."""
+        a quote now follows activation instead of preceding it. Both wallets are locked to this miner on
+        first post; a wallet another miner already posted is refused (AddressTaken)."""
         miner = self.keypair.pubkey()
+        from_key, to_key = pdas.addr_lock_key(miner_from_addr), pdas.addr_lock_key(miner_to_addr)
         args = layouts.IX_SET_QUOTE_ARGS.build(
             {
                 'from_chain': from_chain,
@@ -555,12 +557,18 @@ class AllwaysSolanaClient:
                 'miner_to_addr': miner_to_addr,
                 'rate': rate,
                 'liquidity': liquidity,
+                'from_addr_lock_key': from_key,
+                'to_addr_lock_key': to_key,
             }
         )
+        # One wallet on both legs is one lock; the payout slot is then omitted (program id).
+        to_lock = self.program_id if to_key == from_key else pdas.addr_lock_pda(miner_to_addr, self.program_id)
         metas = [
             AccountMeta(miner, True, True),
             AccountMeta(pdas.miner_state_pda(miner, self.program_id), False, False),
             AccountMeta(pdas.quote_pda(miner, from_chain, to_chain, backing, self.program_id), False, True),
+            AccountMeta(pdas.addr_lock_pda(miner_from_addr, self.program_id), False, True),
+            AccountMeta(to_lock, False, to_lock != self.program_id),
             AccountMeta(pdas.treasury_pda(self.program_id), False, True),
             AccountMeta(SYSTEM_PROGRAM, False, False),
         ]
@@ -612,6 +620,32 @@ class AllwaysSolanaClient:
             AccountMeta(pdas.legacy_quote_pda(m, from_chain, to_chain, self.program_id), False, True),
         ]
         return self._send([self._ix('close_legacy_quote', b'', metas)])
+
+    def unlocked_quotes(self) -> List[Tuple[str, object]]:
+        """Standing quotes whose two wallets aren't both locked to their miner — what `close_unlocked_quote`
+        reaps. Empty once every quote has been re-posted under wallet locks."""
+        owners = {str(pda): lock.owner for pda, lock in self.get_all('AddrLock')}
+
+        def locked(addr: str, miner) -> bool:
+            return owners.get(str(pdas.addr_lock_pda(addr, self.program_id))) == miner
+
+        return [
+            (pda, q)
+            for pda, q in self.get_all('MinerQuote')
+            if not (locked(q.miner_from_addr, q.miner) and locked(q.miner_to_addr, q.miner))
+        ]
+
+    def close_unlocked_quote(self, quote_pda, quote) -> str:
+        """Permissionless: reap a quote whose wallets aren't both locked to its miner (posted before wallet
+        locks existed). `quote` is the decoded MinerQuote at `quote_pda`. Rent goes to the miner."""
+        metas = [
+            AccountMeta(self.keypair.pubkey(), True, False),
+            AccountMeta(_as_pubkey(quote.miner), False, True),
+            AccountMeta(_as_pubkey(quote_pda), False, True),
+            AccountMeta(pdas.addr_lock_pda(quote.miner_from_addr, self.program_id), False, False),
+            AccountMeta(pdas.addr_lock_pda(quote.miner_to_addr, self.program_id), False, False),
+        ]
+        return self._send([self._ix('close_unlocked_quote', b'', metas)])
 
     def close_legacy_pool(self, miner) -> str:
         """Permissionless: reap a `Pool` stranded at the retired pre-v3.1 [pool, miner] address (live
@@ -678,22 +712,24 @@ class AllwaysSolanaClient:
         ]
         return self._send([self._ix('submit_swap_claim', args, metas)])
 
-    def vote_initiate(self, swap_key: bytes, miner, from_chain: str, from_addr: str, backing: str = 'sol') -> str:
+    def vote_initiate(
+        self, swap_key: bytes, miner, from_chain: str, from_addr: str, backing: str = 'sol', *, miner_from_addr: str
+    ) -> str:
         """Vote to attest a PendingAttestation swap; on quorum it transitions to Active.
         `backing` must be the swap's pinned `collateral_chain` — it selects the purse the obligation
         gate reads (and hence which BondAttestation account travels with the vote). `from_chain` +
-        `from_addr` (the reservation's committed source) target the SourceLock the quorum releases
-        (V-C2); the program verifies the hash against the reservation before touching it."""
+        `from_addr` + `miner_from_addr` (the reservation's committed source and deposit wallet) target the
+        SourceLock the quorum releases; the program verifies the key against the reservation."""
         validator = self.keypair.pubkey()
         m = _as_pubkey(miner)
-        from_addr_hash = keccak.new(data=from_addr.encode(), digest_bits=256).digest()
+        lock_key = pdas.source_lock_key(miner_from_addr, from_addr)
         metas = [
             AccountMeta(validator, True, True),
             AccountMeta(pdas.config_pda(self.program_id), False, False),
             AccountMeta(m, False, False),
             AccountMeta(pdas.miner_state_pda(m, self.program_id), False, True),
             AccountMeta(pdas.reservation_pda(m, backing, self.program_id), False, True),
-            AccountMeta(pdas.source_lock_pda(m, from_chain, from_addr_hash, self.program_id), False, True),
+            AccountMeta(pdas.source_lock_pda(from_chain, lock_key, self.program_id), False, True),
             AccountMeta(pdas.vote_round_pda(pdas.REQ_INITIATE, swap_key, self.program_id), False, True),
             AccountMeta(pdas.swap_pda(swap_key, self.program_id), False, True),
             AccountMeta(self._attestation_meta(m, backing), False, False),
@@ -703,7 +739,7 @@ class AllwaysSolanaClient:
             AccountMeta(pdas.evm_binding_pda(m, self.program_id), False, False),
             AccountMeta(SYSTEM_PROGRAM, False, False),
         ]
-        args = layouts.IX_VOTE_INITIATE_ARGS.build({'swap_key': swap_key, 'from_addr_hash': from_addr_hash})
+        args = layouts.IX_VOTE_INITIATE_ARGS.build({'swap_key': swap_key, 'source_lock_key': lock_key})
         return self._send([self._ix('vote_initiate', args, metas)])
 
     def confirm_swap(self, swap_key: bytes, miner, from_chain: str, to_chain: str) -> str:
@@ -901,22 +937,22 @@ class AllwaysSolanaClient:
         return self._send([self._ix('extend_timeout', args, metas)])
 
     def extend_reservation(
-        self, miner, target_at: int, backing: str = 'sol', *, from_chain: str, from_addr: str
+        self, miner, target_at: int, backing: str = 'sol', *, from_chain: str, from_addr: str, miner_from_addr: str
     ) -> str:
         """Single-validator slide of a reservation's reserved_until forward (no consensus). Slides the
-        V-C2 source_lock in lockstep — `from_chain` + keccak(`from_addr`) seed it (verified on-chain)."""
+        source_lock in lockstep — `from_chain` + the (deposit wallet, source) key seed it (verified on-chain)."""
         validator = self.keypair.pubkey()
         m = _as_pubkey(miner)
-        from_addr_hash = keccak.new(data=from_addr.encode(), digest_bits=256).digest()
+        lock_key = pdas.source_lock_key(miner_from_addr, from_addr)
         metas = [
             AccountMeta(validator, True, False),
             AccountMeta(pdas.config_pda(self.program_id), False, False),
             AccountMeta(m, False, False),
             AccountMeta(pdas.miner_state_pda(m, self.program_id), False, True),
             AccountMeta(pdas.reservation_pda(m, backing, self.program_id), False, True),
-            AccountMeta(pdas.source_lock_pda(m, from_chain, from_addr_hash, self.program_id), False, True),
+            AccountMeta(pdas.source_lock_pda(from_chain, lock_key, self.program_id), False, True),
         ]
-        args = layouts.IX_EXTEND_RESERVATION_ARGS.build({'target_at': target_at, 'from_addr_hash': from_addr_hash})
+        args = layouts.IX_EXTEND_RESERVATION_ARGS.build({'target_at': target_at, 'source_lock_key': lock_key})
         return self._send([self._ix('extend_reservation', args, metas)])
 
     # ---------- swap intake (Phase 9: reservation-lottery pool) ----------
@@ -958,17 +994,16 @@ class AllwaysSolanaClient:
         backing: str = 'sol',
         *,
         from_chain: str,
+        miner_from_addr: str,
     ) -> str:
         """Fill the reservation this client's keypair won at the draw (signer must == reservation.router).
         Names the taker + amounts, running the swap-size bounds + collateral gate + the collateral bind.
         `backing` must be the reservation's pinned `collateral_chain` — it is a PDA seed now (v3.1).
-        `from_chain` + keccak(user_from_addr) seed the V-C2 source_lock, which blocks a duplicate source
-        across hubs sharing that chain — routed or self-represented alike."""
+        `from_chain` + the (pinned deposit wallet `miner_from_addr`, user_from_addr) key seed the source_lock,
+        which blocks a second live reservation one deposit could satisfy — routed or self-represented alike."""
         router = self.keypair.pubkey()
         m = _as_pubkey(miner)
-        # keccak256(user_from_addr) — mirrors the contract's hashv(&[user_from_addr.as_bytes()]) source-lock
-        # seed (same construction as swap_key_from_tx_hash); verified on-chain against user_from_addr.
-        from_addr_hash = keccak.new(data=user_from_addr.encode(), digest_bits=256).digest()
+        lock_key = pdas.source_lock_key(miner_from_addr, user_from_addr)
         args = layouts.IX_FINALIZE_RESERVATION_ARGS.build(
             {
                 'user': bytes(_as_pubkey(user)),
@@ -977,7 +1012,7 @@ class AllwaysSolanaClient:
                 'collateral_amount': collateral_amount,
                 'from_amount': from_amount,
                 'to_amount': to_amount,
-                'from_addr_hash': from_addr_hash,
+                'source_lock_key': lock_key,
             }
         )
         metas = [
@@ -987,7 +1022,7 @@ class AllwaysSolanaClient:
             AccountMeta(pdas.miner_state_pda(m, self.program_id), False, True),  # mut: finalize writes busy_until
             AccountMeta(pdas.reservation_pda(m, backing, self.program_id), False, True),
             AccountMeta(self._attestation_meta(m, backing), False, False),
-            AccountMeta(pdas.source_lock_pda(m, from_chain, from_addr_hash, self.program_id), False, True),
+            AccountMeta(pdas.source_lock_pda(from_chain, lock_key, self.program_id), False, True),
             AccountMeta(SYSTEM_PROGRAM, False, False),
         ]
         return self._send([self._ix('finalize_reservation', args, metas)])

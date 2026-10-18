@@ -212,7 +212,7 @@ pub mod allways_swap_manager {
         collateral_amount: u64,
         from_amount: u128,
         to_amount: u128,
-        from_addr_hash: [u8; 32],
+        source_lock_key: [u8; 32],
     ) -> Result<()> {
         finalize_reservation::handler(
             ctx,
@@ -222,7 +222,7 @@ pub mod allways_swap_manager {
             collateral_amount,
             from_amount,
             to_amount,
-            from_addr_hash,
+            source_lock_key,
         )
     }
     /// Permissionless: reap an unfilled reservation past its finalize deadline, freeing the miner.
@@ -243,8 +243,8 @@ pub mod allways_swap_manager {
     }
     /// Validators attest a pending claim (`PendingAttestation` → `Active` on quorum); the miner's
     /// obligation deadline starts here.
-    pub fn vote_initiate(ctx: Context<VoteInitiate>, swap_key: [u8; 32], from_addr_hash: [u8; 32]) -> Result<()> {
-        vote_initiate::handler(ctx, swap_key, from_addr_hash)
+    pub fn vote_initiate(ctx: Context<VoteInitiate>, swap_key: [u8; 32], source_lock_key: [u8; 32]) -> Result<()> {
+        vote_initiate::handler(ctx, swap_key, source_lock_key)
     }
     /// Permissionless: reap an orphaned `PendingAttestation` claim whose reservation expired (rent →
     /// caller; frees the reservation's claim slot).
@@ -285,9 +285,9 @@ pub mod allways_swap_manager {
     pub fn extend_reservation(
         ctx: Context<ExtendReservation>,
         target_at: i64,
-        from_addr_hash: [u8; 32],
+        source_lock_key: [u8; 32],
     ) -> Result<()> {
-        extend_reservation::handler(ctx, target_at, from_addr_hash)
+        extend_reservation::handler(ctx, target_at, source_lock_key)
     }
     /// A validator slides a swap's fulfillment timeout forward while it waits on slow destination-chain
     /// confirmation. Bounded by the per-swap ceiling frozen at creation.
@@ -319,6 +319,8 @@ pub mod allways_swap_manager {
         miner_to_addr: String,
         rate: u128,
         liquidity: u128,
+        from_addr_lock_key: [u8; 32],
+        to_addr_lock_key: [u8; 32],
     ) -> Result<()> {
         set_quote::handler(
             ctx,
@@ -329,6 +331,8 @@ pub mod allways_swap_manager {
             miner_to_addr,
             rate,
             liquidity,
+            from_addr_lock_key,
+            to_addr_lock_key,
         )
     }
     /// Miner removes one of its quotes; the PDA is closed and its rent refunded to the miner.
@@ -344,6 +348,11 @@ pub mod allways_swap_manager {
     /// miner that paid it. Cannot touch a live quote (see the handler's address proof).
     pub fn close_legacy_quote(ctx: Context<CloseLegacyQuote>) -> Result<()> {
         close_legacy_quote::handler(ctx)
+    }
+    /// Permissionless: reap a quote whose wallets aren't both locked to its miner (posted before
+    /// wallet locks existed), refunding its rent to the miner.
+    pub fn close_unlocked_quote(ctx: Context<CloseUnlockedQuote>) -> Result<()> {
+        close_unlocked_quote::handler(ctx)
     }
     /// Permissionless: reap a `Pool` stranded at the retired pre-v3.1 `[pool, miner]` address (the
     /// live seeds carry the backing), refunding rent to the miner. Any historical layout — the

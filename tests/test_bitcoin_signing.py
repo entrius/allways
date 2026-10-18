@@ -408,6 +408,13 @@ class TestCanSendFromCase:
         with patch.dict(os.environ, {'BTC_PRIVATE_KEY': TEST_WIF}, clear=False):
             assert provider.can_send_from(addr.upper())
 
+    def test_uppercase_bech32_dest_is_sent_lowercase(self):
+        btc = Bitcoin()
+        upper = 'BC1QW508D6QEJXTDG4Y5R3ZARVARY0C5XW7KV8F3T4'
+        with patch.object(btc, 'send_amount_lightweight') as send:
+            btc.send_amount(upper, 1000)
+        assert send.call_args.args[0] == upper.lower()
+
 
 class TestSignet:
     """signet was an accepted BTC_NETWORK with no branch here, so it fell through to mainnet

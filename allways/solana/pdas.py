@@ -15,6 +15,7 @@ Seeds mirror smart-contracts/solana/.../constants.rs. Composite seeds:
 
 from typing import Optional
 
+from Crypto.Hash import keccak
 from solders.pubkey import Pubkey
 
 from allways.solana.program import resolve_program_id
@@ -115,11 +116,29 @@ def pool_pda(miner, backing: str = BACKING_CHAIN_SOL, program_id: Optional[Pubke
     return _derive([b'pool', _pk_bytes(miner), backing.encode()], program_id)
 
 
-def source_lock_pda(miner, from_chain: str, from_addr_hash: bytes, program_id: Optional[Pubkey] = None) -> Pubkey:
-    """V-C2 source lock — one live-unclaimed reservation per (miner, from_chain, from_addr). NOT keyed by
-    backing, so a colliding reservation on any other hub sharing that source chain resolves the SAME PDA.
-    `from_addr_hash` is keccak(from_addr), mirroring finalize_reservation's on-chain seeds."""
-    return _derive([b'srclock', _pk_bytes(miner), from_chain.encode(), from_addr_hash], program_id)
+def source_lock_key(miner_from_addr: str, from_addr: str) -> bytes:
+    """keccak(keccak(lower(deposit wallet)) || keccak(lower(source address))) — mirrors the program's
+    `source_lock_key`; case-insensitive so one address can't be spelled into a second lock. ASCII-only
+    folding (bytes.lower), like Rust's to_ascii_lowercase, so both sides derive one key."""
+    lower = lambda s: keccak.new(data=s.encode().lower(), digest_bits=256).digest()  # noqa: E731
+    return keccak.new(data=lower(miner_from_addr) + lower(from_addr), digest_bits=256).digest()
+
+
+def source_lock_pda(from_chain: str, lock_key: bytes, program_id: Optional[Pubkey] = None) -> Pubkey:
+    """Source lock — one live-unclaimed reservation per (from_chain, deposit wallet, source address), shared
+    by every miner and hub paying into that wallet. `lock_key` is `source_lock_key(...)`."""
+    return _derive([b'srclock', from_chain.encode(), lock_key], program_id)
+
+
+def addr_lock_key(addr: str) -> bytes:
+    """keccak(lower(wallet)) — mirrors the program's `addr_lock_key`. No chain in it: one wallet has one
+    owner on every chain. ASCII-only folding, like Rust's to_ascii_lowercase."""
+    return keccak.new(data=addr.encode().lower(), digest_bits=256).digest()
+
+
+def addr_lock_pda(addr: str, program_id: Optional[Pubkey] = None) -> Pubkey:
+    """Wallet lock — the first miner to post `addr` owns it permanently."""
+    return _derive([b'addrlock', addr_lock_key(addr)], program_id)
 
 
 def legacy_reservation_pda(miner, program_id: Optional[Pubkey] = None) -> Pubkey:

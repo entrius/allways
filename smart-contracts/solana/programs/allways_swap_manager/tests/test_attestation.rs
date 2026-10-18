@@ -62,6 +62,16 @@ const MINER_FROM: &str = "minerSrcAddr";
 const MINER_TO: &str = "minerDstAddr";
 const RATE: u128 = 1_500_000_000_000_000_000;
 
+
+fn addr_lock_pda(program_id: &Pubkey, addr: &str) -> Pubkey {
+    Pubkey::find_program_address(&[b"addrlock", &allways_swap_manager::addr_lock_key(addr)], program_id).0
+}
+
+/// The payout wallet's lock, or None when it is the deposit wallet's (same lock).
+fn to_addr_lock_pda(program_id: &Pubkey, from: &str, to: &str) -> Option<Pubkey> {
+    (from.to_ascii_lowercase() != to.to_ascii_lowercase()).then(|| addr_lock_pda(program_id, to))
+}
+
 fn pid() -> Pubkey {
     allways_swap_manager::id()
 }
@@ -208,12 +218,16 @@ fn set_quote_backed_ix(miner: &Pubkey, f: &str, t: &str, b: &str) -> Instruction
             miner_to_addr: MINER_TO.to_string(),
             rate: RATE,
             liquidity: 1_000,
+            from_addr_lock_key: allways_swap_manager::addr_lock_key(MINER_FROM),
+            to_addr_lock_key: allways_swap_manager::addr_lock_key(MINER_TO),
         }
         .data(),
         allways_swap_manager::accounts::SetQuote {
             miner: *miner,
             miner_state: miner_pda(miner),
             quote: quote_pda(miner, f, t, b),
+            from_addr_lock: addr_lock_pda(&pid(), MINER_FROM),
+            to_addr_lock: to_addr_lock_pda(&pid(), MINER_FROM, MINER_TO),
             treasury: treasury_pda(),
             system_program: SYSTEM_PROGRAM,
         }
@@ -380,7 +394,7 @@ fn finalize_ix_b(
             collateral_amount,
             from_amount,
             to_amount,
-            from_addr_hash: hashv(&["userSrcAddr".as_bytes()]).to_bytes(),
+            source_lock_key: allways_swap_manager::source_lock_key(MINER_FROM, "userSrcAddr"),
         }
         .data(),
         allways_swap_manager::accounts::FinalizeReservation {
@@ -393,9 +407,8 @@ fn finalize_ix_b(
             source_lock: Pubkey::find_program_address(
                 &[
                     b"srclock",
-                    miner.as_ref(),
                     (if backing == SOL { SPOKE_FROM } else { HUB_FROM }).as_bytes(),
-                    &hashv(&["userSrcAddr".as_bytes()]).to_bytes(),
+                    &allways_swap_manager::source_lock_key(MINER_FROM, "userSrcAddr"),
                 ],
                 &pid(),
             )
@@ -449,7 +462,7 @@ fn initiate_ix_b(
         pid(),
         &allways_swap_manager::instruction::VoteInitiate {
             swap_key: key,
-            from_addr_hash: hashv(&["userSrcAddr".as_bytes()]).to_bytes(),
+            source_lock_key: allways_swap_manager::source_lock_key(MINER_FROM, "userSrcAddr"),
         }
         .data(),
         allways_swap_manager::accounts::VoteInitiate {
@@ -461,9 +474,8 @@ fn initiate_ix_b(
             source_lock: Pubkey::find_program_address(
                 &[
                     b"srclock",
-                    miner.as_ref(),
                     (if backing == SOL { SPOKE_FROM } else { HUB_FROM }).as_bytes(),
-                    &hashv(&["userSrcAddr".as_bytes()]).to_bytes(),
+                    &allways_swap_manager::source_lock_key(MINER_FROM, "userSrcAddr"),
                 ],
                 &pid(),
             )

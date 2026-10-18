@@ -123,7 +123,8 @@ def test_b4_miner_and_admin_builders_on_localnet(env):
     validators[1].vote_activate(miner.pubkey())  # quorum → active
     # Quoting follows activation (W2b): a quote names the purse that answers for it. btc<->sol is the
     # SOL-backed pair here — btc<->tao would need an activated TAO purse, which is W3's relay.
-    mclient.set_quote('btc', 'sol', 'minerBTC', 'minerSOL', 400 * RATE_PRECISION, 1_000)
+    tag = str(mclient.keypair.pubkey())[:8]  # wallets are per miner: a shared one is refused
+    mclient.set_quote('btc', 'sol', f'minerBTC{tag}', f'minerSOL{tag}', 400 * RATE_PRECISION, 1_000)
 
     ms = mclient.get_miner_state(miner.pubkey())
     assert ms is not None and ms.active is True and ms.collateral == 5_000_000

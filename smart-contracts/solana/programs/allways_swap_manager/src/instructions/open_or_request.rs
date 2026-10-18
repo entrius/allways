@@ -152,7 +152,9 @@ pub fn handler(
     // (the abandoned slot is reapable).
     let resv = &ctx.accounts.reservation;
     let active_reservation = resv.reserved_until != 0 && resv.reserved_until >= now;
-    let pending_finalize = resv.reserved_until == 0 && resv.finalize_by != 0 && now <= resv.finalize_by;
+    // `created_at == 0` = never filled; a seat its swap consumed also reads reserved_until == 0.
+    let pending_finalize =
+        resv.reserved_until == 0 && resv.created_at == 0 && resv.finalize_by != 0 && now <= resv.finalize_by;
     require!(!active_reservation && !pending_finalize, ErrorCode::MinerReserved);
 
     // Non-refundable anti-spam fee: router → treasury (subnet revenue), stake-discounted — the
@@ -279,6 +281,7 @@ pub fn handler(
             router: router_key,
             requests: pool.requests.len() as u8,
             fee_paid,
+            collateral_chain,
         });
     }
     Ok(())

@@ -9,7 +9,6 @@ from allways.assets.arbusdc import ArbUsdc
 from allways.assets.asset import Asset, MissingTestnetDeployment, SendResult, TransactionInfo
 from allways.assets.aster import Aster
 from allways.assets.avax import Avax
-from allways.assets.avaxusdc import AvaxUsdc
 from allways.assets.baseusdc import BaseUsdc
 from allways.assets.bnb import Bnb
 from allways.assets.btc import Bitcoin
@@ -21,7 +20,6 @@ from allways.assets.ethusdc import EthUsdc
 from allways.assets.evm import EvmChain
 from allways.assets.evm_coin import EvmCoin
 from allways.assets.hype import Hype
-from allways.assets.hypeusdc import HypeUsdc
 from allways.assets.paxg import Paxg
 from allways.assets.pol import Pol
 from allways.assets.polusdc import PolUsdc
@@ -57,8 +55,6 @@ __all__ = [
     'Uni',
     'Qnt',
     'PolUsdc',
-    'AvaxUsdc',
-    'HypeUsdc',
     'Paxg',
     'SolanaChain',
     'SplToken',
@@ -100,8 +96,6 @@ ASSET_REGISTRY: Tuple[AssetSpec, ...] = (
     AssetSpec('pol', Pol, ()),
     AssetSpec('polusdc', PolUsdc, ()),
     AssetSpec('paxg', Paxg, ()),
-    AssetSpec('avaxusdc', AvaxUsdc, ()),
-    AssetSpec('hypeusdc', HypeUsdc, ()),
     AssetSpec('solusdc', SolUsdc, ('solana_rpc_url', 'solana_keypair')),
     # One row per subnet alpha, bound to its ChainDefinition. `partial` is the binding a
     # per-netuid subclass used to be: same class, different netuid, no file each.

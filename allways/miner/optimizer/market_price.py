@@ -22,8 +22,6 @@ COINGECKO_IDS = {
     'ethusdc': 'usd-coin',
     'polusdc': 'usd-coin',
     'solusdc': 'usd-coin',
-    'avaxusdc': 'usd-coin',
-    'hypeusdc': 'usd-coin',
     'hype': 'hyperliquid',
     'bnb': 'binancecoin',
     'avax': 'avalanche-2',
