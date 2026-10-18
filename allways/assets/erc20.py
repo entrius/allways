@@ -59,10 +59,6 @@ TESTNET_TOKEN_CONTRACTS = {
     'qnt': {'sepolia': '0x81Dc68CB065ec6D9a4d24f6e2F442dc2A236D853'},
     # Circle-verified native USDC on Polygon Amoy (developers.circle.com, 2026-08-12).
     'polusdc': {'amoy': '0x41E94Eb019C0762f9Bfcf9Fb1E58725BfB0e7582'},
-    # Circle-verified native USDC on Avalanche Fuji (developers.circle.com, 2026-10-14).
-    'avaxusdc': {'fuji': '0x5425890298aed601595a70AB815c96711a31Bc65'},
-    # Circle-verified native USDC on HyperEVM testnet (developers.circle.com, 2026-10-14).
-    'hypeusdc': {'testnet': '0x2B3370eE501B4a559b57D449569354196457D8Ab'},
 }
 
 

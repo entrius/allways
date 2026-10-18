@@ -6,7 +6,9 @@ instruction (vote_activate / submit_swap_claim) — or rejects with a clear reas
 """
 
 import asyncio
+import tempfile
 import threading
+from pathlib import Path
 from types import SimpleNamespace
 
 import bittensor as bt
@@ -17,6 +19,7 @@ from allways.solana import pdas
 from allways.solana.client import swap_key_from_tx_hash
 from allways.synapses import MinerActivateSynapse, SwapConfirmSynapse
 from allways.validator import activation, axon_handlers
+from allways.validator.state_store import ValidatorStateStore
 
 HK = bt.Keypair.create_from_seed('0x' + '11' * 32)
 HOTKEY = HK.ss58_address
@@ -83,6 +86,9 @@ class FakeSolanaClient:
     def vote_activate(self, miner, backing='sol'):
         self.calls.append(('vote_activate', miner, backing))
 
+    def get_swap(self, swap_key):
+        return None
+
     def submit_swap_claim(self, miner, swap_key, from_tx_hash, from_tx_block, backing='sol'):
         self.calls.append(('submit_swap_claim', miner, swap_key, from_tx_hash, from_tx_block, backing))
 
@@ -98,7 +104,7 @@ class FakeProvider:
 
     @property
     def chain(self):
-        return SimpleNamespace(normalize_address=lambda a: a)
+        return SimpleNamespace(normalize_address=lambda a: a, canonical_tx_hash=lambda h: h)
 
     def verify_transaction(self, **kw):
         return self.tx_info
@@ -126,6 +132,7 @@ def make_validator(solana_client, provider=None, vault=None):
         config=SimpleNamespace(netuid=1),
         metagraph=SimpleNamespace(hotkeys=[HOTKEY]),
         axon_assets={'btc': provider} if provider else {},
+        state_store=ValidatorStateStore(db_path=Path(tempfile.mkdtemp()) / 'state.db'),
         bond_relay=SimpleNamespace() if vault is not None else None,
         _vault=vault,
     )

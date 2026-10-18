@@ -405,16 +405,17 @@ class SplToken(Asset):
             if held < int(amount):
                 bt.logging.error(f'{LOG_SOL} {self.chain_def.id} balance {held} < {amount} — not sending')
                 return None
-            lamports_needed = TX_FEE_LAMPORTS + (0 if self._token_account(to_address) else ATA_RENT_LAMPORTS)
+            dst_account = self._token_account(to_address)
+            lamports_needed = TX_FEE_LAMPORTS + (0 if dst_account else ATA_RENT_LAMPORTS)
             sol = int(self.rpc.get_balance(str(me)))
             if sol < lamports_needed:
                 bt.logging.error(
                     f'{LOG_SOL} signer holds {sol} lamports < {lamports_needed} needed for fee+rent — not sending'
                 )
                 return None
-            dst_owner = Pubkey.from_string(to_address)
-            ixs = [
-                create_ata_idempotent_ix(me, dst_owner, mint),
+            # Create only when missing: CreateIdempotent fails on an existing ATA whose owner was reassigned.
+            create = [] if dst_account else [create_ata_idempotent_ix(me, Pubkey.from_string(to_address), mint)]
+            ixs = create + [
                 transfer_checked_ix(
                     self.ata(str(me)), mint, self.ata(to_address), me, int(amount), self.chain_def.decimals
                 ),

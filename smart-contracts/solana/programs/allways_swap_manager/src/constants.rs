@@ -23,11 +23,16 @@ pub const VOTE_SEED: &[u8] = b"vote";
 #[constant]
 pub const RESV_SEED: &[u8] = b"resv";
 
-/// PDA seed prefix for the V-C2 source-address lock
-/// (`seeds = [SRCLOCK_SEED, miner_pubkey, from_chain, keccak(from_addr)]`) — one live-unclaimed
-/// reservation per `(miner, from_chain, from_addr)`, enforced for routed and self-represented alike.
+/// PDA seed prefix for the source-address lock (`seeds = [SRCLOCK_SEED, from_chain, source_lock_key]`) —
+/// one live-unclaimed reservation per `(from_chain, deposit wallet, from_addr)`, case-insensitive,
+/// enforced for routed and self-represented alike.
 #[constant]
 pub const SRCLOCK_SEED: &[u8] = b"srclock";
+
+/// PDA seed prefix for a wallet lock (`seeds = [ADDR_LOCK_SEED, addr_lock_key]`) — the first miner to
+/// post a wallet owns it on every chain, permanently, so no other miner can post it.
+#[constant]
+pub const ADDR_LOCK_SEED: &[u8] = b"addrlock";
 
 /// PDA seed prefix for a swap (`seeds = [SWAP_SEED, swap_key]`, swap_key = keccak(from_tx_hash)).
 #[constant]

@@ -11,7 +11,9 @@ closes), ``collateral_verdicts`` (declared alpha leg checks pinned at fill),
 ``routed_requests`` (queued on-behalf reservation details awaiting
 finalize — the one table NOT rebuildable from chain),
 ``relay_swaps``/``relay_fees``/``relay_slashes``/``relay_meta`` (the W3 bond
-relay's ledger of what the vault still owes), and
+relay's ledger of what the vault still owes),
+``used_deposits`` (which swap claimed each source deposit),
+``used_deliveries`` (which swap each miner's verified delivery tx confirmed), and
 ``solana_event_meta`` (the event-ingest cursor).
 Single connection guarded by one lock; opened with ``check_same_thread=False``.
 ``busy_timeout`` is set before ``journal_mode=WAL`` because the WAL flip takes a
@@ -19,12 +21,20 @@ brief exclusive lock that concurrent openers would otherwise hit as "database is
 locked" — the local dev env runs two validators against the same file.
 """
 
+import re
 import sqlite3
 import threading
 from pathlib import Path
 from typing import Callable, Dict, List, Optional, Sequence, Set, Tuple
 
 from allways.classes import ActivityTransition, MinerActivity, next_activity
+
+_HEX_HASH = re.compile(r'(0x)?[0-9a-f]{64}', re.IGNORECASE)
+
+
+def tx_key(tx_hash: str) -> str:
+    """Ledger key for a tx hash: hex-shaped hashes lowercase (events carry no chain to ask)."""
+    return tx_hash.lower() if _HEX_HASH.fullmatch(tx_hash) else tx_hash
 
 
 class ValidatorStateStore:
@@ -615,6 +625,10 @@ class ValidatorStateStore:
             return
         self._execute('DELETE FROM swap_outcomes WHERE block_time < ?', (cutoff_block,))
         self._execute('DELETE FROM swap_fulfillments WHERE block_time < ?', (cutoff_block,))
+        # A deposit older than this can't pass freshness against any new reservation.
+        self._execute('DELETE FROM used_deposits WHERE seen_at < ?', (cutoff_block,))
+        self._execute('DELETE FROM used_deliveries WHERE seen_at < ?', (cutoff_block,))
+        self._execute('DELETE FROM payout_routes WHERE seen_at < ?', (cutoff_block,))
 
     # ─── collateral_verdicts (declared alpha leg at fill block) ────────
 
@@ -658,6 +672,67 @@ class ValidatorStateStore:
     def get_swap_fulfillment(self, swap_key: str) -> Optional[str]:
         row = self._fetchone('SELECT to_tx_hash FROM swap_fulfillments WHERE swap_key = ?', (swap_key,))
         return row['to_tx_hash'] if row is not None else None
+
+    def is_recorded_payout(self, tx_hash: str) -> bool:
+        """Whether ``tx_hash`` is a delivery some swap reported (``SwapFulfilled``) or this validator
+        verified, in any spelling ``tx_key`` folds together."""
+        key = tx_key(tx_hash)
+        if self._fetchone('SELECT 1 FROM used_deliveries WHERE tx_hash = ?', (key,)) is not None:
+            return True
+        rows = self._fetchall('SELECT to_tx_hash FROM swap_fulfillments WHERE lower(to_tx_hash) = lower(?)', (tx_hash,))
+        return any(tx_key(row['to_tx_hash']) == key for row in rows)
+
+    # ─── payout_routes (live swaps' payout legs) ─────────────────────────
+    # Fed by the swap loop every pass, before it decides anything. Addresses are normalized by the
+    # caller; seen_at is refreshed each pass, so a route outlives its swap by the prune window.
+
+    def record_payout_route(self, chain: str, sender: str, recipient: str, swap_key: str, seen_at: int) -> None:
+        self._execute(
+            'INSERT OR REPLACE INTO payout_routes (chain, sender, recipient, swap_key, seen_at) VALUES (?, ?, ?, ?, ?)',
+            (chain, sender, recipient, swap_key, int(seen_at)),
+        )
+
+    def is_payout_route(self, chain: str, sender: str, recipient: str) -> bool:
+        row = self._fetchone(
+            'SELECT 1 FROM payout_routes WHERE chain = ? AND sender = ? AND recipient = ?', (chain, sender, recipient)
+        )
+        return row is not None
+
+    # ─── used_deposits (one swap per source deposit) ─────────────────────
+    # Fed by SwapClaimed/SwapInitiated events and the swap loop, so a fresh database rebuilds it
+    # from program history. Keys go through ``tx_key``.
+
+    def record_deposit_claim(self, tx_hash: str, swap_key: str, seen_at: int) -> None:
+        """Note the first claim seen on a deposit; later claims leave the row alone."""
+        self._execute(
+            'INSERT OR IGNORE INTO used_deposits (tx_hash, swap_key, seen_at, initiated) VALUES (?, ?, ?, 0)',
+            (tx_key(tx_hash), swap_key, int(seen_at)),
+        )
+
+    def mark_deposit_initiated(self, swap_key: str) -> None:
+        """The claim on this swap key was initiated: its deposit is spent."""
+        self._execute('UPDATE used_deposits SET initiated = 1 WHERE swap_key = ?', (swap_key,))
+
+    def deposit_claim(self, tx_hash: str) -> Optional[Tuple[str, bool]]:
+        """(swap_key of the first claim, initiated?) for a deposit, or None if unseen."""
+        row = self._fetchone('SELECT swap_key, initiated FROM used_deposits WHERE tx_hash = ?', (tx_key(tx_hash),))
+        return (row['swap_key'], bool(row['initiated'])) if row is not None else None
+
+    # ─── used_deliveries (one swap per verified delivery) ───────────────
+    # Written only once a delivery has verified, so a hash a miner merely submits never counts.
+    # Keyed per miner: another miner naming the same tx can't block this one's swap.
+
+    def claim_delivery(self, miner: str, tx_hash: str, swap_key: str, seen_at: int, settled: bool = False) -> bool:
+        """Record a verified delivery for a swap; False if it already confirmed a different swap.
+        ``settled`` (an on-chain completion) replaces whatever this validator recorded locally."""
+        key = tx_key(tx_hash)
+        verb = 'INSERT OR REPLACE' if settled else 'INSERT OR IGNORE'
+        self._execute(
+            f'{verb} INTO used_deliveries (miner, tx_hash, swap_key, seen_at) VALUES (?, ?, ?, ?)',
+            (miner, key, swap_key, int(seen_at)),
+        )
+        row = self._fetchone('SELECT swap_key FROM used_deliveries WHERE miner = ? AND tx_hash = ?', (miner, key))
+        return row is not None and row['swap_key'] == swap_key
 
     # ─── routed_requests (on-behalf reservation queue) ──────────────────
     # The ONLY table not rebuildable from chain events: a routed user's details
@@ -735,6 +810,13 @@ class ValidatorStateStore:
         self._execute(
             'DELETE FROM routed_requests WHERE miner = ? AND from_chain = ? AND to_chain = ? AND backing = ?',
             (miner, from_chain, to_chain, backing),
+        )
+
+    def delete_routed_request(self, miner: str, from_chain: str, to_chain: str, backing: str, user_pubkey: str) -> None:
+        self._execute(
+            'DELETE FROM routed_requests WHERE miner = ? AND from_chain = ? AND to_chain = ? AND backing = ? '
+            'AND user_pubkey = ?',
+            (miner, from_chain, to_chain, backing, user_pubkey),
         )
 
     def prune_routed_requests(self, cutoff_time: int) -> None:
@@ -1238,6 +1320,36 @@ class ValidatorStateStore:
                     swap_key    TEXT PRIMARY KEY,
                     to_tx_hash  TEXT NOT NULL,
                     block_time  INTEGER NOT NULL
+                );
+                CREATE INDEX IF NOT EXISTS idx_swap_fulfillments_tx
+                    ON swap_fulfillments(lower(to_tx_hash));
+
+                -- (chain, payout wallet, payout address) of every live swap the loop has seen.
+                -- A source tx paid along one is that swap's payout, never a taker's deposit.
+                CREATE TABLE IF NOT EXISTS payout_routes (
+                    chain       TEXT NOT NULL,
+                    sender      TEXT NOT NULL,
+                    recipient   TEXT NOT NULL,
+                    swap_key    TEXT NOT NULL,
+                    seen_at     INTEGER NOT NULL,
+                    PRIMARY KEY (chain, sender, recipient, swap_key)
+                );
+
+                -- Source tx hash -> the first swap that claimed it; initiated = spent.
+                CREATE TABLE IF NOT EXISTS used_deposits (
+                    tx_hash     TEXT PRIMARY KEY,
+                    swap_key    TEXT NOT NULL,
+                    seen_at     INTEGER NOT NULL,
+                    initiated   INTEGER NOT NULL DEFAULT 0
+                );
+
+                -- (miner, delivery tx hash) -> the swap that verified delivery confirmed.
+                CREATE TABLE IF NOT EXISTS used_deliveries (
+                    miner       TEXT NOT NULL,
+                    tx_hash     TEXT NOT NULL,
+                    swap_key    TEXT NOT NULL,
+                    seen_at     INTEGER NOT NULL,
+                    PRIMARY KEY (miner, tx_hash)
                 );
 
                 -- One row per hotkey ever banned (latest ban), so it needs no prune.

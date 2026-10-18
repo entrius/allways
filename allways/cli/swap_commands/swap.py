@@ -1042,6 +1042,7 @@ def _reserve_self_represented(
             fill.to_amount,
             backing,
             from_chain=from_chain,
+            miner_from_addr=drawn.miner_from_addr,
         )
     except Exception as e:
         reason = contract_reject_reason(e)

@@ -279,6 +279,7 @@ pub fn handler(
             router: router_key,
             requests: pool.requests.len() as u8,
             fee_paid,
+            collateral_chain,
         });
     }
     Ok(())

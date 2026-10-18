@@ -121,6 +121,7 @@ DISCRIMINATORS = {
     'HotkeyBinding': bytes([225, 14, 96, 246, 60, 210, 97, 210]),
     'MinerDirectionStats': bytes([109, 39, 104, 238, 244, 223, 118, 88]),
     'MinerQuote': bytes([205, 197, 49, 135, 73, 161, 154, 230]),
+    'AddrLock': bytes([234, 127, 191, 228, 66, 104, 58, 71]),
     'MinerState': bytes([171, 93, 72, 78, 139, 153, 97, 8]),
     'Pool': bytes([241, 154, 109, 4, 17, 177, 109, 188]),
     'Reservation': bytes([188, 235, 0, 111, 208, 253, 247, 212]),
@@ -211,6 +212,9 @@ MinerQuote = CStruct(
     'updated_at' / I64,
     'bump' / U8,
 )
+
+# Permanent owner of a posted wallet (`[addrlock, keccak(lower(wallet))]`).
+AddrLock = CStruct('owner' / Pubkey32, 'bump' / U8)
 
 # Two-phase: `router` pinned at draw (unfilled, reserved_until==0); the rest written at finalize.
 Reservation = CStruct(
@@ -337,6 +341,7 @@ ACCOUNT_PUBKEY_FIELDS = {
     'MinerState': ['miner'],
     'MinerDirectionStats': ['miner'],
     'MinerQuote': ['miner'],
+    'AddrLock': ['owner'],
     'Reservation': ['router', 'user'],
     'Swap': ['user', 'miner'],
     'Pool': ['miner'],
@@ -355,6 +360,7 @@ EVENT_DISCRIMINATORS = {
     'CollateralWithdrawn': bytes([51, 224, 133, 106, 74, 173, 72, 82]),
     'EvmAddressBound': bytes([157, 127, 194, 188, 250, 193, 158, 74]),
     'FulfillmentGraceApplied': bytes([201, 98, 85, 62, 191, 162, 4, 22]),
+    'ConfigChanged': bytes([147, 25, 86, 98, 98, 77, 78, 192]),
     'HaltSet': bytes([72, 72, 136, 23, 166, 26, 205, 223]),
     'HotkeyBound': bytes([168, 26, 136, 137, 160, 137, 120, 133]),
     'LegacySwapClosed': bytes([3, 153, 162, 14, 136, 34, 47, 239]),
@@ -396,6 +402,7 @@ EVENT_LAYOUTS = {
     'CollateralWithdrawn': CStruct('miner' / Pubkey32, 'amount' / U64, 'total' / U64),
     'EvmAddressBound': CStruct('miner' / Pubkey32, 'evm_address' / EvmAddr20, 'bound_at' / I64),
     'FulfillmentGraceApplied': CStruct('swap_key' / Hash32, 'miner' / Pubkey32, 'timeout_at' / I64),
+    'ConfigChanged': CStruct('setting' / String),
     'HaltSet': CStruct('halted' / Bool),
     'HotkeyBound': CStruct('miner' / Pubkey32, 'hotkey' / Hash32, 'bound_at' / I64),
     'LegacySwapClosed': CStruct(
@@ -426,7 +433,9 @@ EVENT_LAYOUTS = {
         'fee_paid' / U64,
     ),
     'PoolDrawArmed': CStruct('miner' / Pubkey32, 'seed_slot' / U64, 'collateral_chain' / String),
-    'PoolResolved': CStruct('miner' / Pubkey32, 'winner' / Pubkey32, 'requests' / U8, 'collateral_chain' / String),
+    'PoolResolved': CStruct(
+        'miner' / Pubkey32, 'winner' / Pubkey32, 'requests' / U8, 'collateral_chain' / String, 'finalize_by' / I64
+    ),
     'QuoteRemoved': CStruct(
         'miner' / Pubkey32,
         'from_chain' / String,
@@ -443,6 +452,8 @@ EVENT_LAYOUTS = {
         'liquidity' / U128,
         'updated_at' / I64,
         'update_fee' / U64,
+        'miner_from_addr' / String,
+        'miner_to_addr' / String,
     ),
     'ReservationExtended': CStruct(
         'miner' / Pubkey32, 'validator' / Pubkey32, 'reserved_until' / I64, 'collateral_chain' / String
@@ -459,7 +470,9 @@ EVENT_LAYOUTS = {
         'reserved_until' / I64,
         'collateral_chain' / String,
     ),
-    'ReservationRequested': CStruct('miner' / Pubkey32, 'router' / Pubkey32, 'requests' / U8, 'fee_paid' / U64),
+    'ReservationRequested': CStruct(
+        'miner' / Pubkey32, 'router' / Pubkey32, 'requests' / U8, 'fee_paid' / U64, 'collateral_chain' / String
+    ),
     'StaleClaimClosed': CStruct('swap_key' / Hash32, 'miner' / Pubkey32),
     'UnfilledReservationClosed': CStruct('miner' / Pubkey32, 'router' / Pubkey32, 'collateral_chain' / String),
     'SwapClaimed': CStruct(
@@ -528,6 +541,7 @@ EVENT_PUBKEY_FIELDS = {
     'CollateralWithdrawn': ['miner'],
     'EvmAddressBound': ['miner'],
     'FulfillmentGraceApplied': ['miner'],
+    'ConfigChanged': [],
     'HaltSet': [],
     'HotkeyBound': ['miner'],
     'LegacySwapClosed': ['miner', 'user'],
@@ -553,6 +567,25 @@ EVENT_PUBKEY_FIELDS = {
     'SwapTimeoutExtended': ['miner', 'validator'],
     'TreasuryWithdrawn': ['recipient'],
     'ValidatorWeightsUpdated': [],
+}
+
+# Events that gained trailing fields, as they were emitted before. History emitted before an upgrade
+# is still in the logs, so a decoder falls back to the older shape when the current one runs short.
+EVENT_PRIOR_LAYOUTS = {
+    'QuoteSet': [
+        CStruct(
+            'miner' / Pubkey32,
+            'from_chain' / String,
+            'to_chain' / String,
+            'collateral_chain' / String,
+            'rate' / U128,
+            'liquidity' / U128,
+            'updated_at' / I64,
+            'update_fee' / U64,
+        )
+    ],
+    'ReservationRequested': [CStruct('miner' / Pubkey32, 'router' / Pubkey32, 'requests' / U8, 'fee_paid' / U64)],
+    'PoolResolved': [CStruct('miner' / Pubkey32, 'winner' / Pubkey32, 'requests' / U8, 'collateral_chain' / String)],
 }
 
 # --- instruction encoding (8-byte discriminator from IDL + borsh arg body) ---
@@ -620,6 +653,7 @@ IX_DISCRIMINATORS = {
     'bind_evm_address': bytes([82, 152, 60, 101, 46, 10, 133, 156]),
     # W2b — reap a quote stranded at the pre-W2b four-seed derivation (no args).
     'close_legacy_quote': bytes([174, 62, 107, 15, 91, 39, 82, 249]),
+    'close_unlocked_quote': bytes([155, 66, 158, 23, 96, 26, 90, 118]),
     # v3 — reap the reused per-miner slots the upgrade left unreadable (no args each). Unlike the
     # quotes these did NOT move, so they sit where the live program looks; run them per pre-v3 miner.
     'close_legacy_pool': bytes([135, 68, 69, 243, 68, 50, 121, 183]),
@@ -646,19 +680,21 @@ IX_SET_QUOTE_ARGS = CStruct(
     'miner_to_addr' / String,
     'rate' / U128,
     'liquidity' / U128,
+    'from_addr_lock_key' / Hash32,
+    'to_addr_lock_key' / Hash32,
 )
 IX_AMOUNT_ARGS = CStruct('amount' / U64)
 
 # B2 swap-lifecycle args. `swap_key` is a borsh `[u8; 32]` (fixed array → raw 32 bytes, no len prefix).
 IX_SWAP_KEY_ARGS = CStruct('swap_key' / Hash32)  # timeout_swap, close_stale_claim
 # V-C2: initiate quorum releases the source lock; the hash targets it (verified vs reservation.from_addr).
-IX_VOTE_INITIATE_ARGS = CStruct('swap_key' / Hash32, 'from_addr_hash' / Hash32)
+IX_VOTE_INITIATE_ARGS = CStruct('swap_key' / Hash32, 'source_lock_key' / Hash32)
 IX_CANCEL_SWAP_ARGS = CStruct('swap_key' / Hash32, 'reason' / U8)  # cancel_swap (reason is advisory)
 IX_SUBMIT_CLAIM_ARGS = CStruct('swap_key' / Hash32, 'from_tx_hash' / String, 'from_tx_block' / U32)
 IX_CONFIRM_SWAP_ARGS = CStruct('swap_key' / Hash32, 'from_chain' / String, 'to_chain' / String)
 IX_MARK_FULFILLED_ARGS = CStruct('swap_key' / Hash32, 'to_tx_hash' / String, 'to_tx_block' / U32)
 IX_EXTEND_TIMEOUT_ARGS = CStruct('swap_key' / Hash32, 'target_at' / I64)
-IX_EXTEND_RESERVATION_ARGS = CStruct('target_at' / I64, 'from_addr_hash' / Hash32)  # V-C2: keccak(from_addr)
+IX_EXTEND_RESERVATION_ARGS = CStruct('target_at' / I64, 'source_lock_key' / Hash32)  # pdas.source_lock_key
 IX_ADD_VALIDATOR_ARGS = CStruct('validator' / Pubkey32, 'weight' / U64)
 
 # B4 — quote retract + admin-setter args. (`deactivate` takes no args → empty body.)
@@ -677,7 +713,7 @@ IX_FINALIZE_RESERVATION_ARGS = CStruct(
     'collateral_amount' / U64,
     'from_amount' / U128,
     'to_amount' / U128,
-    'from_addr_hash' / Hash32,  # V-C2: keccak(user_from_addr); seeds the source_lock, verified on-chain
+    'source_lock_key' / Hash32,  # pdas.source_lock_key(wallet, user_from_addr); verified on-chain
 )
 IX_SET_WEIGHTS_ARGS = CStruct('weights' / Vec(U64), 'round_key' / Hash32)  # vote_set_weights
 # W2 — vote_activate / vote_deactivate now name the purse they act on.
@@ -711,6 +747,7 @@ ACCOUNT_LAYOUTS = {
     'HotkeyBinding': HotkeyBinding,
     'MinerDirectionStats': MinerDirectionStats,
     'MinerQuote': MinerQuote,
+    'AddrLock': AddrLock,
     'MinerState': MinerState,
     'Pool': Pool,
     'Reservation': Reservation,

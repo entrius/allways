@@ -12,7 +12,7 @@ from embit.networks import NETWORKS
 from embit.script import address_to_scriptpubkey
 
 from allways.assets.asset import Asset, ProviderUnreachableError, SendResult, TransactionInfo
-from allways.assets.chain import Chain
+from allways.assets.chain import Chain, canonical_hex_tx_hash
 from allways.chains import CHAIN_BTC, ChainDefinition
 
 ADDR_TYPE_P2PKH = 'p2pkh'
@@ -211,6 +211,9 @@ class Bitcoin(Asset, Chain):
     def describe(self) -> str:
         hosts = ', '.join(urlparse(base).netloc or base for base, _ in self.btc_api_bases())
         return f'Esplora API ({self.network}): {hosts}'
+
+    def canonical_tx_hash(self, tx_hash: str) -> Optional[str]:
+        return canonical_hex_tx_hash(tx_hash, prefixed=False)
 
     def normalize_address(self, address: str) -> str:
         """bech32 is case-insensitive (BIP-173); base58 legacy addresses are not — lowercase bech32 only."""
@@ -802,6 +805,10 @@ class Bitcoin(Asset, Chain):
         self, utxos: list, amount: int, is_segwit: bool, output_scripts: list, fee_rate_override: Optional[int] = None
     ) -> Optional[Tuple[list, int, int]]:
         """Greedy UTXO selection. Returns (selected, total_in, fee) or None."""
+        # Anyone can pay our public address; an unconfirmed outside coin can be RBF'd away or left
+        # unconfirmed, killing any payout built on it. Spend only confirmed coins or our own change.
+        pending = sum(u['value'] for u in utxos if not self.is_spendable_utxo(u))
+        utxos = [u for u in utxos if self.is_spendable_utxo(u)]
         fee_rate = self.estimate_fee_rate(override=fee_rate_override)
         input_vsize = 68 if is_segwit else 148
         # Each output: 8-byte value + length-prefixed scriptPubKey (Taproot 43 vB, P2WPKH 31).
@@ -819,9 +826,14 @@ class Bitcoin(Asset, Chain):
         est_vsize = base_vsize + len(selected) * input_vsize
         fee = est_vsize * fee_rate
         if total_in < amount + fee:
-            self._send_error(f'Insufficient funds: have {total_in} sat, need {amount} + {fee} fee')
+            held = f' ({pending} sat more awaiting confirmation)' if pending else ''
+            self._send_error(f'Insufficient funds: have {total_in} sat{held}, need {amount} + {fee} fee')
             return None
         return selected, total_in, fee
+
+    def is_spendable_utxo(self, utxo: dict) -> bool:
+        """Confirmed, or change from a tx this process broadcast (we won't replace our own)."""
+        return bool((utxo.get('status') or {}).get('confirmed')) or utxo.get('txid') in self.broadcasted_txids
 
     def broadcast_tx(self, raw_hex: str, dedup_key: Optional[str] = None) -> Optional[str]:
         """Broadcast a raw transaction. Returns tx_hash or None."""
@@ -903,4 +915,5 @@ class Bitcoin(Asset, Chain):
         first-input sender stays on the miner's committed address (validators
         enforce sender == committed address).
         """
+        to_address = self.chain.normalize_address(to_address)  # embit rejects uppercase bech32
         return self.send_amount_lightweight(to_address, amount, from_address=from_address, dedup_key=dedup_key)

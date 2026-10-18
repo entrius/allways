@@ -101,7 +101,7 @@ def _best_offer(client, miner_pk, miner_state, from_chain, to_chain, from_amount
 
 @dataclass
 class RoutedRejection:
-    """A finalize the contract refused. The whole queue on that pool lost the round with it."""
+    """A finalize the contract refused, and the user whose request it was."""
 
     reason: str
     users: list
@@ -487,19 +487,18 @@ def finalize_won_seats(validator, now: int) -> list:
                 fill.to_amount,
                 backing,
                 from_chain=from_chain,
+                miner_from_addr=resv.miner_from_addr,
             )
         except Exception as e:
             reason = contract_reject_reason(e) or (str(e) if isinstance(e, ValueError) else None)
             if reason is None:
                 bt.logging.warning(f'routed sweep {miner[:8]}: finalize transport fault, retrying next step: {e}')
                 continue
-            bt.logging.warning(f'routed sweep {miner[:8]}: finalize rejected ({reason}), dropping queue')
-            # Every queued user lost this round; /status carries the verdict so the offering can
-            # refund at once instead of waiting out its "reservation never landed" backstop. Published
-            # BEFORE the delete: a request landing in between clears it and is then dropped with the
-            # queue — the slow backstop, never a fast fail on a seat that could still land.
-            _publish_verdict((miner, from_chain, to_chain), RoutedRejection(reason, [q['user_pubkey'] for q in queue]))
-            store.delete_routed_requests(miner, from_chain, to_chain, backing)
+            bt.logging.warning(f'routed sweep {miner[:8]}: finalize rejected ({reason}), dropping that request')
+            # Only this request's fields were committed, so only it is refused; the next pass tries the
+            # next user on the same seat. /status carries the verdict so the offering can refund at once.
+            _publish_verdict((miner, from_chain, to_chain), RoutedRejection(reason, [req['user_pubkey']]))
+            store.delete_routed_request(miner, from_chain, to_chain, backing, req['user_pubkey'])
             continue
         bt.logging.info(f'routed sweep {miner[:8]}: finalized seat for {req["user_pubkey"][:8]} (FIFO of queue)')
         store.delete_routed_requests(miner, from_chain, to_chain, backing)
@@ -622,7 +621,12 @@ def _extend_for_claim(client, miner_pk, reservation, backing) -> None:
         return  # already at the contract ceiling — nothing left to buy
     try:
         client.extend_reservation(
-            miner_pk, target, backing, from_chain=reservation.from_chain, from_addr=reservation.from_addr
+            miner_pk,
+            target,
+            backing,
+            from_chain=reservation.from_chain,
+            from_addr=reservation.from_addr,
+            miner_from_addr=reservation.miner_from_addr,
         )
         bt.logging.info(f'claim runway: extended reserved_until {reserved_until} -> {target} (+{target - now}s)')
     except Exception as e:  # noqa: BLE001 - never block the claim on a failed extension
@@ -650,7 +654,7 @@ def confirm_deposit(validator, miner_hotkey: str, from_tx_hash: str, from_tx_blo
     submit_swap_claim (creating the Swap in PendingAttestation). Accepts a content-valid deposit even before
     it fully confirms — the crank defers voting until confirmations accrue. Fast-fails (no claim, so the short
     TTL frees the miner) only when the tx is absent or its content doesn't match the reservation."""
-    from allways.validator.solana_swap_loop import is_tx_fresh
+    from allways.validator.solana_swap_loop import is_tx_fresh, payout_reuse_reason
 
     # Reject empty/whitespace-only hashes and strip surrounding whitespace before use (#167).
     from_tx_hash = from_tx_hash.strip() if from_tx_hash else from_tx_hash
@@ -680,7 +684,10 @@ def confirm_deposit(validator, miner_hotkey: str, from_tx_hash: str, from_tx_blo
             ref = _deposit_ref(provider, from_tx_hash, from_tx_block)
             if ref is None:
                 continue
-            tx_hash, block_hint = ref
+            # One spelling per hash: the swap key hashes the raw string, and RPCs accept several spellings.
+            tx_hash, block_hint = provider.chain.canonical_tx_hash(ref[0]), ref[1]
+            if tx_hash is None:
+                continue
             candidate = provider.verify_transaction(
                 tx_hash=tx_hash,
                 expected_recipient=resv.miner_from_addr,
@@ -716,14 +723,27 @@ def confirm_deposit(validator, miner_hotkey: str, from_tx_hash: str, from_tx_blo
         # No live slot matched; fast-fail (no claim) so the short TTL frees the miner.
         return ConfirmResult(False, 'Source tx not visible or does not match the reservation')
     _, reservation, backing, tx_info, from_tx_hash = min(matches, key=lambda m: m[0])
+    if payout_reuse_reason(
+        validator.state_store,
+        validator.axon_assets[reservation.from_chain].chain,
+        reservation.from_chain,
+        reservation.from_addr,
+        reservation.miner_from_addr,
+        from_tx_hash,
+    ):
+        return ConfirmResult(False, "Source tx is another swap's payout, not a deposit")
+    swap_key = swap_key_from_tx_hash(from_tx_hash)
+    held = validator.state_store.deposit_claim(from_tx_hash)
+    if (held is not None and (held[0] != swap_key.hex() or held[1])) or client.get_swap(swap_key) is not None:
+        return ConfirmResult(False, 'Source deposit already claimed')
 
     # The taker's funds are already on the source chain and this deposit just verified against the
     # pinned reservation — but submit_swap_claim needs reserved_until >= now, and once it lapses there
     # is no claim, no Swap, no timeout and no refund: the deposit is simply lost. Buy runway first.
     _extend_for_claim(client, miner_pk, reservation, backing)
 
-    swap_key = swap_key_from_tx_hash(from_tx_hash)
     sig = client.submit_swap_claim(miner_pk, swap_key, from_tx_hash, tx_info.block_number or 0, backing)
+    validator.state_store.record_deposit_claim(from_tx_hash, swap_key.hex(), int(time.time()))
     return ConfirmResult(True, '', swap_key.hex(), sig, from_tx_hash)
 
 

@@ -32,11 +32,12 @@ if TYPE_CHECKING:
 async def forward(self: Validator) -> None:
     """One validator forward step — Solana-sourced end to end.
 
+    Program events are ingested into ``SolanaEventIndex`` first, so the
+    used-deposit and used-delivery ledgers are current when
     ``SolanaSwapLoop.run_once`` drives the swap lifecycle (discover live Solana
     swaps off the contract, verify both legs with replay-freshness gates, cast
-    the on-chain consensus vote). Then the program's crown-relevant events are
-    ingested into ``SolanaEventIndex`` and, on the block-gated cadence, replayed
-    to score + reward miners and snapshot the live crown. Scoring CADENCE stays
+    the on-chain consensus vote). On the block-gated cadence the index is then
+    replayed to score + reward miners and snapshot the live crown. Scoring CADENCE stays
     subtensor-block-gated (heartbeat + set_weights are TAO); only the crown
     replay WINDOW is unix-time.
     """
@@ -53,13 +54,15 @@ async def forward(self: Validator) -> None:
         bt.logging.info(f'forward step #{self.step}: resolved {len(resolved)} reservation pool(s)')
     if finalized:
         bt.logging.info(f'forward step #{self.step}: finalized {len(finalized)} routed seat(s)')
+    # Ingest first: the swap loop's used-tx ledgers are fed by these events. A failed ingest still lets it vote.
+    try:
+        ingest_solana_events(self)
+    except Exception as e:
+        bt.logging.warning(f'forward: solana event ingest failed: {e}')
     decisions = await asyncio.to_thread(self.solana_swap_loop.run_once, now)
     bt.logging.info(
         f'forward step #{self.step} @ block {self.block}: solana swap loop processed {len(decisions)} live swap(s)'
     )
-
-    # Fold new program events into the crown index before scoring reads it.
-    ingest_solana_events(self)
 
     # Bond relay: carry Solana verdicts to the Bittensor vault and the vault's bonds back.
     # Off the event loop — a vault write waits on substrate block inclusion. Retry construction
