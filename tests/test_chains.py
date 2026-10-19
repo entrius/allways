@@ -35,7 +35,7 @@ from allways.chains import (
     compute_extension_target_secs,
     get_chain_def,
 )
-from allways.constants import family
+from allways.constants import CHAIN_PEGS, family
 
 
 class TestGetChain:
@@ -109,6 +109,10 @@ class TestGetChain:
         for chain in SUPPORTED_CHAINS.values():
             assert bool(re.fullmatch(r'sn\d+', chain.id)) is (chain.backing_family == 'tao'), chain.id
             assert family(chain.id) == (chain.backing_family or chain.id), chain.id
+
+    def test_peg_matches_the_constants_twin(self):
+        assert {c.id: c.peg for c in SUPPORTED_CHAINS.values() if c.peg} == CHAIN_PEGS
+        assert all(c.peg == 'usd' for c in SUPPORTED_CHAINS.values() if c.native_unit == 'µUSDC')
 
     def test_subnet_assets_share_tao_clock(self):
         for chain in (CHAIN_SN7, CHAIN_SN74):

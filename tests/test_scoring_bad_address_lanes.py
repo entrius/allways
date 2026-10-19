@@ -353,7 +353,9 @@ def test_bad_address_lanes_get_zero_and_the_honest_next_best_takes_the_crown(tmp
         rewards = score(validator)
         validator.state_store.close()
         assert rewards[0] == 0.0, f'{case_id}: bad-address miner earned {rewards[0]}'
-        np.testing.assert_allclose(rewards[1], lane_reward(from_chain, to_chain, backing), rtol=1e-6, err_msg=case_id)
+        # A backing not yet served (baseusdc) has no purse stream, so its crown fails closed for everyone.
+        honest = lane_reward(from_chain, to_chain, backing) if backing in BACKING_BITS else 0.0
+        np.testing.assert_allclose(rewards[1], honest, rtol=1e-6, err_msg=case_id)
 
 
 def test_guard_every_supported_chain_rejects_a_foreign_family_address(providers):

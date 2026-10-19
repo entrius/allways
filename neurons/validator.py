@@ -36,6 +36,7 @@ from allways.constants import (  # noqa: E402
 from allways.solana import keys  # noqa: E402
 from allways.solana.client import AllwaysSolanaClient  # noqa: E402
 from allways.solana.events import SolanaEventIngest  # noqa: E402
+from allways.solana.pdas import BACKING_BITS  # noqa: E402
 from allways.solana.program_feed import ProgramEventFeed  # noqa: E402
 from allways.solana.rpc import assert_cluster_safe, resolve_rpc_url, resolve_ws_url  # noqa: E402
 from allways.utils.subtensor import build_subtensor, serialize_subtensor  # noqa: E402
@@ -102,7 +103,8 @@ class Validator(BaseValidatorNeuron):
         self.assets = create_assets(
             check=True,
             require_send=False,
-            required_chains=set(HUB_CHAINS),
+            # Served hubs only: a hub joins once its backing is live, so a dark one can't fail startup.
+            required_chains={hub for hub in HUB_CHAINS if hub in BACKING_BITS},
             subtensor=self.subtensor,
             solana_rpc_url=solana_rpc_url,
         )

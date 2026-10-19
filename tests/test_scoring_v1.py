@@ -493,7 +493,8 @@ class TestComputeDirectionPools:
             assert scoring_family(*pair) == ALPHA_FAMILY
         assert scoring_family('sol', 'btc') == 'sol' and scoring_family('sol', 'tao') == 'sol'
         assert scoring_family('tao', 'eth') == 'tao'
-        assert set(FAMILY_PAIR_COUNTS) == {'sol', 'tao', ALPHA_FAMILY}
+        assert scoring_family('baseusdc', 'btc') == 'baseusdc' and scoring_family('sn7', 'baseusdc') == ALPHA_FAMILY
+        assert set(FAMILY_PAIR_COUNTS) == {'sol', 'tao', 'baseusdc', ALPHA_FAMILY}
 
     def test_no_volume_falls_back_to_equal_family_shares(self):
         pools = compute_direction_pools({})
@@ -544,8 +545,10 @@ class TestComputeDirectionPools:
                 ('btc', 'sol'): {'hk_a': (1, 10**12)},  # lamports, sol family
                 ('tao', 'eth'): {'hk_b': (5, 10**9)},  # rao, tao family
                 ('sol', 'sn7'): {'hk_c': (1, 1, 10)},  # TAO collateral, alpha family
+                ('baseusdc', 'btc'): {'hk_d': (7, 10**6)},  # µUSDC, baseusdc family
             }
         )
+        assert len(FAMILY_PAIR_COUNTS) == 4
         for family in FAMILY_PAIR_COUNTS:
             assert self.family_total(pools, family) == pytest.approx(self.FAMILY)
         assert pools[('tao', 'eth', 'tao')] == pytest.approx(self.FAMILY / 2)

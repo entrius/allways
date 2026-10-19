@@ -796,7 +796,7 @@ def resolve_quote_backing(miner_state, from_chain: str, to_chain: str, explicit:
             f'One leg must be a collateral chain ({", ".join(pdas.BACKING_BITS)}).'
         )
     mask = int(getattr(miner_state, 'active_backings', 0) or 0) if miner_state is not None else 0
-    active = [b for b in pair if mask & pdas.BACKING_BITS[b]]
+    active = [b for b in pair if mask & pdas.BACKING_BITS.get(b, 0)]  # a hub not yet served has no purse
 
     if explicit is not None:
         explicit = explicit.lower()

@@ -171,10 +171,10 @@ def parse_lane(spec: str) -> Lane:
 
 
 def default_lanes() -> List[Lane]:
-    """Every hub↔hub lane: both directions, each declarable backing. Spoke lanes are opt-in by listing them."""
-    return [
-        Lane(a, b, backing) for a in HUB_CHAINS for b in HUB_CHAINS if a != b for backing in declarable_backings(a, b)
-    ]
+    """Every hub↔hub lane between optimizer chains: both directions, each declarable backing. Spoke lanes are
+    opt-in by listing them."""
+    hubs = [hub for hub in HUB_CHAINS if hub in OPTIMIZER_CHAINS]
+    return [Lane(a, b, backing) for a in hubs for b in hubs if a != b for backing in declarable_backings(a, b)]
 
 
 TOLERANCE_KEYS = ('max_better_than_market_pct', 'max_worse_than_market_pct')
