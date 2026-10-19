@@ -73,7 +73,7 @@ def log_scoring_trace(
 
     idle = 0
     for (from_c, to_c, backing), trace in direction_traces.items():
-        if trace.pool <= 0 and not any(secs > 0 for secs in trace.crown_time.values()):
+        if not is_live_lane(trace):
             idle += 1  # most of the registry, most of the time: counted, not listed
             continue
         holders = ', '.join(
@@ -87,7 +87,7 @@ def log_scoring_trace(
         )
 
     if idle:
-        lines.append(f'  {idle} lane(s) with no pool and no crown holder')
+        lines.append(f'  {idle} idle lane(s): no crown holder, no unfilled time, no qualified volume')
 
     # Log everyone paid OR holding crown — an ineligible crown holder earning 0 must appear.
     crown_holders = {hk for t in direction_traces.values() for hk, secs in t.crown_time.items() if secs > 0}
@@ -143,6 +143,12 @@ def log_scoring_trace(
 
     bt.logging.info(round_summary(window_start, window_end, direction_traces, rewards, recycle_uid, distributed))
     bt.logging.debug('\n'.join(lines))
+
+
+def is_live_lane(trace: 'DirectionTrace') -> bool:
+    """A lane worth a log line: someone held its crown, it sat unfilled, or it cleared qualified volume. The
+    pool alone doesn't count — with no volume anywhere, the fallback gives every registry lane a pool."""
+    return trace.unfilled_time > 0 or trace.qualified_volume > 0 or any(s > 0 for s in trace.crown_time.values())
 
 
 def round_summary(

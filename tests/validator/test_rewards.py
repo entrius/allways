@@ -757,3 +757,15 @@ def test_a_round_reads_as_one_line():
     rewards[1], rewards[RECYCLE_UID] = 0.25, 0.75
     line = round_summary(3600, 7200, traces, rewards, RECYCLE_UID, distributed=0.25)
     assert line == 'scoring: round 01:00–02:00 UTC, 25.0% to miners over 1 lane(s), 75.0% recycled; top: uid1 25.0%'
+
+
+def test_the_trace_lists_live_lanes_and_counts_the_rest_even_when_every_lane_has_a_pool():
+    from allways.validator.scoring.trace import is_live_lane
+
+    # The no-volume fallback gives every registry lane a pool; a pool alone must not earn a log line.
+    fallback = DirectionTrace(pool=7.6e-05)
+    held = DirectionTrace(pool=0.02, crown_time={'hk_b': 3600.0})
+    unfilled = DirectionTrace(pool=0.02, unfilled_time=3600)
+    cleared = DirectionTrace(pool=0.02, qualified_volume=100)
+    assert not is_live_lane(fallback) and not is_live_lane(DirectionTrace())
+    assert is_live_lane(held) and is_live_lane(unfilled) and is_live_lane(cleared)
