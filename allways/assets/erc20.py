@@ -36,7 +36,7 @@ def _refusal_call(signature: str) -> tuple[str, bool]:
 # transfer() runs contract code (~65k for Circle's FiatToken) — cap bounds the miner's
 # gas spend against a pathological estimate without pinching the real cost.
 MAX_TOKEN_TRANSFER_GAS = 150_000
-# Estimator-down fallback: covers FiatToken's worst case while staying under the cap.
+# Floor and estimator-down fallback: covers FiatToken's worst case while staying under the cap.
 DEFAULT_TOKEN_TRANSFER_GAS = 120_000
 
 # Testnet deployments per (asset id, network). The canonical mainnet deployment is the
@@ -478,7 +478,7 @@ class Erc20(EvmAsset):
         except Exception as e:
             return None if getattr(e, 'is_execution_revert', False) else DEFAULT_TOKEN_TRANSFER_GAS
         gas = est + est // 5
-        return None if gas > MAX_TOKEN_TRANSFER_GAS else gas
+        return None if gas > MAX_TOKEN_TRANSFER_GAS else max(gas, DEFAULT_TOKEN_TRANSFER_GAS)
 
     # --- Delivery gates (F3: blacklist + pause, deliberately no getCode) ---
 

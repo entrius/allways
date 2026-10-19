@@ -407,6 +407,10 @@ class TestSendGuards:
         rpc_stub(provider, self._send_responses(est=hex(200_000)))  # ×1.2 > 150k cap
         assert provider.send_amount(RECIPIENT, AMOUNT) is None
 
+    def test_low_gas_estimate_raised_to_floor(self, provider):
+        rpc_stub(provider, self._send_responses(est=hex(45_000)))
+        assert provider._transfer_gas(SENDER, 'ab') == 120_000
+
     def test_happy_path_broadcasts_transfer_calldata(self, provider, monkeypatch):
         monkeypatch.setenv('ARB_PRIVATE_KEY', TEST_KEY)
         sent = {}
