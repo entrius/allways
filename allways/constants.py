@@ -349,6 +349,9 @@ TAO_HUB_VAULT_ADDRESSES = {
     'test': '5Fkn2rNGvWxZ3cMNWbbT3FVrsyBjWmpE5fU4yYGDCrKAfLhs',  # SN19
     'finney': '5EejtudSLREHj8pAvNLcDg3gm1skP1RZGtVuoDQpVVUwpWJJ',  # SN7
 }
+# The Base USDC vault's twin of the map above, keyed by BASE_NETWORK (mainnet / sepolia). Empty
+# until the first deploy is of record; ALLWAYS_BASE_VAULT_ADDRESS / `base-vault-address` resolve it.
+BASE_HUB_VAULT_ADDRESSES: dict[str, str] = {}
 
 # ─── Swap outcome retention ──────────────────────────────
 # Terminal completed/timed_out rows (seam stage truth after the swap PDA closes). Rows are

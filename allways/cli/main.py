@@ -185,6 +185,11 @@ def _effective_settings(config: dict) -> list:
             os.environ.get('ALLWAYS_VAULT_ADDRESS') or config.get('vault-address') or '(not set)',
             source('ALLWAYS_VAULT_ADDRESS', bool(config.get('vault-address')), '—'),
         ),
+        (
+            'base-vault-address',
+            os.environ.get('ALLWAYS_BASE_VAULT_ADDRESS') or config.get('base-vault-address') or '(not set)',
+            source('ALLWAYS_BASE_VAULT_ADDRESS', bool(config.get('base-vault-address')), '—'),
+        ),
         ('program-id', program_id, program_src),
     ]
 
@@ -216,6 +221,7 @@ VALID_CONFIG_KEYS = (
     'netuid',
     'program-id',
     'vault-address',
+    'base-vault-address',
     'solana-rpc',
     'solana-network',
     'solana-keypair',
@@ -239,6 +245,7 @@ CONFIG_SET_HELP = """Set a configuration value.
 {chain_keys}
         router              Validator hotkey (ss58) to route reservations through; "" = self-represent
         vault-address       TAO bond vault contract (ss58); `env` sets the of-record one (ALLWAYS_VAULT_ADDRESS env wins)
+        base-vault-address  Base USDC bond vault contract (0x…; ALLWAYS_BASE_VAULT_ADDRESS env wins)
         program-id          Solana program ID (miner/admin commands)[/dim]
 
     [dim]Networks per chain:
