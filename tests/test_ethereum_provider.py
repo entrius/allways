@@ -867,12 +867,11 @@ class TestTransferGas:
         responses = dict(
             SEND_RESPONSES, eth_getCode='0x6080', eth_estimateGas=hex(25_000), eth_sendRawTransaction=capture
         )
-        calls = counting_rpc_stub(provider, responses)
+        rpc_stub(provider, responses)
         assert provider.send_amount(RECIPIENT, 10**15) == (TX, 0)
-        assert calls['eth_getCode'] == 1
         assert broadcast['raw'].removeprefix('0x') == self._signed_raw(100_000).hex().removeprefix('0x')
 
-    def test_eoa_destination_signs_with_estimated_gas(self, provider):
+    def test_eoa_destination_signs_with_fulfillment_gas_floor(self, provider):
         broadcast = {}
 
         def capture(params):
@@ -882,7 +881,7 @@ class TestTransferGas:
         responses = dict(SEND_RESPONSES, eth_estimateGas=hex(25_000), eth_sendRawTransaction=capture)
         rpc_stub(provider, responses)
         assert provider.send_amount(RECIPIENT, 10**15) == (TX, 0)
-        assert broadcast['raw'].removeprefix('0x') == self._signed_raw(30_000).hex().removeprefix('0x')
+        assert broadcast['raw'].removeprefix('0x') == self._signed_raw(100_000).hex().removeprefix('0x')
 
     def test_contract_destination_balance_preflight_uses_fulfillment_gas_floor(self, provider):
         balance = 10**15 + 30_000 * 3 * 10**9
@@ -893,7 +892,7 @@ class TestTransferGas:
         assert str(100_000 * 3 * 10**9) in provider.last_send_error
 
     def test_estimate_sizes_the_send_with_headroom(self, provider):
-        assert self._send(provider, hex(50_000)) is not None  # 60k limit, under cap
+        assert self._send(provider, hex(50_000)) is not None  # 60k with headroom, raised to the floor
 
     def test_reverting_destination_broadcasts_floor_gas_evidence(self, provider):
         # P0: a reverting dest no longer bails silently — the miner broadcasts a floor-gas attempt so the
@@ -907,8 +906,16 @@ class TestTransferGas:
         # An over-cap estimate likewise broadcasts at the fulfillment gas floor rather than refusing to send.
         assert self._send(provider, hex(500_000)) is not None
 
-    def test_estimator_down_falls_back_to_plain_transfer_gas(self, provider):
-        def down(params):
-            raise ConnectionError('down')
+    def test_non_revert_estimate_error_signs_with_fulfillment_gas_floor(self, provider):
+        broadcast = {}
 
-        assert self._send(provider, down) is not None
+        def capture(params):
+            broadcast['raw'] = params[0]
+            return TX
+
+        def error(params):
+            raise EvmRpcError('EVM error: PrecompileError', {'code': -32003, 'message': 'EVM error: PrecompileError'})
+
+        rpc_stub(provider, dict(SEND_RESPONSES, eth_estimateGas=error, eth_sendRawTransaction=capture))
+        assert provider.send_amount(RECIPIENT, 10**15) == (TX, 0)
+        assert broadcast['raw'].removeprefix('0x') == self._signed_raw(100_000).hex().removeprefix('0x')
