@@ -128,12 +128,18 @@ class WorldContext:
         return leg
 
     def cancel_evidence(self, swap: Any, amount: int) -> Optional[int]:
-        args = (swap.user_to_addr, int(amount), getattr(swap, 'to_tx_hash', '') or None, swap.miner_to_addr or None)
+        args = (
+            swap.user_to_addr,
+            int(amount),
+            getattr(swap, 'to_tx_hash', '') or None,
+            swap.miner_to_addr or None,
+            int(getattr(swap, 'to_tx_block', 0) or 0),  # where the delivery landed: alpha reads refusals there
+        )
         probe = Probe(
             swap.to_chain,
             'cancel_evidence',
             args,
-            run=lambda a: a.cancel_evidence(args[0], args[1], args[2], from_address=args[3]),
+            run=lambda a: a.cancel_evidence(args[0], args[1], args[2], from_address=args[3], block_hint=args[4]),
         )
         v = self._ask(swap.to_chain, probe)
         return None if v.error else v.info  # no evidence when the check fails: never cancel on a failure

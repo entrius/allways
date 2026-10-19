@@ -78,7 +78,8 @@ class RecordingProvider:
             raise ProviderUnreachableError('down')
         return self.refuses
 
-    def cancel_evidence(self, address, amount, tx_hash=None, from_address=None):
+    def cancel_evidence(self, address, amount, tx_hash=None, from_address=None, block_hint=0):
+        self.calls.append(('cancel_evidence', block_hint))
         if self.cancel_reason == 'raise':
             raise ProviderUnreachableError('down')
         return self.cancel_reason
@@ -310,6 +311,15 @@ def test_fulfilled_sound_cancel_evidence_refuses_no_slash():
     action = rules.decide(make_swap(status='Fulfilled', timeout_at=1000), now=1500)
     assert action.decision == Decision.REFUSE
     assert action.reason_code == 3
+
+
+def test_cancel_evidence_is_read_at_the_block_the_delivery_landed():
+    # An alpha refusal is recorded at the delivery's block, so the probe passes the swap's to_tx_block (#798).
+    rules, providers = rules_with(result=None)
+    swap = make_swap(status='Fulfilled', timeout_at=1000)
+    swap.to_tx_block = 8_257_100
+    rules.decide(swap, now=1500)
+    assert ('cancel_evidence', 8_257_100) in providers['sol'].calls
 
 
 def test_cancel_evidence_fires_early_before_deadline():
