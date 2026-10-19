@@ -294,7 +294,7 @@ class _Wallet:
     coldkeypub = SimpleNamespace(ss58_address=MINER)
 
 
-def _sender(stakes, *, response=None, calls=None, recipient_hotkeys=()):
+def _sender(stakes, *, response=None, calls=None, recipient_hotkeys=(), flags=0, owned=()):
     calls = [] if calls is None else calls
     receipt = SimpleNamespace(extrinsic_hash=TXID, block_hash='0xincl')
     landed = SimpleNamespace(success=True, message='', extrinsic=_ext(), extrinsic_receipt=receipt)
@@ -315,7 +315,11 @@ def _sender(stakes, *, response=None, calls=None, recipient_hotkeys=()):
         sign_and_send_extrinsic=sign_and_send_extrinsic,
         substrate=SimpleNamespace(
             get_block_number=lambda h: BLOCK,
-            query=lambda m, name, params: list(recipient_hotkeys) if name == 'StakingHotkeys' else True,
+            query=lambda m, name, params, block_hash=None: {
+                'StakingHotkeys': list(recipient_hotkeys),
+                'OwnedHotkeys': list(owned),
+                'AccountFlags': flags,
+            }.get(name, True),
         ),
     )
     p = Alpha(CHAIN_SN7, subtensor, _Wallet())
@@ -412,6 +416,58 @@ def test_a_recipient_at_the_cap_is_paid_onto_a_hotkey_it_already_stakes_to():
         'alpha_amount': 5_000,
     }
     assert p.cancel_evidence(USER, 5_000, from_address=MINER) is None
+
+
+def test_a_recipient_refusing_new_hotkeys_is_paid_onto_one_it_already_stakes_to():
+    """With the refuse-new-hotkey flag on, landing on the miner's own hotkey fails on-chain; one the
+    recipient already stakes to still lands."""
+    p, calls = _sender([_stake('big', 9_000)], recipient_hotkeys=['theirs'], flags=1 << 1)
+    assert p.send_amount(USER, 5_000, dedup_key='swap-1') == (TXID, BLOCK)
+    assert calls[0]['destination_hotkey'] == 'theirs'
+
+
+def test_a_refused_send_is_returned_as_refusal_evidence():
+    """A recipient with no hotkey to land on fails the send on-chain: the failed tx is the evidence."""
+    receipt = SimpleNamespace(extrinsic_hash=TXID, block_hash='0xincl')
+    refused = SimpleNamespace(
+        success=False,
+        message="{'name': 'AccountRejectsStakingHotkeyGrowth'}",
+        extrinsic=_ext(),
+        extrinsic_receipt=receipt,
+    )
+    p, _ = _sender([_stake('big', 9_000)], response=refused, flags=1 << 1)
+    assert p.send_amount(USER, 5_000, dedup_key='swap-1') == (TXID, BLOCK)
+
+
+def _refused_on_chain(*, error='AccountRejectsStakingHotkeyGrowth', recipient_hotkeys=(), sender=MINER):
+    """The miner's transfer_stake to USER sits in BLOCK and failed with ``error``."""
+    p, _ = _sender([], recipient_hotkeys=recipient_hotkeys)
+    p.chain.get_block = lambda n: {'extrinsics': [_ext(dest=USER, sender=sender)]} if n == BLOCK else None
+    failed = {'Module': {'index': 7, 'error': '0xaf000000'}}
+    p.chain.get_block_events = lambda h: [_event('System', 'ExtrinsicFailed', {'dispatch_error': failed})]
+    p.subtensor.substrate.metadata = SimpleNamespace(
+        get_module_error=lambda module_index, error_index: SimpleNamespace(name=error)
+    )
+    return p
+
+
+def test_a_refused_send_to_a_recipient_with_no_hotkey_is_cancel_evidence():
+    p = _refused_on_chain()
+    assert p.cancel_evidence(USER, 5_000, TXID, from_address=MINER, block_hint=BLOCK) == 8
+    assert p.cancel_evidence(USER, 5_000, TXID, from_address=MINER) is None
+
+
+@pytest.mark.parametrize(
+    'case',
+    [
+        dict(recipient_hotkeys=['theirs']),  # the miner could have landed there
+        dict(error='SlippageTooHigh'),
+        dict(sender='someoneElse'),
+    ],
+)
+def test_a_refusal_the_miner_could_have_avoided_is_not_cancel_evidence(case):
+    p = _refused_on_chain(**case)
+    assert p.cancel_evidence(USER, 5_000, TXID, from_address=MINER, block_hint=BLOCK) is None
 
 
 def test_send_needs_one_hotkey_holding_the_whole_amount():

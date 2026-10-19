@@ -365,7 +365,12 @@ class SplToken(Asset):
         return self._frozen(address)
 
     def cancel_evidence(
-        self, address: str, amount: int, tx_hash: Optional[str] = None, from_address: Optional[str] = None
+        self,
+        address: str,
+        amount: int,
+        tx_hash: Optional[str] = None,
+        from_address: Optional[str] = None,
+        block_hint: int = 0,
     ) -> Optional[int]:
         if address in RESERVED_ACCOUNTS:
             return CANCEL_REASON_SOL_RESERVED

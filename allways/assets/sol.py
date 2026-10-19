@@ -429,7 +429,12 @@ class Sol(Asset):
         return address in RESERVED_ACCOUNTS
 
     def cancel_evidence(
-        self, address: str, amount: int, tx_hash: Optional[str] = None, from_address: Optional[str] = None
+        self,
+        address: str,
+        amount: int,
+        tx_hash: Optional[str] = None,
+        from_address: Optional[str] = None,
+        block_hint: int = 0,
     ) -> Optional[int]:
         """No-fault-cancel evidence: a reserved-account destination is undeliverable by construction, a
         fixed offline membership test — deterministic, no RPC, sound enough to terminate the swap with

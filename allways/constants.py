@@ -69,6 +69,8 @@ CANCEL_REASON_SPL_FROZEN = 5
 CANCEL_REASON_INVALID_DEST = 6
 # 7 (alpha transfer disabled) is reserved in constants.rs but never emitted: a pruned or transfers-off alpha
 # dest defers, never cancels.
+# The alpha recipient refuses stake on any hotkey and holds none a delivery could land on.
+CANCEL_REASON_ALPHA_STAKE_REFUSED = 8
 CANCEL_REASON_OTHER = 255
 
 BTC_MIN_FEE_RATE = 5

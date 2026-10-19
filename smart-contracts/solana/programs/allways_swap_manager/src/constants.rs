@@ -131,6 +131,8 @@ pub const CANCEL_REASON_SPL_FROZEN: u8 = 5;
 pub const CANCEL_REASON_INVALID_DEST: u8 = 6;
 /// Reserved, never emitted: a pruned or transfers-off alpha dest defers to timeout, never cancels.
 pub const CANCEL_REASON_ALPHA_TRANSFER_DISABLED: u8 = 7;
+/// The alpha recipient refuses stake on any hotkey and holds none a delivery could land on.
+pub const CANCEL_REASON_ALPHA_STAKE_REFUSED: u8 = 8;
 pub const CANCEL_REASON_OTHER: u8 = 255;
 
 /// Slots the draw's seed slot is pinned ahead of the arming crank. Three leader windows (4 slots

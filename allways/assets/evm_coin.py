@@ -244,13 +244,8 @@ class EvmCoin(EvmAsset):
                     f'{to_address} refuses {prefix} transfers — broadcasting a floor-gas attempt as refusal evidence'
                 )
             else:
-                try:
-                    has_code = (self.chain.eth_rpc('eth_getCode', [to_address, 'latest']) or '0x') != '0x'
-                except Exception:
-                    has_code = False
-                if has_code:
-                    # The floor makes any revert receipt adjudicable; unused gas is refunded on normal delivery.
-                    gas = max(gas, ETH_FULFILL_GAS_FLOOR)
+                # Every send carries the floor so any failed receipt is adjudicable; unused gas is refunded.
+                gas = max(gas, ETH_FULFILL_GAS_FLOOR)
 
             nonce = int(self.chain.eth_rpc('eth_getTransactionCount', [acct.address, 'pending']), 16)
 
@@ -368,7 +363,12 @@ class EvmCoin(EvmAsset):
         return any((self.chain.eth_rpc('eth_getCode', [address, b]) or '0x') != '0x' for b in probes)
 
     def cancel_evidence(
-        self, address: str, amount: int, tx_hash: Optional[str] = None, from_address: Optional[str] = None
+        self,
+        address: str,
+        amount: int,
+        tx_hash: Optional[str] = None,
+        from_address: Optional[str] = None,
+        block_hint: int = 0,
     ) -> Optional[int]:
         """No-fault-cancel evidence for native EVM: the miner's own delivery tx reverted despite a
         correct, well-gassed attempt — sound proof the destination refused, strong enough to TERMINATE
