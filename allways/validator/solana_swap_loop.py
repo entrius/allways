@@ -321,6 +321,7 @@ class SolanaSwapLoop:
                 self.expected_user_receives(swap),
                 getattr(swap, 'to_tx_hash', '') or None,
                 from_address=getattr(swap, 'miner_to_addr', '') or None,
+                block_hint=int(getattr(swap, 'to_tx_block', 0) or 0),
             )
         except Exception as e:
             bt.logging.warning(f'{self._label(swap)}: cancel_evidence check failed ({e}) — not cancelling')

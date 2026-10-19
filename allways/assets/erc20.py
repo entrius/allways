@@ -535,7 +535,12 @@ class Erc20(EvmAsset):
         return False
 
     def cancel_evidence(
-        self, address: str, amount: int, tx_hash: Optional[str] = None, from_address: Optional[str] = None
+        self,
+        address: str,
+        amount: int,
+        tx_hash: Optional[str] = None,
+        from_address: Optional[str] = None,
+        block_hint: int = 0,
     ) -> Optional[int]:
         """No-fault-cancel evidence: the issuer's own state proves the destination cannot receive —
         a frozen dest or a stopped token — attributed to the DEST, not the miner (a reverted ERC-20
