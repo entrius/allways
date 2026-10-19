@@ -52,6 +52,7 @@ class TestPinnedContract:
             'netuid',
             'program-id',
             'vault-address',
+            'base-vault-address',
             'solana-rpc',
             'solana-network',
             'solana-keypair',

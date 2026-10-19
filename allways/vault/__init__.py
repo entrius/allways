@@ -4,6 +4,10 @@
 contract: the miner/admin surface the ``alw vault`` CLI drives, and the quorum relay rounds
 the validator's W3 relayer drives. ``codec`` holds the SCALE encode/decode primitives and the
 metadata reader (selectors + event signature topics) both sides share.
+
+``base_client.BaseVaultClient`` is its Base twin for the ``AllwaysUsdcVault`` Solidity contract
+(USDC bonds for the baseusdc hub). Import it from its module: it pulls in the EVM transport,
+which the TAO side doesn't need.
 """
 
 from allways.vault.client import (
