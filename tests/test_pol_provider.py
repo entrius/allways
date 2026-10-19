@@ -49,7 +49,7 @@ def signed_transfer(tip_fee):
             'nonce': 0,
             'to': RECIPIENT,
             'value': 10**16,
-            'gas': 25_200,
+            'gas': 100_000,
             'maxFeePerGas': 2 * BASE_FEE + tip_fee,
             'maxPriorityFeePerGas': tip_fee,
         },
@@ -223,7 +223,7 @@ class TestSending:
 
     def test_broadcasts_a_polygon_signed_transfer(self, provider):
         # Pins the whole signed payload: chain id 137 (a tx signed for any other chain is simply
-        # invalid here), EIP-1559 fees off the stubbed base fee, and the estimated gas + 20%.
+        # invalid here), EIP-1559 fees off the stubbed base fee, and the fulfillment gas floor.
         broadcast = {}
 
         def capture(params):
