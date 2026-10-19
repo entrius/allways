@@ -106,7 +106,20 @@ REWARD_MINER_STATES: frozenset[MinerActivity] = frozenset({MinerActivity.AVAILAB
 # Hub (collateral-capable) chains, PRIORITY-ORDERED: the earlier hub anchors a hub↔hub pair, so
 # sol↔tao stays SOL-anchored (grandfathered — existing quotes keep their stored convention).
 # A pair is valid iff one leg is a hub or an alpha, bar native swaps; hub_leg() names that anchor ('dest per 1 anchor').
-HUB_CHAINS = ('sol', 'tao')
+HUB_CHAINS = ('sol', 'tao', 'baseusdc')
+# Hubs an alpha leg outranks as anchor: snN↔baseusdc launched alpha-anchored before baseusdc became a hub.
+ALPHA_ANCHORED_HUBS = frozenset({'baseusdc'})
+# Stablecoins by the fiat they track — twin of ChainDefinition.peg (pinned by test), since chains.py imports
+# this module. Two legs on one peg trade 1:1, so a same-peg pair is trivially washable and never valid.
+CHAIN_PEGS = {
+    'arbusdc': 'usd',
+    'baseusdc': 'usd',
+    'ethusdc': 'usd',
+    'polusdc': 'usd',
+    'solusdc': 'usd',
+    'avaxusdc': 'usd',
+    'hypeusdc': 'usd',
+}
 # The SOL constant — the Solana ledger's own asset (reservation fee, local collateral purse,
 # the `alw miner quotes` default hub). "Is this the pair's hub" reads go through hub_leg() instead.
 NUMERAIRE_CHAIN = 'sol'
@@ -127,6 +140,12 @@ def is_native_swap(from_chain: str, to_chain: str) -> bool:
     return (is_alpha(from_chain) or is_alpha(to_chain)) and family(from_chain) == family(to_chain)
 
 
+def is_same_peg(from_chain: str, to_chain: str) -> bool:
+    """True iff both legs are stablecoins on one peg (baseusdc↔arbusdc): a 1:1 pair, never a valid swap."""
+    peg = CHAIN_PEGS.get(from_chain)
+    return peg is not None and peg == CHAIN_PEGS.get(to_chain)
+
+
 def is_hub(chain: str) -> bool:
     """True iff ``chain`` backs quotes with its own collateral purse (a literal hub, not an alpha)."""
     return chain in HUB_CHAINS
@@ -134,13 +153,14 @@ def is_hub(chain: str) -> bool:
 
 def hub_leg(from_chain: str, to_chain: str) -> str | None:
     """The pair's anchor — its pricing leg: the literal hub if one is a leg, else the alpha leg of an
-    alpha↔spoke pair. None = invalid pair (spoke↔spoke, tao↔alpha, alpha↔alpha)."""
-    if is_native_swap(from_chain, to_chain):
+    alpha↔spoke pair (or alpha↔baseusdc). None = invalid pair (spoke↔spoke, tao↔alpha, alpha↔alpha, USDC↔USDC)."""
+    if is_native_swap(from_chain, to_chain) or is_same_peg(from_chain, to_chain):
         return None
+    alpha = next((chain for chain in (from_chain, to_chain) if is_alpha(chain)), None)
     for hub in HUB_CHAINS:
-        if hub in (from_chain, to_chain):
+        if hub in (from_chain, to_chain) and not (alpha and hub in ALPHA_ANCHORED_HUBS):
             return hub
-    return next((chain for chain in (from_chain, to_chain) if is_alpha(chain)), None)
+    return alpha
 
 
 def collateral_leg(backing: str, from_chain: str, to_chain: str) -> str | None:
@@ -162,13 +182,13 @@ def scoring_family(from_chain: str, to_chain: str) -> str | None:
 
 
 def declarable_backings(from_chain: str, to_chain: str) -> list[str]:
-    """The backings a quote may declare = the pair's scoring lanes (F4): its hub legs — two on sol↔tao,
-    one on a spoke pair, none if invalid. Every alpha pair is TAO-backed only, so each alpha fill's
-    collateral is its TAO value."""
+    """The backings a quote may declare = the pair's scoring lanes (F4): its hub legs — two on a hub↔hub
+    pair, one on a spoke pair, none if invalid. An alpha pair is TAO-backed, bar alpha↔baseusdc which is
+    USDC-backed only."""
     if hub_leg(from_chain, to_chain) is None:
         return []
     if is_alpha(from_chain) or is_alpha(to_chain):
-        return ['tao']
+        return ['baseusdc'] if 'baseusdc' in (from_chain, to_chain) else ['tao']
     return [hub for hub in HUB_CHAINS if hub in (from_chain, to_chain)]
 
 
@@ -202,13 +222,27 @@ LAUNCH_SPOKES = (
 # Every registered subnet alpha launches. A subnet whose transfers are off is the MINER's problem —
 # it should not quote one — not a list we curate here and re-curate on every registration.
 LAUNCH_ALPHAS: tuple[str, ...] = tuple(f'sn{n}' for n in ALPHA_NETUIDS)
-# Every launch pair in canonical order: each hub against every spoke and alpha (sol↔tao lands once,
-# under SOL, because sol never appears in LAUNCH_SPOKES), then each alpha against every spoke. No
-# tao↔alpha or alpha↔alpha: subtensor swaps those natively.
-LAUNCH_PAIRS: tuple[tuple[str, str], ...] = (
-    tuple((hub, spoke) for hub in HUB_CHAINS for spoke in LAUNCH_SPOKES if spoke != hub)
-    + tuple((hub, alpha) for hub in HUB_CHAINS for alpha in LAUNCH_ALPHAS if not is_native_swap(hub, alpha))
-    + tuple((alpha, spoke) for alpha in LAUNCH_ALPHAS for spoke in LAUNCH_SPOKES if not is_hub(spoke))
+
+
+def anchored_pair(chain_a: str, chain_b: str) -> tuple[str, str] | None:
+    """``(anchor, other)`` for a valid pair, else None."""
+    anchor = hub_leg(chain_a, chain_b)
+    return None if anchor is None else (anchor, chain_b if anchor == chain_a else chain_a)
+
+
+# Every launch pair in canonical order: each hub against every spoke, each hub against every alpha, then
+# each alpha against every spoke, keyed under its anchor and listed once (sol↔tao under SOL, snN↔baseusdc
+# under the alpha). No tao↔alpha, alpha↔alpha or USDC↔USDC: hub_leg() refuses them.
+LAUNCH_PAIRS: tuple[tuple[str, str], ...] = tuple(
+    dict.fromkeys(
+        pair
+        for pair in (
+            [anchored_pair(hub, spoke) for hub in HUB_CHAINS for spoke in LAUNCH_SPOKES if spoke != hub]
+            + [anchored_pair(hub, alpha) for hub in HUB_CHAINS for alpha in LAUNCH_ALPHAS]
+            + [anchored_pair(alpha, spoke) for alpha in LAUNCH_ALPHAS for spoke in LAUNCH_SPOKES]
+        )
+        if pair is not None
+    )
 )
 # Fixed burn: pools sum to MINER_POOL_SHARE instead of 1.0, so at least
 # BURN_RATE of every round recycles to RECYCLE_UID before any shortfall.

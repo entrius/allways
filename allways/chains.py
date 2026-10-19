@@ -58,6 +58,8 @@ class ChainDefinition:
     # The backing family this asset settles penalties in ('tao' for an sn<N> alpha). The program
     # derives the same fact from the id prefix, so only 'tao' rows may carry an sn<digits> id.
     backing_family: str | None = None
+    # The fiat a stablecoin tracks ('usd' on every USDC row). Two legs on one peg never form a valid pair.
+    peg: str | None = None
 
 
 # ─── Supported Chains ────────────────────────────────────
@@ -108,6 +110,7 @@ CHAIN_SOLUSDC = ChainDefinition(
     id='solusdc',
     name='USDC (Solana)',
     native_unit='µUSDC',
+    peg='usd',
     decimals=6,
     # Solana's env identity, shared with native SOL: the cluster is picked by the RPC's genesis hash,
     # never by name, so no `networks` — a declared tuple would spawn a dead `sol-network` CLI key.
@@ -151,6 +154,7 @@ CHAIN_ARBUSDC = ChainDefinition(
     id='arbusdc',
     name='USDC (Arbitrum)',
     native_unit='µUSDC',
+    peg='usd',
     decimals=6,
     env_prefix='ARB',
     networks=('mainnet', 'sepolia'),  # sepolia = Arbitrum Sepolia
@@ -197,6 +201,7 @@ CHAIN_HYPEUSDC = ChainDefinition(
     id='hypeusdc',
     name='USDC (HyperEVM)',
     native_unit='µUSDC',
+    peg='usd',
     decimals=6,
     # Hyperliquid's prefix, shared with CHAIN_HYPE: one HYPE_NETWORK / HYPE_RPC_URLS /
     # HYPE_PRIVATE_KEY serves both assets, so they can never disagree about which HyperEVM.
@@ -274,6 +279,7 @@ CHAIN_AVAXUSDC = ChainDefinition(
     id='avaxusdc',
     name='USDC (Avalanche)',
     native_unit='µUSDC',
+    peg='usd',
     decimals=6,
     # Avalanche's prefix, shared with CHAIN_AVAX: one AVAX_NETWORK / AVAX_RPC_URLS / AVAX_PRIVATE_KEY
     # serves both assets, so they can never disagree about which Avalanche they are on.
@@ -303,6 +309,7 @@ CHAIN_BASEUSDC = ChainDefinition(
     id='baseusdc',
     name='USDC (Base)',
     native_unit='µUSDC',
+    peg='usd',
     decimals=6,
     env_prefix='BASE',
     networks=('mainnet', 'sepolia'),  # sepolia = Base Sepolia
@@ -330,6 +337,7 @@ CHAIN_ETHUSDC = ChainDefinition(
     id='ethusdc',
     name='USDC (Ethereum)',
     native_unit='µUSDC',
+    peg='usd',
     decimals=6,
     # Ethereum's prefix, shared with CHAIN_ETH: one ETH_NETWORK / ETH_RPC_URLS / ETH_PRIVATE_KEY
     # serves both assets, so they can never disagree about which Ethereum they are on.
@@ -513,6 +521,7 @@ CHAIN_POLUSDC = ChainDefinition(
     id='polusdc',
     name='USDC (Polygon)',
     native_unit='µUSDC',
+    peg='usd',
     decimals=6,
     # Polygon's prefix, shared with CHAIN_POL: one POL_NETWORK / POL_RPC_URLS / POL_PRIVATE_KEY
     # serves both assets, so they can never disagree about which Polygon they are on.
@@ -674,11 +683,11 @@ def canonical_pair(chain_a: str, chain_b: str) -> tuple:
     Ordering rules (priority):
     1. The pair's ``hub_leg`` is the canonical SOURCE, so every pair reads 'dest per 1 anchor':
        the literal hub (TAO per SOL, ETH per TAO; ``HUB_CHAINS`` order keeps sol↔tao SOL-anchored),
-       else the family-bearing leg (AVAX per SN7). A literal hub still anchors a native tao↔snN pair,
-       so a legacy swap keeps its stored rate unit.
+       else the family-bearing leg (AVAX per SN7, USDC per SN7). A literal hub still anchors an invalid
+       pair (native tao↔snN), so a legacy swap keeps its stored rate unit.
     2. Else alphabetical — deterministic fallback for spoke↔spoke (never a valid swap pair).
     """
-    anchor = next((hub for hub in HUB_CHAINS if hub in (chain_a, chain_b)), None) or hub_leg(chain_a, chain_b)
+    anchor = hub_leg(chain_a, chain_b) or next((hub for hub in HUB_CHAINS if hub in (chain_a, chain_b)), None)
     if anchor:
         return (anchor, chain_b if anchor == chain_a else chain_a)
     return (chain_a, chain_b) if chain_a < chain_b else (chain_b, chain_a)

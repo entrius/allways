@@ -107,6 +107,12 @@ def test_a_miner_with_no_active_purse_is_refused():
         _resolve(0, 'btc', 'sol')
 
 
+def test_a_hub_not_yet_served_has_no_purse_to_infer():
+    with pytest.raises(SystemExit):
+        _resolve(BACKING_BIT_SOL | BACKING_BIT_TAO, 'baseusdc', 'btc')
+    assert _resolve(BACKING_BIT_SOL, 'sol', 'baseusdc') == 'sol'
+
+
 # --- labels ------------------------------------------------------------------------------------
 
 

@@ -412,7 +412,8 @@ def lane_volumes_to_directions(
 def family_notional(from_chain: str, to_chain: str, sums: Tuple[int, ...]) -> int:
     """A direction's volume in its family's one unit: the TAO collateral on an alpha pair, else the hub leg."""
     if scoring_family(from_chain, to_chain) == ALPHA_FAMILY:
-        return sums[2]
+        # Alpha notional is rao collateral: a USDC-backed alpha pair would feed µUSDC, so it scores no volume yet.
+        return 0 if declarable_backings(from_chain, to_chain) != ['tao'] else sums[2]
     return sums[0] if from_chain == hub_leg(from_chain, to_chain) else sums[1]
 
 
