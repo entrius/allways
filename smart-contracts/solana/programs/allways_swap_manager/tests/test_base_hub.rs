@@ -11,6 +11,7 @@ use {
         required_collateral, ATTEST_MAX_AGE_SECS, BACKING_BIT_BASEUSDC, BACKING_BIT_SOL, POOL_WINDOW_SECS,
     },
     allways_swap_manager::events::{AttestHeartbeat, EvmAddressBound, SwapTimedOut},
+    allways_swap_manager::instructions::bind_evm_address::{evm_bind_digest, evm_bind_message},
     allways_swap_manager::state::{Config, EvmAddressBinding, EvmBinding, MinerState, Pool, Reservation, Swap},
     litesvm::LiteSVM,
     solana_account::Account,
@@ -49,7 +50,12 @@ const USDC_MIN_SWAP: u64 = 1_000_000;
 const USDC_MIN_COLLATERAL: u64 = 25_000_000;
 const USDC_SWAP: u64 = 5_000_000; // 5 USDC — the baseusdc leg of a sol→baseusdc swap
 const SOL_LEG: u128 = 30_000_000;
-const EVM_ADDR: [u8; 20] = [0xab; 20];
+// anvil's account #0 (0xf39F…2266): the bind vector's key, shared with tests/test_solana_evm_bind.py.
+const EVM_KEY: [u8; 32] = [
+    0xac, 0x09, 0x74, 0xbe, 0xc3, 0x9a, 0x17, 0xe3, 0x6b, 0xa4, 0xa6, 0xb4, 0xd2, 0x38, 0xff, 0x94, //
+    0x4b, 0xac, 0xb4, 0x78, 0xcb, 0xed, 0x5e, 0xfc, 0xae, 0x78, 0x4d, 0x7b, 0xf4, 0xf2, 0xff, 0x80,
+];
+const OTHER_EVM_KEY: [u8; 32] = [0x42; 32];
 
 fn pid() -> Pubkey {
     allways_swap_manager::id()
@@ -462,20 +468,38 @@ fn timeout_ix(validator: &Pubkey, miner: &Pubkey, tx: &str) -> Instruction {
         .to_account_metas(None),
     )
 }
-fn bind_evm_ix(miner: &Pubkey, addr: [u8; 20], miner_state: Option<Pubkey>) -> Instruction {
+fn evm_addr(key: &[u8; 32]) -> [u8; 20] {
+    let pk = libsecp256k1::PublicKey::from_secret_key(&libsecp256k1::SecretKey::parse(key).unwrap()).serialize();
+    hashv(&[&pk[1..]]).to_bytes()[12..].try_into().unwrap()
+}
+/// personal_sign by `key` over the bind message naming `addr` and `miner`, as r || s || v (v = 27/28).
+fn evm_sign(key: &[u8; 32], addr: &[u8; 20], miner: &Pubkey) -> [u8; 65] {
+    let digest = evm_bind_digest(&evm_bind_message(addr, miner, &pid()));
+    let sk = libsecp256k1::SecretKey::parse(key).unwrap();
+    let (sig, recid) = libsecp256k1::sign(&libsecp256k1::Message::parse(&digest), &sk);
+    let mut out = [0u8; 65];
+    out[..64].copy_from_slice(&sig.serialize());
+    out[64] = recid.serialize() + 27;
+    out
+}
+fn bind_evm_ix(miner: &Pubkey, addr: [u8; 20], evm_signature: [u8; 65]) -> Instruction {
     Instruction::new_with_bytes(
         pid(),
-        &allways_swap_manager::instruction::BindEvmAddress { evm_address: addr }.data(),
+        &allways_swap_manager::instruction::BindEvmAddress { evm_address: addr, evm_signature }.data(),
         allways_swap_manager::accounts::BindEvmAddress {
             miner: *miner,
-            config: config_pda(),
-            miner_state,
             evm_binding: evm_bind_pda(miner),
             evm_address_binding: evm_addr_pda(&addr),
             system_program: SYSTEM_PROGRAM,
         }
         .to_account_metas(None),
     )
+}
+
+/// `signer` binds the address of `key`, signed by that key.
+fn bind_evm(svm: &mut LiteSVM, signer: &Keypair, key: &[u8; 32]) -> Result<Vec<String>, String> {
+    let addr = evm_addr(key);
+    send_logs(svm, bind_evm_ix(&signer.pubkey(), addr, evm_sign(key, &addr, &signer.pubkey())), signer)
 }
 
 /// init + 3 validators + a SOL-active miner. The Base hub is exactly as a fresh upgrade leaves it.
@@ -742,43 +766,111 @@ fn test_per_hub_setters_touch_only_their_hub_and_refuse_sol() {
 fn test_evm_binding_is_set_once_in_both_directions() {
     let (mut svm, _admin, _vals, miner) = setup();
     let m = miner.pubkey();
-    let logs = send_logs(&mut svm, bind_evm_ix(&m, EVM_ADDR, Some(miner_pda(&m))), &miner).expect("bind");
+    let addr = evm_addr(&EVM_KEY);
+    let logs = bind_evm(&mut svm, &miner, &EVM_KEY).expect("bind");
     let ev: EvmAddressBound = event(&logs);
-    assert_eq!((ev.miner, ev.evm_address), (m, EVM_ADDR));
+    assert_eq!((ev.miner, ev.evm_address), (m, addr));
     let b = EvmBinding::try_deserialize(&mut svm.get_account(&evm_bind_pda(&m)).unwrap().data.as_slice()).unwrap();
-    assert_eq!((b.miner, b.evm_address), (m, EVM_ADDR));
-    let r = EvmAddressBinding::try_deserialize(&mut svm.get_account(&evm_addr_pda(&EVM_ADDR)).unwrap().data.as_slice())
+    assert_eq!((b.miner, b.evm_address), (m, addr));
+    let r = EvmAddressBinding::try_deserialize(&mut svm.get_account(&evm_addr_pda(&addr)).unwrap().data.as_slice())
         .unwrap();
     assert_eq!(r.miner, m);
 
-    // Same address again: a harmless no-op. A different one: refused (V-M1).
-    send(&mut svm, bind_evm_ix(&m, EVM_ADDR, Some(miner_pda(&m))), &miner).expect("idempotent rebind");
-    let err = send(&mut svm, bind_evm_ix(&m, [0xcd; 20], Some(miner_pda(&m))), &miner).unwrap_err();
+    // Same address again: a harmless no-op. A different one, properly signed: refused (V-M1).
+    bind_evm(&mut svm, &miner, &EVM_KEY).expect("idempotent rebind");
+    let err = bind_evm(&mut svm, &miner, &OTHER_EVM_KEY).unwrap_err();
     assert!(err.contains("EvmAddressChangeForbidden"), "{err}");
-    assert!(svm.get_account(&evm_addr_pda(&[0xcd; 20])).is_none_or(|a| a.data.is_empty()), "no marker leaked");
+    let other_addr = evm_addr(&OTHER_EVM_KEY);
+    assert!(svm.get_account(&evm_addr_pda(&other_addr)).is_none_or(|a| a.data.is_empty()), "no marker leaked");
 
-    // A second registered miner can't claim the same Base bond.
+    // Another pubkey holding the same EVM key still can't claim an address already bound.
     let other = Keypair::new();
     svm.airdrop(&other.pubkey(), 100_000_000_000).unwrap();
-    send(&mut svm, post_ix(&other.pubkey(), COLLATERAL), &other).expect("post");
-    let err = send(&mut svm, bind_evm_ix(&other.pubkey(), EVM_ADDR, Some(miner_pda(&other.pubkey()))), &other)
-        .unwrap_err();
+    let err = bind_evm(&mut svm, &other, &EVM_KEY).unwrap_err();
     assert!(err.contains("EvmAddressAlreadyBound"), "{err}");
 }
 
 #[test]
-fn test_evm_binding_is_gated_like_the_hotkey_binding() {
-    let (mut svm, _admin, vals, miner) = setup();
+fn test_evm_binding_needs_no_collateral_and_validators_sign_too() {
+    let (mut svm, _admin, vals, _miner) = setup();
     let stranger = Keypair::new();
     svm.airdrop(&stranger.pubkey(), 100_000_000_000).unwrap();
-    let err = send(&mut svm, bind_evm_ix(&stranger.pubkey(), [0x11; 20], None), &stranger).unwrap_err();
-    assert!(err.contains("InsufficientCollateral"), "{err}");
-    // A whitelisted validator may bind without a MinerState, as with bind_hotkey.
-    send(&mut svm, bind_evm_ix(&vals[2].pubkey(), [0x22; 20], None), &vals[2]).expect("validator binds");
+    assert!(svm.get_account(&miner_pda(&stranger.pubkey())).is_none(), "no MinerState, no collateral");
+    bind_evm(&mut svm, &stranger, &EVM_KEY).expect("the EVM signature alone is enough");
+    // A validator takes the same path: an unsigned claim is refused for it too.
+    let addr = evm_addr(&OTHER_EVM_KEY);
+    let err = send(&mut svm, bind_evm_ix(&vals[2].pubkey(), addr, [0u8; 65]), &vals[2]).unwrap_err();
+    assert!(err.contains("EvmSignatureMalformed"), "{err}");
+    bind_evm(&mut svm, &vals[2], &OTHER_EVM_KEY).expect("validator binds");
+}
+
+#[test]
+fn test_evm_binding_refuses_a_signature_that_does_not_prove_the_address() {
+    let (mut svm, _admin, _vals, miner) = setup();
+    let m = miner.pubkey();
+    let addr = evm_addr(&EVM_KEY);
+    // Signed by another EVM key: the recovered address isn't the one being bound.
+    let err = send(&mut svm, bind_evm_ix(&m, addr, evm_sign(&OTHER_EVM_KEY, &addr, &m)), &miner).unwrap_err();
+    assert!(err.contains("EvmSignatureMismatch"), "{err}");
+    // The right key, but naming another Solana pubkey: it can't be replayed onto this signer.
+    let err = send(&mut svm, bind_evm_ix(&m, addr, evm_sign(&EVM_KEY, &addr, &LOTTERY_USER)), &miner).unwrap_err();
+    assert!(err.contains("EvmSignatureMismatch"), "{err}");
+
+    let good = evm_sign(&EVM_KEY, &addr, &m);
+    // The malleable twin (n - s, flipped v) recovers the same key, but is refused as high-s.
+    let mut twin = good;
+    let mut s = libsecp256k1::curve::Scalar::default();
+    let _ = s.set_b32(&good[32..64].try_into().unwrap());
+    twin[32..64].copy_from_slice(&(-s).b32());
+    twin[64] = if good[64] == 27 { 28 } else { 27 };
+    let err = send(&mut svm, bind_evm_ix(&m, addr, twin), &miner).unwrap_err();
+    assert!(err.contains("EvmSignatureMalformed"), "{err}");
+    // v in the 0/1 convention is refused: only 27/28 is accepted.
+    let mut raw_v = good;
+    raw_v[64] -= 27;
+    let err = send(&mut svm, bind_evm_ix(&m, addr, raw_v), &miner).unwrap_err();
+    assert!(err.contains("EvmSignatureMalformed"), "{err}");
     // The zero address pads to the "never bound" bond key, so it can't be claimed.
-    let err = send(&mut svm, bind_evm_ix(&miner.pubkey(), [0u8; 20], Some(miner_pda(&miner.pubkey()))), &miner)
-        .unwrap_err();
+    let err = send(&mut svm, bind_evm_ix(&m, [0u8; 20], good), &miner).unwrap_err();
     assert!(err.contains("EvmAddressZero"), "{err}");
+    assert!(svm.get_account(&evm_bind_pda(&m)).is_none_or(|a| a.data.is_empty()), "nothing bound");
+    send(&mut svm, bind_evm_ix(&m, addr, good), &miner).expect("the low-s original binds");
+}
+
+#[test]
+fn test_evm_bind_message_matches_the_shared_vector() {
+    // Pinned byte for byte in tests/test_solana_evm_bind.py: what eth_account signs, the program verifies.
+    let addr = evm_addr(&EVM_KEY);
+    let solana = Pubkey::new_from_array(core::array::from_fn(|i| i as u8 + 1));
+    let msg = evm_bind_message(&addr, &solana, &pid());
+    assert_eq!(
+        msg,
+        "allways: bind EVM address 0xf39fd6e51aad88f6f4ce6ab8827279cfffb92266 to Solana \
+         4wBqpZM9xaSheZzJSMawUKKwhdpChKbZ5eu5ky4Vigw (program 6JVBEj5w27J2SVjERmv2c7wXgFee9nSSBKUJevHehyBD)"
+    );
+    assert_eq!(hex(&evm_bind_digest(&msg)), "993a92a4d3f9a8d6c77e4f75460823c8b8e3cfa1650423c762129b9f186bf35e");
+    assert_eq!(
+        hex(&evm_sign(&EVM_KEY, &addr, &solana)),
+        "c512197956bd508d3ba52b4a8788d1afff0f71da8db904503be60fc0d714adba\
+         0357f8ae382560de32fbc704ac979be666c2cd93e1639875d9f98285d1b81eda1b"
+    );
+}
+
+#[test]
+fn test_evm_bind_fits_comfortably_in_the_default_compute_budget() {
+    let (mut svm, _admin, _vals, miner) = setup();
+    let m = miner.pubkey();
+    let addr = evm_addr(&EVM_KEY);
+    let ix = bind_evm_ix(&m, addr, evm_sign(&EVM_KEY, &addr, &m));
+    let msg = Message::new_with_blockhash(&[ix], Some(&m), &svm.latest_blockhash());
+    let tx = VersionedTransaction::try_new(VersionedMessage::Legacy(msg), &[&miner]).unwrap();
+    let cu = svm.send_transaction(tx).expect("bind").compute_units_consumed;
+    println!("bind_evm_address compute units: {cu}");
+    assert!(cu < 100_000, "{cu}");
+}
+
+fn hex(bytes: &[u8]) -> String {
+    bytes.iter().map(|b| format!("{b:02x}")).collect()
 }
 
 // --- the pinned bond key, end to end on a Base-backed swap ---------------------------------------
@@ -803,7 +895,7 @@ fn test_a_base_backed_swap_pins_the_evm_bond_key_and_the_verdict_carries_it() {
         .to_account_metas(None),
     );
     send(&mut svm, bind_hk, &miner).expect("bind hotkey");
-    send(&mut svm, bind_evm_ix(&m, EVM_ADDR, Some(miner_pda(&m))), &miner).expect("bind evm");
+    bind_evm(&mut svm, &miner, &EVM_KEY).expect("bind evm");
 
     open_base_policy(&mut svm, &admin);
     beat(&mut svm, &vals, BASE);
@@ -823,7 +915,7 @@ fn test_a_base_backed_swap_pins_the_evm_bond_key_and_the_verdict_carries_it() {
     quorum(&mut svm, &vals, |val| initiate_ix(BASE, SOL, val, &m, "basetx"));
 
     let key = swap_key("basetx");
-    assert_eq!(swap_acct(&svm, &key).bond_key, padded(&EVM_ADDR), "the EVM address, not the hotkey");
+    assert_eq!(swap_acct(&svm, &key).bond_key, padded(&evm_addr(&EVM_KEY)), "the EVM address, not the hotkey");
     let ms = miner_state(&svm, &m);
     assert_eq!(ms.reserved(BACKING_BIT_BASEUSDC), required_collateral(USDC_SWAP));
     assert_eq!(ms.reserved(BACKING_BIT_SOL), 0, "the SOL pot backs nothing here");
@@ -831,7 +923,7 @@ fn test_a_base_backed_swap_pins_the_evm_bond_key_and_the_verdict_carries_it() {
     set_clock(&mut svm, initiated_at + TIMEOUT_SECS + 1);
     let logs = quorum(&mut svm, &vals, |val| timeout_ix(val, &m, "basetx"));
     let ev: SwapTimedOut = event(&logs);
-    assert_eq!(ev.bond_key, padded(&EVM_ADDR));
+    assert_eq!(ev.bond_key, padded(&evm_addr(&EVM_KEY)));
     assert_eq!(ev.collateral_chain, BASE);
     assert_eq!(ev.slash, 0, "verdict only — the seizure is a vote on Base");
     assert_eq!(ev.penalty, required_collateral(USDC_SWAP));

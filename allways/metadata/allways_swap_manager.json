@@ -61,8 +61,8 @@
     {
       "name": "bind_evm_address",
       "docs": [
-        "A miner names the 20-byte EVM address holding its Base bond. Set-once; the vault's",
-        "`lockBond(solanaPubkey)` names it back, and validators attest only when the two agree."
+        "A miner names the 20-byte EVM address holding its Base bond, proven by that key's personal_sign",
+        "over `evm_bind_message`. Set-once; the vault's `lockBond(solanaPubkey)` names it back."
       ],
       "discriminator": [
         82,
@@ -79,49 +79,6 @@
           "name": "miner",
           "writable": true,
           "signer": true
-        },
-        {
-          "name": "config",
-          "pda": {
-            "seeds": [
-              {
-                "kind": "const",
-                "value": [
-                  99,
-                  111,
-                  110,
-                  102,
-                  105,
-                  103
-                ]
-              }
-            ]
-          }
-        },
-        {
-          "name": "miner_state",
-          "docs": [
-            "Present on the miner path; whitelisted validators pass the program id (anchor's None)."
-          ],
-          "optional": true,
-          "pda": {
-            "seeds": [
-              {
-                "kind": "const",
-                "value": [
-                  109,
-                  105,
-                  110,
-                  101,
-                  114
-                ]
-              },
-              {
-                "kind": "account",
-                "path": "miner"
-              }
-            ]
-          }
         },
         {
           "name": "evm_binding",
@@ -183,6 +140,15 @@
             "array": [
               "u8",
               20
+            ]
+          }
+        },
+        {
+          "name": "evm_signature",
+          "type": {
+            "array": [
+              "u8",
+              65
             ]
           }
         }
@@ -6127,6 +6093,16 @@
       "code": 6081,
       "name": "EvmAddressZero",
       "msg": "EVM bond address must not be the zero address"
+    },
+    {
+      "code": 6082,
+      "name": "EvmSignatureMalformed",
+      "msg": "EVM bind signature is malformed (v must be 27 or 28, s must be low)"
+    },
+    {
+      "code": 6083,
+      "name": "EvmSignatureMismatch",
+      "msg": "EVM bind signature was not made by the EVM address being bound"
     }
   ],
   "types": [

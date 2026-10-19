@@ -9,6 +9,7 @@ Configuration: `alw config set base-vault-address <0x…>` (or ALLWAYS_BASE_VAUL
 BASE_NETWORK / BASE_RPC_URLS pick the network and endpoints, exactly as for the spoke.
 """
 
+import re
 from decimal import Decimal
 
 import click
@@ -19,17 +20,18 @@ from allways.cli.swap_commands.helpers import (
     FINITE_DECIMAL,
     console,
     fail,
-    from_lamports,
     get_effective_config,
     get_solana_cli_context,
     loading,
 )
 from allways.constants import BASE_HUB_VAULT_ADDRESSES
-from allways.solana.client import SolanaClientError
+from allways.solana.client import SolanaClientError, evm_bind_message, sign_evm_bind
 from allways.vault.base_client import BaseVaultClient, BaseVaultError, base_chain
 from allways.vault.client import VaultConfigError
 
 USDC_DECIMALS = CHAIN_BASEUSDC.decimals
+_HEX_ADDR_RE = re.compile(r'0x[0-9a-fA-F]{40}')
+SECP256K1_HALF_N = 0x7FFFFFFFFFFFFFFFFFFFFFFFFFFFFFFF5D576E7357A4501DDFE92F46681B20A0
 
 # Plain-language versions of the vault reverts a miner can hit, for a simulation that slips past
 # the local checks (e.g. state moved between the read and the send).
@@ -180,67 +182,97 @@ def base_vault_group():
     bind -> deposit -> lock, then activate once validators attest the bond.[/dim]"""
 
 
+def _external_signature(raw: str, message: str, address: str) -> bytes:
+    """A signature made elsewhere, checked here so a wrong key or message fails before any tx."""
+    from eth_account import Account
+    from eth_account.messages import encode_defunct
+
+    try:
+        sig = bytes.fromhex(raw.removeprefix('0x'))
+    except ValueError:
+        fail('--signature must be hex.')
+    if len(sig) != 65:
+        fail(f'--signature must be 65 bytes (r, s, v), got {len(sig)}.')
+    if sig[64] in (0, 1):  # some hardware wallets return the raw recovery id
+        sig = sig[:64] + bytes([sig[64] + 27])
+    if int.from_bytes(sig[32:64], 'big') > SECP256K1_HALF_N:
+        fail('--signature has a high s value, which the program refuses. Re-sign with a standard wallet.')
+    try:
+        signer = Account.recover_message(encode_defunct(text=message), signature=sig)
+    except Exception as e:
+        fail(f'--signature is not a valid signature: {e}')
+    if signer.lower() != address.lower():
+        fail(f'--signature was made by {signer}, not {address}, or over a different message.')
+    return sig
+
+
 @base_vault_group.command('bind', show_disclaimer=True)
+@click.option(
+    '--address', default=None, help='Base address to bind when its key is held elsewhere (e.g. a hardware wallet).'
+)
+@click.option('--signature', default=None, help="0x… personal_sign of the bind message by --address's key.")
 @click.option('--yes', '-y', is_flag=True, help='Skip confirmation prompt')
-def base_vault_bind(yes: bool):
+def base_vault_bind(address: str, signature: str, yes: bool):
     """Bind your Solana pubkey to your Base address (set-once, both ways).
 
-    [dim]Names the BASE_PRIVATE_KEY address on Solana; `alw base-vault lock` names your pubkey
-    back on the vault. Neither side can ever be rebound, so check the address first.[/dim]
+    [dim]Names the BASE_PRIVATE_KEY address on Solana, proven by that key signing a message that names
+    your pubkey; `alw base-vault lock` names your pubkey back on the vault. Neither side can ever be
+    rebound, so check the address first. For a key held elsewhere: run with --address to print the
+    message, sign it there (personal_sign), then re-run with --address and --signature.[/dim]
     """
-    account = _base_account()
+    if signature and not address:
+        fail('--signature needs --address, the Base address that made it.')
+    if address and not _HEX_ADDR_RE.fullmatch(address):
+        fail(f'--address must be 0x plus 40 hex characters, got {address!r}.')
+    account = None if address else _base_account()
+    address = address or account.address
     _, client = get_solana_cli_context()
     pubkey = client.keypair.pubkey()
+    message = evm_bind_message(_addr_bytes(address), pubkey, client.program_id)
 
     console.print('\n[bold]Bind Solana Pubkey ↔ Base Address[/bold]\n')
     console.print(f'  Pubkey:  {pubkey}')
-    console.print(f'  Base:    {account.address}\n')
+    console.print(f'  Base:    {address}\n')
 
     try:
-        bound_addr, claimed_by = _bindings(client, pubkey, account.address)
+        bound_addr, claimed_by = _bindings(client, pubkey, address)
     except SolanaClientError as e:
         fail(f'Failed to read bindings: {e}')
-    _print_bindings(pubkey, account.address, bound_addr, claimed_by)
+    _print_bindings(pubkey, address, bound_addr, claimed_by)
     console.print()
 
-    if bound_addr is not None and bound_addr.lower() != account.address.lower():
+    if bound_addr is not None and bound_addr.lower() != address.lower():
         fail(
             f'Your pubkey is already bound to {bound_addr}, and a binding never changes. '
             f"Set BASE_PRIVATE_KEY to that address's key to bond from it."
         )
     if claimed_by is not None and bytes(claimed_by) != bytes(pubkey):
-        fail(f'{account.address} is already claimed by another Solana pubkey ({claimed_by}). Use a different Base key.')
+        fail(f'{address} is already claimed by another Solana pubkey ({claimed_by}). Use a different Base key.')
     if bound_addr is not None:
         console.print('[green]Already bound both ways.[/green]\n')
         return
 
-    # The program prices a claim like bind-hotkey: SOL collateral at the floor, or a validator seat.
-    try:
-        cfg = client.get_config()
-        ms = client.get_miner_state(pubkey)
-    except SolanaClientError as e:
-        fail(f'Failed to read miner state: {e}')
-    is_validator = cfg is not None and any(bytes(v.key) == bytes(pubkey) for v in cfg.validators)
-    floor = int(cfg.min_collateral) if cfg is not None else 0
-    have = int(ms.collateral) if ms is not None else 0
-    if not is_validator and (ms is None or have < floor):
-        fail(
-            f'Binding needs SOL collateral of at least {from_lamports(floor)} SOL on this pubkey '
-            f'(you have {from_lamports(have)}) — `alw collateral deposit` first.'
-        )
+    if account is None and not signature:
+        console.print(f'Sign this exact message with {address} (personal_sign):\n')
+        console.print(message, markup=False, highlight=False, soft_wrap=True)
+        console.print('\n[dim]Then re-run with --address and --signature 0x….[/dim]\n')
+        return
+    evm_signature = _external_signature(signature, message, address) if signature else None
 
     if not yes and not click.confirm('Confirm binding? It can never be changed.'):
         console.print('[yellow]Cancelled[/yellow]')
         return
 
     try:
+        if evm_signature is None:
+            evm_signature = sign_evm_bind(account, pubkey, client.program_id)
         with loading('Submitting transaction...'):
-            client.bind_evm_address(_addr_bytes(account.address))
-        bound_addr, claimed_by = _bindings(client, pubkey, account.address)
+            client.bind_evm_address(_addr_bytes(address), evm_signature)
+        bound_addr, claimed_by = _bindings(client, pubkey, address)
     except SolanaClientError as e:
         fail(f'Failed to bind Base address: {e}')
-    console.print(f'[green]Bound {pubkey} → {account.address}[/green]\n')
-    _print_bindings(pubkey, account.address, bound_addr, claimed_by)
+    console.print(f'[green]Bound {pubkey} → {address}[/green]\n')
+    _print_bindings(pubkey, address, bound_addr, claimed_by)
     console.print('\n[dim]Next: `alw base-vault deposit`, then `alw base-vault lock`.[/dim]\n')
 
 

@@ -23,6 +23,7 @@ custom-panic = []
 [dependencies]
 anchor-lang = { version = "1.0.0", features = ["init-if-needed"] }
 solana-keccak-hasher = "3.1.0"
+solana-secp256k1-recover = "3.2.0"
 
 [dev-dependencies]
 litesvm = "0.10.0"
@@ -45,6 +46,8 @@ solana-pubkey = "3.0.0"
 solana-hash = "3.1.0"
 solana-instruction = "3.0.0"
 solana-native-token = "3.0.0"
+# Signs the EVM bind message in tests (already in the tree via the runtime).
+libsecp256k1 = "0.6.0"
 
 
 [lints.rust]

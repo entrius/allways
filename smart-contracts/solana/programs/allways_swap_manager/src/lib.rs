@@ -386,10 +386,14 @@ pub mod allways_swap_manager {
     ) -> Result<()> {
         bind_hotkey::handler(ctx, hotkey, hotkey_sig)
     }
-    /// A miner names the 20-byte EVM address holding its Base bond. Set-once; the vault's
-    /// `lockBond(solanaPubkey)` names it back, and validators attest only when the two agree.
-    pub fn bind_evm_address(ctx: Context<BindEvmAddress>, evm_address: [u8; 20]) -> Result<()> {
-        bind_evm_address::handler(ctx, evm_address)
+    /// A miner names the 20-byte EVM address holding its Base bond, proven by that key's personal_sign
+    /// over `evm_bind_message`. Set-once; the vault's `lockBond(solanaPubkey)` names it back.
+    pub fn bind_evm_address(
+        ctx: Context<BindEvmAddress>,
+        evm_address: [u8; 20],
+        evm_signature: [u8; 65],
+    ) -> Result<()> {
+        bind_evm_address::handler(ctx, evm_address, evm_signature)
     }
 
     // --- v3 upgrade cranks (admin, idempotent; run migrate_config first) ---
