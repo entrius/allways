@@ -363,7 +363,12 @@ class EvmCoin(EvmAsset):
         return any((self.chain.eth_rpc('eth_getCode', [address, b]) or '0x') != '0x' for b in probes)
 
     def cancel_evidence(
-        self, address: str, amount: int, tx_hash: Optional[str] = None, from_address: Optional[str] = None
+        self,
+        address: str,
+        amount: int,
+        tx_hash: Optional[str] = None,
+        from_address: Optional[str] = None,
+        block_hint: int = 0,
     ) -> Optional[int]:
         """No-fault-cancel evidence for native EVM: the miner's own delivery tx reverted despite a
         correct, well-gassed attempt — sound proof the destination refused, strong enough to TERMINATE
