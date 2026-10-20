@@ -940,3 +940,16 @@ fn test_quote_set_event_carries_the_stored_addresses() {
     assert_eq!((ev.miner_from_addr.as_str(), ev.miner_to_addr.as_str()), ("bc1qsrc", "5Cdst"));
     assert_eq!(ev.rate, 340 * RATE_PRECISION);
 }
+
+#[test]
+fn test_a_lamports_only_lock_address_is_still_a_new_lock() {
+    // Anyone can send lamports to a lock address; that neither claims the wallet nor skips its fee.
+    let (mut svm, program_id) = setup();
+    let miner = dual_miner(&mut svm, &program_id);
+    let m = miner.pubkey();
+    svm.airdrop(&addr_lock_pda(&program_id, "bc1qfunded"), 1_000_000).unwrap();
+    send(&mut svm, set_quote_ix(&program_id, &m, "btc", "sol", "bc1qfunded", "minerSol", RATE_PRECISION, 1), &m, &miner)
+        .expect("quote");
+    assert_eq!(lock_owner(&svm, &program_id, "bc1qfunded"), Some(m));
+    assert_eq!(treasury(&svm, &program_id), 2 * ADDR_LOCK_FEE_LAMPORTS);
+}
