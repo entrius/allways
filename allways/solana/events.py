@@ -35,6 +35,16 @@ _EXIT = re.compile(rf'^Program ({_B58}) (?:success$|failed: )')
 logger = logging.getLogger(__name__)
 
 
+# The runtime replaces every log line past its ~10KB cap with this one line; events after it are lost.
+LOG_TRUNCATED = 'Log truncated'
+# The feed's synthetic event for such a tx: ``accounts`` names every account it touched, for the World to re-read.
+TX_LOGS_TRUNCATED = 'TxLogsTruncated'
+
+
+def logs_truncated(logs: Optional[List[str]]) -> bool:
+    return LOG_TRUNCATED in (logs or ())
+
+
 def program_event_payloads(logs: Optional[List[str]], program_id: Any) -> List[bytes]:
     """Decoded `Program data:` payloads that ``program_id`` itself logged, read off the invoke stack. A line
     logged by any other program (one that only lists ours as an account) is not ours and is dropped.

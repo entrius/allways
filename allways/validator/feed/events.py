@@ -19,7 +19,7 @@ from typing import Any, Callable, List, Optional, Tuple
 
 import bittensor as bt
 
-from allways.solana.events import EventRecord
+from allways.solana.events import TX_LOGS_TRUNCATED, EventRecord, logs_truncated
 from allways.solana.program_feed import ProgramEventFeed, events_from_logs
 from allways.validator.runtime.bus import Latest, Topic
 from allways.validator.runtime.component import Component
@@ -129,11 +129,26 @@ class FeedStatus:
     cursor: Optional[Tuple[int, str]] = None
 
 
+# Truncated txs whose accounts the feed names per hour; past this the hourly rescan heals them instead.
+TRUNCATED_REREADS_PER_HOUR = 120
+
+
+def tx_account_keys(tx: Optional[dict]) -> List[str]:
+    """Every account a getTransaction result names, signer first (static keys, then lookup-table loads)."""
+    if not tx:
+        return []
+    keys = ((tx.get('transaction') or {}).get('message') or {}).get('accountKeys') or []
+    loaded = (tx.get('meta') or {}).get('loadedAddresses') or {}
+    out = [k if isinstance(k, str) else k.get('pubkey') for k in keys]
+    return [k for k in out + list(loaded.get('writable') or []) + list(loaded.get('readonly') or []) if k]
+
+
 @dataclass
 class _Pending:
     slot: int
     signature: str
     events: List[Tuple[str, Any]]
+    truncated: bool = False  # the runtime cut this tx's logs: events after the cut never arrived
 
 
 class LiveFeed(ProgramEventFeed):
@@ -174,8 +189,9 @@ class LiveFeed(ProgramEventFeed):
             return 0
         events = events_from_logs(value.get('logs'), self.program_id)
         slot = int((result.get('context') or {}).get('slot') or 0)
+        truncated = logs_truncated(value.get('logs'))
         with self._lock:
-            self._inbox.append(_Pending(slot, str(value.get('signature')), events))
+            self._inbox.append(_Pending(slot, str(value.get('signature')), events, truncated))
         return len(events)
 
     def take(self) -> List[_Pending]:
@@ -273,6 +289,7 @@ class EventFeed(Component):
         self._last_event_at = 0.0
         self._empty_tries: dict = {}
         self._recovered = 0  # events the current backfill published
+        self._truncated_window, self._truncated_count = 0, 0
 
     def setup(self) -> None:
         self._rpc = self._rpc_factory()
@@ -295,6 +312,30 @@ class EventFeed(Component):
         # Set after publishing: whoever reads this status and then drains has everything up to cursor.
         self.status.set(FeedStatus(self._backfill is not None, self.live.session, self._last_event_at, self._cursor))
 
+    def _truncated(self, sig: str, slot, block_time, tx: Optional[dict], now: float) -> List[EventRecord]:
+        """A tx whose logs the runtime cut short may have changed accounts with no event saying so. Name
+        every account it touched so the World re-reads them; past the hourly cap the rescan heals instead."""
+        window = int(now // 3600)
+        if window != self._truncated_window:
+            self._truncated_window, self._truncated_count = window, 0
+        self._truncated_count += 1
+        if self._truncated_count > TRUNCATED_REREADS_PER_HOUR:
+            bt.logging.warning(f'feed: {sig} logs truncated, over {TRUNCATED_REREADS_PER_HOUR}/h: left to the rescan')
+            return []
+        try:
+            tx = tx if tx is not None else self._rpc.get_transaction(sig)
+        except Exception as e:
+            tx = None
+            bt.logging.warning(f'feed: {sig} logs truncated and its transaction is unreadable ({e})')
+        accounts = tx_account_keys(tx)
+        if not accounts:
+            self.gaps.publish(HistoryGap(block_time or now))  # can't name its accounts: rescan them all
+            return []
+        bt.logging.warning(
+            f'feed: {sig} logs truncated (signer {accounts[0]}): re-reading the {len(accounts)} accounts it touched'
+        )
+        return [EventRecord(TX_LOGS_TRUNCATED, {'accounts': accounts}, slot, block_time, sig)]
+
     def _stamp_live(self, now: float) -> None:
         self._held.extend(self.live.take())
         if not self._held:
@@ -305,7 +346,10 @@ class EventFeed(Component):
         for p in self._held:
             if self.seen.add(p.signature):
                 t = self._clock.time_of(p.slot)
-                self.out.publish_many([EventRecord(n, f, p.slot, t, p.signature) for n, f in p.events])
+                records = [EventRecord(n, f, p.slot, t, p.signature) for n, f in p.events]
+                if p.truncated:
+                    records += self._truncated(p.signature, p.slot, t, None, now)
+                self.out.publish_many(records)
                 self._last_event_at = now
             self._newest_live = max(self._newest_live or (p.slot, p.signature), (p.slot, p.signature))
         self._held = []
@@ -338,6 +382,8 @@ class EventFeed(Component):
                         EventRecord(n, f, entry.get('slot'), block_time, sig)
                         for n, f in events_from_logs(logs, self.program_id)
                     ]
+                    if logs_truncated(logs):
+                        records += self._truncated(sig, entry.get('slot'), block_time, tx, now)
                     self.out.publish_many(records)
                     self._recovered += len(records)
             self._cursor = (slot, sig)

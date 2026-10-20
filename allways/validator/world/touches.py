@@ -12,9 +12,11 @@ from typing import Any, List, Optional, Set, Tuple
 from construct import Container
 
 from allways.solana import pdas
+from allways.solana.events import TX_LOGS_TRUNCATED
 from allways.validator.hubs import HUBS
 
 AccountKey = Tuple[str, str]  # (account type, pda as str)
+UNTYPED = ''  # an account of unknown type: the read names it from its owner and discriminator
 
 CONFIG_EVENTS = frozenset({'ConfigChanged', 'HaltSet', 'ValidatorWeightsUpdated', 'AttestHeartbeat'})
 NO_ACCOUNT_EVENTS = frozenset({'TreasuryWithdrawn'})
@@ -56,6 +58,9 @@ def quote_from_event(fields: Any) -> Container:
 def touches(name: str, fields: Any, program_id: Optional[Any] = None) -> Touches:
     out = Touches()
     if name in NO_ACCOUNT_EVENTS:
+        return out
+    if name == TX_LOGS_TRUNCATED:
+        out.reads |= {(UNTYPED, str(pk)) for pk in fields.get('accounts') or ()}  # typed at read time
         return out
     if name in CONFIG_EVENTS:
         out.reads.add(('Config', str(pdas.config_pda(program_id))))

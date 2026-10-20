@@ -28,7 +28,7 @@ from allways.validator.runtime.component import Component
 from allways.validator.store.db import Store
 from allways.validator.world import persist
 from allways.validator.world.binding import build_attribution
-from allways.validator.world.touches import AccountKey, touches
+from allways.validator.world.touches import UNTYPED, AccountKey, touches
 
 _HEX_HASH = re.compile(r'(0x)?[0-9a-f]{64}', re.IGNORECASE)
 
@@ -40,6 +40,7 @@ def tx_key(tx_hash: str) -> str:
 
 ACCOUNT_TYPES = ('Swap', 'Reservation', 'Pool', 'MinerState', 'MinerQuote', 'BondAttestation', 'Binding')
 MULTIPLE_ACCOUNTS_MAX = 100
+_TYPE_OF = {layouts.DISCRIMINATORS[t]: t for t in (*ACCOUNT_TYPES, 'Config')}
 # With nothing changed, the World still saves this often, so its saved-at time stays fresh for a restore.
 SAVE_HEARTBEAT_SECS = 30
 # A full re-read this often, so a lost event (a dropped notification, an empty getTransaction) can't
@@ -405,12 +406,29 @@ class WorldReader(Component):
             )
             slot = int(result['context']['slot'])
             for (name, pda), value in zip(chunk, result['value']):
+                if name == UNTYPED:
+                    self._put_untyped(pda, value, slot)
+                    continue
                 if value is None:
                     self._drop(name, pda, slot)
                 else:
                     self._put_raw(name, pda, base64.b64decode(value['data'][0]), slot)
                 if name == 'Binding':
                     self._refresh_attribution()
+
+    def _put_untyped(self, pda: str, value: Optional[dict], slot: int) -> None:
+        """An account named only by a truncated tx: ours iff our program owns it, typed by its discriminator."""
+        name = None
+        if value is not None and value.get('owner') == str(self._client.program_id):
+            raw = base64.b64decode(value['data'][0])
+            name = _TYPE_OF.get(raw[:8])
+            if name is not None:
+                self._put_raw(name, pda, raw, slot)
+        held = [t for t, accounts in self._accounts.items() if pda in accounts and t != name]
+        for t in held:  # closed, or no longer ours: whatever the World held under this address is gone
+            self._drop(t, pda, slot)
+        if name == 'Binding' or 'Binding' in held:
+            self._refresh_attribution()
 
     def _refresh_attribution(self) -> None:
         self._attribution = build_attribution(_BindingSource(self._accounts['Binding'].items()))
