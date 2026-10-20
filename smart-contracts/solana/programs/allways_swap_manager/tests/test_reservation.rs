@@ -305,6 +305,7 @@ fn finalize_ix_into(
             )
             .0,
             system_program: SYSTEM_PROGRAM,
+            from_addr_lock: addr_lock_pda(&pid(), ufrom),
         }
         .to_account_metas(None),
     )
@@ -1233,4 +1234,37 @@ fn test_source_lock_is_per_deposit_wallet() {
     seat_all(&mut svm, &vals, &[&a.pubkey(), &b.pubkey()]);
     fill(&mut svm, &vals, &a.pubkey(), MFROM, "bc1quser").expect("first fill");
     fill(&mut svm, &vals, &b.pubkey(), "otherMinerBTCaddr", "bc1quser").expect("distinct wallet fills");
+}
+
+#[test]
+fn test_fill_refuses_a_miner_wallet_as_source() {
+    // Miner b's payout wallet is locked; naming it as the taker's source on miner a is refused, in any case.
+    let (mut svm, _admin, vals, a) = setup(0, 0);
+    add_btc_miner(&mut svm, &vals, "otherMinerBTCaddr");
+    seat_all(&mut svm, &vals, &[&a.pubkey()]);
+    let e = fill(&mut svm, &vals, &a.pubkey(), MFROM, "otherMinerBTCaddrSOL").unwrap_err();
+    assert!(e.contains("AddressTaken"), "a posted miner wallet is not a taker source: {e}");
+    let e = fill(&mut svm, &vals, &a.pubkey(), MFROM, "OTHERMINERBTCADDRSOL").unwrap_err();
+    assert!(e.contains("AddressTaken"), "case variant of a posted wallet: {e}");
+}
+
+#[test]
+fn test_fill_checks_the_source_wallet_lock_address() {
+    // Passing some other wallet's (empty) lock must not make a posted wallet look free.
+    let (mut svm, _admin, vals, a) = setup(0, 0);
+    seat_all(&mut svm, &vals, &[&a.pubkey()]);
+    let user = Keypair::new().pubkey();
+    let mut ix = finalize_ix_into(MFROM, "btc", &vals[0].pubkey(), &a.pubkey(), &user, MTO, "uSOL", 2_000_000_000, 1, 2_000_000_000);
+    ix.accounts[8].pubkey = addr_lock_pda(&pid(), "unrelated");
+    let e = send(&mut svm, ix, &vals[0].pubkey(), &vals[0]).unwrap_err();
+    assert!(e.contains("AddrLockKeyMismatch"), "{e}");
+}
+
+#[test]
+fn test_fill_ignores_a_bare_lamport_account_at_the_source_wallet_lock() {
+    // Anyone can send lamports to the lock address; only a claimed lock refuses the source.
+    let (mut svm, _admin, vals, a) = setup(0, 0);
+    svm.airdrop(&addr_lock_pda(&pid(), "bc1qfunded"), 1_000_000).unwrap();
+    seat_all(&mut svm, &vals, &[&a.pubkey()]);
+    fill(&mut svm, &vals, &a.pubkey(), MFROM, "bc1qfunded").expect("unclaimed lock does not block");
 }

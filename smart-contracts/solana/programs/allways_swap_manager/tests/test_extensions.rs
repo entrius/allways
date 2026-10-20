@@ -256,6 +256,7 @@ fn finalize_ix(router: &Pubkey, miner: &Pubkey, user: &Pubkey) -> Instruction {
             )
             .0,
             system_program: SYSTEM_PROGRAM,
+            from_addr_lock: addr_lock_pda(&pid(), FROM_ADDR),
         }
         .to_account_metas(None),
     )

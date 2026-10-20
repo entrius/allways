@@ -3,11 +3,13 @@ use anchor_lang::prelude::*;
 use crate::backing::{self, LegBind};
 
 use crate::constants::{
-    required_collateral, ATTEST_SEED, CONFIG_SEED, MAX_ADDR_LEN, MINER_SEED, RESV_SEED, SRCLOCK_SEED,
+    required_collateral, ADDR_LOCK_SEED, ATTEST_SEED, CONFIG_SEED, MAX_ADDR_LEN, MINER_SEED, RESV_SEED, SRCLOCK_SEED,
 };
 use crate::error::ErrorCode;
 use crate::events::ReservationFilled;
-use crate::state::{source_lock_key as source_lock_key_of, BondAttestation, Config, MinerState, Reservation, SourceLock};
+use crate::state::{
+    addr_lock_key, source_lock_key as source_lock_key_of, BondAttestation, Config, MinerState, Reservation, SourceLock,
+};
 
 /// The seat winner (`reservation.router`) fills the reservation it won at the draw: names the taker +
 /// amounts and sets `reserved_until`, making the reservation live (sendable/claimable). Only the router
@@ -71,6 +73,10 @@ pub struct FinalizeReservation<'info> {
     pub source_lock: Account<'info, SourceLock>,
 
     pub system_program: Program<'info, System>,
+
+    /// CHECK: the wallet lock for `user_from_addr`; address verified in the handler, must not be claimed.
+    // Last on purpose: a trailing account keeps the account list a prefix of the previous program's.
+    pub from_addr_lock: UncheckedAccount<'info>,
 }
 
 pub fn handler(
@@ -99,6 +105,12 @@ pub fn handler(
         source_lock_key == source_lock_key_of(&ctx.accounts.reservation.miner_from_addr, &user_from_addr),
         ErrorCode::SourceHashMismatch
     );
+    // A posted miner wallet can't be a taker's source: its payouts would read as that taker's deposit.
+    // Only this program initializes the lock, so a bare-lamport account at its address is not a claim.
+    let lock = &ctx.accounts.from_addr_lock;
+    let (expected, _) = Pubkey::find_program_address(&[ADDR_LOCK_SEED, &addr_lock_key(&user_from_addr)], ctx.program_id);
+    require!(lock.key() == expected, ErrorCode::AddrLockKeyMismatch);
+    require!(lock.owner != ctx.program_id || lock.data_is_empty(), ErrorCode::AddressTaken);
 
     // Self-dealing guard: a miner may not be its own taker. Two tiny self-swaps would otherwise buy
     // permanent eligibility (successful_swaps >= 2) and pad fill volume at zero real cost. A sybil
