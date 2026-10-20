@@ -5,28 +5,39 @@ block_time extraction, amount matching (>=), confirmations, failed/missing tx, u
 address validity, the ed25519 proof sign/verify roundtrip, balance, and the SystemProgram send path.
 """
 
+import base58
 import pytest
 from solders.keypair import Keypair
 
 from allways.assets.asset import ProviderUnreachableError
-from allways.assets.sol import RESERVED_ACCOUNTS, Sol
+from allways.assets.sol import RESERVED_ACCOUNTS, SYSTEM_PROGRAM, Sol
 from allways.chains import CHAIN_SOL
 from allways.solana.rpc import SolanaRpcError, SolanaRpcUnreachable
 
 
+def transfer_ix(program_idx, from_idx, to_idx, lamports, tag=2, extra_accounts=()):
+    """A json-encoded System Program instruction: Transfer (tag 2) or TransferWithSeed (tag 11)."""
+    data = tag.to_bytes(4, 'little') + lamports.to_bytes(8, 'little')
+    accounts = [from_idx, *extra_accounts, to_idx]
+    return {'programIdIndex': program_idx, 'accounts': accounts, 'data': base58.b58encode(data).decode()}
+
+
 def make_tx(recipient, credit, sender='SENDER', slot=100, block_time=5000, err=None, extra_keys=None):
-    """Build a getTransaction (json encoding) dict crediting `credit` lamports to `recipient`."""
+    """Build a getTransaction (json encoding) dict where `sender` System-transfers `credit` lamports to
+    `recipient`, paying the fee itself."""
     extra = extra_keys or []
-    keys = [sender, recipient] + extra
-    pre = [10_000_000, 1_000_000] + [0] * len(extra)
+    keys = [sender, recipient] + extra + [SYSTEM_PROGRAM]
+    pre = [10_000_000, 1_000_000] + [0] * len(extra) + [1]
     post = list(pre)
     ridx = keys.index(recipient)
     post[ridx] = pre[ridx] + credit
     return {
         'slot': slot,
         'blockTime': block_time,
-        'meta': {'err': err, 'preBalances': pre, 'postBalances': post},
-        'transaction': {'message': {'accountKeys': keys}},
+        'meta': {'err': err, 'preBalances': pre, 'postBalances': post, 'innerInstructions': []},
+        'transaction': {
+            'message': {'accountKeys': keys, 'instructions': [transfer_ix(len(keys) - 1, 0, ridx, credit)]}
+        },
     }
 
 
@@ -225,11 +236,86 @@ class TestFetchAndVerify:
                 'postBalances': [10_000_000, 3_000_000],
                 'loadedAddresses': {'writable': ['RECIP'], 'readonly': []},
             },
-            'transaction': {'message': {'accountKeys': ['SENDER']}},
+            'transaction': {
+                'message': {
+                    'accountKeys': ['SENDER', SYSTEM_PROGRAM],
+                    'instructions': [transfer_ix(1, 0, 2, 3_000_000)],
+                }
+            },
         }
         p = provider_with(FakeRpc(tx=tx, slot=200))
         info = p.fetch_matching_tx('sig', 'RECIP', 1_000_000)
+        assert info is not None and info.amount == 3_000_000 and info.sender == 'SENDER'
+
+
+PROGRAM = 'A11waysProgram1111111111111111111111111111'
+
+
+def program_tx(keys, pre, post, instructions, inner=()):
+    return {
+        'slot': 100,
+        'blockTime': 5000,
+        'meta': {
+            'err': None,
+            'preBalances': pre,
+            'postBalances': post,
+            'innerInstructions': [{'index': 0, 'instructions': list(inner)}],
+        },
+        'transaction': {'message': {'accountKeys': keys, 'instructions': instructions}},
+    }
+
+
+class TestCreditComesFromSystemTransfers:
+    """Only a System Program transfer out of a wallet credits a deposit, and the sender is that wallet."""
+
+    def test_program_moved_lamports_are_not_a_deposit(self):
+        # A program credits RECIP straight from an account it owns, in a tx VALIDATOR signed and paid
+        # for, alongside a System transfer VALIDATOR makes elsewhere (rent for a new account).
+        keys = ['VALIDATOR', 'VAULT', 'RECIP', 'NEWPDA', PROGRAM, SYSTEM_PROGRAM]
+        pre = [50_000_000, 900_000_000, 1_000_000, 0, 1, 1]
+        post = [48_000_000, 890_000_000, 11_000_000, 2_000_000, 1, 1]
+        ix = {'programIdIndex': 4, 'accounts': [0, 1, 2, 3], 'data': ''}
+        tx = program_tx(keys, pre, post, [ix], inner=[transfer_ix(5, 0, 3, 2_000_000)])
+        p = provider_with(FakeRpc(tx=tx, slot=200))
+        assert p.fetch_matching_tx('sig', 'RECIP', 1_000_000) is None
+        assert p.verify_transaction('sig', 'RECIP', 1_000_000, expected_sender='VALIDATOR') is None
+
+    def test_sender_is_the_debited_wallet_not_the_fee_payer(self):
+        keys = ['RELAYER', 'ALICE', 'RECIP', SYSTEM_PROGRAM]
+        tx = program_tx(keys, [9, 9, 9, 1], [9, 9, 9, 1], [transfer_ix(3, 1, 2, 4_000_000)])
+        p = provider_with(FakeRpc(tx=tx, slot=200))
+        assert p.verify_transaction('sig', 'RECIP', 1_000_000, expected_sender='RELAYER') is None
+        info = p.verify_transaction('sig', 'RECIP', 1_000_000, expected_sender='ALICE')
+        assert info is not None and info.amount == 4_000_000
+
+    def test_a_smart_wallet_cpi_transfer_counts(self):
+        # A multisig program signs for its vault and CPIs the System Program; the member pays the fee.
+        keys = ['MEMBER', 'VAULT', 'RECIP', 'MULTISIG', SYSTEM_PROGRAM]
+        ix = {'programIdIndex': 3, 'accounts': [0, 1, 2, 4], 'data': ''}
+        tx = program_tx(keys, [9] * 5, [9] * 5, [ix], inner=[transfer_ix(4, 1, 2, 6_000_000)])
+        p = provider_with(FakeRpc(tx=tx, slot=200))
+        info = p.verify_transaction('sig', 'RECIP', 5_000_000, expected_sender='VAULT')
+        assert info is not None and info.amount == 6_000_000
+
+    def test_transfers_from_one_wallet_add_up_and_with_seed_counts(self):
+        keys = ['ALICE', 'RECIP', 'BASE', SYSTEM_PROGRAM]
+        ixs = [transfer_ix(3, 0, 1, 1_000_000), transfer_ix(3, 0, 1, 2_000_000, tag=11, extra_accounts=(2,))]
+        p = provider_with(FakeRpc(tx=program_tx(keys, [9] * 4, [9] * 4, ixs), slot=200))
+        info = p.verify_transaction('sig', 'RECIP', 3_000_000, expected_sender='ALICE')
         assert info is not None and info.amount == 3_000_000
+
+    def test_two_paying_wallets_have_no_single_sender(self):
+        keys = ['ALICE', 'BOB', 'RECIP', SYSTEM_PROGRAM]
+        ixs = [transfer_ix(3, 0, 2, 3_000_000), transfer_ix(3, 1, 2, 3_000_000)]
+        p = provider_with(FakeRpc(tx=program_tx(keys, [9] * 4, [9] * 4, ixs), slot=200))
+        assert p.fetch_matching_tx('sig', 'RECIP', 1_000_000) is None
+
+    def test_other_system_instructions_are_not_transfers(self):
+        # CreateAccount (tag 0) also moves lamports, but into an account it creates, never a deposit wallet.
+        keys = ['ALICE', 'RECIP', SYSTEM_PROGRAM]
+        tx = program_tx(keys, [9] * 3, [9] * 3, [transfer_ix(2, 0, 1, 3_000_000, tag=0)])
+        p = provider_with(FakeRpc(tx=tx, slot=200))
+        assert p.fetch_matching_tx('sig', 'RECIP', 1_000_000) is None
 
 
 class TestVerifyTransactionPostChecks:

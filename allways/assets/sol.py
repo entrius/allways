@@ -1,7 +1,8 @@
 import base64
 import time
-from typing import Any, List, Optional
+from typing import Any, Dict, List, Optional, Tuple
 
+import base58
 import bittensor as bt
 from solders.keypair import Keypair
 from solders.pubkey import Pubkey
@@ -61,6 +62,37 @@ RESERVED_ACCOUNTS = frozenset(
         'Sysvar1111111111111111111111111111111111111',
     }
 )
+
+
+SYSTEM_PROGRAM = '11111111111111111111111111111111'
+# System Program instructions that pay lamports out of their first account: tag → index of the payee
+# among the instruction's accounts. Transfer is [from, to]; TransferWithSeed is [from, base, to].
+SYSTEM_TRANSFER_PAYEE = {2: 1, 11: 2}
+
+
+def system_transfers(keys: List[str], tx: dict, meta: dict) -> List[Tuple[str, str, int]]:
+    """(from, to, lamports) for every System Program transfer in a json-encoded tx, top-level and inner
+    (CPI), so a smart wallet's transfer counts. Only these move a wallet's lamports, and only with that
+    wallet's signature; a program crediting an account directly (a refund, an account close) is a
+    transfer from no one."""
+    msg = (tx.get('transaction') or {}).get('message') or {}
+    ixs = list(msg.get('instructions') or [])
+    for inner in meta.get('innerInstructions') or []:
+        ixs += inner.get('instructions') or []
+    out = []
+    for ix in ixs:
+        try:
+            if keys[ix['programIdIndex']] != SYSTEM_PROGRAM:
+                continue
+            data = base58.b58decode(ix.get('data') or '')
+            payee = SYSTEM_TRANSFER_PAYEE.get(int.from_bytes(data[:4], 'little')) if len(data) >= 12 else None
+            if payee is None:
+                continue
+            accounts = ix.get('accounts') or []
+            out.append((keys[accounts[0]], keys[accounts[payee]], int.from_bytes(data[4:12], 'little')))
+        except (KeyError, IndexError, TypeError, ValueError):
+            continue
+    return out
 
 
 class SolanaChain(Chain):
@@ -254,8 +286,8 @@ class Sol(Asset):
     The SOL leg of a launch pair (sol↔btc, sol↔tao) is a peer-to-peer user↔miner
     transfer — the swap-manager program never custodies it. It's verified like a BTC
     deposit: look the signature up by hash via getTransaction and confirm a >= lamport
-    credit to the expected address (balance-delta on pre/postBalances, robust to how the
-    transfer was issued).
+    credit to the expected address, counted from System Program transfers (top-level or CPI)
+    and attributed to the wallet they debit, never to whoever paid the fee.
 
     Composes ``SolanaChain`` (transport, tip, crypto, broadcast dedup); this class is only
     the native-lamport semantics — ``_match_native_credit`` and the SystemProgram transfer.
@@ -342,7 +374,7 @@ class Sol(Asset):
             return None
 
         keys = self.chain.account_keys(tx, meta)
-        credit = self._match_native_credit(keys, meta, expected_recipient)
+        credit, sender = self._match_native_credit(keys, tx, meta, expected_recipient)
         if credit is None or credit < expected_amount:
             bt.logging.warning(
                 f'{LOG_SOL} tx {tx_hash[:16]}... credits {expected_recipient} {credit} lamports '
@@ -353,7 +385,6 @@ class Sol(Asset):
         slot = tx.get('slot')
         block_time = tx.get('blockTime')  # unix seconds, the replay-freshness floor (B2)
         confirmations = self.chain.confirmations(slot)
-        sender = keys[0] if keys else ''  # fee payer / first signer == the transfer source
         return TransactionInfo(
             tx_hash=tx_hash,
             confirmed=confirmations >= self.chain_def.min_confirmations,
@@ -366,18 +397,17 @@ class Sol(Asset):
         )
 
     @staticmethod
-    def _match_native_credit(keys: List[str], meta: dict, recipient: str) -> Optional[int]:
-        """Net lamports credited to ``recipient`` in this tx (postBalance − preBalance),
-        or None if the address isn't in the tx. Balance-delta is robust to how the transfer
-        was issued (plain transfer, CPI, batched)."""
-        pre = meta.get('preBalances') or []
-        post = meta.get('postBalances') or []
-        if recipient not in keys:
-            return None
-        i = keys.index(recipient)
-        if i >= len(pre) or i >= len(post):
-            return None
-        return int(post[i]) - int(pre[i])
+    def _match_native_credit(keys: List[str], tx: dict, meta: dict, recipient: str) -> Tuple[Optional[int], str]:
+        """(lamports System-transferred to ``recipient``, the one wallet they came from), or (None, '')
+        when nothing was transferred to it or several wallets paid it (no single sender to pin)."""
+        paid: Dict[str, int] = {}
+        for source, payee, lamports in system_transfers(keys, tx, meta):
+            if payee == recipient:
+                paid[source] = paid.get(source, 0) + lamports
+        if len(paid) != 1:
+            return None, ''
+        ((sender, credit),) = paid.items()
+        return credit, sender
 
     def find_recent_outgoing(self, from_addr: str, to_addr: str, amount: int) -> Optional[str]:
         """Signature of a recent tx from ``from_addr`` crediting ``to_addr`` >= ``amount`` lamports,
@@ -401,11 +431,8 @@ class Sol(Asset):
             meta = tx.get('meta') or {}
             if meta.get('err') is not None:
                 continue
-            keys = self.chain.account_keys(tx, meta)
-            if not keys or keys[0] != from_addr:
-                continue
-            credit = self._match_native_credit(keys, meta, to_addr)
-            if credit is not None and credit >= amount:
+            credit, sender = self._match_native_credit(self.chain.account_keys(tx, meta), tx, meta, to_addr)
+            if sender == from_addr and credit is not None and credit >= amount:
                 return sig
         return None
 
