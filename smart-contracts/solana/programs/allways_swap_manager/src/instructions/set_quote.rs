@@ -3,8 +3,8 @@ use anchor_lang::system_program::{transfer, Transfer};
 
 use crate::backing;
 use crate::constants::{
-    quote_update_fee, quantize_rate_sig_figs, ADDR_LOCK_FEE_LAMPORTS, ADDR_LOCK_SEED, MAX_ADDR_LEN, MAX_CHAIN_LEN, MINER_SEED,
-    QUOTE_SEED, TREASURY_SEED,
+    quote_update_fee, quantize_rate_sig_figs, ADDR_LOCK_FEE_LAMPORTS, ADDR_LOCK_SEED, MAX_ADDR_LEN,
+    MAX_CHAIN_LEN, MINER_SEED, QUOTE_SEED, TREASURY_SEED,
 };
 use crate::error::ErrorCode;
 use crate::events::QuoteSet;
@@ -16,7 +16,7 @@ use crate::state::{addr_lock_key, AddrLock, MinerQuote, MinerState, Treasury};
 /// serving from. `(from_chain, to_chain)` ordering encodes the direction, so the reverse direction is a
 /// separate quote (no `counter_rate`), and the backing is in the seeds, so a dual-purse miner can stand
 /// both offers on one hub↔hub direction at different rates (D2). First call lazily creates the PDA
-/// (miner pays rent) and is otherwise free; subsequent calls overwrite in place and pay a **decaying
+/// (miner pays rent) with no churn fee; subsequent calls overwrite in place and pay a **decaying
 /// anti-flashing fee** (`constants::quote_update_fee`) into the treasury PDA — high for rapid churn,
 /// zero once a quote has stood long enough. Both wallets are locked to the poster on first post, so no
 /// other miner can ever post them (a payout from a shared wallet would confirm both miners' swaps).
@@ -79,7 +79,7 @@ pub struct SetQuote<'info> {
     )]
     pub to_addr_lock: Option<Account<'info, AddrLock>>,
 
-    /// Treasury sink for the quote-update churn fee — subnet revenue, separate from collateral.
+    /// Treasury sink for the churn and wallet-lock fees — subnet revenue, separate from collateral.
     #[account(mut, seeds = [TREASURY_SEED], bump = treasury.bump)]
     pub treasury: Account<'info, Treasury>,
 

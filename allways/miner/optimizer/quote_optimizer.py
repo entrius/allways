@@ -81,7 +81,7 @@ SHUTDOWN_JOIN_SECS = 30
 DEFAULT_OPTIMIZER_CONFIG_PATH = Path.home() / '.allways' / 'miner' / 'optimizer.json'
 # Quote churn fee — mirrors smart-contracts/…/constants.rs quote_update_fee() and the CLI's copy in
 # allways/cli/swap_commands/helpers.py (a test holds them equal): (elapsed < secs, lamports), else free. set_quote
-# and remove_quote both charge it, keyed on how long the quote stood; creation is free.
+# and remove_quote both charge it, keyed on how long the quote stood; creation pays no churn fee.
 QUOTE_UPDATE_FEE_TIERS = ((300, 10_000_000), (600, 1_000_000))
 # Routine updates wait until a quote's churn fee has decayed to zero.
 QUOTE_UPDATE_FREE_AFTER_SECS = QUOTE_UPDATE_FEE_TIERS[-1][0]
