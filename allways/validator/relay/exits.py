@@ -15,17 +15,21 @@ arming is re-derived every pass, so a restart mid-exit simply resumes.
 **True-up.** Per-swap fee rounds are uneconomic, so fees ride the attestation off-chain and land
 on the vault as one block-boundary-aligned global batch. Every validator fires at the same
 boundary, reads totals AT that boundary, and sorts by AccountId — the vector is byte-identical by
-construction, which is what lets the round's contents-hash key converge. A boundary whose snapshot
-carries no delta is skipped: a no-op round is pure postage.
+construction, which is what lets the round's contents-hash key converge. It lists only miners still
+owed something, so a long-running validator (which remembers every miner that ever paid) and a fresh
+one agree. It fires a grace period after the boundary and only once the event feed has caught up,
+so a fee confirmed just before the boundary is in every validator's ledger. A boundary with nothing
+owed is skipped: a no-op round is pure postage.
 """
 
 from __future__ import annotations
 
-from typing import Dict, List, Optional, Sequence, Tuple
+from typing import Dict, List, Optional, Tuple
 
 import bittensor as bt
 
 from allways import dev_signal
+from allways.constants import RELAY_FEE_SETTLE_GRACE_SECS
 from allways.solana.layouts import lock_max
 from allways.vault import codec
 
@@ -145,23 +149,22 @@ def _unlock(relay, miner: str, hotkey: str, epoch: int, now: int) -> bool:
 def maybe_cadence_settle(relay, now: int) -> None:
     """Fire the global fee true-up once per aligned boundary."""
     cadence = relay.cfg.fee_cadence_secs
-    boundary = (now // cadence) * cadence
+    boundary = ((now - RELAY_FEE_SETTLE_GRACE_SECS) // cadence) * cadence
     try:
         last = int(relay.store.get_relay_meta(_CADENCE_KEY) or 0)
     except ValueError:
         last = 0
     if boundary <= last:
         return
+    if not relay.feed_caught_up:
+        bt.logging.debug(f'relay: fee boundary {boundary} waits for the event feed to catch up')
+        return
 
     entries = cadence_entries(relay, boundary)
-    if not entries:
-        relay.store.set_relay_meta(_CADENCE_KEY, boundary)
-        return
-    delta = _has_delta(relay, entries)
-    if delta is None:
+    if entries is None:
         return  # vault unreadable — retry at the next tick, still inside this boundary
-    if not delta:
-        bt.logging.debug(f'relay: fee cadence boundary {boundary} has zero delta — skipping the round')
+    if not entries:
+        bt.logging.debug(f'relay: nothing owed at fee boundary {boundary} — skipping the round')
         relay.store.set_relay_meta(_CADENCE_KEY, boundary)
         return
 
@@ -175,14 +178,19 @@ def maybe_cadence_settle(relay, now: int) -> None:
     relay.store.set_relay_meta(_CADENCE_KEY, boundary)
 
 
-def cadence_entries(relay, boundary: int) -> List[Tuple[str, int]]:
-    """The batch vector: every miner with a fee accrued at-or-before the boundary, sorted by raw
-    AccountId. Membership is derived from the Solana event stream ALONE — deliberately not
-    filtered against the vault — because the vector is hashed into the round key and must be
-    byte-identical across validators; the vault's monotonic totals no-op any stale entry."""
+def cadence_entries(relay, boundary: int) -> Optional[List[Tuple[str, int]]]:
+    """The batch vector: every miner whose total at the boundary exceeds what the vault has settled,
+    sorted by raw AccountId. None when a vault read failed — the vector is hashed into the round key,
+    so it is built from facts or not at all.
+
+    Membership is by what is still OWED, not by who appears in this validator's ledger: a validator
+    that has run for months remembers miners whose fees were settled long ago, a fresh one doesn't,
+    and both must vote the same bytes. Two validators can still read the vault either side of a
+    round applying; that needs a round to land after the next boundary's grace, and costs that one
+    boundary."""
     generation = relay.vault_generation()
     if generation is None:
-        return []
+        return None
     totals: Dict[str, int] = relay.store.accrued_fee_totals(
         relay.backing, at_time=boundary, vault_generation=generation
     )
@@ -194,22 +202,13 @@ def cadence_entries(relay, boundary: int) -> List[Tuple[str, int]]:
         if hotkey is None:
             bt.logging.warning(f'relay: {miner[:8]} owes fees but has no binding — excluded from the true-up')
             continue
-        entries.append((codec.account_bytes(hotkey), hotkey, total))
-    entries.sort(key=lambda e: e[0])
-    return [(hotkey, total) for _raw, hotkey, total in entries]
-
-
-def _has_delta(relay, entries: Sequence[Tuple[str, int]]) -> Optional[bool]:
-    """Whether any entry would actually move the vault's books. None when a read failed — the
-    skip/fire decision has to be made on facts, not on a defaulted zero."""
-    found = False
-    for hotkey, total in entries:
         settled = relay.settled_total(hotkey)
         if settled is None:
             return None
         if total > settled:
-            found = True
-    return found
+            entries.append((codec.account_bytes(hotkey), hotkey, total))
+    entries.sort(key=lambda e: e[0])
+    return [(hotkey, total) for _raw, hotkey, total in entries]
 
 
 def _chunks(entries: List[Tuple[str, int]], size: int):

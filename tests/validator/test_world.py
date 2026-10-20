@@ -5,7 +5,7 @@ from solders.keypair import Keypair
 
 from allways.solana import layouts, pdas
 from allways.solana.events import EventRecord
-from allways.validator.feed.events import FeedStatus, HistoryGap
+from allways.validator.feed.events import HISTORY_HORIZON_SECS, FeedStatus, HistoryGap
 from allways.validator.runtime.bus import Latest, Topic
 from allways.validator.store.db import Store
 from allways.validator.world.snapshot import RESCAN_SECS, WorldReader
@@ -231,7 +231,7 @@ def test_a_snapshot_older_than_the_horizon_is_rescanned(tmp_path):
     reader, _, _, _, _ = _reader(client, tmp_path)
     reader.tick(NOW)
     with reader.store.tx() as c:
-        Store.set_meta(c, 'world.saved_at', str(NOW - 7 * 3600))
+        Store.set_meta(c, 'world.saved_at', str(NOW - HISTORY_HORIZON_SECS - 3600))
     scans = client.scans
     again, _, _, _, _ = _reader(client, tmp_path)
     again.tick(NOW)

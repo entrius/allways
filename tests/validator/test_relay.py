@@ -91,6 +91,9 @@ class _Vault:
     def get_settled_total(self, hotkey):
         return self.settled.get(hotkey, 0)
 
+    def get_validators(self):
+        return ['us']
+
     def get_lock_state(self, hotkey):
         return (True, 3)
 

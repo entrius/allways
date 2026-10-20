@@ -24,9 +24,12 @@ from allways.solana.program_feed import ProgramEventFeed, events_from_logs
 from allways.validator.runtime.bus import Latest, Topic
 from allways.validator.runtime.component import Component
 
-# Longest swap life (10 min reservation TTL + 140 min reservation extensions + 10 min base timeout +
-# 140 min timeout extensions ≈ 5h), plus margin. Nothing the validator decides needs older events.
-HISTORY_HORIZON_SECS = 6 * 3600
+# Two fee cadences plus margin. The longest swap life (10 min reservation TTL + 140 min reservation
+# extensions + 10 min base timeout + 140 min timeout extensions ≈ 5h) needs less; the fee ledger
+# needs every fee since the vault last settled, and with a round waiting on this validator's vote
+# that is up to two boundaries back. A fresh boot reads this window once: ~19,500 transactions on
+# mainnet (2026-10-19), ~40 minutes at Helius latency, during which only fee votes wait.
+HISTORY_HORIZON_SECS = 13 * 3600
 BACKFILL_PAGES_PER_TICK = 5
 BACKFILL_DECODES_PER_TICK = 300
 SEEN_SIGNATURES = 50_000

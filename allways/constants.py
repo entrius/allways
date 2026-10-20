@@ -288,7 +288,18 @@ WEIGHTS_VOTE_RETRY_SECS = 1_800
 RELAY_HEARTBEAT_INTERVAL_SECS = 12 * 3600
 # Time-aligned global fee true-up. Every validator fires at the same boundary and reads totals at
 # it, so the batch vector is byte-identical; a boundary with zero delta is skipped as pure postage.
-RELAY_FEE_CADENCE_SECS = 2 * 86400
+# Six hours keeps every fee a fresh validator must count inside the feed's catch-up window: the
+# vault may still stand at the boundary before last (that round waiting on this validator's vote),
+# so the window has to reach two boundaries back (see feed.events.HISTORY_HORIZON_SECS). A round
+# costs each validator ~0.001-0.003 TAO (measured on finney 2026-10-19), and quiet boundaries cost nothing.
+RELAY_FEE_CADENCE_SECS = 6 * 3600
+# How long after a boundary the true-up waits before reading totals at it, so a fee confirmed
+# just before the boundary has reached every validator's ledger first.
+RELAY_FEE_SETTLE_GRACE_SECS = 120
+# The vault signer (the validator hotkey) pays every vault vote and needs ~0.075 TAO free up front
+# per call; below this the relay warns, hourly.
+RELAY_LOW_BALANCE_RAO = 500_000_000
+RELAY_BALANCE_CHECK_SECS = 3600
 # Slow continuous vault↔attestation repair loop (crash-between-paired-writes, missed refreshes):
 # after the boot audit, every bound miner is re-checked once per interval, a few per forward step.
 RELAY_RECONCILE_INTERVAL_SECS = 900

@@ -9,6 +9,7 @@ from typing import Any, Callable, List, Optional
 
 import bittensor as bt
 
+from allways.constants import RELAY_FEE_SETTLE_GRACE_SECS
 from allways.validator.actuator.planners import intent
 from allways.validator.feed.events import HISTORY_HORIZON_SECS, FeedStatus
 from allways.validator.hubs import HubSpec
@@ -50,6 +51,11 @@ class HubRelay(Component):
         self.program_id = program_id
         self.cfg = config or RelayConfig.from_env()
         cadence = self.cfg.fee_cadence_secs
+        if 2 * cadence + RELAY_FEE_SETTLE_GRACE_SECS > HISTORY_HORIZON_SECS:
+            bt.logging.warning(
+                f'{self.name}: fee cadence {cadence}s is over half the {HISTORY_HORIZON_SECS}s history window — '
+                'a fresh validator cannot count back to where the vault may stand, and will vote short'
+            )
         self.ledger = RelayLedger(
             store, hub.chain, self._settled, boundary=lambda t: (t // cadence) * cadence, clock=lambda: self.clock()
         )
@@ -113,6 +119,7 @@ class HubRelay(Component):
             self._held = records  # the transaction itself failed: nothing above landed
             raise
         self.relay._ingest_healthy = not self._held
+        self.relay.feed_caught_up = status is not None and not status.catching_up
         self.relay.step(int(now))
         boundary = int(self.ledger.get_relay_meta('fee_cadence_boundary') or 0)
         self.ledger.fold(min(int(now) - HISTORY_HORIZON_SECS, boundary))

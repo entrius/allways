@@ -244,6 +244,27 @@ class BondVaultClient:
         """Cumulative protocol fees already settled onto the vault for this miner (rao)."""
         return self._read_u64('get_settled_total', codec.account_bytes(hotkey))
 
+    def get_settled_total_at(self, hotkey: str, block_hash: str, substrate=None) -> Optional[int]:
+        """``get_settled_total`` as of a past block. A lite node prunes old state within minutes, so the
+        caller passes an archive connection's substrate."""
+        sub = substrate or self.subtensor.substrate
+        data = self.metadata.call('get_settled_total', codec.account_bytes(hotkey))
+        try:
+            raw = self._payload(sub.runtime_call('ContractsApi', 'call', self._dry(data, None), block_hash=block_hash))
+        except Exception:
+            return None
+        return _u64(codec.Reader(raw)) if raw else None
+
+    def signer_balance(self) -> Optional[int]:
+        """Free balance of the account that signs this client's writes (rao), or None when unreadable."""
+        if self.keypair is None:
+            return None
+        try:
+            account = self.subtensor.substrate.query('System', 'Account', [self.keypair.ss58_address])
+            return int(getattr(account, 'value', account)['data']['free'])
+        except Exception:
+            return None
+
     def is_slashed(self, swap_ref) -> Optional[bool]:
         """Whether the vault has already applied a slash for this Solana swap key — the permanent
         marker that makes ``vote_slash`` replay-proof."""

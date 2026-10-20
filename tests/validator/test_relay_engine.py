@@ -10,6 +10,7 @@ from types import SimpleNamespace
 import pytest
 from solders.pubkey import Pubkey
 
+from allways.constants import RELAY_FEE_SETTLE_GRACE_SECS as GRACE
 from allways.constants import RELAY_MINER_READ_INTERVAL_SECS
 from allways.solana import pdas
 from allways.validator.relay import attestation as attestation_job
@@ -50,12 +51,16 @@ class FakeVault:
         self.reject = set()
         self.events = []
         self.head = lambda: 100
+        self.validators = ['us']
 
     def get_collateral(self, hotkey):
         return self.collateral.get(hotkey, 0) if self.readable else None
 
     def get_settled_total(self, hotkey):
         return self.settled.get(hotkey, 0) if self.readable else None
+
+    def get_validators(self):
+        return list(self.validators) if self.readable else None
 
     def get_lock_state(self, hotkey):
         return self.lock.get(hotkey, (False, 0)) if self.readable else None
@@ -543,12 +548,40 @@ def test_the_batch_vector_is_ordered_by_account_id_so_every_validator_agrees():
     assert codec.account_bytes(entries[0][0]) < codec.account_bytes(entries[1][0])
 
 
-def test_the_vector_is_derived_from_the_event_stream_not_from_the_vault():
-    # Membership must not depend on a vault read, or two validators reading at slightly different
-    # moments would build different vectors. Stale entries are the vault's no-op to make.
+def test_a_miner_the_vault_has_fully_settled_is_left_out_so_old_and_fresh_validators_agree():
+    # A validator that has run for months remembers a miner whose fees were settled long ago; a fresh
+    # one never saw them. Listing by what is still owed gives both the same bytes.
     relay = _relay(vault=FakeVault(settled={HOTKEY: 5 * RAO}))
     relay.store.record_relay_fee(SWAP, MINER, 'tao', 5 * RAO, NOW)
-    assert exit_relay.cadence_entries(relay, NOW) == [(HOTKEY, 5 * RAO)]
+    relay.store.record_relay_fee(SWAP2, MINER2, 'tao', 7 * RAO, NOW)
+    assert exit_relay.cadence_entries(relay, NOW) == [(HOTKEY2, 7 * RAO)]
+
+
+def test_an_unreadable_settled_counter_yields_no_vector_rather_than_a_guessed_one():
+    relay = _relay(vault=FakeVault(readable=False))
+    relay.store.record_relay_fee(SWAP, MINER, 'tao', 5 * RAO, NOW)
+    assert exit_relay.cadence_entries(relay, NOW) is None
+
+
+def test_the_round_waits_out_the_grace_so_a_fee_just_before_the_boundary_is_everywhere():
+    relay = _relay(fee_cadence_secs=1000)
+    relay.store.record_relay_fee(SWAP, MINER, 'tao', 5 * RAO, NOW - 10)
+    exit_relay.maybe_cadence_settle(relay, NOW + GRACE - 1)
+    assert not relay.vault.calls
+    exit_relay.maybe_cadence_settle(relay, NOW + GRACE)
+    assert relay.vault.calls == [('vote_collect_fees_batch', [(HOTKEY, 5 * RAO)])]
+
+
+def test_the_round_waits_for_the_event_feed_to_catch_up():
+    relay = _relay(fee_cadence_secs=1000)
+    relay.store.record_relay_fee(SWAP, MINER, 'tao', 5 * RAO, NOW - 10)
+    relay.feed_caught_up = False
+    exit_relay.maybe_cadence_settle(relay, NOW + GRACE)
+    assert not relay.vault.calls
+    assert relay.store.get_relay_meta('fee_cadence_boundary') is None, 'the boundary is still owed'
+    relay.feed_caught_up = True
+    exit_relay.maybe_cadence_settle(relay, NOW + GRACE + 12)
+    assert relay.vault.calls == [('vote_collect_fees_batch', [(HOTKEY, 5 * RAO)])]
 
 
 def test_totals_are_read_at_the_boundary_not_at_the_moment_of_firing():
@@ -561,7 +594,7 @@ def test_totals_are_read_at_the_boundary_not_at_the_moment_of_firing():
 def test_a_boundary_with_no_delta_is_skipped_as_pure_postage():
     relay = _relay(vault=FakeVault(settled={HOTKEY: 5 * RAO}), fee_cadence_secs=1000)
     relay.store.record_relay_fee(SWAP, MINER, 'tao', 5 * RAO, NOW - 10)
-    exit_relay.maybe_cadence_settle(relay, NOW)
+    exit_relay.maybe_cadence_settle(relay, NOW + GRACE)
     assert not relay.vault.calls
     assert relay.store.get_relay_meta('fee_cadence_boundary') is not None, 'and it is not retried'
 
@@ -569,15 +602,15 @@ def test_a_boundary_with_no_delta_is_skipped_as_pure_postage():
 def test_a_boundary_with_a_delta_fires_once_and_only_once():
     relay = _relay(fee_cadence_secs=1000)
     relay.store.record_relay_fee(SWAP, MINER, 'tao', 5 * RAO, NOW - 10)
-    exit_relay.maybe_cadence_settle(relay, NOW)
-    exit_relay.maybe_cadence_settle(relay, NOW + 5)
+    exit_relay.maybe_cadence_settle(relay, NOW + GRACE)
+    exit_relay.maybe_cadence_settle(relay, NOW + GRACE + 5)
     assert relay.vault.calls == [('vote_collect_fees_batch', [(HOTKEY, 5 * RAO)])]
 
 
 def test_an_unreadable_vault_defers_the_round_instead_of_deciding_blind():
     relay = _relay(vault=FakeVault(readable=False), fee_cadence_secs=1000)
     relay.store.record_relay_fee(SWAP, MINER, 'tao', 5 * RAO, NOW - 10)
-    exit_relay.maybe_cadence_settle(relay, NOW)
+    exit_relay.maybe_cadence_settle(relay, NOW + GRACE)
     assert not relay.vault.calls
     assert relay.store.get_relay_meta('fee_cadence_boundary') is None, 'the boundary is retried'
 
@@ -587,7 +620,7 @@ def test_a_rejected_batch_leaves_the_boundary_open_for_the_next_tick():
     vault.reject.add('vote_collect_fees_batch')
     relay = _relay(vault=vault, fee_cadence_secs=1000)
     relay.store.record_relay_fee(SWAP, MINER, 'tao', 5 * RAO, NOW - 10)
-    exit_relay.maybe_cadence_settle(relay, NOW)
+    exit_relay.maybe_cadence_settle(relay, NOW + GRACE)
     assert relay.store.get_relay_meta('fee_cadence_boundary') is None
 
 

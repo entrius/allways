@@ -3,9 +3,9 @@
 The fee total is cumulative per (miner, vault generation), because the vault's fee batch takes
 cumulative totals and every validator must vote the same vector. It is kept as a base plus the fee
 rows since the base was last folded, not as all of history: a miner's base is seeded from the vault's
-settled counter (which covers every fee up to the last fee boundary) and only rises when the vault
-has settled more than this ledger counted. A validator with a fresh database may count short until the
-next boundary settles; it never counts a fee twice."""
+settled counter, as of the boundary the vault last settled, and only rises when the vault has settled
+more than this ledger counted. A fresh database learns that boundary from ``stop_point`` before its
+first seed; a miner the vault has never settled counts every fee row. It never counts a fee twice."""
 
 from __future__ import annotations
 
@@ -50,6 +50,9 @@ class RelayLedger:
     ) -> None:
         self.store, self.hub = store, hub
         self.settled, self.boundary, self.clock = settled, boundary, clock
+        # The boundary the vault last settled, while a fresh database seeds its miners (see stop_point).
+        # Unset, a seed assumes the latest boundary — right whenever this validator voted the last round.
+        self.seed_as_of: Optional[int] = None
         self._t = f'relay_{hub}'
         store.declare(self._t, 1, _tables(hub))
 
@@ -114,7 +117,12 @@ class RelayLedger:
         if base is None:
             if settled is None:
                 raise RuntimeError(f'vault settled total unreadable for {miner[:8]}: cannot seed its fee total')
-            as_of = self.boundary(int(self.clock()))
+            if not settled:
+                as_of = -1  # never settled: every fee row is owed
+            elif self.seed_as_of is not None:
+                as_of = self.seed_as_of
+            else:
+                as_of = self.boundary(int(self.clock()))
             self._exec(f'INSERT INTO {self._t}_fee_base VALUES (?, ?, ?, ?)', (miner, generation, int(settled), as_of))
             base = self._base(miner, generation)
         last = self.boundary(int(self.clock()))
@@ -128,6 +136,10 @@ class RelayLedger:
                 )
                 base = self._base(miner, generation)
         return self._total(miner, generation, at_time)
+
+    def has_fee_bases(self) -> bool:
+        """Whether any miner was ever seeded: a database that has none is fresh to the fee ledger."""
+        return bool(self._rows(f'SELECT 1 FROM {self._t}_fee_base LIMIT 1'))
 
     def _generations(self, miner: str) -> List[int]:
         sql = f'SELECT generation FROM {self._t}_fee_base WHERE miner = ? UNION SELECT generation FROM {self._t}_fees WHERE miner = ?'
