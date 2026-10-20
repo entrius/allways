@@ -309,6 +309,7 @@ fn finalize_ix(router: &Pubkey, miner: &Pubkey, user: &Pubkey) -> Instruction {
             attestation: None,
             source_lock: srclock_pda(miner, FROM_CHAIN, FROM_ADDR),
             system_program: SYSTEM_PROGRAM,
+            from_addr_lock: addr_lock_pda(&pid(), FROM_ADDR),
         }
         .to_account_metas(None),
     )
@@ -720,6 +721,7 @@ fn test_finalize_rejects_dest_equal_to_miner_delivery_addr() {
             attestation: None,
             source_lock: srclock_pda(&miner.pubkey(), FROM_CHAIN, FROM_ADDR),
             system_program: SYSTEM_PROGRAM,
+            from_addr_lock: addr_lock_pda(&pid(), FROM_ADDR),
         }
         .to_account_metas(None),
     );

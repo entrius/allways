@@ -111,6 +111,28 @@ def test_vote_initiate_ix(client):
     ]
 
 
+def test_finalize_reservation_ix(client):
+    miner = Keypair().pubkey()
+    user = Keypair().pubkey()
+    client.finalize_reservation(
+        miner, user, 'userBTCaddr', 'userSOLaddr', 5, 1, 5, from_chain='btc', miner_from_addr='minerBTCaddr'
+    )
+    ix = _ix(client)
+    lock_key = pdas.source_lock_key('minerBTCaddr', 'userBTCaddr')
+    assert ix.data[:8] == layouts.IX_DISCRIMINATORS['finalize_reservation']
+    assert _metas(ix) == [
+        (client.keypair.pubkey(), True, True),
+        (pdas.config_pda(PID), False, False),
+        (miner, False, False),
+        (pdas.miner_state_pda(miner, PID), False, True),
+        (pdas.reservation_pda(miner, 'sol', PID), False, True),
+        (PID, False, False),  # absent optional BondAttestation — a "sol"-backed seat has no bond
+        (pdas.source_lock_pda('btc', lock_key, PID), False, True),
+        (SYSTEM_PROGRAM, False, False),
+        (pdas.addr_lock_pda('userBTCaddr', PID), False, False),  # the taker's source must not be a posted wallet
+    ]
+
+
 def test_vote_set_weights_ix(client):
     weights = [3, 0, 7]
     keys = [bytes(Keypair().pubkey()) for _ in range(3)]

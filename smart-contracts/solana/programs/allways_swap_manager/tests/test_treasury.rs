@@ -185,7 +185,7 @@ fn setup_with_fee() -> (LiteSVM, Keypair, u64) {
     // sole bidder (vals[0]) won the seat → it finalizes the fill (BTC→SOL: to_amount == collateral).
     send(&mut svm, Instruction::new_with_bytes(pid(),
         &allways_swap_manager::instruction::FinalizeReservation { user: pool_user, user_from_addr: "userBTC".to_string(), user_to_addr: "userSOL".to_string(), collateral_amount: SOL_AMOUNT, from_amount: 1, to_amount: SOL_AMOUNT as u128, source_lock_key: allways_swap_manager::source_lock_key("mBTC", "userBTC") }.data(),
-        allways_swap_manager::accounts::FinalizeReservation { router: vals[0].pubkey(), config: cfg(), miner: miner.pubkey(), miner_state: miner_pda(&miner.pubkey()), reservation: resv_pda(&miner.pubkey()), attestation: None, source_lock: Pubkey::find_program_address(&[b"srclock", b"btc", &allways_swap_manager::source_lock_key("mBTC", "userBTC")], &pid()).0, system_program: SYS }.to_account_metas(None),
+        allways_swap_manager::accounts::FinalizeReservation { router: vals[0].pubkey(), config: cfg(), miner: miner.pubkey(), miner_state: miner_pda(&miner.pubkey()), reservation: resv_pda(&miner.pubkey()), attestation: None, source_lock: Pubkey::find_program_address(&[b"srclock", b"btc", &allways_swap_manager::source_lock_key("mBTC", "userBTC")], &pid()).0, system_program: SYS, from_addr_lock: addr_lock_pda(&pid(), "userBTC") }.to_account_metas(None),
     ), &vals[0].pubkey(), &vals[0]).expect("finalize");
 
     let key = skey("tx1");
