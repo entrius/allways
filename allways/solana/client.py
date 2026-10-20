@@ -23,6 +23,7 @@ from solders.transaction import Transaction
 from allways.constants import VOTE_ROUND_TTL_SECS
 from allways.metadata import METADATA_DIR
 from allways.solana import layouts, pdas
+from allways.solana.events import program_event_payloads
 from allways.solana.program import resolve_program_id
 from allways.solana.rpc import SolanaRpc
 
@@ -1023,13 +1024,12 @@ class AllwaysSolanaClient:
         return self.rpc.get_signatures_for_address(self.program_id, before=before, until=until, limit=limit)
 
     def get_event_logs(self, signature: str) -> List[bytes]:
-        """Base64-decoded `Program data:` payloads from a tx's logs (Anchor self-CPI events). The canonical
-        event ingest (allways/solana/events.py, used by the validator crown) decodes these."""
+        """Base64-decoded event payloads this program logged in a tx; lines other programs logged are dropped.
+        The canonical event ingest (allways/solana/events.py, used by the validator) decodes these."""
         tx = self.rpc.get_transaction(signature)
         if not tx:
             return []
-        logs = (tx.get('meta') or {}).get('logMessages') or []
-        return [base64.b64decode(line[len('Program data: ') :]) for line in logs if line.startswith('Program data: ')]
+        return program_event_payloads((tx.get('meta') or {}).get('logMessages'), self.program_id)
 
     # ---------- dev helper ----------
     def airdrop(self, pubkey, lamports: int) -> str:

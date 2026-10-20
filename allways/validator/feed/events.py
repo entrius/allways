@@ -172,7 +172,7 @@ class LiveFeed(ProgramEventFeed):
         value = result.get('value') or {}
         if value.get('err') is not None:
             return 0
-        events = events_from_logs(value.get('logs'))
+        events = events_from_logs(value.get('logs'), self.program_id)
         slot = int((result.get('context') or {}).get('slot') or 0)
         with self._lock:
             self._inbox.append(_Pending(slot, str(value.get('signature')), events))
@@ -334,7 +334,10 @@ class EventFeed(Component):
                 block_time = tx.get('blockTime') or entry.get('blockTime') or self._clock.time_of(slot)
                 logs = (tx.get('meta') or {}).get('logMessages') or []
                 if self.seen.add(sig):
-                    records = [EventRecord(n, f, entry.get('slot'), block_time, sig) for n, f in events_from_logs(logs)]
+                    records = [
+                        EventRecord(n, f, entry.get('slot'), block_time, sig)
+                        for n, f in events_from_logs(logs, self.program_id)
+                    ]
                     self.out.publish_many(records)
                     self._recovered += len(records)
             self._cursor = (slot, sig)
