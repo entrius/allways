@@ -3,7 +3,6 @@ decoded and dispatched per event name, reconnecting with jittered backoff. The a
 a miner narrows it to its own pubkey. The feed is latency, not truth — consumers keep a catch-up for gaps."""
 
 import asyncio
-import base64
 import json
 import random
 import threading
@@ -13,7 +12,7 @@ from typing import Any, Callable, Dict, List, Optional
 
 import bittensor as bt
 
-from allways.solana.events import PROGRAM_DATA_PREFIX, decode_event
+from allways.solana.events import decode_event, program_event_payloads
 
 Handler = Callable[[str, Any], None]
 
@@ -26,14 +25,12 @@ def _mask(url: str) -> str:
     return f'{head}{sep}…' if sep else url
 
 
-def events_from_logs(logs: List[str]) -> List[tuple]:
-    """Decode the program's `Program data:` lines of one tx into [(name, event)], skipping foreign/unknown."""
+def events_from_logs(logs: List[str], program_id) -> List[tuple]:
+    """Decode the `Program data:` lines ``program_id`` itself logged in one tx into [(name, event)]."""
     out = []
-    for line in logs or []:
-        if not line.startswith(PROGRAM_DATA_PREFIX):
-            continue
+    for raw in program_event_payloads(logs, program_id):
         try:
-            decoded = decode_event(base64.b64decode(line[len(PROGRAM_DATA_PREFIX) :]))
+            decoded = decode_event(raw)
         except Exception:
             continue
         if decoded is not None:
@@ -82,7 +79,7 @@ class ProgramEventFeed:
         if value.get('err') is not None:
             return 0
         n = 0
-        for name, event in events_from_logs(value.get('logs')):
+        for name, event in events_from_logs(value.get('logs'), self.program_id):
             for handler in self._handlers.get(name, ()):
                 try:
                     handler(name, event)

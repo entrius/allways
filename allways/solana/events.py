@@ -1,12 +1,16 @@
 """Decode + ingest allways_swap_manager program events from Solana tx logs (B3).
 
-Anchor self-CPI events are emitted as base64 `Program data:` log lines = 8-byte event discriminator +
-borsh(body). Discriminators + field order copied verbatim from target/idl/allways_swap_manager.json. The
-validator replays these to reconstruct per-instant miner state (collateral, activity, rate, active) for the
+Events are emitted with Anchor `emit!` as base64 `Program data:` log lines = 8-byte event discriminator +
+borsh(body). Any program can log such a line, so a line counts only when the program itself logged it
+(program_event_payloads). Discriminators + field order copied verbatim from target/idl/allways_swap_manager.json.
+The validator replays these to reconstruct per-instant miner state (collateral, activity, rate, active) for the
 crown — replacing the old substrate event_watcher. Only the crown-relevant events are decoded here.
 """
 
+import base64
+import binascii
 import logging
+import re
 import time
 from dataclasses import dataclass
 from typing import Any, List, Optional, Tuple
@@ -23,7 +27,43 @@ _BY_DISC = {disc: name for name, disc in EVENT_DISCRIMINATORS.items()}
 
 PROGRAM_DATA_PREFIX = 'Program data: '
 
+# Only the runtime writes these frame lines; a program's own output is always `Program log:` / `Program data:`.
+_B58 = r'[1-9A-HJ-NP-Za-km-z]{32,44}'
+_INVOKE = re.compile(rf'^Program ({_B58}) invoke \[(\d+)\]$')
+_EXIT = re.compile(rf'^Program ({_B58}) (?:success$|failed: )')
+
 logger = logging.getLogger(__name__)
+
+
+def program_event_payloads(logs: Optional[List[str]], program_id: Any) -> List[bytes]:
+    """Decoded `Program data:` payloads that ``program_id`` itself logged, read off the invoke stack. A line
+    logged by any other program (one that only lists ours as an account) is not ours and is dropped.
+    Frames that don't nest as the runtime writes them void the whole tx: nothing in it is attributable."""
+    program, stack, out = str(program_id), [], []
+    for line in logs or []:
+        invoke = _INVOKE.match(line)
+        if invoke:
+            if int(invoke.group(2)) != len(stack) + 1:
+                return _unattributable(logs)
+            stack.append(invoke.group(1))
+            continue
+        exit_ = _EXIT.match(line)
+        if exit_:
+            if not stack or stack.pop() != exit_.group(1):
+                return _unattributable(logs)
+            continue
+        if line.startswith(PROGRAM_DATA_PREFIX) and stack and stack[-1] == program:
+            try:
+                out.append(base64.b64decode(line[len(PROGRAM_DATA_PREFIX) :], validate=True))
+            except (binascii.Error, ValueError):
+                continue
+    return out
+
+
+def _unattributable(logs: List[str]) -> List[bytes]:
+    logger.warning('Dropping a tx whose log frames do not nest (%d lines): its events cannot be attributed', len(logs))
+    return []
+
 
 # Slot age at which poll() stops holding the cursor for an unstamped tx (~2 min): past this the
 # RPC is never going to backfill its blockTime, and holding would wedge ingest forever.
