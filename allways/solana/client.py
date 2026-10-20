@@ -585,7 +585,7 @@ class AllwaysSolanaClient:
     def new_wallet_locks(self, wallets) -> int:
         """How many wallet locks posting these wallets would claim — each pays the program's lock fee."""
         locks = {pdas.addr_lock_pda(w, self.program_id) for w in wallets}
-        return sum(self.rpc.get_account_info(lock) is None for lock in locks)
+        return sum(not self.rpc.get_account_info(lock) for lock in locks)  # no data = not yet claimed
 
     def unlocked_quotes(self) -> List[Tuple[str, object]]:
         """Standing quotes whose two wallets aren't both locked to their miner — what `close_unlocked_quote`

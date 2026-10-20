@@ -124,7 +124,7 @@ def test_wallet_lock_fee_counts_each_unlocked_wallet_once(capsys):
     client = AllwaysSolanaClient.__new__(AllwaysSolanaClient)
     client.program_id, client.rpc = Keypair().pubkey(), MagicMock()
     owned = pdas.addr_lock_pda('OWNED', client.program_id)
-    client.rpc.get_account_info.side_effect = lambda lock: b'lock' if lock == owned else None
+    client.rpc.get_account_info.side_effect = lambda lock: b'lock' if lock == owned else b''
     print_wallet_lock_fee(client, ['bc1qnew', 'BC1QNEW', 'owned', 'solNew'])
     assert 'Wallet lock fee: 0.04 SOL' in capsys.readouterr().out  # 2 new: case variants share one lock
     print_wallet_lock_fee(client, ['OWNED'])

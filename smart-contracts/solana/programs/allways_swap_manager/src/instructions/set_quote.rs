@@ -169,7 +169,7 @@ pub fn handler(
     } else {
         0
     };
-    let charge = fee + lock_fee;
+    let charge = fee.checked_add(lock_fee).ok_or(ErrorCode::Overflow)?;
     if charge > 0 {
         transfer(
             CpiContext::new(
