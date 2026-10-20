@@ -628,7 +628,6 @@ class ValidatorStateStore:
         # A deposit older than this can't pass freshness against any new reservation.
         self._execute('DELETE FROM used_deposits WHERE seen_at < ?', (cutoff_block,))
         self._execute('DELETE FROM used_deliveries WHERE seen_at < ?', (cutoff_block,))
-        self._execute('DELETE FROM payout_routes WHERE seen_at < ?', (cutoff_block,))
 
     # ─── collateral_verdicts (declared alpha leg at fill block) ────────
 
@@ -678,22 +677,6 @@ class ValidatorStateStore:
         together. A ``SwapFulfilled`` hash alone doesn't count: it is the miner's own pointer to its
         delivery, checked only against that swap."""
         return self._fetchone('SELECT 1 FROM used_deliveries WHERE tx_hash = ?', (tx_key(tx_hash),)) is not None
-
-    # ─── payout_routes (live swaps' payout legs) ─────────────────────────
-    # Fed by the swap loop every pass, before it decides anything. Addresses are normalized by the
-    # caller; seen_at is refreshed each pass, so a route outlives its swap by the prune window.
-
-    def record_payout_route(self, chain: str, sender: str, recipient: str, swap_key: str, seen_at: int) -> None:
-        self._execute(
-            'INSERT OR REPLACE INTO payout_routes (chain, sender, recipient, swap_key, seen_at) VALUES (?, ?, ?, ?, ?)',
-            (chain, sender, recipient, swap_key, int(seen_at)),
-        )
-
-    def is_payout_route(self, chain: str, sender: str, recipient: str) -> bool:
-        row = self._fetchone(
-            'SELECT 1 FROM payout_routes WHERE chain = ? AND sender = ? AND recipient = ?', (chain, sender, recipient)
-        )
-        return row is not None
 
     # ─── used_deposits (one swap per source deposit) ─────────────────────
     # Fed by SwapClaimed/SwapInitiated events and the swap loop, so a fresh database rebuilds it
@@ -1328,17 +1311,6 @@ class ValidatorStateStore:
                 );
                 CREATE INDEX IF NOT EXISTS idx_swap_fulfillments_tx
                     ON swap_fulfillments(lower(to_tx_hash));
-
-                -- (chain, payout wallet, payout address) of every live swap the loop has seen.
-                -- A source tx paid along one is that swap's payout, never a taker's deposit.
-                CREATE TABLE IF NOT EXISTS payout_routes (
-                    chain       TEXT NOT NULL,
-                    sender      TEXT NOT NULL,
-                    recipient   TEXT NOT NULL,
-                    swap_key    TEXT NOT NULL,
-                    seen_at     INTEGER NOT NULL,
-                    PRIMARY KEY (chain, sender, recipient, swap_key)
-                );
 
                 -- Source tx hash -> the first swap that claimed it; initiated = spent.
                 CREATE TABLE IF NOT EXISTS used_deposits (

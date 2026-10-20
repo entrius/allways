@@ -315,14 +315,6 @@ def _payout_relay(store):
     return _relay(spec, {'sol': resv}, store)
 
 
-def test_a_live_swaps_payout_cannot_be_claimed_as_a_deposit(tmp_path):
-    store = ValidatorStateStore(tmp_path / 'state.db')
-    store.record_payout_route('eth', PAYER.lower(), DEPOSIT_WALLET.lower(), 'aa' * 32, CREATED_AT)
-    validator, client, _ = _payout_relay(store)
-    r = confirm_deposit(validator, HOTKEY, '0x' + HEX)
-    assert not r.ok and 'payout' in r.reason and not client.claims
-
-
 @pytest.mark.parametrize('reported', ['0x' + HEX.upper(), '0x' + HEX.lower()])
 def test_a_reported_payout_hash_alone_does_not_block_a_deposit(tmp_path, reported):
     # Another swap's SwapFulfilled names this hash, but no validator verified it as a delivery.
@@ -339,10 +331,8 @@ def test_a_verified_delivery_cannot_be_claimed(tmp_path):
     assert not confirm_deposit(validator, HOTKEY, '0x' + HEX).ok and not client.claims
 
 
-def test_an_honest_deposit_is_unaffected_by_other_routes(tmp_path):
+def test_an_honest_deposit_is_unaffected_by_reported_fulfillments(tmp_path):
     store = ValidatorStateStore(tmp_path / 'state.db')
-    store.record_payout_route('eth', PAYER.lower(), '0x' + 'ee' * 20, 'aa' * 32, CREATED_AT)  # pays someone else
-    store.record_payout_route('base', PAYER.lower(), DEPOSIT_WALLET.lower(), 'bb' * 32, CREATED_AT)  # another chain
     store.record_swap_fulfillment('cc' * 32, '0x' + 'f' * 64, CREATED_AT)
     validator, client, _ = _payout_relay(store)
     assert confirm_deposit(validator, HOTKEY, '0x' + HEX).ok and len(client.claims) == 1
@@ -357,23 +347,14 @@ def _refill_and_claim(store):
     return loop, claim, refill
 
 
-def test_attest_gate_refuses_a_claim_on_a_live_swaps_payout(tmp_path):
-    store = ValidatorStateStore(tmp_path / 'state.db')
-    loop, claim, refill = _refill_and_claim(store)
-    assert loop.decide(claim, now=1500).decision == SwapDecision.ATTEST  # no route known yet
-    loop._note_payout_routes([refill], now=1500)
-    action = loop.decide(claim, now=1501)
-    assert action.decision == SwapDecision.REJECT and 'payout' in action.reason
-
-
-def test_routes_are_recorded_before_any_decision_in_a_pass(tmp_path):
-    # The claim is listed before the refill: the pass must still know the refill's route when deciding it.
+def test_a_live_swap_paying_the_same_wallets_does_not_block_a_claim(tmp_path):
+    # A live swap pays from the claim's source to its deposit wallet; the claim still attests on its own merits.
     store = ValidatorStateStore(tmp_path / 'state.db')
     loop, claim, refill = _refill_and_claim(store)
     loop.read_only = True
     loop.client.get_swaps = lambda: [(None, claim), (None, refill)]
     decisions = dict(loop.run_once(now=1500))
-    assert decisions[claim.swap_key.hex()] == SwapDecision.REJECT
+    assert decisions[claim.swap_key.hex()] == SwapDecision.ATTEST
 
 
 # ── ledger rebuilt from program events ───────────────────────────────────────
@@ -527,6 +508,16 @@ def test_one_delivery_confirms_one_swap_whatever_the_second_spelling(spec, spell
     assert loop.decide(first, now=1500).decision == SwapDecision.CONFIRM
     assert loop.decide(second, now=1500).decision == SwapDecision.WAIT
     assert loop.decide(second, now=2500).decision == SwapDecision.TIMEOUT
+
+
+@pytest.mark.parametrize('spec', DEST_SPECS, ids=lambda s: s.chain_id)
+def test_a_claimed_source_deposit_never_confirms_a_delivery(spec, tmp_path):
+    store = ValidatorStateStore(tmp_path / 'state.db')
+    store.record_deposit_claim(_canonical(spec), 'ee' * 32, 1400)
+    loop, _ = _dest_loop(spec, store)
+    swap = _delivery(spec, _canonical(spec).upper() if spec is BTC_SPEC else _canonical(spec))
+    assert loop.decide(swap, now=1500).decision == SwapDecision.WAIT
+    assert loop.decide(swap, now=2500).decision == SwapDecision.TIMEOUT
 
 
 def test_solana_delivery_signature_is_verified_as_given():

@@ -124,19 +124,10 @@ def is_tx_fresh(info: Any, floor_unix: int, grace: int = 0) -> bool:
     return block_time >= floor_unix - grace
 
 
-def payout_reuse_reason(
-    state_store: Any, chain: Any, from_chain: str, sender: str, deposit_wallet: str, tx_hash: str
-) -> Optional[str]:
-    """Refuse a deposit that is some swap's payout. A miner refilling its deposit wallet through allways
-    announces the payout (sender, recipient, amount) on chain before it lands, so anyone could reserve
-    naming the payer as their source and claim the delivery as their own deposit. Matches the route of
-    any live swap the loop has seen, or a delivery this validator already verified."""
-    if state_store is None:
-        return None
-    norm = chain.normalize_address
-    if state_store.is_payout_route(from_chain, norm(sender), norm(deposit_wallet)) or state_store.is_recorded_payout(
-        tx_hash
-    ):
+def payout_reuse_reason(state_store: Any, tx_hash: str) -> Optional[str]:
+    """Refuse a deposit that is a delivery this validator already verified for some swap. A payout from a
+    posted miner wallet can't be named as a taker's source at all (``finalize_reservation`` refuses it)."""
+    if state_store is not None and state_store.is_recorded_payout(tx_hash):
         return "source tx is another swap's payout, not a deposit"
     return None
 
@@ -416,6 +407,12 @@ class SolanaSwapLoop:
             and d_status == 'ok'
             and self._is_fresh(d_info, int(swap.initiated_at), swap.to_chain, self._label(swap))
         ):
+            if self.state_store is not None and self.state_store.deposit_claim(swap.to_tx_hash) is not None:
+                # A tx some swap claimed as its source deposit pays that swap, not this one.
+                return SwapAction(
+                    SwapDecision.TIMEOUT if overdue else SwapDecision.WAIT,
+                    reason="delivery tx is another swap's source deposit" + (' — slashing' if overdue else ''),
+                )
             if self.state_store is not None and not self.state_store.claim_delivery(
                 str(swap.miner), swap.to_tx_hash, _swap_key_hex(swap.swap_key), now
             ):
@@ -475,34 +472,7 @@ class SolanaSwapLoop:
         return bytes(reservation.claimed_swap_key) != swap_key_from_tx_hash(swap.from_tx_hash)
 
     def _payout_reuse_reason(self, swap: Any) -> Optional[str]:
-        provider = self.providers.get(swap.from_chain)
-        if provider is None:
-            return None
-        return payout_reuse_reason(
-            self.state_store,
-            provider.chain,
-            swap.from_chain,
-            swap.user_from_addr,
-            swap.miner_from_addr,
-            swap.from_tx_hash,
-        )
-
-    def _note_payout_routes(self, swaps: List[Any], now: int) -> None:
-        """Record every live swap's payout route before any decision, so a claim on its payout is refused
-        even in the pass that first sees both."""
-        if self.state_store is None:
-            return
-        for swap in swaps:
-            provider = self.providers.get(swap.to_chain)
-            if provider is None:
-                continue
-            try:
-                norm = provider.chain.normalize_address
-                self.state_store.record_payout_route(
-                    swap.to_chain, norm(swap.miner_to_addr), norm(swap.user_to_addr), _swap_key_hex(swap.swap_key), now
-                )
-            except Exception as e:  # one bad swap must not break the pass
-                bt.logging.warning(f'swap {_swap_key_hex(swap.swap_key)}: payout route not recorded: {e}')
+        return payout_reuse_reason(self.state_store, swap.from_tx_hash)
 
     def _deposit_claimed_reason(self, swap: Any, now: int) -> Optional[str]:
         """Refuse a claim on a deposit that another swap claimed first, or whose swap was already
@@ -791,7 +761,6 @@ class SolanaSwapLoop:
         swaps = [
             acct if hasattr(acct, 'swap_key') else swap_from_solana(acct) for _pubkey, acct in self.client.get_swaps()
         ]
-        self._note_payout_routes(swaps, now)
         for swap in swaps:
             key = _swap_key_hex(swap.swap_key)
             if self.relay is not None:
