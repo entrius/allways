@@ -2,6 +2,7 @@
 
 import pytest
 
+from allways.assets.btc import Bitcoin
 from allways.miner.optimizer.balances import HOLD_SECS, BtcBalanceReader, TaoBalanceReader
 
 
@@ -55,9 +56,13 @@ class EsploraResponse:
 class FlakyEsplora:
     """The miner's BTC provider as the reader sees it: ``btc_api_get`` answering each call from ``results``."""
 
-    def __init__(self, results):
+    spendable_balance = Bitcoin.spendable_balance
+    is_spendable_utxo = Bitcoin.is_spendable_utxo
+
+    def __init__(self, results, broadcasted=()):
         self.results = list(results)
         self.paths = []
+        self.broadcasted_txids = {txid: None for txid in broadcasted}
 
     def btc_api_get(self, path, timeout=None):
         self.paths.append(path)
@@ -67,19 +72,16 @@ class FlakyEsplora:
         return result
 
 
-def address_stats(funded, spent, mempool_funded=0, mempool_spent=0):
-    return {
-        'chain_stats': {'funded_txo_sum': funded, 'spent_txo_sum': spent},
-        'mempool_stats': {'funded_txo_sum': mempool_funded, 'spent_txo_sum': mempool_spent},
-    }
+def utxo(txid, value, confirmed=True):
+    return {'txid': txid, 'vout': 0, 'value': value, 'status': {'confirmed': confirmed}}
 
 
-def test_btc_balance_counts_confirmed_and_mempool_coins():
-    # A payout may spend unconfirmed change, so an outgoing mempool spend counts against the balance and an incoming
-    # one for it — the same coins the provider selects from.
-    esplora = FlakyEsplora([EsploraResponse(address_stats(900_000, 100_000, mempool_funded=50_000, mempool_spent=0))])
+def test_btc_balance_counts_confirmed_coins_and_our_own_change_only():
+    # An outside unconfirmed coin can be replaced away before a payout built on it confirms.
+    coins = [utxo('a', 800_000), utxo('ours', 50_000, confirmed=False), utxo('outside', 5_000_000, confirmed=False)]
+    esplora = FlakyEsplora([EsploraResponse(coins)], broadcasted=['ours'])
     assert BtcBalanceReader(esplora).get_balance('bc1qminer') == 850_000
-    assert esplora.paths == ['/address/bc1qminer']
+    assert esplora.paths == ['/address/bc1qminer/utxo']
 
 
 @pytest.mark.parametrize(
@@ -87,12 +89,12 @@ def test_btc_balance_counts_confirmed_and_mempool_coins():
     [
         ConnectionError('every Esplora endpoint down'),
         EsploraResponse(error=RuntimeError('429 Too Many Requests')),
-        EsploraResponse({'chain_stats': {}}),  # a malformed body
+        EsploraResponse({'chain_stats': {}}),  # a malformed body (not a UTXO list)
     ],
 )
 def test_a_failed_btc_read_holds_the_last_good_balance_then_reads_unknown_not_zero(failure):
     now = [1000.0]
-    esplora = FlakyEsplora([EsploraResponse(address_stats(500_000, 0)), failure, failure])
+    esplora = FlakyEsplora([EsploraResponse([utxo('a', 500_000)]), failure, failure])
     reader = BtcBalanceReader(esplora, clock=lambda: now[0])
     assert reader.get_balance('bc1qminer') == 500_000
     now[0] += 60

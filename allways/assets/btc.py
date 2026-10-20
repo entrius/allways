@@ -518,19 +518,19 @@ class Bitcoin(Asset, Chain):
         return None
 
     def api_get_balance(self, address: str) -> int:
-        """Get balance via Esplora API. Returns satoshis."""
+        """Satoshis the wallet can spend now via Esplora: confirmed coins plus change from our own broadcasts,
+        the same coins ``select_utxos`` will spend. Anyone can push an unconfirmed coin to a public address."""
         try:
-            resp = self.btc_api_get(f'/address/{address}', timeout=15)
-            resp.raise_for_status()
-            data = resp.json()
-            funded = data.get('chain_stats', {}).get('funded_txo_sum', 0)
-            spent = data.get('chain_stats', {}).get('spent_txo_sum', 0)
-            mempool_funded = data.get('mempool_stats', {}).get('funded_txo_sum', 0)
-            mempool_spent = data.get('mempool_stats', {}).get('spent_txo_sum', 0)
-            return (funded - spent) + (mempool_funded - mempool_spent)
+            return self.spendable_balance(address)
         except Exception as e:
             bt.logging.error(f'Esplora balance lookup failed for {address}: {e}')
             return 0
+
+    def spendable_balance(self, address: str, timeout: float = 15) -> int:
+        """Sum of the address's spendable UTXOs (``is_spendable_utxo``); raises on an API failure."""
+        resp = self.btc_api_get(f'/address/{address}/utxo', timeout=timeout)
+        resp.raise_for_status()
+        return sum(int(u['value']) for u in resp.json() if self.is_spendable_utxo(u))
 
     def is_valid_address(self, address: str) -> bool:
         """Validate BTC address format and network without RPC."""
