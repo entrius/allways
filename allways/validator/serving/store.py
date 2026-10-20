@@ -5,7 +5,7 @@ already priced (collateral verdicts) are read from there, not kept twice."""
 
 from __future__ import annotations
 
-from typing import Any, Callable, Dict, List, Optional, Set, Tuple
+from typing import Any, Callable, Dict, List, Optional, Tuple
 
 from allways.constants import SWAP_OUTCOME_RETENTION_SECS
 from allways.validator.store.db import Store
@@ -168,11 +168,9 @@ class ServingStore:
         return any(r.chain == chain and norm(r.sender) == sender and norm(r.recipient) == recipient for r in routes)
 
     def is_recorded_payout(self, tx_hash: str) -> bool:
-        key, world = tx_key(tx_hash), self._world()
-        reported: Set[str] = (
-            {tx_key(f.to_tx_hash) for f in world.fulfillments.values() if f.to_tx_hash} if world else set()
-        )
-        return key in reported or any(k == key for _, k in self.memory.deliveries)
+        """A delivery this validator verified. Not one a miner merely reported: see WorldContext.payout_reuse."""
+        key = tx_key(tx_hash)
+        return any(k == key for _, k in self.memory.deliveries)
 
     def collateral_verdict(self, miner, backing, created_at, collateral_amount) -> Optional[bool]:
         return self.memory.collateral.get((str(miner), str(backing), int(created_at), int(collateral_amount)))

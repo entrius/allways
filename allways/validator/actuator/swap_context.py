@@ -181,7 +181,9 @@ class WorldContext:
         return False
 
     def payout_reuse(self, swap: Any) -> bool:
-        """The deposit is some swap's payout: it matches a payout route, or it is a reported delivery."""
+        """The deposit is some swap's payout: it matches a payout route, or a delivery this validator verified.
+        A delivery a miner only reported is not evidence: ``to_tx_hash`` is free text, so any miner could name
+        a user's real deposit and get it refused."""
         provider = self.providers.get(swap.from_chain)
         if provider is None:
             return False
@@ -191,8 +193,6 @@ class WorldContext:
             if route.chain == swap.from_chain and norm(route.sender) == sender and norm(route.recipient) == wallet:
                 return True
         deposit = tx_key(swap.from_tx_hash)
-        if any(tx_key(f.to_tx_hash) == deposit for f in self.world.fulfillments.values() if f.to_tx_hash):
-            return True
         return any(k == deposit for _, k in self.memory.deliveries)
 
     def claim_delivery(self, swap: Any) -> bool:

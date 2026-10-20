@@ -1,6 +1,7 @@
 """The swap rules (``swaps.decide``) through the production context, with every chain question answered
 on the spot by the providers below instead of a watcher thread. No chain, no votes."""
 
+from dataclasses import replace
 from types import SimpleNamespace
 
 from allways.assets.asset import ProviderUnreachableError
@@ -10,7 +11,7 @@ from allways.validator.actuator.swap_context import SwapMemory, WorldContext
 from allways.validator.actuator.swaps import COLLATERAL_REJECT_REASON, Decision, decide
 from allways.validator.chains.watcher import Verdict
 from allways.validator.store.db import Store
-from allways.validator.world.snapshot import World
+from allways.validator.world.snapshot import Fulfillment, World, tx_key
 
 INITIATED_AT = 1000  # dest-freshness floor
 RESV_CREATED_AT = 1200  # source-freshness floor
@@ -762,3 +763,19 @@ class TestMissingProviderNeverSlashes:
 
 
 # ── Published leg confirmations (seam serves these; it must never recompute them) ────────────
+
+
+def test_a_delivery_another_miner_only_reported_does_not_veto_a_deposit():
+    # Any miner can mark_fulfilled with a user's real deposit hash as its to_tx_hash (free text).
+    rules, _ = rules_with(result=True)
+    swap = make_swap(status='PendingAttestation')
+    ctx = _Context(rules, 1500)
+    ctx.world = replace(ctx.world, fulfillments={'other': Fulfillment(swap.from_tx_hash, 1400, 'sybil', False)})
+    assert decide(swap, ctx, 1500, fee_divisor=100).decision == Decision.ATTEST
+
+
+def test_a_delivery_this_validator_verified_is_still_refused_as_a_deposit():
+    rules, _ = rules_with(result=True)
+    swap = make_swap(status='PendingAttestation')
+    rules.memory.claim_delivery('another-miner', tx_key(swap.from_tx_hash), 'ab' * 32, 1400)
+    assert rules.decide(swap, now=1500).decision == Decision.REJECT
