@@ -22,6 +22,7 @@ from allways.cli import ui
 from allways.cli.help import StyledCommand
 from allways.cli.swap_commands import setup_env as se
 from allways.cli.swap_commands.helpers import (
+    ADDR_LOCK_FEE_LAMPORTS,
     ALLWAYS_DIR,
     CONFIG_FILE,
     ENV_BUNDLES,
@@ -53,8 +54,8 @@ HELIUS_RPC = {'devnet': 'https://devnet.helius-rpc.com/', 'mainnet': 'https://ma
 ACTIVATE_RETRY_SECS = 180
 ACTIVATE_WAIT_AFTER_REGISTER_MINS = 35
 # SOL kept on the keypair past the collateral floor: rent for the miner's state, binding and first quote
-# accounts plus transaction fees. A headroom figure, not a contract value.
-SOL_SETUP_HEADROOM_LAMPORTS = 50_000_000
+# accounts plus transaction fees, and the first quote's two wallet locks. A headroom figure, not a contract value.
+SOL_SETUP_HEADROOM_LAMPORTS = 50_000_000 + 2 * ADDR_LOCK_FEE_LAMPORTS
 # Preflight rows the go-live sequence itself resolves (fund → deposit → bind → register → bond → start →
 # activate): a fresh miner fails all of them by definition, so they never gate the "continue?" prompt.
 GO_LIVE_ROWS = ('SOL balance', 'SOL collateral', 'hotkey binding', 'TAO bond', 'miner container')
@@ -683,7 +684,8 @@ def _funding_rows(s: Setup, client, subtensor, config, wallet, pubkey, netuid: i
     posted = client.get_collateral_lamports(pubkey) or 0
     sol_need = max(floors[BACKING_CHAIN_SOL] - posted, 0) + SOL_SETUP_HEADROOM_LAMPORTS
     sol_have = client.rpc.get_account_lamports(pubkey) or 0
-    why = 'collateral floor + ~0.05 rent/fees' if posted < floors[BACKING_CHAIN_SOL] else '~0.05 rent/fees'
+    headroom = f'~{SOL_SETUP_HEADROOM_LAMPORTS / 1e9:g} rent/fees/wallet locks'
+    why = f'collateral floor + {headroom}' if posted < floors[BACKING_CHAIN_SOL] else headroom
     rows.append(
         (
             sol_have >= sol_need,

@@ -55,6 +55,7 @@ def _client(**over):
     c.get_collateral_lamports.return_value = over.pop('collateral', 0)
     c.get_miner_state.return_value = over.pop('state', _state())
     c.rpc.get_account_lamports.return_value = over.pop('free', 100_000_000_000)
+    c.new_wallet_locks.return_value = 0
     for k, v in over.items():
         getattr(c, k).return_value = v
     return c

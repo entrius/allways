@@ -382,14 +382,15 @@ pub struct AddrLock {
 }
 
 impl AddrLock {
-    /// Claim on first post; afterwards only the owner may post this wallet.
-    pub fn claim(&mut self, miner: Pubkey, bump: u8) -> Result<()> {
-        if self.owner == Pubkey::default() {
+    /// Claim on first post; afterwards only the owner may post this wallet. True on the first claim.
+    pub fn claim(&mut self, miner: Pubkey, bump: u8) -> Result<bool> {
+        let first = self.owner == Pubkey::default();
+        if first {
             self.owner = miner;
             self.bump = bump;
         }
         require!(self.owner == miner, crate::error::ErrorCode::AddressTaken);
-        Ok(())
+        Ok(first)
     }
 }
 

@@ -7,7 +7,7 @@ use {
         AccountDeserialize, InstructionData, ToAccountMetas,
     },
     allways_swap_manager::constants::{
-        discounted_reservation_fee, POOL_WINDOW_SECS, RESERVATION_FEE_LAMPORTS,
+        discounted_reservation_fee, ADDR_LOCK_FEE_LAMPORTS, POOL_WINDOW_SECS, RESERVATION_FEE_LAMPORTS,
     },
     allways_swap_manager::state::{Pool, Treasury},
     litesvm::LiteSVM,
@@ -217,9 +217,10 @@ fn setup_with_fee() -> (LiteSVM, Keypair, u64) {
     confirm(&mut svm, &vals[0]);
     confirm(&mut svm, &vals[1]);
 
-    // treasury = reservation fee + the 1% confirm fee (quote creation is free).
+    // treasury = the quote's two wallet locks + reservation fee + the 1% confirm fee.
     // The opener is one of 3 weight-1 validators, so its reservation fee is stake-discounted.
-    (svm, admin, SOL_AMOUNT / 100 + discounted_reservation_fee(RESERVATION_FEE_LAMPORTS, 1, 3))
+    let fees = 2 * ADDR_LOCK_FEE_LAMPORTS + discounted_reservation_fee(RESERVATION_FEE_LAMPORTS, 1, 3);
+    (svm, admin, SOL_AMOUNT / 100 + fees)
 }
 
 #[test]

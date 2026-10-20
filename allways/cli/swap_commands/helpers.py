@@ -140,11 +140,25 @@ QUOTE_UPDATE_FEE_TIERS = ((300, 10_000_000), (600, 1_000_000))  # (elapsed < sec
 
 def quote_update_fee_lamports(elapsed_secs: int) -> int:
     """Churn fee (lamports) to re-quote a direction ``elapsed_secs`` after its last update: 0.01 SOL
-    under 5 min, 0.001 SOL at 5–10 min, free after 10 min. Creation is free. Mirrors the contract."""
+    under 5 min, 0.001 SOL at 5–10 min, free after 10 min. None on creation. Mirrors the contract."""
     for below, fee in QUOTE_UPDATE_FEE_TIERS:
         if elapsed_secs < below:
             return fee
     return 0
+
+
+# Wallet-lock fee — mirrors constants.rs ADDR_LOCK_FEE_LAMPORTS: each wallet's first post, non-refundable.
+ADDR_LOCK_FEE_LAMPORTS = 20_000_000
+
+
+def print_wallet_lock_fee(client, wallets) -> None:
+    """Show the lock fee for wallets this post would lock for the first time, before the confirm."""
+    new = client.new_wallet_locks(wallets)
+    if new:
+        console.print(
+            f'  [yellow]Wallet lock fee: {new * ADDR_LOCK_FEE_LAMPORTS / 1e9:g} SOL[/yellow] '
+            f'[dim]({new} new wallet(s); locked to you for good, non-refundable → treasury)[/dim]\n'
+        )
 
 
 def votes_needed(cfg) -> int:
