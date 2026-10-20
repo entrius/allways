@@ -302,8 +302,8 @@ ACCOUNT_PUBKEY_FIELDS = {
 }
 
 # --- events (8-byte discriminator from IDL `events[].discriminator` + borsh(fields)) ---
-# Emitted via Anchor self-CPI and surfaced in tx logs as base64 `Program data:` lines. Field order/types
-# mirror events.rs / the IDL exactly. swap_key + hotkey stay raw bytes (see EVENT_PUBKEY_FIELDS).
+# Emitted via Anchor `emit!` as base64 `Program data:` log lines, which any program can log (see
+# events.program_event_payloads). Field order/types mirror events.rs / the IDL exactly. swap_key + hotkey stay raw bytes (see EVENT_PUBKEY_FIELDS).
 EVENT_DISCRIMINATORS = {
     'AttestHeartbeat': bytes([66, 230, 199, 211, 232, 136, 138, 139]),
     'BondAttested': bytes([65, 162, 178, 67, 21, 45, 162, 255]),

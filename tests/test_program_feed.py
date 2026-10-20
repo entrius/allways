@@ -12,6 +12,7 @@ from allways.solana.layouts import EVENT_DISCRIMINATORS, EVENT_LAYOUTS
 from allways.solana.program_feed import ProgramEventFeed, events_from_logs
 from allways.solana.rpc import resolve_ws_url
 
+PROGRAM = '6JVBEj5w27J2SVjERmv2c7wXgFee9nSSBKUJevHehyBD'
 MINER = Pubkey.from_bytes(b'\x01' * 32)
 WINNER = Pubkey.from_bytes(b'\x02' * 32)
 
@@ -30,29 +31,32 @@ def _frame(logs, err=None) -> dict:
 
 def test_events_from_logs_decodes_program_events_and_skips_the_rest():
     logs = [
-        'Program 6JVB invoke [1]',
+        f'Program {PROGRAM} invoke [1]',
         _program_data(
             'PoolResolved', miner=bytes(MINER), winner=bytes(WINNER), requests=2, collateral_chain='sol', finalize_by=0
         ),
         'Program data: AAAA',  # too short / foreign
         'Program log: Instruction: ResolvePool',
+        f'Program {PROGRAM} success',
     ]
-    events = events_from_logs(logs)
+    events = events_from_logs(logs, PROGRAM)
     assert [n for n, _ in events] == ['PoolResolved']
     ev = events[0][1]
     assert ev.miner == MINER and ev.winner == WINNER and ev.requests == 2 and ev.collateral_chain == 'sol'
 
 
 def test_feed_dispatches_to_handlers_by_name_and_drops_failed_txs():
-    feed = ProgramEventFeed('ws://x', 'prog')
+    feed = ProgramEventFeed('ws://x', PROGRAM)
     seen = []
     feed.on('PoolDrawArmed', lambda name, ev: seen.append((name, int(ev.seed_slot))))
     feed.on('PoolResolved', lambda name, ev: (_ for _ in ()).throw(RuntimeError('boom')))  # never fatal
     logs = [
+        f'Program {PROGRAM} invoke [1]',
         _program_data('PoolDrawArmed', miner=bytes(MINER), seed_slot=4242, collateral_chain='tao'),
         _program_data(
             'PoolResolved', miner=bytes(MINER), winner=bytes(WINNER), requests=1, collateral_chain='sol', finalize_by=0
         ),
+        f'Program {PROGRAM} success',
     ]
     assert feed.handle_notification(_frame(logs)) == 2
     assert feed.handle_notification(_frame(logs, err={'InstructionError': [0, 'Custom']})) == 0
