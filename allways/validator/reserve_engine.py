@@ -723,14 +723,7 @@ def confirm_deposit(validator, miner_hotkey: str, from_tx_hash: str, from_tx_blo
         # No live slot matched; fast-fail (no claim) so the short TTL frees the miner.
         return ConfirmResult(False, 'Source tx not visible or does not match the reservation')
     _, reservation, backing, tx_info, from_tx_hash = min(matches, key=lambda m: m[0])
-    if payout_reuse_reason(
-        validator.state_store,
-        validator.axon_assets[reservation.from_chain].chain,
-        reservation.from_chain,
-        reservation.from_addr,
-        reservation.miner_from_addr,
-        from_tx_hash,
-    ):
+    if payout_reuse_reason(validator.state_store, from_tx_hash):
         return ConfirmResult(False, "Source tx is another swap's payout, not a deposit")
     swap_key = swap_key_from_tx_hash(from_tx_hash)
     held = validator.state_store.deposit_claim(from_tx_hash)
