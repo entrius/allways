@@ -42,6 +42,7 @@ def test_skips_sol_and_nonpositive_prices():
 def test_alpha_price_reuses_tao_address_without_alpha_address_flag():
     client = MagicMock()
     client.keypair.pubkey.return_value = 'miner-pk'
+    client.new_wallet_locks.return_value = 0
     client.get_miner_state.return_value = MagicMock()
     client.get_quote.return_value = None
     wallet = MagicMock()
@@ -75,6 +76,7 @@ def test_alpha_price_requires_tao_address():
 def test_alpha_anchor_posts_the_alpha_against_every_priced_spoke():
     client = MagicMock()
     client.keypair.pubkey.return_value = 'miner-pk'
+    client.new_wallet_locks.return_value = 0
     client.get_quote.return_value = None
     with (
         patch.object(numeraire, 'get_cli_context', return_value=({}, MagicMock(), None, None)),
@@ -110,3 +112,20 @@ def test_alpha_anchor_refuses_pairs_it_does_not_anchor():
 def test_unknown_anchor_is_refused():
     result = CliRunner().invoke(numeraire.quotes_command, ['--hub', 'btc', '--dry-run'])
     assert result.exit_code != 0 and '--hub must be one of' in result.output
+
+
+def test_wallet_lock_fee_counts_each_unlocked_wallet_once(capsys):
+    from solders.keypair import Keypair
+
+    from allways.cli.swap_commands.helpers import print_wallet_lock_fee
+    from allways.solana import pdas
+    from allways.solana.client import AllwaysSolanaClient
+
+    client = AllwaysSolanaClient.__new__(AllwaysSolanaClient)
+    client.program_id, client.rpc = Keypair().pubkey(), MagicMock()
+    owned = pdas.addr_lock_pda('OWNED', client.program_id)
+    client.rpc.get_account_info.side_effect = lambda lock: b'lock' if lock == owned else None
+    print_wallet_lock_fee(client, ['bc1qnew', 'BC1QNEW', 'owned', 'solNew'])
+    assert 'Wallet lock fee: 0.1 SOL' in capsys.readouterr().out  # 2 new: case variants share one lock
+    print_wallet_lock_fee(client, ['OWNED'])
+    assert capsys.readouterr().out == ''

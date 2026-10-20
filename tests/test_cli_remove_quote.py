@@ -27,6 +27,7 @@ def test_quotes_warns_a_live_sibling_quote_on_the_other_backing():
     client = MagicMock()
     client.keypair.pubkey.return_value = 'miner-pk'
     client.get_miner_state.return_value = MagicMock()
+    client.new_wallet_locks.return_value = 0
 
     def get_quote(_miner, from_chain, to_chain, backing):
         # Only the prior SOL-backed sol->tao quote exists; the TAO slots are new.

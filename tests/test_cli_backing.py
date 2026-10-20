@@ -126,6 +126,7 @@ def _client(mask):
     c.keypair = Keypair()
     c.get_miner_state.return_value = _state(mask)
     c.get_quote.return_value = None  # no standing quote -> creation is free
+    c.new_wallet_locks.return_value = 0
     return c
 
 

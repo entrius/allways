@@ -147,6 +147,20 @@ def quote_update_fee_lamports(elapsed_secs: int) -> int:
     return 0
 
 
+# Wallet-lock fee — mirrors constants.rs ADDR_LOCK_FEE_LAMPORTS: each wallet's first post, non-refundable.
+ADDR_LOCK_FEE_LAMPORTS = 50_000_000
+
+
+def print_wallet_lock_fee(client, wallets) -> None:
+    """Show the lock fee for wallets this post would lock for the first time, before the confirm."""
+    new = client.new_wallet_locks(wallets)
+    if new:
+        console.print(
+            f'  [yellow]Wallet lock fee: {new * ADDR_LOCK_FEE_LAMPORTS / 1e9:g} SOL[/yellow] '
+            f'[dim]({new} new wallet(s); locked to you for good, non-refundable → treasury)[/dim]\n'
+        )
+
+
 def votes_needed(cfg) -> int:
     """Votes required for consensus — mirrors the program's headcount check
     (consensus.rs: votes*100 >= threshold*total), i.e. ceil(threshold*total/100)."""
