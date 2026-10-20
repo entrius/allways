@@ -140,7 +140,7 @@ QUOTE_UPDATE_FEE_TIERS = ((300, 10_000_000), (600, 1_000_000))  # (elapsed < sec
 
 def quote_update_fee_lamports(elapsed_secs: int) -> int:
     """Churn fee (lamports) to re-quote a direction ``elapsed_secs`` after its last update: 0.01 SOL
-    under 5 min, 0.001 SOL at 5–10 min, free after 10 min. Creation is free. Mirrors the contract."""
+    under 5 min, 0.001 SOL at 5–10 min, free after 10 min. None on creation. Mirrors the contract."""
     for below, fee in QUOTE_UPDATE_FEE_TIERS:
         if elapsed_secs < below:
             return fee

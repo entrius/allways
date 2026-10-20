@@ -189,7 +189,7 @@ def quotes_command(spread_bps, hub, backing, dry_run, yes, **spoke_opts):
     }
 
     # Show each direction's current rate + the churn fee this update will incur (per-direction,
-    # keyed on that quote's own updated_at). Creation is free; the fee decays to 0 over 10 min.
+    # keyed on that quote's own updated_at). Creation pays no churn fee; it decays to 0 over 10 min.
     hub_up = hub.upper()
     console.print(f'\n[bold]{hub_up}-numéraire quotes[/bold]  [dim](X per 1 {hub_up})[/dim]\n')
     total_fee = 0

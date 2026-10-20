@@ -231,7 +231,7 @@ def post_pair(
     )
     console.print(f'  Pubkey:     [dim]{client.keypair.pubkey()}[/dim]\n')
 
-    # Per-direction churn fee for updating an existing quote (creation is free); keyed on each
+    # Per-direction churn fee for updating an existing quote (none on creation); keyed on each
     # quote's own updated_at. Total shown before the confirm so the fee is never a surprise.
     now = int(time.time())
     miner = client.keypair.pubkey()

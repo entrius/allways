@@ -227,7 +227,7 @@ pub fn required_collateral(collateral_amount: u64) -> u64 {
 }
 
 // Quote-update churn fee (anti-flashing): overwriting a standing quote too soon costs a treasury-
-// bound, decaying fee (free once it's stood long enough; first creation is always free). Stepwise
+// bound, decaying fee (free once it's stood long enough; first creation pays none). Stepwise
 // tiers by seconds since last update — see `quote_update_fee` for the cutoffs; all fees → treasury.
 pub const QUOTE_UPDATE_FEE_TIER1_LAMPORTS: u64 = 10_000_000; // 0.01 SOL — churn within 5 min
 pub const QUOTE_UPDATE_FEE_TIER1_MAX_SECS: i64 = 300; // 5 min
@@ -247,7 +247,7 @@ pub const ADDR_LOCK_FEE_LAMPORTS: u64 = 50_000_000; // 0.05 SOL
 
 /// Fee (lamports) for updating a standing quote `elapsed_secs` after its previous write. A negative
 /// or zero elapsed (clock skew / same-second churn) falls into the most-expensive tier. Applies only
-/// to updates — the caller charges nothing on first creation.
+/// to updates — the caller charges no churn fee on first creation.
 pub fn quote_update_fee(elapsed_secs: i64) -> u64 {
     if elapsed_secs < QUOTE_UPDATE_FEE_TIER1_MAX_SECS {
         QUOTE_UPDATE_FEE_TIER1_LAMPORTS

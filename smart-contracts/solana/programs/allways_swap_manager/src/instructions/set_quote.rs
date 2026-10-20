@@ -161,9 +161,9 @@ pub fn handler(
     };
     let lock_fee = ADDR_LOCK_FEE_LAMPORTS * (from_claimed as u64 + to_claimed as u64);
 
-    // Anti-flashing churn fee on UPDATES only — creation is free (no onboarding barrier), decaying to
+    // Anti-flashing churn fee on UPDATES only — creation pays no churn fee, decaying to
     // zero the longer the prior quote stood; fee → treasury. The remove + re-create dodge is closed on
-    // the remove side (see `remove_quote`), so creation needn't be charged.
+    // the remove side (see `remove_quote`), so creation needn't pay it.
     let fee = if ctx.accounts.quote.miner != Pubkey::default() {
         quote_update_fee(now.saturating_sub(ctx.accounts.quote.updated_at))
     } else {
