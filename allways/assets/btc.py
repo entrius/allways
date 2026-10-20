@@ -22,6 +22,23 @@ ADDR_TYPE_P2TR = 'p2tr'
 
 LOG_ESPLORA = '[Esplora]'
 
+# Node reject reasons (relayed verbatim by Esplora/mempool.space POST /tx bodies) for a tx that would
+# overflow a mempool ancestor/descendant/cluster limit.
+MEMPOOL_CHAIN_LIMIT_MARKERS = (
+    'too-long-mempool-chain',
+    'too many unconfirmed ancestors',
+    'too many descendants',
+    'ancestor size limit',
+    'descendant size limit',
+    'too-large-cluster',
+    'cluster size limit',
+)
+
+
+def is_mempool_chain_limit_error(text: Optional[str]) -> bool:
+    lowered = (text or '').lower()
+    return any(marker in lowered for marker in MEMPOOL_CHAIN_LIMIT_MARKERS)
+
 
 def detect_address_type(address: str) -> str:
     """Detect Bitcoin address type from its prefix."""
@@ -192,6 +209,9 @@ class Bitcoin(Asset, Chain):
         # txid → dedup scope (the swap key). A fresh `alw swap`
         # run can't return a tx hash already consumed by an earlier swap.
         self.broadcasted_txids: dict[str, str] = {}
+        # Our unconfirmed txs whose change a broadcast was refused for (mempool chain limit). Their
+        # change stays unspendable until it confirms, so payouts fall back to other coins.
+        self.chain_limited_txids: set[str] = set()
 
         # Optional operator-supplied Esplora endpoints (paid/private), tried
         # before the public defaults. Empty → public blockstream → mempool.
@@ -751,6 +771,23 @@ class Bitcoin(Asset, Chain):
             raw_tx = final_tx.serialize().hex()
             tx_hash = self.broadcast_tx(raw_tx, dedup_key=dedup_key)
             if tx_hash is None:
+                if is_mempool_chain_limit_error(self.last_send_error):
+                    pinned = {u['txid'] for u in selected if not self.is_confirmed_utxo(u)}
+                    pinned -= self.chain_limited_txids
+                    if pinned:
+                        # Each retry excludes at least one more coin, so this recursion is bounded.
+                        self.chain_limited_txids |= pinned
+                        bt.logging.warning(
+                            f'Broadcast hit a mempool chain limit; rebuilding without unconfirmed change '
+                            f'from {sorted(pinned)}'
+                        )
+                        return self.send_amount_lightweight(
+                            to_address,
+                            amount,
+                            from_address=from_address,
+                            fee_rate_override=fee_rate_override,
+                            dedup_key=dedup_key,
+                        )
                 return None
 
             bt.logging.info(f'Sent {amount} sat to {to_address} via embit (tx: {tx_hash}, fee: {fee})')
@@ -817,7 +854,9 @@ class Bitcoin(Asset, Chain):
         base_vsize = 11 + sum(8 + len(script.serialize()) for script in output_scripts)
         selected = []
         total_in = 0
-        for utxo in sorted(utxos, key=lambda u: u['value'], reverse=True):
+        # Confirmed coins first (largest first): unconfirmed change only tops up, so a payout doesn't
+        # inherit a mempool chain someone else can grow until our spend is refused.
+        for utxo in sorted(utxos, key=lambda u: (not self.is_confirmed_utxo(u), -u['value'])):
             selected.append(utxo)
             total_in += utxo['value']
             est_vsize = base_vsize + len(selected) * input_vsize
@@ -833,9 +872,17 @@ class Bitcoin(Asset, Chain):
             return None
         return selected, total_in, fee
 
+    @staticmethod
+    def is_confirmed_utxo(utxo: dict) -> bool:
+        return bool((utxo.get('status') or {}).get('confirmed'))
+
     def is_spendable_utxo(self, utxo: dict) -> bool:
-        """Confirmed, or change from a tx this process broadcast (we won't replace our own)."""
-        return bool((utxo.get('status') or {}).get('confirmed')) or utxo.get('txid') in self.broadcasted_txids
+        """Confirmed, or change from a tx this process broadcast (we won't replace our own) whose
+        mempool chain hasn't already refused a spend."""
+        if self.is_confirmed_utxo(utxo):
+            return True
+        txid = utxo.get('txid')
+        return txid in self.broadcasted_txids and txid not in self.chain_limited_txids
 
     def broadcast_tx(self, raw_hex: str, dedup_key: Optional[str] = None) -> Optional[str]:
         """Broadcast a raw transaction. Returns tx_hash or None."""
