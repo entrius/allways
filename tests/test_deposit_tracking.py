@@ -324,13 +324,12 @@ def test_a_live_swaps_payout_cannot_be_claimed_as_a_deposit(tmp_path):
 
 
 @pytest.mark.parametrize('reported', ['0x' + HEX.upper(), '0x' + HEX.lower()])
-def test_a_closed_swaps_reported_payout_cannot_be_claimed(tmp_path, reported):
-    # The refill swap already completed and closed; only its SwapFulfilled hash remains.
+def test_a_reported_payout_hash_alone_does_not_block_a_deposit(tmp_path, reported):
+    # Another swap's SwapFulfilled names this hash, but no validator verified it as a delivery.
     store = ValidatorStateStore(tmp_path / 'state.db')
     store.record_swap_fulfillment('aa' * 32, reported, CREATED_AT)
     validator, client, _ = _payout_relay(store)
-    r = confirm_deposit(validator, HOTKEY, '0x' + HEX)
-    assert not r.ok and 'payout' in r.reason and not client.claims
+    assert confirm_deposit(validator, HOTKEY, '0x' + HEX).ok and len(client.claims) == 1
 
 
 def test_a_verified_delivery_cannot_be_claimed(tmp_path):
