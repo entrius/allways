@@ -342,3 +342,17 @@ def test_upsert_retry_keeps_fifo_position(tmp_path):
     assert [r['user_pubkey'] for r in queue] == [USER_A, USER_B]
     assert queue[0]['created_at'] == NOW - 50
     assert (queue[0]['user_from_addr'], queue[0]['from_amount']) == ('src1b', 150)
+
+
+def test_a_queued_source_that_is_a_live_payout_to_the_seats_wallet_is_skipped(tmp_path):
+    # Its deposit would be refused at claim as that payout; serve the next user instead of stranding it.
+    from allways.validator.world.snapshot import PayoutRoute, World
+
+    client = SweepClient(None)
+    client._reservation = _drawn_seat(client)
+    routes = {'k': PayoutRoute('sol', f'{USER_A[:6]}src', 'minerDepositAddr', 0)}
+    v = Ctx(client, store=serving_store(tmp_path / 'state.db', world=World(0, 1, True, None, {}, routes=routes)))
+    _queue(v.store, USER_A, created_at=NOW - 50)
+    _queue(v.store, USER_B, created_at=NOW - 5)
+    assert finalize_won_seats(v, NOW) == [MINER]
+    assert [f[1] for f in client.finalized] == [USER_B]

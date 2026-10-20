@@ -243,6 +243,8 @@ def reserve_on_behalf(
         blocker = miner_from_addr and src_provider.send_blocker(user_from_addr, miner_from_addr, from_amount)
         if blocker:
             return ReserveResult(False, blocker)
+        if miner_from_addr and _payout_route_blocks(ctx, from_chain, user_from_addr, miner_from_addr):
+            return ReserveResult(False, PAYOUT_ROUTE_REFUSAL)
 
     # Two-phase: this places a BID only (the pair). The taker + amounts computed above are a
     # pre-flight viability check; naming them on-chain is the winner's `finalize_reservation` step.
@@ -266,6 +268,17 @@ def reserve_on_behalf(
 
 # Staleness backstop for queued routed requests: pool window + finalize window + generous slack.
 ROUTED_REQUEST_TTL_SECS = 900
+
+
+PAYOUT_ROUTE_REFUSAL = "that source already pays this miner's wallet in a live swap, so its deposit would read as that payout — reservation refused, no funds moved"
+
+
+def _payout_route_blocks(ctx, from_chain: str, user_from_addr: str, miner_from_addr: str) -> bool:
+    """A deposit from this source to this wallet would be refused at claim as another swap's payout
+    (confirm_deposit), so refuse the seat before the user sends anything rather than strand the deposit."""
+    provider = ctx.providers.get(from_chain)
+    norm = provider.chain.normalize_address if provider is not None else (lambda a: a)
+    return ctx.store.is_payout_route(from_chain, norm(user_from_addr), norm(miner_from_addr))
 
 
 def draw_pool_winner(requests: list) -> dict:
@@ -342,7 +355,12 @@ def finalize_won_seats(ctx, now: int) -> list:
                 for s, _b in live_slots
             )
 
-        eligible = [q for q in queue if not _collides(q['user_from_addr'])]
+        eligible = [
+            q
+            for q in queue
+            if not _collides(q['user_from_addr'])
+            and not _payout_route_blocks(ctx, from_chain, q['user_from_addr'], resv.miner_from_addr)
+        ]
         if not eligible:
             bt.logging.warning(
                 f'routed sweep {miner[:8]}: every queued source already backs a live seat — nothing to '
