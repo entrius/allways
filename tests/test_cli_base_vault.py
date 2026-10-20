@@ -5,12 +5,17 @@ from unittest.mock import MagicMock
 
 import pytest
 from click.testing import CliRunner
+from eth_account import Account
+from eth_account.messages import encode_defunct
 from solders.pubkey import Pubkey
 
 from allways.cli.swap_commands import base_vault as cli
+from allways.solana.client import evm_bind_message
 from allways.vault.base_client import BaseBond, BaseCallResult, BaseVaultError
 
 OWNER = '0xf39Fd6e51aad88F6F4ce6aB8827279cffFb92266'
+OWNER_KEY = '0xac0974bec39a17e36ba4a6b4d238ff944bacb478cbed5efcae784d7bf4f2ff80'
+PROGRAM_ID = Pubkey.from_string('6JVBEj5w27J2SVjERmv2c7wXgFee9nSSBKUJevHehyBD')
 OTHER = '0x70997970C51812dc3A010C7d01b50e0d17dc79C8'
 VAULT = '0x1111111111111111111111111111111111111111'
 PUBKEY = Pubkey.from_bytes(bytes(range(1, 33)))
@@ -36,18 +41,23 @@ def _vault(monkeypatch, bond=None, min_collateral=MIN, max_collateral=0, usdc=10
     return vault
 
 
-def _solana(monkeypatch, bound_to=None, claimed_by=None, sol_collateral=10**9, min_sol=10**9, validators=()):
+def _solana(monkeypatch, bound_to=None, claimed_by=None):
     client = MagicMock()
     client.keypair.pubkey.return_value = PUBKEY
+    client.program_id = PROGRAM_ID
     client.get_evm_binding.return_value = SimpleNamespace(evm_address=bytes.fromhex(bound_to[2:])) if bound_to else None
     client.get_evm_address_binding.return_value = SimpleNamespace(miner=claimed_by) if claimed_by else None
-    client.get_config.return_value = SimpleNamespace(
-        min_collateral=min_sol, validators=[SimpleNamespace(key=v) for v in validators]
-    )
-    client.get_miner_state.return_value = SimpleNamespace(collateral=sol_collateral)
     monkeypatch.setattr(cli, 'get_solana_cli_context', lambda need_keypair=True: ({}, client))
-    monkeypatch.setattr(cli, '_base_account', lambda: SimpleNamespace(address=OWNER))
+    monkeypatch.setattr(cli, '_base_account', lambda: Account.from_key(OWNER_KEY))
     return client
+
+
+def _bind_message():
+    return evm_bind_message(bytes.fromhex(OWNER[2:]), PUBKEY, PROGRAM_ID)
+
+
+def _signed_elsewhere(message=None, key=OWNER_KEY):
+    return Account.from_key(key).sign_message(encode_defunct(text=message or _bind_message())).signature
 
 
 def _run(args, stdin=None):
@@ -77,18 +87,11 @@ def test_bind_refuses_an_address_another_pubkey_already_claimed(monkeypatch):
     client.bind_evm_address.assert_not_called()
 
 
-def test_bind_mirrors_the_programs_sol_collateral_gate(monkeypatch):
-    client = _solana(monkeypatch, sol_collateral=10, min_sol=10**9)
-    result = _run(['bind', '-y'])
-    assert result.exit_code != 0
-    assert 'SOL collateral' in _text(result)
-    client.bind_evm_address.assert_not_called()
-
-
-def test_a_validator_binds_without_sol_collateral(monkeypatch):
-    client = _solana(monkeypatch, sol_collateral=0, validators=(PUBKEY,))
+def test_bind_reads_no_sol_collateral(monkeypatch):
+    client = _solana(monkeypatch)
     assert _run(['bind', '-y']).exit_code == 0
-    client.bind_evm_address.assert_called_once()
+    client.get_miner_state.assert_not_called()
+    client.get_config.assert_not_called()
 
 
 def test_bind_is_a_noop_when_already_bound_both_ways(monkeypatch):
@@ -99,10 +102,38 @@ def test_bind_is_a_noop_when_already_bound_both_ways(monkeypatch):
     client.bind_evm_address.assert_not_called()
 
 
-def test_bind_sends_the_20_byte_address_of_the_base_key(monkeypatch):
+def test_bind_sends_the_base_address_signed_by_the_base_key(monkeypatch):
     client = _solana(monkeypatch)
     assert _run(['bind', '-y']).exit_code == 0
-    client.bind_evm_address.assert_called_once_with(bytes.fromhex(OWNER[2:]))
+    client.bind_evm_address.assert_called_once_with(bytes.fromhex(OWNER[2:]), bytes(_signed_elsewhere()))
+
+
+def test_bind_with_address_alone_prints_the_message_and_sends_nothing(monkeypatch):
+    client = _solana(monkeypatch)
+    monkeypatch.setattr(cli, '_base_account', lambda: pytest.fail('no Base key needed'))
+    result = _run(['bind', '--address', OWNER])
+    assert result.exit_code == 0
+    assert _bind_message() in result.output
+    client.bind_evm_address.assert_not_called()
+
+
+def test_bind_accepts_a_signature_made_elsewhere(monkeypatch):
+    client = _solana(monkeypatch)
+    monkeypatch.setattr(cli, '_base_account', lambda: pytest.fail('no Base key needed'))
+    sig = _signed_elsewhere()
+    raw_v = sig[:64] + bytes([sig[64] - 27])  # a wallet returning v as 0/1 is normalized
+    assert _run(['bind', '--address', OWNER, '--signature', '0x' + raw_v.hex(), '-y']).exit_code == 0
+    client.bind_evm_address.assert_called_once_with(bytes.fromhex(OWNER[2:]), bytes(sig))
+
+
+def test_bind_refuses_a_signature_from_another_key_or_message(monkeypatch):
+    client = _solana(monkeypatch)
+    for sig in (_signed_elsewhere(key='0x' + '42' * 32), _signed_elsewhere(message='something else')):
+        result = _run(['bind', '--address', OWNER, '--signature', sig.hex(), '-y'])
+        assert result.exit_code != 0 and 'not ' + OWNER in _text(result)
+    result = _run(['bind', '--signature', _signed_elsewhere().hex(), '-y'])
+    assert result.exit_code != 0 and 'needs --address' in _text(result)
+    client.bind_evm_address.assert_not_called()
 
 
 # ─── deposit ─────────────────────────────────────────────────────────────────

@@ -321,23 +321,22 @@ def test_per_hub_admin_setters(client, method, args, name, body):
 
 
 def test_bind_evm_address_claims_both_markers(client):
-    client.get_miner_state = lambda miner: object()  # a registered miner rides its MinerState
-    addr = bytes([0xAB] * 20)
-    client.bind_evm_address(addr)
+    addr, sig = bytes([0xAB] * 20), bytes(range(65))
+    client.bind_evm_address(addr, sig)
     ix = _ix(client)
     miner = client.keypair.pubkey()
     assert ix.data[:8] == layouts.IX_DISCRIMINATORS['bind_evm_address']
-    assert _body(ix) == addr
+    assert _body(ix) == addr + sig
     assert _metas(ix) == [
         (miner, True, True),
-        (pdas.config_pda(PID), False, False),
-        (pdas.miner_state_pda(miner, PID), False, False),
         (pdas.evm_binding_pda(miner, PID), False, True),
         (pdas.evm_address_binding_pda(addr, PID), False, True),
         (SYSTEM_PROGRAM, False, False),
     ]
     with pytest.raises(ValueError):
-        client.bind_evm_address(bytes(32))
+        client.bind_evm_address(bytes(32), sig)
+    with pytest.raises(ValueError):
+        client.bind_evm_address(addr, sig[:64])
 
 
 # --- split-collateral setters -------------------------------------------------------------------

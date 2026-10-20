@@ -112,7 +112,7 @@ def test_an_un_upgraded_client_still_decodes_every_old_field_of_a_v17_config():
         ('vote_attest_heartbeat', ['hub']),
         ('bump_vault_generation', ['hub']),
         ('set_attest_max_age', ['hub', 'secs']),
-        ('bind_evm_address', ['evm_address']),
+        ('bind_evm_address', ['evm_address', 'evm_signature']),
     ],
 )
 def test_per_hub_instruction_args_match_the_idl(ix, args):

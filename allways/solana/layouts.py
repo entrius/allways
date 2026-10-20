@@ -109,6 +109,7 @@ Pubkey32 = _Raw(32)
 Hash32 = _Raw(32)
 Sig64 = _Raw(64)
 EvmAddr20 = _Raw(20)
+EvmSig65 = _Raw(65)
 
 # 8-byte account discriminators (IDL `accounts[].discriminator`).
 DISCRIMINATORS = {
@@ -729,7 +730,7 @@ IX_SET_ATTESTATION_ARGS = CStruct(
 # v17 per-hub levers: the hub id rides first, as in the handler signatures.
 IX_HUB_ARGS = CStruct('hub' / String)  # vote_attest_heartbeat, bump_vault_generation
 IX_HUB_I64_ARGS = CStruct('hub' / String, 'secs' / I64)  # set_attest_max_age
-IX_EVM_ADDRESS_ARGS = CStruct('evm_address' / EvmAddr20)  # bind_evm_address
+IX_EVM_ADDRESS_ARGS = CStruct('evm_address' / EvmAddr20, 'evm_signature' / EvmSig65)  # bind_evm_address
 IX_PUBKEY_ARGS = CStruct('value' / Pubkey32)  # remove_validator
 IX_U8_ARGS = CStruct('value' / U8)  # set_consensus_threshold
 IX_I64_ARGS = CStruct('value' / I64)  # set_fulfillment_timeout

@@ -201,4 +201,8 @@ pub enum ErrorCode {
     EvmAddressChangeForbidden,
     #[msg("EVM bond address must not be the zero address")]
     EvmAddressZero,
+    #[msg("EVM bind signature is malformed (v must be 27 or 28, s must be low)")]
+    EvmSignatureMalformed,
+    #[msg("EVM bind signature was not made by the EVM address being bound")]
+    EvmSignatureMismatch,
 }

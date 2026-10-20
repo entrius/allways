@@ -48,6 +48,24 @@ def weights_round_key(validator_keys: List[bytes], weights: List[int]) -> bytes:
     return h.digest()
 
 
+# What an EVM key personal_signs to bind its address to a Solana pubkey. Mirrors evm_bind_message in
+# the program's bind_evm_address.rs; tests/test_solana_evm_bind.py pins both to one vector.
+EVM_BIND_MESSAGE = 'allways: bind EVM address 0x{evm_address} to Solana {miner} (program {program_id})'
+
+
+def evm_bind_message(evm_address: bytes, miner: Pubkey, program_id: Pubkey) -> str:
+    """The exact text to sign for `bind_evm_address` (lowercase hex address, base58 pubkeys)."""
+    return EVM_BIND_MESSAGE.format(evm_address=bytes(evm_address).hex(), miner=miner, program_id=program_id)
+
+
+def sign_evm_bind(account, miner: Pubkey, program_id: Pubkey) -> bytes:
+    """An eth_account key's personal_sign over its own bind message: 65 bytes r || s || v, v = 27/28."""
+    from eth_account.messages import encode_defunct
+
+    message = evm_bind_message(bytes.fromhex(account.address[2:]), miner, program_id)
+    return bytes(account.sign_message(encode_defunct(text=message)).signature)
+
+
 @dataclass
 class SolanaSwap:
     """Miner-facing view of an on-chain `Swap`, keyed by its `swap_key` (== keccak(from_tx_hash)).
@@ -511,25 +529,22 @@ class AllwaysSolanaClient:
         ]
         return self._send([self._ix('bind_hotkey', bytes(hotkey) + bytes(hotkey_sig), metas)])
 
-    def bind_evm_address(self, evm_address: bytes) -> str:
-        """Name the 20-byte EVM address holding this miner's Base bond. Set-once, gated like
-        `bind_hotkey`; the vault's lockBond(solanaPubkey) names this pubkey back."""
-        evm_address = bytes(evm_address)
+    def bind_evm_address(self, evm_address: bytes, evm_signature: bytes) -> str:
+        """Name the 20-byte EVM address holding this miner's Base bond, proven by `evm_signature`
+        (see `sign_evm_bind`). Set-once; the vault's lockBond(solanaPubkey) names this pubkey back."""
+        evm_address, evm_signature = bytes(evm_address), bytes(evm_signature)
         if len(evm_address) != 20:
             raise ValueError(f'EVM address must be 20 bytes, got {len(evm_address)}')
+        if len(evm_signature) != 65:
+            raise ValueError(f'EVM signature must be 65 bytes, got {len(evm_signature)}')
         miner = self.keypair.pubkey()
-        miner_state = pdas.miner_state_pda(miner, self.program_id)
-        if self.get_miner_state(miner) is None:
-            miner_state = self.program_id
         metas = [
             AccountMeta(miner, True, True),
-            AccountMeta(pdas.config_pda(self.program_id), False, False),
-            AccountMeta(miner_state, False, False),
             AccountMeta(pdas.evm_binding_pda(miner, self.program_id), False, True),
             AccountMeta(pdas.evm_address_binding_pda(evm_address, self.program_id), False, True),
             AccountMeta(SYSTEM_PROGRAM, False, False),
         ]
-        args = layouts.IX_EVM_ADDRESS_ARGS.build({'evm_address': evm_address})
+        args = layouts.IX_EVM_ADDRESS_ARGS.build({'evm_address': evm_address, 'evm_signature': evm_signature})
         return self._send([self._ix('bind_evm_address', args, metas)])
 
     def set_quote(
