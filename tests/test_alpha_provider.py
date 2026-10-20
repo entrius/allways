@@ -439,6 +439,60 @@ def test_a_refused_send_is_returned_as_refusal_evidence():
     assert p.send_amount(USER, 5_000, dedup_key='swap-1') == (TXID, BLOCK)
 
 
+def _flips_flag_in_the_send_block(recipient_hotkeys=('theirs',), second=None):
+    """USER turns its flag on in the same block as the miner's first transfer, which fails on it."""
+    state = {'flags': 0}
+    receipt = SimpleNamespace(extrinsic_hash=TXID, block_hash='0xincl')
+    refused = SimpleNamespace(
+        success=False,
+        message="{'name': 'AccountRejectsStakingHotkeyGrowth'}",
+        extrinsic=_ext(),
+        extrinsic_receipt=receipt,
+    )
+    landed = SimpleNamespace(success=True, message='', extrinsic=_ext(), extrinsic_receipt=receipt)
+    responses = [refused, second or landed]
+    p, calls = _sender([_stake('big', 9_000)], recipient_hotkeys=recipient_hotkeys)
+
+    def transfer(to_address, origin, destination, amount):
+        calls.append((origin, destination))
+        state['flags'] = 1 << 1
+        return responses.pop(0)
+
+    p.transfer = transfer
+    query = p.subtensor.substrate.query
+    p.subtensor.substrate.query = lambda m, name, params, block_hash=None: (
+        state['flags'] if name == 'AccountFlags' else query(m, name, params, block_hash)
+    )
+    return p, calls
+
+
+def test_a_refusal_from_a_flag_flipped_after_the_pick_is_resent_onto_the_recipients_hotkey():
+    """The pick saw the flag off and landed on the miner's own hotkey; the recipient turned it on in the
+    same block. The failed tx moved nothing, so the miner re-picks and pays onto 'theirs' instead of
+    handing in the refusal."""
+    p, calls = _flips_flag_in_the_send_block()
+    assert p.send_amount(USER, 5_000, dedup_key='swap-1') == (TXID, BLOCK)
+    assert calls == [('big', 'big'), ('big', 'theirs')]
+
+
+def test_a_refusal_with_nowhere_else_to_land_is_returned_once_as_evidence():
+    p, calls = _flips_flag_in_the_send_block(recipient_hotkeys=())
+    assert p.send_amount(USER, 5_000, dedup_key='swap-1') == (TXID, BLOCK)
+    assert calls == [('big', 'big')]
+
+
+def test_a_resend_is_attempted_at_most_once():
+    refused_again = SimpleNamespace(
+        success=False,
+        message="{'name': 'AccountRejectsStakingHotkeyGrowth'}",
+        extrinsic=_ext(),
+        extrinsic_receipt=SimpleNamespace(extrinsic_hash=TXID, block_hash='0xincl'),
+    )
+    p, calls = _flips_flag_in_the_send_block(second=refused_again)
+    assert p.send_amount(USER, 5_000, dedup_key='swap-1') == (TXID, BLOCK)
+    assert calls == [('big', 'big'), ('big', 'theirs')]
+
+
 def _refused_on_chain(
     *, error='AccountRejectsStakingHotkeyGrowth', recipient_hotkeys=(), sender=MINER, flags=0, events=(), ahead=0
 ):

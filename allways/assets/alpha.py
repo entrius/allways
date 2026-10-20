@@ -453,33 +453,55 @@ class Alpha(Asset):
             )
             return None
 
-        attempt_head = self.chain.record_send_attempt(self.broadcasted_txids, scope, to_address, amount)
-        # The SDK never raises here: every failure comes back as a response, possibly without a hash.
-        response = self.transfer(to_address, *hotkeys, amount)
-        # The signed extrinsic exists before broadcast, so its hash outlives a lost receipt.
-        receipt = getattr(response, 'extrinsic_receipt', None)
-        tx_hash = getattr(receipt, 'extrinsic_hash', None) or Tao.extrinsic_hash(getattr(response, 'extrinsic', None))
-        if tx_hash:
-            self.broadcasted_txids[scope] = (to_address, int(amount), tx_hash, attempt_head)
-        refused = not response.success and STAKE_HOTKEY_REFUSED in str(response.message)
-        if (not response.success and not refused) or not tx_hash:
-            bt.logging.error(
-                f'{LOG_ALPHA} transfer_stake unresolved: {response.message} — recorded, resolved next poll'
+        for resend in (False, True):
+            attempt_head = self.chain.record_send_attempt(self.broadcasted_txids, scope, to_address, amount)
+            # The SDK never raises here: every failure comes back as a response, possibly without a hash.
+            response = self.transfer(to_address, *hotkeys, amount)
+            # The signed extrinsic exists before broadcast, so its hash outlives a lost receipt.
+            receipt = getattr(response, 'extrinsic_receipt', None)
+            tx_hash = getattr(receipt, 'extrinsic_hash', None) or Tao.extrinsic_hash(
+                getattr(response, 'extrinsic', None)
             )
-            return None
-        try:
-            block_num = int(self.subtensor.substrate.get_block_number(receipt.block_hash))
-        except Exception:
-            block_num = attempt_head
-        self.broadcasted_txids[scope] = (to_address, int(amount), tx_hash, block_num)
-        if refused:
-            # Marked fulfilled like a delivery: validators read the failed tx as no-fault refusal evidence.
+            if tx_hash:
+                self.broadcasted_txids[scope] = (to_address, int(amount), tx_hash, attempt_head)
+            refused = not response.success and STAKE_HOTKEY_REFUSED in str(response.message)
+            if (not response.success and not refused) or not tx_hash:
+                bt.logging.error(
+                    f'{LOG_ALPHA} transfer_stake unresolved: {response.message} — recorded, resolved next poll'
+                )
+                return None
+            try:
+                block_num = int(self.subtensor.substrate.get_block_number(receipt.block_hash))
+            except Exception:
+                block_num = attempt_head
+            self.broadcasted_txids[scope] = (to_address, int(amount), tx_hash, block_num)
+            if not refused:
+                bt.logging.info(
+                    f'{LOG_ALPHA} sent {amount} alpha (netuid {self.netuid}) to {to_address} '
+                    f'(tx: {tx_hash}, block: {block_num})'
+                )
+                return (tx_hash, block_num)
+            # The recipient changed its flag or list after the pick. The failed tx moved nothing, so
+            # re-pick from the state that refused it and pay onto a hotkey it takes, once.
+            retry = None if resend or receipt is None else self.repick(from_ss58, to_address, amount)
+            if retry is None or retry[1] == hotkeys[1]:
+                break
             bt.logging.warning(
-                f'{LOG_ALPHA} {to_address} refuses new stake hotkeys — failed tx {tx_hash} (block {block_num}) '
-                'submitted as refusal evidence'
+                f'{LOG_ALPHA} {to_address} refused stake on {hotkeys[1]} (failed tx {tx_hash}) — '
+                f'resending onto {retry[1]}'
             )
-        else:
-            bt.logging.info(
-                f'{LOG_ALPHA} sent {amount} alpha (netuid {self.netuid}) to {to_address} (tx: {tx_hash}, block: {block_num})'
-            )
+            hotkeys = retry
+        # Marked fulfilled like a delivery: validators read the failed tx as no-fault refusal evidence.
+        bt.logging.warning(
+            f'{LOG_ALPHA} {to_address} refuses new stake hotkeys — failed tx {tx_hash} (block {block_num}) '
+            'submitted as refusal evidence'
+        )
         return (tx_hash, block_num)
+
+    def repick(self, from_addr: str, to_addr: str, amount: int) -> Optional[Tuple[str, str]]:
+        """``landing_hotkeys`` re-read after a refusal, None when unreadable."""
+        try:
+            return self.landing_hotkeys(from_addr, to_addr, amount)
+        except Exception as e:
+            bt.logging.warning(f'{LOG_ALPHA} cannot re-pick a landing hotkey for {to_addr}: {e}')
+            return None
