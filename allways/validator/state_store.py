@@ -674,13 +674,10 @@ class ValidatorStateStore:
         return row['to_tx_hash'] if row is not None else None
 
     def is_recorded_payout(self, tx_hash: str) -> bool:
-        """Whether ``tx_hash`` is a delivery some swap reported (``SwapFulfilled``) or this validator
-        verified, in any spelling ``tx_key`` folds together."""
-        key = tx_key(tx_hash)
-        if self._fetchone('SELECT 1 FROM used_deliveries WHERE tx_hash = ?', (key,)) is not None:
-            return True
-        rows = self._fetchall('SELECT to_tx_hash FROM swap_fulfillments WHERE lower(to_tx_hash) = lower(?)', (tx_hash,))
-        return any(tx_key(row['to_tx_hash']) == key for row in rows)
+        """Whether ``tx_hash`` is a delivery this validator verified, in any spelling ``tx_key`` folds
+        together. A ``SwapFulfilled`` hash alone doesn't count: it is the miner's own pointer to its
+        delivery, checked only against that swap."""
+        return self._fetchone('SELECT 1 FROM used_deliveries WHERE tx_hash = ?', (tx_key(tx_hash),)) is not None
 
     # ─── payout_routes (live swaps' payout legs) ─────────────────────────
     # Fed by the swap loop every pass, before it decides anything. Addresses are normalized by the

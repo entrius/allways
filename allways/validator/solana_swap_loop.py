@@ -130,7 +130,7 @@ def payout_reuse_reason(
     """Refuse a deposit that is some swap's payout. A miner refilling its deposit wallet through allways
     announces the payout (sender, recipient, amount) on chain before it lands, so anyone could reserve
     naming the payer as their source and claim the delivery as their own deposit. Matches the route of
-    any live swap the loop has seen, or a delivery hash already reported or verified."""
+    any live swap the loop has seen, or a delivery this validator already verified."""
     if state_store is None:
         return None
     norm = chain.normalize_address
