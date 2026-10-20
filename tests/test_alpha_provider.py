@@ -439,16 +439,27 @@ def test_a_refused_send_is_returned_as_refusal_evidence():
     assert p.send_amount(USER, 5_000, dedup_key='swap-1') == (TXID, BLOCK)
 
 
-def _refused_on_chain(*, error='AccountRejectsStakingHotkeyGrowth', recipient_hotkeys=(), sender=MINER):
-    """The miner's transfer_stake to USER sits in BLOCK and failed with ``error``."""
-    p, _ = _sender([], recipient_hotkeys=recipient_hotkeys)
-    p.chain.get_block = lambda n: {'extrinsics': [_ext(dest=USER, sender=sender)]} if n == BLOCK else None
+def _refused_on_chain(
+    *, error='AccountRejectsStakingHotkeyGrowth', recipient_hotkeys=(), sender=MINER, flags=0, events=(), ahead=0
+):
+    """The miner's transfer_stake to USER sits in BLOCK behind ``ahead`` other extrinsics and failed with
+    ``error``; ``recipient_hotkeys`` and ``flags`` are USER's state at the parent block."""
+    p, _ = _sender([], recipient_hotkeys=recipient_hotkeys, flags=flags)
+    other = SimpleNamespace(extrinsic_hash=bytes(32), value={'address': USER, 'call': {}})
+    exts = [other] * ahead + [_ext(dest=USER, sender=sender)]
+    p.chain.get_block = lambda n: {'extrinsics': exts} if n == BLOCK else None
     failed = {'Module': {'index': 7, 'error': '0xaf000000'}}
-    p.chain.get_block_events = lambda h: [_event('System', 'ExtrinsicFailed', {'dispatch_error': failed})]
+    refusal = _event('System', 'ExtrinsicFailed', {'dispatch_error': failed}, ahead)
+    p.chain.get_block_events = lambda h: [*events, refusal]
     p.subtensor.substrate.metadata = SimpleNamespace(
         get_module_error=lambda module_index, error_index: SimpleNamespace(name=error)
     )
     return p
+
+
+def _flag_set(who=USER, idx=0, enabled=True):
+    """The SubtensorModule event set_reject_staking_hotkey_growth emits, in extrinsic ``idx``."""
+    return _event('SubtensorModule', 'RejectStakingHotkeyGrowthUpdated', {'coldkey': who, 'enabled': enabled}, idx)
 
 
 def test_a_refused_send_to_a_recipient_with_no_hotkey_is_cancel_evidence():
@@ -461,6 +472,7 @@ def test_a_refused_send_to_a_recipient_with_no_hotkey_is_cancel_evidence():
     'case',
     [
         dict(recipient_hotkeys=['theirs']),  # the miner could have landed there
+        dict(recipient_hotkeys=['theirs'], flags=1 << 1),  # flag already on: it should have
         dict(error='SlippageTooHigh'),
         dict(sender='someoneElse'),
     ],
@@ -468,6 +480,41 @@ def test_a_refused_send_to_a_recipient_with_no_hotkey_is_cancel_evidence():
 def test_a_refusal_the_miner_could_have_avoided_is_not_cancel_evidence(case):
     p = _refused_on_chain(**case)
     assert p.cancel_evidence(USER, 5_000, TXID, from_address=MINER, block_hint=BLOCK) is None
+
+
+def test_a_flag_the_recipient_turned_on_in_the_delivery_block_is_cancel_evidence():
+    """At the parent block the flag was off, so landing on the miner's own hotkey was legal; the taker
+    then turned the flag on ahead of the miner's transfer in the same block. The miner did nothing it
+    could have avoided, so the failed transfer is a no-fault cancel, not a slash."""
+    p = _refused_on_chain(recipient_hotkeys=['theirs'], events=[_flag_set(idx=0)], ahead=1)
+    assert p.cancel_evidence(USER, 5_000, TXID, from_address=MINER, block_hint=BLOCK) == 8
+
+
+@pytest.mark.parametrize(
+    'case',
+    [
+        # the flag was already on at the parent block: the miner should have landed on 'theirs'
+        dict(flags=1 << 1, events=[_flag_set(idx=0)]),
+        # a full list at the parent block: a new hotkey would not have landed either
+        dict(recipient_hotkeys=FULL, events=[_flag_set(idx=0)]),
+        # no flag change in the block: a coldkey swap copies AccountFlags without this event
+        dict(events=[]),
+        # turned on by someone else, turned off, or only after the miner's transfer
+        dict(events=[_flag_set(who='someoneElse', idx=0)]),
+        dict(events=[_flag_set(enabled=False, idx=0)]),
+        dict(events=[_flag_set(idx=1)]),
+    ],
+)
+def test_a_same_block_refusal_counts_only_when_the_recipient_itself_flipped_the_flag(case):
+    p = _refused_on_chain(**{'recipient_hotkeys': ['theirs'], 'ahead': 1, **case})
+    assert p.cancel_evidence(USER, 5_000, TXID, from_address=MINER, block_hint=BLOCK) is None
+
+
+def test_refusal_evidence_never_reads_head_state_for_a_missing_parent_block():
+    p = _refused_on_chain(recipient_hotkeys=['theirs'], events=[_flag_set(idx=0)], ahead=1)
+    p.chain.get_block_hash = lambda n: None if n == BLOCK - 1 else f'0xblock{n}'
+    with pytest.raises(ProviderUnreachableError):
+        p.cancel_evidence(USER, 5_000, TXID, from_address=MINER, block_hint=BLOCK)
 
 
 def test_send_needs_one_hotkey_holding_the_whole_amount():

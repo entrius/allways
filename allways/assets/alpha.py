@@ -35,6 +35,9 @@ MAX_THIRD_PARTY_STAKING_HOTKEYS = 128
 # already stakes to or owns, failing any other with this module error.
 REJECT_STAKING_HOTKEY_GROWTH = 1 << 1
 STAKE_HOTKEY_REFUSED = 'AccountRejectsStakingHotkeyGrowth'
+# Emitted only by set_reject_staking_hotkey_growth, signed by the coldkey itself. A coldkey swap also copies
+# AccountFlags onto its (empty) new coldkey but emits no such event, so this names who turned the flag on.
+FLAG_SET_EVENT = ('SubtensorModule', 'RejectStakingHotkeyGrowthUpdated')
 
 
 def event_name(record: Any) -> Optional[Tuple[str, str]]:
@@ -198,9 +201,10 @@ class Alpha(Asset):
         """The hotkeys ``coldkey`` owns — SubtensorModule::OwnedHotkeys; raises when unreadable."""
         return [Tao.as_ss58(hotkey) for hotkey in self.account_storage('OwnedHotkeys', coldkey, block_hash) or []]
 
-    def rejects_new_hotkeys(self, coldkey: str) -> bool:
+    def rejects_new_hotkeys(self, coldkey: str, block_hash: Optional[str] = None) -> bool:
         """Whether ``coldkey`` refuses stake on hotkeys it neither stakes to nor owns; raises when unreadable."""
-        return bool(int(self.account_storage('AccountFlags', coldkey) or 0) & REJECT_STAKING_HOTKEY_GROWTH)
+        flags = self.account_storage('AccountFlags', coldkey, block_hash)
+        return bool(int(flags or 0) & REJECT_STAKING_HOTKEY_GROWTH)
 
     def landing_hotkeys(self, from_addr: str, to_addr: str, amount: int) -> Optional[Tuple[str, str]]:
         """(origin, destination) hotkeys for a delivery of ``amount``: the sender's position holding all of it
@@ -301,6 +305,35 @@ class Alpha(Asset):
             return metadata.get_module_error(module_index=int(error['index']), error_index=index).name
         return None
 
+    @staticmethod
+    def landing_hotkey(ext: Any) -> str:
+        """The hotkey a stake transfer lands on: ``hotkey`` for transfer_stake, ``destination_hotkey`` for
+        transfer_stake_and_hotkey; '' when unreadable."""
+        call = (ext.value if hasattr(ext, 'value') else ext).get('call') or {}
+        args = {a.get('name'): a.get('value') for a in call.get('call_args') or [] if isinstance(a, dict)}
+        return Tao.as_ss58(args.get('destination_hotkey', args.get('hotkey')))
+
+    def flag_turned_on_by(self, block_num: int, before_idx: int, coldkey: str) -> bool:
+        """Whether ``coldkey`` itself turned its refuse-new-hotkey flag on in an extrinsic of ``block_num``
+        ahead of ``before_idx``; raises when unreadable."""
+        block_hash = self.chain.get_block_hash(block_num)
+        if not block_hash:
+            raise ProviderUnreachableError(f'{self.chain_def.id} block hash unavailable for {block_num}')
+        for record in self.chain.get_block_events(block_hash):
+            idx = Tao.event_extrinsic_idx(record)
+            if idx is None or idx >= before_idx or event_name(record) != FLAG_SET_EVENT:
+                continue
+            attributes = record.get('event', record).get('attributes')
+            if isinstance(attributes, dict):
+                who, enabled = attributes.get('coldkey'), attributes.get('enabled')
+            elif isinstance(attributes, (list, tuple)) and len(attributes) == 2:
+                who, enabled = attributes
+            else:
+                continue
+            if enabled is True and Tao.as_ss58(who) == coldkey:
+                return True
+        return False
+
     def cancel_evidence(
         self,
         address: str,
@@ -310,8 +343,12 @@ class Alpha(Asset):
         block_hint: int = 0,
     ) -> Optional[int]:
         """No-fault cancel: the committed miner's own transfer_stake of the full amount to ``address`` failed
-        on its refuse-new-hotkey flag while it neither staked to nor owned any hotkey, so no delivery could
-        land. A recipient with such a hotkey is payable onto it, never refused. Raises when unreadable."""
+        on its refuse-new-hotkey flag, and the miner could not have avoided it. That is either (a) at the
+        parent block the recipient neither staked to nor owned any hotkey, so no delivery could land, or
+        (b) at the parent block the flag was off and the landing hotkey would have been taken, and the
+        recipient itself turned the flag on earlier in the inclusion block. Every read is pinned to those
+        two blocks, so every validator reaches the same verdict. A recipient that was payable at the parent
+        block and did not change its own state is never refused. Raises when unreadable."""
         if not tx_hash or block_hint <= 0:
             return None
         for position, ext in enumerate(self.chain.decoded_extrinsics(block_hint)):
@@ -326,7 +363,18 @@ class Alpha(Asset):
             if self.dispatch_error(block_hint, position) != STAKE_HOTKEY_REFUSED:
                 return None
             parent = self.chain.get_block_hash(block_hint - 1)
-            if self.staking_hotkeys(address, parent) or self.owned_hotkeys(address, parent):
+            if not parent:
+                # A None hash reads head state, not the parent block's.
+                raise ProviderUnreachableError(f'{self.chain_def.id} block hash unavailable for {block_hint - 1}')
+            staking = self.staking_hotkeys(dest, parent)
+            if not staking and not self.owned_hotkeys(dest, parent):
+                return CANCEL_REASON_ALPHA_STAKE_REFUSED
+            if self.rejects_new_hotkeys(dest, parent):
+                return None
+            landing = self.landing_hotkey(ext)
+            if landing not in staking and len(staking) >= MAX_THIRD_PARTY_STAKING_HOTKEYS:
+                return None
+            if not self.flag_turned_on_by(block_hint, position, dest):
                 return None
             return CANCEL_REASON_ALPHA_STAKE_REFUSED
         return None
