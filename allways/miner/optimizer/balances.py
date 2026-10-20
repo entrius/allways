@@ -85,10 +85,5 @@ class BtcBalanceReader(HeldBalanceReader):
         self.provider = provider
 
     def read(self, address: str) -> int:
-        resp = self.provider.btc_api_get(f'/address/{address}', timeout=ESPLORA_TIMEOUT_SECS)
-        resp.raise_for_status()
-        data = resp.json()
-        chain, mempool = data['chain_stats'], data['mempool_stats']
-        return (int(chain['funded_txo_sum']) - int(chain['spent_txo_sum'])) + (
-            int(mempool['funded_txo_sum']) - int(mempool['spent_txo_sum'])
-        )
+        # Confirmed coins plus our own change only: an outside unconfirmed coin can vanish before we pay.
+        return self.provider.spendable_balance(address, timeout=ESPLORA_TIMEOUT_SECS)
