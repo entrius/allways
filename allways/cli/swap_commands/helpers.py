@@ -148,7 +148,7 @@ def quote_update_fee_lamports(elapsed_secs: int) -> int:
 
 
 # Wallet-lock fee — mirrors constants.rs ADDR_LOCK_FEE_LAMPORTS: each wallet's first post, non-refundable.
-ADDR_LOCK_FEE_LAMPORTS = 50_000_000
+ADDR_LOCK_FEE_LAMPORTS = 20_000_000
 
 
 def print_wallet_lock_fee(client, wallets) -> None:

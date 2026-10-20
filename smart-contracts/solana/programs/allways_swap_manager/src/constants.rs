@@ -243,7 +243,7 @@ const _: () = assert!(
 
 // Wallet-lock fee: claiming a wallet locks it out of every other miner and every taker source forever,
 // so each first claim pays a non-refundable fee to the treasury. Re-posting an owned wallet is free.
-pub const ADDR_LOCK_FEE_LAMPORTS: u64 = 50_000_000; // 0.05 SOL
+pub const ADDR_LOCK_FEE_LAMPORTS: u64 = 20_000_000; // 0.02 SOL
 
 /// Fee (lamports) for updating a standing quote `elapsed_secs` after its previous write. A negative
 /// or zero elapsed (clock skew / same-second churn) falls into the most-expensive tier. Applies only
