@@ -112,6 +112,18 @@ def flush(relay, now: int, reconciling: bool = False) -> bool:
     return ok
 
 
+def _note_reflected(relay, miner: str, desired: Attested, current: Any) -> None:
+    """Release the entry hold of vault-applied slashes once Solana no longer overstates the bond.
+    ``desired`` was read off the vault after the seizure, so an attestation at or under it (or none at
+    all, which refuses entry on its own) can't back a swap with collateral that was taken."""
+    if not relay.store.unreflected_relay_slashes(relay.backing, miner):
+        return
+    if current is not None and int(current.effective_balance) > desired.effective_balance:
+        return
+    relay.store.mark_relay_slashes_reflected(relay.backing, miner)
+    bt.logging.info(f'relay: {miner[:8]} attestation reflects its applied slashes — entry hold released')
+
+
 def _write_one(relay, miner: str, hotkey: str, now: int, reconciling: bool) -> bool:
     """Queue the vote when the attestation drifted. Landing it is the actuator's job: a write the program
     refuses while the hub is held stays in its inbox until the hub frees."""
@@ -119,6 +131,7 @@ def _write_one(relay, miner: str, hotkey: str, now: int, reconciling: bool) -> b
     if desired is None:
         return False
     current = relay.attestation(miner)
+    _note_reflected(relay, miner, desired, current)
     if desired.matches(current):
         return True
     if current is None and desired.is_empty:

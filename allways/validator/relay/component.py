@@ -65,9 +65,10 @@ class HubRelay(Component):
         self._acked_slot = int(row['slot']) if row else 0
 
     def has_pending_debit(self, miner: str) -> bool:
-        """Read from the actuator: no new swap backed by this hub for a miner whose slash isn't applied yet."""
+        """Read from the actuator: no new swap backed by this hub for a miner whose slash isn't applied on
+        the vault, or is applied but not yet reflected in Solana's attestation (see ``BondRelay``)."""
         try:
-            return bool(self.ledger.open_relay_slashes(self.hub.chain, str(miner)))
+            return self.ledger.owes_relay_debit(self.hub.chain, str(miner))
         except Exception as e:
             bt.logging.warning(f'{self.name}: pending-debit check failed for {str(miner)[:8]} ({e}); assuming owed')
             return True

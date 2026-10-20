@@ -78,6 +78,10 @@ def arm_verdicts(relay, now: int) -> None:
     the vault write in the same tick. This is the ordering invariant, expressed as scheduling."""
     for row in relay.store.open_relay_slashes(relay.backing):
         relay.mark_dirty(row['miner'])
+    # A seizure the attestation doesn't show yet is re-read every tick until it does: that is what
+    # releases the miner's entry hold (``has_pending_debit``).
+    for row in relay.store.unreflected_relay_slashes(relay.backing):
+        relay.mark_dirty(row['miner'])
 
 
 def relay_verdicts(relay, now: int) -> bool:
@@ -133,8 +137,8 @@ def _relay_one(relay, row: Dict[str, Any], now: int) -> bool:
 
 
 def _settle(relay, row: Dict[str, Any], why: str) -> None:
-    """Close the obligation: the debit is real on the vault now, so it stops being netted off the
-    attestation and stops blocking the miner's initiates."""
+    """Close the vault obligation: the debit is real on the vault now, so it stops being netted off the
+    attestation. It keeps blocking the miner's initiates until Solana's attestation reflects it."""
     relay.store.mark_relay_slash_applied(row['swap_key'])
     relay.mark_dirty(row['miner'])
     bt.logging.info(f'relay: verdict {row["swap_key"][:16]} settled — {why}')

@@ -78,13 +78,34 @@ class RelayLedger:
         return [dict(r) for r in self._rows(sql + ' ORDER BY block_time, swap_key', params)]
 
     def mark_relay_slash_applied(self, swap_key: str) -> None:
-        self._exec(f'UPDATE {self._t}_slashes SET applied = 1 WHERE swap_key = ?', (swap_key,))
+        self._exec(f'UPDATE {self._t}_slashes SET applied = 1 WHERE swap_key = ? AND applied = 0', (swap_key,))
+
+    # A verdict's ``applied`` runs 0 → 1 → 2: owed to the vault, seized on the vault but not yet visible
+    # in Solana's BondAttestation, and reflected there too. Only the last state frees the miner's entry.
+
+    def unreflected_relay_slashes(self, backing: str, miner: Optional[str] = None) -> List[dict]:
+        sql = f'SELECT * FROM {self._t}_slashes WHERE applied = 1 AND backing = ?'
+        params: tuple = (backing,)
+        if miner is not None:
+            sql, params = sql + ' AND miner = ?', params + (miner,)
+        return [dict(r) for r in self._rows(sql + ' ORDER BY block_time, swap_key', params)]
+
+    def mark_relay_slashes_reflected(self, backing: str, miner: str) -> None:
+        self._exec(
+            f'UPDATE {self._t}_slashes SET applied = 2 WHERE applied = 1 AND backing = ? AND miner = ?',
+            (backing, miner),
+        )
+
+    def owes_relay_debit(self, backing: str, miner: str) -> bool:
+        """Whether a verdict against ``miner`` is unapplied on the vault or not yet reflected on Solana."""
+        sql = f'SELECT 1 FROM {self._t}_slashes WHERE applied < 2 AND backing = ? AND miner = ? LIMIT 1'
+        return bool(self._rows(sql, (backing, miner)))
 
     def get_relay_swap(self, swap_key: str) -> None:
         return None  # the verdict carries its payee and pinned hotkey; no live snapshot is kept
 
     def prune_relay_swaps(self, cutoff: int) -> None:
-        self._exec(f'DELETE FROM {self._t}_slashes WHERE applied = 1 AND block_time < ?', (int(cutoff),))
+        self._exec(f'DELETE FROM {self._t}_slashes WHERE applied >= 1 AND block_time < ?', (int(cutoff),))
 
     # ── fees ────────────────────────────────────────────────────────────────
 

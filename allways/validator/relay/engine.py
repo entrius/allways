@@ -201,9 +201,15 @@ class BondRelay:
         """Off-chain backstop to busy-until-settled: while a miner owes the vault an unapplied
         debit, this validator refuses to vote a new off-chain-backed initiate for it. Covers the
         seconds-wide window the on-chain settlement grace can't, and any relay-slower-than-grace
-        tail."""
+        tail.
+
+        The hold outlives the vault seizure: once the vault applies a slash the verdict stops being
+        netted, but Solana's BondAttestation can still show the pre-slash bond (the netted write sits in
+        the actuator's inbox, or its quorum hasn't landed). Releasing then would let this validator
+        open a swap against seized collateral, so the hold ends only when the attestation in the World
+        is at or below what the post-slash vault supports (see ``attestation._write_one``)."""
         try:
-            return bool(self.store.open_relay_slashes(self.backing, str(miner)))
+            return self.store.owes_relay_debit(self.backing, str(miner))
         except Exception as e:
             bt.logging.warning(f'relay: pending-debit check failed for {str(miner)[:8]} ({e}); assuming owed')
             return True  # fail closed: an unreadable ledger must not open a new swap

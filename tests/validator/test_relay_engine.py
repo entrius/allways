@@ -437,7 +437,56 @@ def test_a_miner_owing_an_unapplied_debit_blocks_its_own_next_initiate():
     relay.store.record_relay_slash(SWAP, MINER, 'tao', 22 * RAO, 22 * RAO, USER_TAO, NOW)
     assert relay.has_pending_debit(MINER)
     relay.store.mark_relay_slash_applied(SWAP)
+    assert relay.has_pending_debit(MINER), 'applied on the vault is not yet reflected on Solana'
+    relay.store.mark_relay_slashes_reflected('tao', MINER)
     assert not relay.has_pending_debit(MINER)
+
+
+class _InboxChain(FakeChain):
+    """Votes sit in the actuator's inbox instead of landing: a held hub, or a quorum still forming."""
+
+    def vote(self, kind, subject, payload):
+        self.calls.append((kind, *(payload or ())))
+        if kind == 'vote_set_attestation':
+            self.timeline.append('solana:vote_set_attestation')
+
+
+def _stale_attestation(balance=100 * RAO):
+    return SimpleNamespace(miner=MINER, chain='tao', effective_balance=balance, locked=True, epoch=3)
+
+
+def test_the_entry_hold_outlives_the_vault_seizure_until_solana_shows_it():
+    # A2: the netted attestation is only QUEUED, and the vault slash is voted in the same tick. Once
+    # the vault applies it the verdict stops netting; if the hold dropped then, this validator would
+    # vote a new TAO swap against the pre-slash 100 Solana still shows, backed by 78 of real bond.
+    chain = _InboxChain(miner_states={MINER: _miner_state()}, attestations={MINER: _stale_attestation()})
+    relay = _relay(solana=chain)
+    relay._reconciled = True
+    _ingest(relay, [_timeout_event()])
+    relay.step(NOW)
+    assert relay.vault.slashed == {SWAP} and relay.store.open_relay_slashes('tao') == []
+    assert chain.attestations[MINER].effective_balance == 100 * RAO
+    assert relay.has_pending_debit(MINER), 'the seizure is real but Solana still advertises the old bond'
+
+    relay.step(NOW + 1)  # still unlanded: the hold persists across ticks
+    assert relay.has_pending_debit(MINER)
+
+    chain.attestations[MINER] = _stale_attestation(78 * RAO)
+    relay.step(NOW + 2)
+    assert not relay.has_pending_debit(MINER)
+
+
+def test_the_entry_hold_survives_a_restart_while_the_attestation_lags():
+    store = _store()
+    chain = _InboxChain(miner_states={MINER: _miner_state()}, attestations={MINER: _stale_attestation()})
+    relay = _relay(solana=chain, store=store)
+    relay._reconciled = True
+    _ingest(relay, [_timeout_event()])
+    relay.step(NOW)
+    restarted = _relay(solana=chain, store=store, vault=relay.vault)
+    assert restarted.has_pending_debit(MINER)
+    restarted.step(NOW + 1)  # the boot reconcile re-reads it, and Solana still overstates the bond
+    assert restarted.has_pending_debit(MINER)
 
 
 # --- job 3: the exit sequence -------------------------------------------------------------------
@@ -973,7 +1022,7 @@ def test_a_rebind_after_the_verdict_does_not_redirect_the_seizure_off_the_pinned
 
 def test_an_unreadable_ledger_fails_closed():
     relay = _relay()
-    relay.store.open_relay_slashes = lambda *a, **k: (_ for _ in ()).throw(RuntimeError('disk'))
+    relay.store.owes_relay_debit = lambda *a, **k: (_ for _ in ()).throw(RuntimeError('disk'))
     assert relay.has_pending_debit(MINER), 'a ledger we cannot read must not open a new swap'
 
 
