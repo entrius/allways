@@ -3,7 +3,7 @@ use anchor_lang::system_program::{transfer, Transfer};
 
 use crate::backing;
 use crate::constants::{
-    quote_update_fee, quantize_rate_sig_figs, ADDR_LOCK_SEED, MAX_ADDR_LEN, MAX_CHAIN_LEN, MINER_SEED,
+    quote_update_fee, quantize_rate_sig_figs, ADDR_LOCK_FEE_LAMPORTS, ADDR_LOCK_SEED, MAX_ADDR_LEN, MAX_CHAIN_LEN, MINER_SEED,
     QUOTE_SEED, TREASURY_SEED,
 };
 use crate::error::ErrorCode;
@@ -20,6 +20,7 @@ use crate::state::{addr_lock_key, AddrLock, MinerQuote, MinerState, Treasury};
 /// anti-flashing fee** (`constants::quote_update_fee`) into the treasury PDA — high for rapid churn,
 /// zero once a quote has stood long enough. Both wallets are locked to the poster on first post, so no
 /// other miner can ever post them (a payout from a shared wallet would confirm both miners' swaps).
+/// Each new lock pays `ADDR_LOCK_FEE_LAMPORTS` to the treasury, so mass-locking users' wallets is costly.
 #[derive(Accounts)]
 #[instruction(
     from_chain: String,
@@ -147,13 +148,18 @@ pub fn handler(
     let miner_key = ctx.accounts.miner.key();
     let bump = ctx.bumps.quote;
 
-    ctx.accounts
+    let from_claimed = ctx
+        .accounts
         .from_addr_lock
         .claim(miner_key, ctx.bumps.from_addr_lock)?;
-    match ctx.accounts.to_addr_lock.as_mut() {
+    let to_claimed = match ctx.accounts.to_addr_lock.as_mut() {
         Some(lock) => lock.claim(miner_key, ctx.bumps.to_addr_lock.ok_or(ErrorCode::MissingAddrLock)?)?,
-        None => require!(from_addr_lock_key == to_addr_lock_key, ErrorCode::MissingAddrLock),
-    }
+        None => {
+            require!(from_addr_lock_key == to_addr_lock_key, ErrorCode::MissingAddrLock);
+            false
+        }
+    };
+    let lock_fee = ADDR_LOCK_FEE_LAMPORTS * (from_claimed as u64 + to_claimed as u64);
 
     // Anti-flashing churn fee on UPDATES only — creation is free (no onboarding barrier), decaying to
     // zero the longer the prior quote stood; fee → treasury. The remove + re-create dodge is closed on
@@ -163,7 +169,8 @@ pub fn handler(
     } else {
         0
     };
-    if fee > 0 {
+    let charge = fee + lock_fee;
+    if charge > 0 {
         transfer(
             CpiContext::new(
                 ctx.accounts.system_program.key(),
@@ -172,12 +179,12 @@ pub fn handler(
                     to: ctx.accounts.treasury.to_account_info(),
                 },
             ),
-            fee,
+            charge,
         )?;
         let treasury = &mut ctx.accounts.treasury;
         treasury.total = treasury
             .total
-            .checked_add(fee)
+            .checked_add(charge)
             .ok_or(ErrorCode::Overflow)?;
     }
 

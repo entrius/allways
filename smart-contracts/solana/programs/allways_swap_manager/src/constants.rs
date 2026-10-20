@@ -234,6 +234,10 @@ pub const QUOTE_UPDATE_FEE_TIER1_MAX_SECS: i64 = 300; // 5 min
 pub const QUOTE_UPDATE_FEE_TIER2_LAMPORTS: u64 = 1_000_000; // 0.001 SOL — 5–10 min
 pub const QUOTE_UPDATE_FEE_TIER2_MAX_SECS: i64 = 600; // 10 min → free thereafter
 
+// Wallet-lock fee: claiming a wallet locks it out of every other miner and every taker source forever,
+// so each first claim pays a non-refundable fee to the treasury. Re-posting an owned wallet is free.
+pub const ADDR_LOCK_FEE_LAMPORTS: u64 = 50_000_000; // 0.05 SOL
+
 // Sanity: windows must increase and the fee must not increase as time passes (monotone decay).
 const _: () = assert!(
     QUOTE_UPDATE_FEE_TIER1_MAX_SECS < QUOTE_UPDATE_FEE_TIER2_MAX_SECS

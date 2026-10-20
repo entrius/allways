@@ -6,7 +6,7 @@ use {
         AccountDeserialize, AccountSerialize, InstructionData, Space, ToAccountMetas,
     },
     allways_swap_manager::constants::{
-        discounted_reservation_fee, FULFILL_GRACE_SOL_SECS, MAX_TOTAL_EXTENSION_SECS,
+        discounted_reservation_fee, ADDR_LOCK_FEE_LAMPORTS, FULFILL_GRACE_SOL_SECS, MAX_TOTAL_EXTENSION_SECS,
         POOL_WINDOW_SECS, RESERVATION_FEE_LAMPORTS,
     },
     allways_swap_manager::state::{MinerDirectionStats, MinerState, Pool, Reservation, Swap, SwapStatus, Treasury},
@@ -953,11 +953,11 @@ fn test_fulfill_confirm_fee_and_invariant() {
 
     let fee = SOL_AMOUNT / 100;
     assert_eq!(miner_state(&svm, &miner.pubkey()).collateral, coll_before - fee, "1% fee taken");
-    // Quote creation is free; treasury holds the setup's stake-discounted reservation fee (the
-    // opener is one of 3 weight-1 validators) plus this swap's 1% confirm fee.
+    // Treasury holds the quote's two wallet locks, the setup's stake-discounted reservation fee (the
+    // opener is one of 3 weight-1 validators), and this swap's 1% confirm fee.
     assert_eq!(
         treasury_total(&svm),
-        discounted_reservation_fee(RESERVATION_FEE_LAMPORTS, 1, 3) + fee,
+        2 * ADDR_LOCK_FEE_LAMPORTS + discounted_reservation_fee(RESERVATION_FEE_LAMPORTS, 1, 3) + fee,
         "fees accrued to treasury"
     );
     assert!(!miner_state(&svm, &miner.pubkey()).has_active_swap);

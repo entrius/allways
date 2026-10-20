@@ -18,7 +18,7 @@ use {
     },
     allways_swap_manager::state::{MinerQuote, MinerState, Treasury},
     allways_swap_manager::constants::{
-        BACKING_BIT_SOL, BACKING_BIT_TAO, QUOTE_UPDATE_FEE_TIER1_LAMPORTS,
+        ADDR_LOCK_FEE_LAMPORTS, BACKING_BIT_SOL, BACKING_BIT_TAO, QUOTE_UPDATE_FEE_TIER1_LAMPORTS,
         QUOTE_UPDATE_FEE_TIER1_MAX_SECS, QUOTE_UPDATE_FEE_TIER2_LAMPORTS,
         QUOTE_UPDATE_FEE_TIER2_MAX_SECS, RATE_PRECISION,
     },
@@ -397,14 +397,15 @@ fn test_quote_update_fee_decays() {
     let m = miner.pubkey();
     set_clock(&mut svm, 1_000_000); // a real (nonzero) wall clock
 
-    // 1) Creation → free.
+    // 1) Creation → no churn fee, only the two new wallet locks.
     send(&mut svm, set_quote_ix(&program_id, &m, "btc", "tao", "a", "b", 340 * RATE_PRECISION, 1), &m, &miner).expect("create");
-    assert_eq!(treasury(&svm, &program_id), 0, "creation is free");
+    let locks = 2 * ADDR_LOCK_FEE_LAMPORTS;
+    assert_eq!(treasury(&svm, &program_id), locks, "creation pays only the wallet locks");
 
     // 2) Immediate update (elapsed 0 < 5 min) → tier-1.
     send(&mut svm, set_quote_ix(&program_id, &m, "btc", "tao", "a", "b", 341 * RATE_PRECISION, 1), &m, &miner).expect("rapid update");
     let after_t1 = treasury(&svm, &program_id);
-    assert_eq!(after_t1, QUOTE_UPDATE_FEE_TIER1_LAMPORTS, "rapid update charges tier-1");
+    assert_eq!(after_t1, locks + QUOTE_UPDATE_FEE_TIER1_LAMPORTS, "rapid update charges tier-1");
 
     // 3) Update just past the 5-min window → tier-2.
     set_clock(&mut svm, 1_000_000 + QUOTE_UPDATE_FEE_TIER1_MAX_SECS + 1);
@@ -432,15 +433,16 @@ fn test_remove_quote_charges_churn_fee() {
 
     // Fresh quote (btc/tao), removed immediately → tier-1.
     send(&mut svm, set_quote_ix(&program_id, &m, "btc", "tao", "a", "b", 340 * RATE_PRECISION, 1), &m, &miner).expect("create fresh");
-    assert_eq!(treasury(&svm, &program_id), 0, "creation free");
+    let locks = 2 * ADDR_LOCK_FEE_LAMPORTS;
+    assert_eq!(treasury(&svm, &program_id), locks, "creation pays only the wallet locks");
     send(&mut svm, remove_quote_ix(&program_id, &m, "btc", "tao"), &m, &miner).expect("remove fresh");
-    assert_eq!(treasury(&svm, &program_id), QUOTE_UPDATE_FEE_TIER1_LAMPORTS, "removing a fresh quote charges tier-1");
+    assert_eq!(treasury(&svm, &program_id), locks + QUOTE_UPDATE_FEE_TIER1_LAMPORTS, "removing a fresh quote charges tier-1");
 
     // A different quote (btc/sol) left to stand past the decay window → removes free (treasury unchanged).
     send(&mut svm, set_quote_ix(&program_id, &m, "btc", "sol", "a", "b", 341 * RATE_PRECISION, 1), &m, &miner).expect("create stale");
     set_clock(&mut svm, 1_000_000 + QUOTE_UPDATE_FEE_TIER2_MAX_SECS + 1);
     send(&mut svm, remove_quote_ix(&program_id, &m, "btc", "sol"), &m, &miner).expect("remove stale");
-    assert_eq!(treasury(&svm, &program_id), QUOTE_UPDATE_FEE_TIER1_LAMPORTS, "a long-standing quote removes free");
+    assert_eq!(treasury(&svm, &program_id), locks + QUOTE_UPDATE_FEE_TIER1_LAMPORTS, "a long-standing quote removes free");
 }
 
 #[test]
@@ -772,12 +774,27 @@ fn test_other_miner_cannot_post_a_taken_wallet() {
 }
 
 #[test]
+fn test_each_new_wallet_lock_pays_the_fee_once() {
+    let (mut svm, program_id) = setup();
+    let miner = dual_miner(&mut svm, &program_id);
+    let m = miner.pubkey();
+    set_clock(&mut svm, 1_000_000);
+    send(&mut svm, set_quote_ix(&program_id, &m, "btc", "sol", "bc1qminer", "minerSol", RATE_PRECISION, 1), &m, &miner).expect("two new");
+    assert_eq!(treasury(&svm, &program_id), 2 * ADDR_LOCK_FEE_LAMPORTS);
+    send(&mut svm, set_quote_ix(&program_id, &m, "sol", "btc", "MINERSOL", "bc1qminer", RATE_PRECISION, 1), &m, &miner).expect("both owned");
+    assert_eq!(treasury(&svm, &program_id), 2 * ADDR_LOCK_FEE_LAMPORTS, "owned wallets re-post free");
+    send(&mut svm, set_quote_ix(&program_id, &m, "btc", "tao", "bc1qminer", "minerTao", RATE_PRECISION, 1), &m, &miner).expect("one new");
+    assert_eq!(treasury(&svm, &program_id), 3 * ADDR_LOCK_FEE_LAMPORTS);
+}
+
+#[test]
 fn test_same_deposit_and_payout_wallet_takes_one_lock() {
     let (mut svm, program_id) = setup();
     let miner = dual_miner(&mut svm, &program_id);
     send(&mut svm, set_quote_ix(&program_id, &miner.pubkey(), "btc", "sol", "sameWallet", "SAMEWALLET", RATE_PRECISION, 1), &miner.pubkey(), &miner)
         .expect("one lock serves both legs");
     assert_eq!(lock_owner(&svm, &program_id, "samewallet"), Some(miner.pubkey()));
+    assert_eq!(treasury(&svm, &program_id), ADDR_LOCK_FEE_LAMPORTS, "one lock, one fee");
 }
 
 #[test]
