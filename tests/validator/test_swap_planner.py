@@ -162,6 +162,18 @@ def test_a_not_found_checked_before_the_deadline_does_not_slash(tmp_path):
     assert report.decision == 'timeout' and intent.key[0] == 'timeout_swap'
 
 
+def test_a_stale_confirmed_delivery_times_out_instead_of_waiting_forever(tmp_path):
+    """A confirmed read is final and never re-checked, so it must not wait on a re-read after the deadline."""
+    swap = _swap(timeout_at=NOW - 5)
+    stale = _ok(block_time=NOW - 500, checked_at=NOW - 30)  # mined before initiated_at, read before the deadline
+    planner = _planner(
+        tmp_path,
+        sol=_Watcher(verify=stale, cancel_evidence=Verdict(1, NOW), delivery_refused=Verdict(1, NOW, info=False)),
+    )
+    report, (intent,) = _decision(planner, _world(swap))
+    assert report.decision == 'timeout' and intent.key[0] == 'timeout_swap'
+
+
 def test_a_deposit_another_swap_claimed_first_is_rejected(tmp_path):
     other = DepositClaim(swap_key='ff' * 32, slot=1, seen_at=NOW)
     planner = _planner(tmp_path, btc=_Watcher(verify=_ok()))

@@ -234,7 +234,9 @@ def _fulfilled(swap: Any, ctx: SwapContext, now: int, overdue: bool, fee_divisor
     why = f'src=ok dst={dest.status} [{confs(swap.to_chain, dest.info)}] timeout_in={int(swap.timeout_at) - now}s'
     if not overdue:
         return Action(Decision.WAIT, reason=f'{why} — awaiting a verifiable+fresh dest leg')
-    if dest.checked_at < int(swap.timeout_at):
+    # Only an answer that can still change needs a re-read: a confirmed leg is final, so re-checking it
+    # would wait forever on a delivery that failed the freshness floor.
+    if dest.status != 'ok' and dest.checked_at < int(swap.timeout_at):
         return Action(Decision.WAIT, reason=f'{why} — re-checking the dest after the deadline before any slash')
     if ctx.delivery_refused(swap):
         if now < int(swap.max_extend_at):

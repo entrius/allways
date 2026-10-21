@@ -53,7 +53,13 @@ class FakeProvider(Asset, Chain):
 
 def _tx(sender: str, recipient: str) -> TransactionInfo:
     return TransactionInfo(
-        tx_hash='0xabc', confirmed=True, sender=sender, recipient=recipient, amount=100, confirmations=6
+        tx_hash='0xabc',
+        confirmed=True,
+        sender=sender,
+        recipient=recipient,
+        amount=100,
+        confirmations=6,
+        block_time=1_700_000_000,
     )
 
 

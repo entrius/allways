@@ -162,6 +162,11 @@ class Asset(ABC):
         if tx_info is None:
             return None
 
+        # A mined tx always has a block time, so a missing one is a failed read. Raising keeps it out of
+        # the freshness floor, which fails closed on None and would slash an honest leg.
+        if tx_info.confirmed and tx_info.block_time is None:
+            raise ProviderUnreachableError(f'{self.chain_def.id} block time unavailable for tx {tx_hash[:16]}...')
+
         if require_confirmed and not tx_info.confirmed:
             bt.logging.debug(
                 f'verify_transaction: tx {tx_hash[:16]}... not yet confirmed '

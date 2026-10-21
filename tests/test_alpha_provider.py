@@ -173,7 +173,7 @@ def test_unreadable_events_raise_rather_than_reading_as_absent():
 def test_missing_block_time_raises():
     """is_tx_fresh fails closed on None, which would ride a paid leg to a TIMEOUT slash."""
     with pytest.raises(ProviderUnreachableError):
-        _verify(_provider(block_time=None))
+        _provider(block_time=None).verify_transaction(TXID, MINER, 5_000, block_hint=BLOCK)
 
 
 # ─── balances + price ───────────────────────────────────────────────────────

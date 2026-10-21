@@ -166,12 +166,9 @@ class Alpha(Asset):
         block_hint: int = 0,
         max_scan_blocks: int = 150,
     ) -> Optional[TransactionInfo]:
-        info = self.chain.scan_for_tx(
+        return self.chain.scan_for_tx(
             tx_hash, expected_recipient, expected_amount, block_hint, max_scan_blocks, *self.ledger
         )
-        if info is not None and info.block_time is None:
-            raise ProviderUnreachableError(f'{self.chain_def.id} block time unavailable for {info.block_number}')
-        return info
 
     def stakes(self, coldkey: str) -> List[Tuple[str, int]]:
         """(hotkey, alpha) held by ``coldkey`` on this netuid; raises on a read failure."""
