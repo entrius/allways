@@ -8,6 +8,7 @@ import pytest
 
 from allways.classes import ActivityTransition
 from allways.constants import (
+    ADDRESS_BAN_SECS,
     ALPHA_FAMILY,
     ALPHA_PRICE_TTL_SECS,
     DIRECTION_POOLS,
@@ -36,6 +37,7 @@ from allways.validator.scoring.rewards import (
     crown_now,
     fill_held_crown,
     make_crown_predicates,
+    quote_rates,
     replay_crown_time_window,
     score_round,
 )
@@ -530,3 +532,56 @@ def test_alpha_prices_come_from_the_price_table_first_and_are_kept_for_their_ttl
     assert prices.unit_value('sol', 'sn7', 'tao', NOW + 1) == 0.25  # kept
     assert prices.unit_value('sol', 'sn7', 'tao', NOW + ALPHA_PRICE_TTL_SECS) == 0.5  # read on its own
     assert prices.unit_value('btc', 'sol', 'sol', NOW) == 1.0 and alpha.reads == 1
+
+
+def test_a_quote_on_a_purse_its_miner_dropped_reads_zero():
+    """The program keeps a quote when its purse goes dark; the reconcile must not keep crediting it."""
+
+    def quote(backing):
+        return SimpleNamespace(
+            miner='pk',
+            from_chain='tao',
+            to_chain='sol',
+            collateral_chain=backing,
+            rate=15 * RATE_PRECISION,
+            miner_from_addr='from',
+            miner_to_addr='to',
+        )
+
+    world = World(NOW, 1, True, None, {'MinerQuote': {'a': quote('sol'), 'b': quote('tao')}}, attribution={'pk': 'hk'})
+    tao_only = SimpleNamespace(active=True, active_backings=pdas.BACKING_BITS['tao'])
+    rates = quote_rates(world, {}, {'hk': tao_only})
+    assert rates[('hk', 'tao', 'sol', 'sol')] == 0.0
+    assert rates[('hk', 'tao', 'sol', 'tao')] > 0
+    # No state (banned / off-metagraph) is not proof of a dark purse: the rate stands.
+    assert quote_rates(world, {}, {})[('hk', 'tao', 'sol', 'sol')] > 0
+
+
+def test_an_address_ban_pays_nothing_on_every_lane_until_it_ends():
+    """A miner banned for an unusable address earns on no lane, a corrected quote included, until the ban has run
+    its rounds; then it earns exactly as before."""
+    world = _round_world()
+    best = world.accounts['MinerQuote']['qb']
+    world.accounts['MinerQuote']['qb2'] = SimpleNamespace(**{**vars(best), 'from_chain': 'sol', 'to_chain': 'btc'})
+    banned_at = NOW - 500
+
+    def score(now, ban=True):
+        ledger = _ledger({'hk_a': NEXT, 'hk_b': BEST})
+        ledger.put(0, 'hk_b', RATE, BEST, 'sol', 'btc', 'sol')
+        if ban:
+            ledger.ban('hk_b', banned_at)
+        return score_round(
+            world, HOTKEYS, ledger, {}, AlphaPrices({}, lambda: None), now - 1000, now, FeePoolShare(0.0, None, 1.0)
+        )
+
+    def paid_lanes(result):
+        return {(r.from_chain, r.to_chain) for r in result.rows if r.hotkey == 'hk_b' and r.reward > 0}
+
+    free = score(NOW, ban=False)
+    assert paid_lanes(free) == {('btc', 'sol'), ('sol', 'btc')}
+    banned = score(NOW)
+    assert banned.rewards[1] == 0 and paid_lanes(banned) == set()
+    assert banned.rewards[0] > 0  # the next rate takes the lane it can serve
+    assert score(banned_at + ADDRESS_BAN_SECS - 1).rewards[1] == 0  # still inside the ban
+    after = score(banned_at + ADDRESS_BAN_SECS + 1)
+    assert paid_lanes(after) == paid_lanes(free) and after.rewards[1] == pytest.approx(free.rewards[1])

@@ -8,6 +8,7 @@ from solders.instruction import Instruction
 from solders.keypair import Keypair
 from solders.transaction import Transaction
 
+from allways.constants import CANCEL_REASON_ALPHA_STAKE_REFUSED, CANCEL_REASON_OTHER
 from allways.solana.client import swap_from_solana, swap_key_from_tx_hash
 from allways.validator.actuator.executors import SWAP_EXECUTORS, SendingClient, StaleWorld
 from allways.validator.actuator.planners import SwapIntent, intent
@@ -149,6 +150,23 @@ def test_a_timeout_is_cast_only_if_the_chain_still_shows_the_swap_as_planned():
 def test_a_refusal_cancel_is_rechecked_the_same_way():
     with pytest.raises(StaleWorld):
         SWAP_EXECUTORS['cancel_swap'](_Chain(_account(status=Fulfilled)), _planned('cancel_swap'))
+
+
+def test_a_refusal_sends_the_planned_reason_to_the_program():
+    """The reason code is what the program records for a no-fault cancel (an alpha recipient's refused stake, a
+    frozen account, …); only a refusal with none falls back to OTHER."""
+    sent = []
+
+    class _Recording(_Chain):
+        def cancel_swap(self, swap_key, miner, reason):
+            sent.append(reason)
+            return 'sig'
+
+    planned = swap_from_solana(_account())
+    for code in (CANCEL_REASON_ALPHA_STAKE_REFUSED, None):
+        refusal = intent('cancel_swap', 'k', planned, 0, payload=SwapIntent(planned, SimpleNamespace(reason_code=code)))
+        assert SWAP_EXECUTORS['cancel_swap'](_Recording(_account()), refusal) == 'sig'
+    assert sent == [CANCEL_REASON_ALPHA_STAKE_REFUSED, CANCEL_REASON_OTHER]
 
 
 def test_a_stale_claim_is_reaped_only_if_its_reservation_has_lapsed_on_chain():
