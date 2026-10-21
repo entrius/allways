@@ -5,8 +5,9 @@ The primary stays where it always was (``SUBTENSOR_NETWORK`` → ``--subtensor.n
 config`` network for the CLI) and may be a keyed provider URL. Two optional comma-separated lists ride alongside it:
 
   SUBTENSOR_FALLBACK_ENDPOINTS  tried in order when the current endpoint drops (a connection error, or
-                                ``max_retries`` timeouts in a row) or rate-limits us (HTTP 429 at the handshake, or a
-                                rate-limit JSON-RPC error), at construction and mid-run alike
+                                ``max_retries`` timeouts in a row), refuses the handshake (any HTTP status: 429, or a
+                                403 from a revoked or blocked key), or rate-limits us (a rate-limit JSON-RPC error), at
+                                construction and mid-run alike
   SUBTENSOR_ARCHIVE_ENDPOINTS   switched to when a read hits "State already discarded": the collateral verdict
                                 prices an alpha leg at its reservation's block, which a lite node (public finney
                                 included) prunes ~300 blocks later
@@ -176,6 +177,12 @@ class RateLimited(ConnectionError):
     dropped socket."""
 
 
+class HandshakeRefused(ConnectionError):
+    """The current endpoint answered the websocket handshake with an HTTP error other than 429 (a 403 for a revoked or
+    blocked key, a 5xx from its gateway). A ConnectionError, so it fails over like a dropped socket: the endpoint is
+    unusable, and a fallback is exactly what the operator configured for that."""
+
+
 def is_rate_limited(error: Any) -> bool:
     """True when ``error`` (an exception, or a JSON-RPC error object / response) is an endpoint throttling us."""
     if isinstance(error, RateLimited):
@@ -208,6 +215,8 @@ def _switch_reason(error: Optional[BaseException], use_archive: bool) -> str:
         return 'state discarded, reading from an archive'
     if isinstance(error, RateLimited):
         return 'rate limited'
+    if isinstance(error, HandshakeRefused):
+        return 'handshake refused'
     if isinstance(error, MaxRetriesExceeded):
         return 'no answer after max_retries timeouts'
     return f'connection error ({type(error).__name__})'
@@ -311,9 +320,11 @@ class PrimaryWatch:
             try:
                 return connect(*args, **kwargs)
             except InvalidStatus as e:
-                if self.fallbacks and is_rate_limited(e):
+                if not self.fallbacks:
+                    raise
+                if is_rate_limited(e):
                     raise RateLimited(f'{redact_endpoint(self.substrate.url)} rate-limited the handshake: {e}') from e
-                raise
+                raise HandshakeRefused(f'{redact_endpoint(self.substrate.url)} refused the handshake: {e}') from e
 
         return watched
 
@@ -362,9 +373,10 @@ def build_subtensor(network: Optional[str] = None, config: Optional['bt.Config']
     walks primary → fallbacks once and then raises MaxRetriesExceeded; ``PrimaryWatch`` brings the connection back to
     the primary once it answers again, and the caller's existing error path still rebuilds through here.
 
-    The SDK's constructor only moves on from an endpoint on ConnectionError, so a primary that rate-limits the first
-    handshake or request is skipped here instead: the Subtensor is built on the next endpoint (the skipped ones become
-    its last fallbacks), and the watch starts off the primary, re-trying it on the usual interval.
+    The SDK's constructor only moves on from an endpoint on ConnectionError, so a primary that refuses the first
+    handshake (any HTTP status) or rate-limits the first request is skipped here instead: the Subtensor is built on the
+    next endpoint (the skipped ones become its last fallbacks), and the watch starts off the primary, re-trying it on
+    the usual interval.
     """
     kwargs = {k: v for k, v in (('network', network), ('config', config)) if v is not None}
     primary, primary_network = bt.Subtensor.setup_config(network, config)
@@ -393,12 +405,11 @@ def build_subtensor(network: Optional[str] = None, config: Optional['bt.Config']
             # RetrySyncSubstrate names every endpoint it tried in this message.
             raise ConnectionError(redact_text(str(e))) from None
         except Exception as e:
-            if i + 1 == len(endpoints) or not is_rate_limited(e):
+            refused = isinstance(e, InvalidStatus)
+            if i + 1 == len(endpoints) or not (refused or is_rate_limited(e)):
                 raise
-            bt.logging.debug(
-                f'Subtensor {redact_endpoint(endpoints[i])} rate-limited the connect: {redact_text(str(e))}'
-            )
-            reason = 'rate limited'
+            reason = 'rate limited' if is_rate_limited(e) else 'handshake refused'
+            bt.logging.debug(f'Subtensor {redact_endpoint(endpoints[i])} {reason} at connect: {redact_text(str(e))}')
     if archives:
         _raise_discarded_state(subtensor.substrate)
     watch = PrimaryWatch.install(subtensor.substrate, primary, fallbacks, archives)
