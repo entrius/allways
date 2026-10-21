@@ -216,6 +216,8 @@ def make_validator(tmp_path: Path, live_quotes, providers, now=10_000):
     hotkeys = pad_hotkeys()
     store = ValidatorStateStore(db_path=tmp_path / 'state.db')
     store.set_relay_meta(ValidatorStateStore.LEDGER_SINCE_KEY, str(now - ELIGIBILITY_FILL_WINDOW_SECS))
+    # Pin the fee share at 1.0: no subtensor here, so each round keeps it and pools pay in full.
+    store.set_miner_share(1.0)
     for hotkey in (BAD, HONEST):
         store.insert_active_event(0, hotkey, True)
         for backing in BACKING_BITS:

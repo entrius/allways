@@ -12,6 +12,7 @@ import numpy as np
 
 from allways.chains import canonical_pair, get_chain_def
 from allways.constants import (
+    FEE_POOL_MULTIPLE,
     RECYCLE_UID,
     declarable_backings,
     hub_leg,
@@ -19,7 +20,7 @@ from allways.constants import (
 from allways.utils.rate import min_executable_hub_leg
 
 if TYPE_CHECKING:
-    from allways.validator.scoring import DirectionTrace
+    from allways.validator.scoring import DirectionTrace, FeePoolShare
     from neurons.validator import Validator
 
 
@@ -63,15 +64,19 @@ def log_scoring_trace(
     weighting_traces: Optional[Dict[str, 'WeightingTrace']] = None,
     swap_bounds: Optional[Dict[str, Tuple[int, int]]] = None,
     live_rates: Optional[Dict[Tuple[str, str, str, str], float]] = None,
+    fee_pool: Optional['FeePoolShare'] = None,
 ) -> None:
     hotkeys = self.metagraph.hotkeys
     recycle_uid = RECYCLE_UID if RECYCLE_UID < len(rewards) else 0
     hotkey_to_uid = {hk: uid for uid, hk in enumerate(hotkeys)}
     weighting_traces = weighting_traces or {}
 
-    lines = [
+    header = (
         f'V1 scoring: window=[{window_start}, {window_end}], distributed={distributed:.6f}, recycled={recycled:.6f}'
-    ]
+    )
+    if fee_pool is not None:
+        header += f', {fee_pool_fields(fee_pool)}'
+    lines = [header]
 
     for (from_c, to_c, backing), trace in direction_traces.items():
         holders = ', '.join(
@@ -80,7 +85,7 @@ def log_scoring_trace(
             if hk in hotkey_to_uid
         )
         lines.append(
-            f'  [{from_c}→{to_c}|{backing}] pool={trace.pool:g} holders={{{holders}}} '
+            f'  [{from_c}→{to_c}|{backing}] pool={trace.paid_pool:g} holders={{{holders}}} '
             f'unfilled={trace.unfilled_time}s qvol={trace.qualified_volume}'
         )
 
@@ -136,6 +141,18 @@ def log_scoring_trace(
         lines.append(f'  recycled={recycled:.3f} → UID{recycle_uid} (subnet owner) cause={cause}')
 
     bt.logging.info('\n'.join(lines))
+
+
+def fee_pool_fields(fee_pool: 'FeePoolShare') -> str:
+    """The round's fee-pool inputs as ``key=value`` pairs; an unread input prints ``n/a``."""
+
+    def tao(value: Optional[float]) -> str:
+        return 'n/a' if value is None else f'{value:.6f}'
+
+    return (
+        f'fees_24h={tao(fee_pool.fees_tao)}TAO, emission_24h={tao(fee_pool.emission_tao)}TAO, '
+        f'multiple={FEE_POOL_MULTIPLE:g}, miner_share={fee_pool.share:.6f}' + ('' if fee_pool.fresh else ' (kept)')
+    )
 
 
 def non_earner_lines(

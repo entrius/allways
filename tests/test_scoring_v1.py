@@ -248,6 +248,8 @@ def make_validator(
     store = ValidatorStateStore(db_path=tmp_path / 'state.db')
     # Ledger older than the window at ``block`` so the activity gate is live (young = strikes-only).
     store.set_relay_meta(ValidatorStateStore.LEDGER_SINCE_KEY, str(block - ELIGIBILITY_FILL_WINDOW_SECS))
+    # Pin the fee share at 1.0: no subtensor here, so each round keeps it and pools pay in full.
+    store.set_miner_share(1.0)
     if recent_fills is None:
         recent_fills = set(hotkeys) if all_eligible else set()
     for hotkey in recent_fills:

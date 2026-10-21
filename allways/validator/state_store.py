@@ -429,18 +429,20 @@ class ValidatorStateStore:
         backing: str = 'sol',
         qualified: bool = False,
         collateral_amount: int = 0,
+        fee: int = 0,
     ) -> None:
         """Persist one completed swap's realized legs, keyed by ``swap_key`` hex so a
         cursor-reset / RPC-prune re-ingest can't double-count volume. ``block_num`` is
         the unix ``blockTime``; the legs are stored as decimal strings (u128-safe).
         ``qualified`` = the fill was reserved on a crown holder (scoring.fill_held_crown).
-        ``collateral_amount`` = the backing's leg the fill locked (an alpha fill's TAO value)."""
+        ``collateral_amount`` = the backing's leg the fill locked (an alpha fill's TAO value).
+        ``fee`` = the swap's protocol fee (``SwapCompleted.fee``) in the backing's smallest unit."""
         self._execute(
             """
             INSERT INTO clearing_rates
                 (block_num, hotkey, from_chain, to_chain, from_amount, to_amount, swap_key, backing, qualified,
-                 collateral_amount)
-            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                 collateral_amount, fee)
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
             ON CONFLICT(swap_key) DO NOTHING
             """,
             (
@@ -454,6 +456,7 @@ class ValidatorStateStore:
                 backing,
                 1 if qualified else 0,
                 str(int(collateral_amount)),
+                str(int(fee)),
             ),
         )
 
@@ -480,6 +483,17 @@ class ValidatorStateStore:
                 collateral_sum + int(r['collateral_amount']),
             )
         return volumes
+
+    def get_swap_fees(self, start_time: int, end_time: int) -> Dict[str, int]:
+        """``{backing: fee_sum}`` — the swap fees completed in ``(start_time, end_time]``, each in its
+        backing's smallest unit. Any lane, qualified or not; rows from before the fee column read 0."""
+        rows = self._fetchall(
+            'SELECT backing, fee FROM clearing_rates WHERE block_num > ? AND block_num <= ?', (start_time, end_time)
+        )
+        fees: Dict[str, int] = {}
+        for r in rows:
+            fees[r['backing']] = fees.get(r['backing'], 0) + int(r['fee'])
+        return fees
 
     def get_recent_fill_hotkeys(self, start_time: int, end_time: int) -> Dict[str, Set[str]]:
         """``{backing: {hotkey}}`` — per purse, the hotkeys that completed a fill drawing on it in
@@ -513,6 +527,30 @@ class ValidatorStateStore:
         return {r['hotkey'] for r in rows}
 
     LEDGER_SINCE_KEY = 'clearing_ledger_since'
+    MINER_SHARE_KEY = 'fee_pool_miner_share'
+    SOL_TAO_RATE_KEY = 'fee_pool_sol_tao_rate'
+    SOL_TAO_RATE_HOUR_KEY = 'fee_pool_sol_tao_rate_hour'
+
+    def miner_share(self) -> float:
+        """The last miner_share a scoring round derived; 0.0 (full recycle) before the first one."""
+        stored = self.get_relay_meta(self.MINER_SHARE_KEY)
+        return float(stored) if stored is not None else 0.0
+
+    def set_miner_share(self, share: float) -> None:
+        self.set_relay_meta(self.MINER_SHARE_KEY, repr(float(share)))
+
+    def sol_tao_rate(self) -> Optional[Tuple[float, int]]:
+        """``(rate, hour)``: the last good TAO-per-SOL rate the fee conversion fetched and the UTC hour it is
+        for; None before the first."""
+        rate = self.get_relay_meta(self.SOL_TAO_RATE_KEY)
+        hour = self.get_relay_meta(self.SOL_TAO_RATE_HOUR_KEY)
+        if rate is None or hour is None:
+            return None
+        return float(rate), int(hour)
+
+    def set_sol_tao_rate(self, rate: float, hour: int) -> None:
+        self.set_relay_meta(self.SOL_TAO_RATE_KEY, repr(float(rate)))
+        self.set_relay_meta(self.SOL_TAO_RATE_HOUR_KEY, str(int(hour)))
 
     def clearing_ledger_since(self, now: int) -> int:
         """When this database started recording fills — stamped ``now`` on first call and kept
@@ -1206,6 +1244,9 @@ class ValidatorStateStore:
             # Alpha-family volume is the fill's TAO collateral. Pre-upgrade rows read 0 and age out in a day.
             if cols and 'collateral_amount' not in cols:
                 conn.execute("ALTER TABLE clearing_rates ADD COLUMN collateral_amount TEXT NOT NULL DEFAULT '0'")
+            # The swap's protocol fee, for the fee-scaled pool. Pre-upgrade rows read 0 and age out in a day.
+            if cols and 'fee' not in cols:
+                conn.execute("ALTER TABLE clearing_rates ADD COLUMN fee TEXT NOT NULL DEFAULT '0'")
             conn.executescript(
                 """
                 CREATE TABLE IF NOT EXISTS rate_events (
@@ -1279,7 +1320,8 @@ class ValidatorStateStore:
                     swap_key    TEXT,
                     backing     TEXT NOT NULL DEFAULT 'sol',
                     qualified   INTEGER NOT NULL DEFAULT 0,
-                    collateral_amount TEXT NOT NULL DEFAULT '0'
+                    collateral_amount TEXT NOT NULL DEFAULT '0',
+                    fee         TEXT NOT NULL DEFAULT '0'
                 );
                 CREATE INDEX IF NOT EXISTS idx_clearing_rates_dir_block
                     ON clearing_rates(from_chain, to_chain, block_num);

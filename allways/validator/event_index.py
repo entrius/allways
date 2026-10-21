@@ -205,6 +205,7 @@ class SolanaEventIndex:
                         hotkey, from_chain, to_chain, backing, collateral_amount, block_time
                     ),
                     collateral_amount=collateral_amount,
+                    fee=int(rec.fields.get('fee', 0)),
                 )
             return True
         if name == 'StaleClaimClosed':
