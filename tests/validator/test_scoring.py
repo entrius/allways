@@ -166,11 +166,34 @@ def test_a_quote_waits_for_its_address_check_and_a_refused_address_zeroes_and_ba
     scoring.tick(NOW)
     assert watcher.asked == [('bc1qrefused',)]
     assert scoring.ledger.get_latest_rates_before('btc', 'sol', NOW) == {}
-    assert rounds.get()[0] is None  # a held event holds the round too
+    assert rounds.get()[0] is not None  # the round runs: only the held quote's lane waits
+    assert scoring.ledger.get_latest_rates_before('btc', 'sol', NOW) == {}
     watcher.answer = Verdict(1, NOW, info=True)
     scoring.tick(NOW + 5)
     assert scoring.ledger.get_latest_rates_before('btc', 'sol', NOW) == {'hk_a': (0.0, NOW - 10)}
     assert scoring.ledger.address_banned_hotkeys(NOW - 20, NOW) == {'hk_a'}
+
+
+def test_quotes_waiting_on_their_address_checks_never_hold_back_a_round(tmp_path):
+    """A fresh QuoteSet every few seconds over idle addresses keeps one quote waiting on its check at all times:
+    rounds still run on schedule."""
+    watcher = _Watcher()  # never answers: every quote waits its full JUDGE_WAIT_SECS
+    scoring, events, rounds, *_ = _scoring(tmp_path, _world(quotes=[_quote('pk_a')]), watchers={'btc': watcher})
+    for i, t in enumerate(range(NOW, NOW + SCORING_WINDOW_SECS + 1, 15)):
+        events.publish(_quote_set('pk_a', t - 1, slot=10 + i, miner_from_addr=f'bc1qidle{i}', miner_to_addr=''))
+        scoring.tick(t)
+        assert scoring._held  # one is always waiting
+    assert rounds.get()[0].window_end == NOW + SCORING_WINDOW_SECS  # both rounds ran
+
+
+def test_a_round_leaves_a_lane_whose_quote_waits_on_its_check_uncredited(tmp_path):
+    """The quote book already shows the new rate; until its address is judged the reconcile must not write it."""
+    watcher = _Watcher()
+    scoring, events, rounds, *_ = _scoring(tmp_path, _world(quotes=[_quote('pk_a')]), watchers={'btc': watcher})
+    events.publish(_quote_set('pk_a', NOW - 1, miner_from_addr='bc1qunjudged', miner_to_addr=''))
+    scoring.tick(NOW)
+    assert scoring._held and rounds.get()[0] is not None
+    assert scoring.ledger.get_latest_rates_before('btc', 'sol', NOW) == {}
 
 
 def test_a_halted_program_recycles_the_whole_pool(tmp_path):

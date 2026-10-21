@@ -85,7 +85,9 @@ class Scoring(Component):
             self._dropped = self.events.dropped
             self.ledger.mark_gap(int(now))
         self._ingest(self.events.drain(), world, head, now, status)
-        caught_up = world.complete and status is not None and not status.catching_up and not self._held
+        # A QuoteSet waiting on its address check holds back only its own lane (the round's reconcile skips it),
+        # never the whole round: otherwise a stream of fresh quotes would keep any round from running.
+        caught_up = world.complete and status is not None and not status.catching_up
         last = int(self.store.get_meta(LAST_SCORED) or now - SCORING_WINDOW_SECS)
         if caught_up and now - last >= SCORING_WINDOW_SECS:
             self._round(world, head, int(now), max(last, int(now) - MAX_SCORING_BACKFILL_SECS))
@@ -143,7 +145,8 @@ class Scoring(Component):
         else:
             fees = self.ledger.swap_fees(now - POOL_VOLUME_WINDOW_SECS, now)
             share = self.fee_pool.round(fees, head.subnet, now)
-            result = score_round(world, hotkeys, self.ledger, self.assets, self.prices, last, now, share)
+            unjudged = {_quote_lane(record, hotkey) for record, hotkey, _ in self._held if record.name == 'QuoteSet'}
+            result = score_round(world, hotkeys, self.ledger, self.assets, self.prices, last, now, share, unjudged)
         self.ledger.prune(now)
         with self.store.tx() as c:
             Store.set_meta(c, LAST_SCORED, str(now))
@@ -168,6 +171,17 @@ def quote_usable(
     if any(answers):
         return False
     return None if None in answers else True
+
+
+def _quote_lane(record: Any, hotkey: str) -> Tuple[str, str, str, str]:
+    """A QuoteSet's lane, keyed as the ledger keys its rate rows."""
+    f = record.fields
+    return (
+        hotkey,
+        str(f['from_chain']).lower(),
+        str(f['to_chain']).lower(),
+        str(f.get('collateral_chain') or 'sol').lower(),
+    )
 
 
 def _hotkey(record: Any, world: World) -> Optional[str]:

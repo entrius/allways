@@ -260,10 +260,16 @@ class Ledger:
                     bt.logging.debug(f'reconcile {hk[:8]}: {backing} collateral corrected to {amount}')
         return made
 
-    def reconcile_live_quotes(self, live_quotes: Dict[Tuple[str, str, str, str], float], now: int) -> int:
+    def reconcile_live_quotes(
+        self,
+        live_quotes: Dict[Tuple[str, str, str, str], float],
+        now: int,
+        unjudged: Set[Tuple[str, ...]] = frozenset(),
+    ) -> int:
         """The quote book's anchor: a lane with no live quote is zeroed, a differing live rate corrected, and
         a live lane the ledger never saw (quoted before its history) added. An empty book reads as a failed
-        read and changes nothing."""
+        read and changes nothing. ``unjudged`` lanes have a QuoteSet still waiting on its address check: the
+        book's rate for them is not yet known to be usable, so they are left as the ledger has them."""
         if not live_quotes:
             bt.logging.warning('reconcile: empty quote book, skipping')
             return 0
@@ -275,6 +281,8 @@ class Ledger:
         # A lane the ledger zeroed (a refused address, a dropped purse) is never revived from the book: only a
         # fresh QuoteSet, judged again, brings it back. A lane it never saw is added.
         for lane in set(held) | {k for k, rate in live_quotes.items() if rate > 0 and k not in latest}:
+            if lane in unjudged:
+                continue
             hk, from_chain, to_chain, backing = lane
             live = live_quotes.get(lane, 0.0)
             if (RATE, hk, lane[1:]) not in quiet and held.get(lane, 0.0) != live:

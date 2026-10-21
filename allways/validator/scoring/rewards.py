@@ -726,9 +726,11 @@ def score_round(
     window_start: int,
     window_end: int,
     fee_pool: FeePoolShare,
+    unjudged: Set[Tuple[str, str, str, str]] = frozenset(),
 ) -> RoundResult:
     """Anchor the ledger to the World, replay each lane's crown over the window, pay each pool scaled by the
-    round's fee share, recycle the rest. The window is on the unix-time axis the ledger is keyed on."""
+    round's fee share, recycle the rest. The window is on the unix-time axis the ledger is keyed on. ``unjudged``
+    are (hotkey, from, to, backing) lanes whose QuoteSet waits on its address check: the reconcile leaves them."""
     n, now = len(hotkeys), window_end
     rewards = np.zeros(n, dtype=np.float32)
     if n == 0:
@@ -746,7 +748,7 @@ def score_round(
         )
     # The book is read for every miner: a banned miner's quotes still have to match the chain.
     live_rates = quote_rates(world, providers, states)
-    made['rate'] = ledger.reconcile_live_quotes(live_rates, now=now)
+    made['rate'] = ledger.reconcile_live_quotes(live_rates, now=now, unjudged=unjudged)
     if any(made.values()):
         # Expected on a fresh ledger; afterwards each one is an event the feed missed.
         bt.logging.info('reconcile: the chain corrected ' + ', '.join(f'{n} {kind}' for kind, n in made.items() if n))
