@@ -213,6 +213,24 @@ def test_an_unreadable_leg_is_unknown_not_absent(spec):
 
 
 @pytest.mark.parametrize('spec', EVM_SPECS, ids=by_id)
+@pytest.mark.parametrize('confs', [1, None], ids=['one-deep', 'at-depth'])
+def test_a_block_replaced_between_reads_is_unknown_until_the_reads_agree(spec, confs):
+    """The block at the receipt's height reads as another block (a reorg between the reads, or endpoints on
+    different forks): unknown at any depth, never cached, and the leg verifies once the reads agree."""
+    provider = spec.cls()
+    amount = amount_for(provider)
+    replaced = dict(mined(provider, confs=confs), eth_getBlockByNumber={'hash': '0x' + 'ee' * 32, 'timestamp': '0x64'})
+    rpc_stub(provider, replaced)
+    with pytest.raises(ProviderUnreachableError):
+        provider.fetch_matching_tx(TX, WIRE_RECIPIENT, amount)
+    assert provider._settled_cache == {}
+
+    rpc_stub(provider, mined(provider, confs=confs))
+    info = provider.fetch_matching_tx(TX, WIRE_RECIPIENT, amount)
+    assert info is not None and info.amount == amount
+
+
+@pytest.mark.parametrize('spec', EVM_SPECS, ids=by_id)
 def test_send_needs_the_matching_key_and_then_broadcasts(spec, monkeypatch):
     provider = spec.cls()
     prefix = provider.chain_def.env_prefix

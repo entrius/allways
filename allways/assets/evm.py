@@ -553,10 +553,6 @@ class EvmAsset(Asset):
         """The match read off a status-1 receipt, else None (logging why). Unused when ``_MATCHES_ON_TX``."""
         raise NotImplementedError
 
-    def _block_replaced(self, block: dict, receipt: dict, block_number: int) -> bool:
-        """Whether the block at the receipt's height is no longer the one the receipt names."""
-        return bool(block.get('hash') and receipt.get('blockHash') and block['hash'] != receipt['blockHash'])
-
     def fetch_matching_tx(
         self,
         tx_hash: str,
@@ -649,9 +645,14 @@ class EvmAsset(Asset):
                 raise ProviderUnreachableError(
                     f'{prefix} tx {tx_hash[:16]}... is mined but block {block_number} has no readable timestamp'
                 )
-            if self._block_replaced(block, receipt, block_number):
-                bt.logging.warning(f'{self._log} tx {tx_hash[:16]}... block was reorged out — rejecting')
-                return None
+            # The block at that height is no longer the one the receipt names: a reorg landed between the two
+            # reads, or the reads came from endpoints on different forks. Either clears on a later read, so it
+            # is 'unknown' (raise) — never "no such payment", which can end a swap an honest miner paid.
+            if block.get('hash') and block['hash'] != receipt.get('blockHash'):
+                raise ProviderUnreachableError(
+                    f'{prefix} tx {tx_hash[:16]}... receipt names block {receipt.get("blockHash")} but block '
+                    f'{block_number} reads {block["hash"]} — reorg or endpoint disagreement, retrying'
+                )
 
             # Cache only a fully-settled, internally-consistent read (status 1, timestamped,
             # tx/receipt agree on the block hash) — pending/absent/reverted are never cached.

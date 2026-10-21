@@ -67,12 +67,6 @@ class EvmCoin(EvmAsset):
             return None
         return self.chain.normalize_address(tx.get('from') or ''), value
 
-    def _block_replaced(self, block: dict, receipt: dict, block_number: int) -> bool:
-        tip = self.chain.cached_block_height()
-        confirmations = max(0, tip - block_number + 1) if tip is not None else 0
-        is_confirmed = confirmations >= self.chain_def.min_confirmations
-        return bool(is_confirmed and block.get('hash') and block['hash'] != receipt.get('blockHash'))
-
     def get_balance(self, address: str) -> int:
         """Balance in the chain's native unit at latest, 0 on failure (mirrors the other providers)."""
         try:

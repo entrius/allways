@@ -135,12 +135,6 @@ class TestFetchMatchingTx:
         assert info.confirmations == 0
         assert info.block_number is None
 
-    def test_reorged_block_rejected_when_confirmed(self, provider):
-        responses = mined_tx_responses()
-        responses['eth_getBlockByNumber'] = {'hash': '0x' + 'ee' * 32, 'timestamp': '0x64'}
-        rpc_stub(provider, responses)
-        assert provider.fetch_matching_tx(TX, RECIPIENT, 10**18) is None
-
     def test_rpc_down_raises_unreachable(self, provider):
         def boom(method, params, timeout=15):
             raise RuntimeError('all ETH RPCs failed')
