@@ -291,7 +291,8 @@ class TestDeliveryGates:
         assert p.can_deliver_to(self.RECIP, AMOUNT) is True
         with pytest.raises(Exception):
             p.delivery_refused(self.RECIP, 0)
-        assert p.cancel_evidence(self.RECIP, AMOUNT) is None
+        with pytest.raises(Exception):
+            p.cancel_evidence(self.RECIP, AMOUNT)  # unknown, never "no evidence"
 
 
 class TestSendGuards:

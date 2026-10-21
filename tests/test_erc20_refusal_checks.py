@@ -159,14 +159,15 @@ class TestCancelEvidenceReadsTheDeclaredSurface:
         provider = build(self.PAXOS, rpc)
         assert provider.cancel_evidence(RECIPIENT, amount=1) == expected
 
-    def test_a_clean_destination_or_rpc_trouble_yields_no_evidence(self):
-        # A false cancel would refund a swap the miner could have delivered.
+    def test_a_clean_destination_yields_no_evidence_and_rpc_trouble_is_unknown(self):
+        # A false cancel would refund a swap the miner could have delivered; an unread check is neither answer.
         assert build(self.PAXOS, lambda m, p, **kw: f'0x{0:064x}').cancel_evidence(RECIPIENT, amount=1) is None
 
         def down(*_a, **_kw):
             raise ConnectionError('every endpoint is down')
 
-        assert build(self.PAXOS, down).cancel_evidence(RECIPIENT, amount=1) is None
+        with pytest.raises(ConnectionError):
+            build(self.PAXOS, down).cancel_evidence(RECIPIENT, amount=1)
 
 
 class TestFeeEnabledYieldsCancelEvidence:

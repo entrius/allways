@@ -261,7 +261,8 @@ class Asset(ABC):
         ``delivery_refused`` (a mere deferral hint): a wrong verdict here converts a genuine miner
         default into a free pass, so passive chains (BTC/TAO) and the default return None — they cannot
         refuse a payout. ``from_address`` is the committed miner sender the delivery must come from, so a
-        provider that keys on the miner's OWN reverted tx can reject one from any other address.
+        provider that keys on the miner's OWN reverted tx can reject one from any other address. Raises when
+        the evidence can't be read: unknown is neither evidence nor its absence, and the caller waits.
         EVM/ERC-20/Sol/Alpha override."""
         return None
 

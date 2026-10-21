@@ -4,12 +4,12 @@ actuator's own memory of what it verified. Nothing here waits on a chain: an ans
 
 from __future__ import annotations
 
-from typing import Any, Callable, Dict, Optional, Set, Tuple
+from typing import Any, Callable, Dict, Optional, Set, Tuple, Union
 
 from allways.cli.swap_commands.swap_intake import collateral_matches, leg_value
 from allways.solana import pdas
 from allways.solana.client import swap_key_from_tx_hash
-from allways.validator.actuator.swaps import Leg, NotReady
+from allways.validator.actuator.swaps import UNKNOWN, Leg, NotReady, Unknown, is_tx_fresh, status_of, user_receives
 from allways.validator.chains.watcher import ChainWatcher, Probe, Verdict, verify_probe
 from allways.validator.feed.events import HISTORY_HORIZON_SECS
 from allways.validator.store.db import Store
@@ -32,8 +32,8 @@ TABLES = [
 
 
 class SwapMemory:
-    """What this validator itself verified, kept across restarts: the delivery each miner's tx confirmed
-    (first verified wins), and alpha collateral verdicts priced at a fill block a lite node may forget."""
+    """What this validator itself verified, kept across restarts: the swap each miner's delivery tx confirmed here
+    (never a second one), and alpha collateral verdicts priced at a fill block a lite node may forget."""
 
     def __init__(self, store: Store) -> None:
         self.store = store
@@ -130,7 +130,7 @@ class WorldContext:
         self.legs[chain] = leg
         return leg
 
-    def cancel_evidence(self, swap: Any, amount: int) -> Optional[int]:
+    def cancel_evidence(self, swap: Any, amount: int) -> Union[int, None, Unknown]:
         args = (
             swap.user_to_addr,
             int(amount),
@@ -145,7 +145,7 @@ class WorldContext:
             run=lambda a: a.cancel_evidence(args[0], args[1], args[2], from_address=args[3], block_hint=args[4]),
         )
         v = self._ask(swap.to_chain, probe)
-        return None if v.error else v.info  # no evidence when the check fails: never cancel on a failure
+        return UNKNOWN if v.error else v.info  # never cancel on a failed check, and never read it as "none"
 
     def delivery_refused(self, swap: Any) -> bool:
         args = (swap.user_to_addr, int(swap.initiated_at))
@@ -188,9 +188,12 @@ class WorldContext:
         """Some swap claimed this swap's delivery tx as its source deposit, so it pays that swap, not this one."""
         return tx_key(swap.to_tx_hash) in self.world.deposits
 
-    def claim_delivery(self, swap: Any) -> bool:
-        """This swap may use its delivery tx: no other swap of the miner completed on it, and no other swap
-        of the miner was verified on it here first."""
+    def claim_delivery(self, swap: Any, info: Any, fee_divisor: int) -> bool:
+        """This swap may use its verified delivery tx (``info``): no other swap of the miner completed on it, no
+        live swap of the miner that the same tx would also pay was fulfilled before it, and this validator never
+        used it for another swap. The World rule is what every validator agrees on — they read the same World,
+        so a shared tx goes to the same swap, and a swap the tx doesn't pay (a mistaken fulfillment) never
+        blocks the one it does. The memory is the backstop for a World that lagged: one tx, one swap, here."""
         miner, delivery = str(swap.miner), tx_key(swap.to_tx_hash)
         key = swap_key_from_tx_hash(swap.from_tx_hash).hex()
         for other_key, f in self.world.fulfillments.items():
@@ -202,7 +205,35 @@ class WorldContext:
                 and tx_key(f.to_tx_hash) == delivery
             ):
                 return False
+        mine = (int(getattr(swap, 'fulfilled_at', 0) or 0), key)
+        for _, other in self.world.all('Swap'):
+            other_key = swap_key_from_tx_hash(other.from_tx_hash).hex()
+            if (
+                other_key != key
+                and status_of(other) == 'Fulfilled'
+                and str(other.miner) == miner
+                and other.to_tx_hash
+                and tx_key(other.to_tx_hash) == delivery
+                and (int(getattr(other, 'fulfilled_at', 0) or 0), other_key) < mine
+                and self._also_pays(other, swap, info, fee_divisor)
+            ):
+                return False
         return self.memory.claim_delivery(miner, delivery, key, self.now)
+
+    def _also_pays(self, other: Any, swap: Any, info: Any, fee_divisor: int) -> bool:
+        """The tx verified for ``swap`` would verify for ``other`` too: same dest chain, recipient and sender,
+        enough for ``other``'s leg, and fresh for it."""
+        provider = self.providers.get(swap.to_chain)
+        if provider is None or other.to_chain != swap.to_chain:
+            return False
+        norm = provider.chain.normalize_address
+        grace = getattr(provider.chain_def, 'replay_grace_secs', 0)
+        return (
+            norm(other.user_to_addr) == norm(swap.user_to_addr)
+            and norm(other.miner_to_addr or '') == norm(swap.miner_to_addr or '')
+            and user_receives(other, fee_divisor) <= int(info.amount)
+            and is_tx_fresh(info, int(other.initiated_at), grace)
+        )
 
     def owes_settlement(self, swap: Any) -> bool:
         backing = str(getattr(swap, 'collateral_chain', '') or '').lower()

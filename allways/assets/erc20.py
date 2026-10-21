@@ -331,21 +331,18 @@ class Erc20(EvmAsset):
         Reads the surface the ROW declares, exactly as ``_refused_at`` does. Hardcoding one issuer's
         selectors here would revert on every other token and silently yield no evidence — which
         slashes a miner for a destination its issuer froze. Returns CANCEL_REASON_ERC20_BLACKLIST
-        for a per-address freeze, _PAUSED for a token-wide stop, else None. None on RPC trouble so
-        the caller waits rather than slashing.
+        for a per-address freeze, _PAUSED for a token-wide stop, else None. Raises on RPC trouble:
+        an unread check is unknown, and the caller waits rather than slashing.
 
         _FEE_ENABLED covers a token whose issuer switched on a transfer fee (PAXG's admin lever):
         the fee shaves every honest delivery's log below the pinned amount, so it's a hub-wide
         no-fault condition, not a miner failure. Probed on ``amount`` (the expected delivery), so a
         fee that floors to 0 for this size never spuriously cancels."""
-        try:
-            for selector, takes_address in self._checks:
-                if self._eth_call(selector, address if takes_address else ''):
-                    return CANCEL_REASON_ERC20_BLACKLIST if takes_address else CANCEL_REASON_ERC20_PAUSED
-            if self._fee_for(amount) > 0:
-                return CANCEL_REASON_ERC20_FEE_ENABLED
-        except Exception:
-            return None
+        for selector, takes_address in self._checks:
+            if self._eth_call(selector, address if takes_address else ''):
+                return CANCEL_REASON_ERC20_BLACKLIST if takes_address else CANCEL_REASON_ERC20_PAUSED
+        if self._fee_for(amount) > 0:
+            return CANCEL_REASON_ERC20_FEE_ENABLED
         return None
 
     def find_recent_outgoing(self, from_addr: str, to_addr: str, amount: int) -> Optional[str]:

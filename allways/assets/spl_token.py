@@ -266,13 +266,10 @@ class SplToken(SolanaAsset):
         from_address: Optional[str] = None,
         block_hint: int = 0,
     ) -> Optional[int]:
+        """A reserved key or a frozen destination ATA. Raises on RPC trouble (unknown: the caller waits)."""
         if address in RESERVED_ACCOUNTS:
             return CANCEL_REASON_SOL_RESERVED
-        try:
-            return CANCEL_REASON_SPL_FROZEN if self._frozen(address) else None
-        except Exception as e:
-            bt.logging.warning(f'{LOG_SOL} {self.chain_def.id} cancel_evidence probe failed for {address}: {e}')
-            return None
+        return CANCEL_REASON_SPL_FROZEN if self._frozen(address) else None
 
     # --- send ---
 

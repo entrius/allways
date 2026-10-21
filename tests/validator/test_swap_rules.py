@@ -109,7 +109,10 @@ class RecordingProvider:
         if self.result is None:
             return None  # tx not found / details mismatch
         return SimpleNamespace(
-            confirmed=bool(self.result), block_time=self.block_time, confirmations=self.confirmations
+            confirmed=bool(self.result),
+            block_time=self.block_time,
+            confirmations=self.confirmations,
+            amount=expected_amount,
         )
 
 
@@ -151,7 +154,7 @@ class _Watchers(dict):
 
 class _Context(WorldContext):
     def __init__(self, rules, now):
-        world = World(now, 1, True, None, {})
+        world = World(now, 1, True, None, {'Swap': {f'pda{i}': s for i, s in enumerate(rules.swaps)}})
         super().__init__(world, _Watchers(rules.providers, now), rules.providers, rules.memory, now, rules.owes)
         self._reservation = rules.reservation
 
@@ -163,6 +166,7 @@ class Rules:
     def __init__(self, providers, reservation, owes=None):
         self.providers, self.reservation, self.owes = providers, reservation, owes
         self.memory = SwapMemory(Store(':memory:'))
+        self.swaps = []  # the live Swap accounts in the World
 
     def decide(self, swap, now):
         return decide(swap, _Context(self, now), now, fee_divisor=100)
@@ -226,6 +230,42 @@ def test_delivery_confirms_one_swap_per_miner():
     assert action.decision == Decision.WAIT and 'another swap' in action.reason
     assert rules.decide(first, now=1501).decision == Decision.CONFIRM  # the second never blocks the first
     assert rules.decide(second, now=2500).decision == Decision.TIMEOUT
+
+
+def test_every_validator_gives_a_shared_delivery_to_the_earlier_fulfilled_swap():
+    """Two validators that read the swaps in opposite orders still agree on which one the tx confirms, so
+    neither swap is left short of quorum."""
+    for first_fulfilled_at, second_fulfilled_at in ((1100, 1200), (1200, 1100)):
+        verdicts = []
+        for order in ('first', 'second'), ('second', 'first'):
+            rules, _, first, second = _delivery_pair()
+            first.fulfilled_at, second.fulfilled_at = first_fulfilled_at, second_fulfilled_at
+            rules.swaps = [first, second]
+            swaps = {'first': first, 'second': second}
+            verdicts.append({name: rules.decide(swaps[name], now=1500).decision for name in order})
+        winner = 'first' if first_fulfilled_at < second_fulfilled_at else 'second'
+        loser = 'second' if winner == 'first' else 'first'
+        for verdict in verdicts:
+            assert verdict[winner] == Decision.CONFIRM and verdict[loser] == Decision.WAIT, verdicts
+
+
+def test_a_shared_delivery_tie_goes_to_the_lower_swap_key():
+    rules, _, first, second = _delivery_pair()
+    first.fulfilled_at = second.fulfilled_at = 1100
+    rules.swaps = [first, second]
+    low, high = sorted((first, second), key=lambda s: swap_key_from_tx_hash(s.from_tx_hash).hex())
+    assert rules.decide(high, now=1500).decision == Decision.WAIT
+    assert rules.decide(low, now=1500).decision == Decision.CONFIRM
+
+
+def test_an_earlier_fulfillment_the_tx_does_not_pay_never_blocks_the_swap_it_pays():
+    # The miner marked the wrong swap fulfilled first: that swap's leg goes to another user, so the tx can only
+    # ever verify for this one.
+    rules, _, first, second = _delivery_pair()
+    first.fulfilled_at, second.fulfilled_at = 1100, 1200
+    first.user_to_addr = 'anotherUserSOL'
+    rules.swaps = [first, second]
+    assert rules.decide(second, now=1500).decision == Decision.CONFIRM
 
 
 def test_unverified_delivery_does_not_use_the_tx():
@@ -344,6 +384,19 @@ def test_getcode_hint_without_sound_evidence_does_not_refuse():
     providers['sol'].cancel_reason = None  # no sound evidence
     action = rules.decide(make_swap(status='Fulfilled', timeout_at=1000), now=1500)
     assert action.decision == Decision.WAIT
+
+
+def test_unreadable_cancel_evidence_holds_an_overdue_slash_until_the_ceiling():
+    # The check that could prove a no-fault cancel failed: that alone defers the slash, even when the refusal
+    # hint reads clean. Before the deadline it changes nothing, and past the ceiling the swap still ends.
+    for status in ('Active', 'Fulfilled'):
+        rules, providers = rules_with(result=None)
+        providers['sol'].cancel_reason = 'raise'
+        overdue = rules.decide(make_swap(status=status, timeout_at=1000), now=1500)
+        assert overdue.decision == Decision.WAIT and 'cancel evidence' in overdue.reason, status
+        assert rules.decide(make_swap(status=status, timeout_at=9999), now=1500).decision == Decision.WAIT
+        past = make_swap(status=status, timeout_at=1000, max_extend_at=1200)
+        assert rules.decide(past, now=1500).decision == Decision.TIMEOUT, status
 
 
 def test_active_refusing_dest_past_ceiling_times_out():

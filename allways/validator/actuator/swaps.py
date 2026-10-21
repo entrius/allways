@@ -9,7 +9,7 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 from enum import Enum
-from typing import Any, Callable, Optional, Protocol
+from typing import Any, Callable, Optional, Protocol, Union
 
 from allways.chains import compute_extension_target_secs, get_chain_def
 from allways.constants import CANCEL_REASON_INVALID_DEST, EXTENSION_PADDING_SECONDS, FEE_DIVISOR
@@ -79,6 +79,16 @@ class NotReady(Exception):
     """The context has asked but not yet heard back. The swap is skipped this tick, never judged on it."""
 
 
+class Unknown:
+    """A check that ran and could not be read: neither evidence nor its absence."""
+
+    def __repr__(self) -> str:
+        return 'UNKNOWN'
+
+
+UNKNOWN = Unknown()
+
+
 class SwapContext(Protocol):
     def provider(self, chain: str) -> Optional[Any]: ...
 
@@ -86,7 +96,7 @@ class SwapContext(Protocol):
 
     def leg(self, chain: str, tx_hash: str, recipient: str, amount: int, block_hint: int, sender: str) -> Leg: ...
 
-    def cancel_evidence(self, swap: Any, amount: int) -> Optional[int]: ...
+    def cancel_evidence(self, swap: Any, amount: int) -> Union[int, None, Unknown]: ...
 
     def delivery_refused(self, swap: Any) -> bool: ...
 
@@ -98,7 +108,7 @@ class SwapContext(Protocol):
 
     def delivery_is_deposit(self, swap: Any) -> bool: ...
 
-    def claim_delivery(self, swap: Any) -> bool: ...
+    def claim_delivery(self, swap: Any, info: Any, fee_divisor: int) -> bool: ...
 
     def owes_settlement(self, swap: Any) -> bool: ...
 
@@ -147,7 +157,7 @@ def _decide(swap: Any, ctx: SwapContext, now: int, fee_divisor: int) -> Action:
     if status == 'PendingAttestation':
         return _pending_attestation(swap, ctx, now, fee_divisor)
     if status == 'Active':
-        cancel = _cancel(swap, ctx, fee_divisor)
+        cancel = _cancel(swap, ctx, now, overdue, fee_divisor)
         if cancel is not None:
             return cancel
         if overdue:
@@ -158,9 +168,14 @@ def _decide(swap: Any, ctx: SwapContext, now: int, fee_divisor: int) -> Action:
     return Action(Decision.WAIT, reason=f'status {status} — no action')
 
 
-def _cancel(swap: Any, ctx: SwapContext, fee_divisor: int) -> Optional[Action]:
-    """REFUSE only on sound evidence that the dest can never be paid; a mere hint never cancels."""
+def _cancel(swap: Any, ctx: SwapContext, now: int, overdue: bool, fee_divisor: int) -> Optional[Action]:
+    """REFUSE only on sound evidence that the dest can never be paid; a mere hint never cancels. Evidence that
+    could not be read holds an overdue swap until max_extend_at: it may yet prove a no-fault cancel."""
     reason = ctx.cancel_evidence(swap, user_receives(swap, fee_divisor))
+    if reason is UNKNOWN:
+        if overdue and now < int(swap.max_extend_at):
+            return Action(Decision.WAIT, reason='overdue but cancel evidence unreadable — deferring, not slashing')
+        return None
     if reason is None:
         return None
     return Action(
@@ -216,13 +231,13 @@ def _fulfilled(swap: Any, ctx: SwapContext, now: int, overdue: bool, fee_divisor
                 Decision.TIMEOUT if overdue else Decision.WAIT,
                 reason="delivery tx is another swap's source deposit" + (' — slashing' if overdue else ''),
             )
-        if not ctx.claim_delivery(swap):
+        if not ctx.claim_delivery(swap, dest.info, fee_divisor):
             return Action(
                 Decision.TIMEOUT if overdue else Decision.WAIT,
                 reason='delivery tx already confirmed another swap' + (' — slashing' if overdue else ''),
             )
         return Action(Decision.CONFIRM, reason='src=ok dst=ok dst-fresh — both legs verified')
-    cancel = _cancel(swap, ctx, fee_divisor)
+    cancel = _cancel(swap, ctx, now, overdue, fee_divisor)
     if cancel is not None:
         return cancel
     why = f'src=ok dst={dest.status} [{confs(swap.to_chain, dest.info)}] timeout_in={int(swap.timeout_at) - now}s'

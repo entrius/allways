@@ -189,14 +189,11 @@ class EvmCoin(EvmAsset):
         sent from a throwaway address (against a dest that reverts unless ``msg.sender`` is the committed
         miner) to claim refusal without ever attempting delivery from its own address. Deliberately NOT
         ``gasUsed < gas`` (a hostile contract can burn all gas to mimic OOG). ``None`` on anything short
-        of that proof or on RPC trouble — the caller then keeps waiting, never slashes."""
+        of that proof; raises on RPC trouble (unknown — the caller then keeps waiting, never slashes)."""
         if not tx_hash:
             return None
-        try:
-            tx = self.chain.eth_rpc('eth_getTransactionByHash', [tx_hash], null_needs_quorum=True)
-            receipt = self.chain.eth_rpc('eth_getTransactionReceipt', [tx_hash]) if tx else None
-        except Exception:
-            return None
+        tx = self.chain.eth_rpc('eth_getTransactionByHash', [tx_hash], null_needs_quorum=True)
+        receipt = self.chain.eth_rpc('eth_getTransactionReceipt', [tx_hash]) if tx else None
         if not tx or not receipt:
             return None
         norm = self.chain.normalize_address
