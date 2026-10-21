@@ -73,7 +73,7 @@ class _Client:
         self._store(pda, layouts.DISCRIMINATORS[name] + layouts.ACCOUNT_LAYOUTS[name].build(value))
 
     def _store(self, pda, raw):
-        self.live[str(pda)] = {'data': [base64.b64encode(raw).decode(), 'base64']}
+        self.live[str(pda)] = {'data': [base64.b64encode(raw).decode(), 'base64'], 'owner': str(self.program_id)}
 
     def _decode(self, name, raw):
         if name == 'Config':
@@ -263,6 +263,45 @@ def test_a_failed_account_read_is_retried_until_it_lands(tmp_path):
         pass  # the component backs off and ticks again
     reader.tick(NOW)
     assert len(calls) == 2 and out.get()[0].get('Swap', swap_pda) is None  # the retry read it back closed
+
+
+def _live_quote(client, rate):
+    fields = {k: v for k, v in _quote_fields(rate).items() if k != 'update_fee'}
+    client.put('MinerQuote', _quote_pda(), {**fields, 'miner': bytes(MINER), 'bump': 255})
+
+
+def test_an_account_the_program_does_not_own_reads_as_absent_and_the_world_keeps_publishing(tmp_path):
+    # Anyone can send lamports to a miner's reservation address before it exists: a system-owned, empty account.
+    client = _Client()
+    reader, events, _, _, out = _reader(client, tmp_path)
+    reader.tick(NOW)
+    reservation = str(pdas.reservation_pda(MINER, 'sol'))
+    client.live[reservation] = {'data': ['', 'base64'], 'owner': '11111111111111111111111111111111'}
+    _live_quote(client, rate=7)
+    events.publish(_ev('CollateralPosted', {'miner': MINER, 'amount': 1, 'total': 1}, slot=200))  # reads every hub's
+    reader.request_reads({('MinerQuote', _quote_pda())})
+    reader.tick(NOW + 1)
+    world = out.get()[0]
+    assert world.taken_at == NOW + 1  # still publishing
+    assert world.get('Reservation', reservation) is None
+    assert world.get('MinerQuote', _quote_pda()).rate == 7  # the rest of the read landed
+    assert not reader._pending_reads
+
+
+def test_an_account_that_will_not_decode_is_retried_alone(tmp_path):
+    client = _Client()
+    reader, _, _, _, out = _reader(client, tmp_path)
+    reader.tick(NOW)
+    swap_pda = str(pdas.swap_pda(bytes(range(32))))
+    client._store(swap_pda, layouts.DISCRIMINATORS['Swap'] + b'truncated')
+    _live_quote(client, rate=7)
+    reader.request_reads({('Swap', swap_pda), ('MinerQuote', _quote_pda())})
+    reader.tick(NOW + 1)
+    assert out.get()[0].taken_at == NOW + 1 and out.get()[0].get('MinerQuote', _quote_pda()).rate == 7
+    assert reader._pending_reads == {('Swap', swap_pda)}
+    client.rpc.calls.clear()
+    reader.tick(NOW + 2)
+    assert [keys for _, (keys, _) in client.rpc.calls] == [[swap_pda]]  # retried on its own
 
 
 def test_an_account_the_actuator_found_stale_is_read_on_the_next_tick(tmp_path):

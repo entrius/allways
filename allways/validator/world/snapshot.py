@@ -206,8 +206,9 @@ class WorldReader(Component):
             self._pending_reads |= self._requested
             self._requested = set()
         if self._pending_reads:
-            self._read(set(self._pending_reads))  # raises on a failed read: the set is kept for the next tick
-            self._pending_reads.clear()
+            # Raises on a failed read: the set is kept for the next tick. An account that came back but would not
+            # decode is kept on its own, so it can't hold up the rest.
+            self._pending_reads = self._read(set(self._pending_reads))
         self._prune(now)
         cursor = status.cursor if status is not None else None
         if self._changes or cursor != self._saved_cursor or now - self._saved_at >= SAVE_HEARTBEAT_SECS:
@@ -371,7 +372,9 @@ class WorldReader(Component):
         row = (key, claim.swap_key, claim.slot, claim.seen_at, int(claim.initiated))
         self._changes.setdefault('world_deposits', {})[key] = row
 
-    def _read(self, keys: Set[AccountKey]) -> None:
+    def _read(self, keys: Set[AccountKey]) -> Set[AccountKey]:
+        """Read ``keys`` and apply what came back; returns the accounts that came back undecodable."""
+        undecodable: Set[AccountKey] = set()
         ordered = sorted(keys)
         for i in range(0, len(ordered), MULTIPLE_ACCOUNTS_MAX):
             chunk = ordered[i : i + MULTIPLE_ACCOUNTS_MAX]
@@ -387,12 +390,20 @@ class WorldReader(Component):
                 if name == UNTYPED:
                     self._put_untyped(pda, value, slot)
                     continue
-                if value is None:
+                raw = base64.b64decode(value['data'][0]) if value is not None else b''
+                # Anyone can fund any address, so an account that isn't the program's, or isn't of the type this
+                # address holds, is no account of ours: absent, exactly as for an untyped read.
+                if value is None or value.get('owner') != str(self._client.program_id) or _TYPE_OF.get(raw[:8]) != name:
                     self._drop(name, pda, slot)
                 else:
-                    self._put_raw(name, pda, base64.b64decode(value['data'][0]), slot)
+                    try:
+                        self._put_raw(name, pda, raw, slot)
+                    except Exception as e:
+                        bt.logging.warning(f'world: {name} {pda} did not decode, retrying it alone: {e}')
+                        undecodable.add((name, pda))
                 if name == 'Binding':
                     self._refresh_attribution()
+        return undecodable
 
     def _put_untyped(self, pda: str, value: Optional[dict], slot: int) -> None:
         """An account named only by a truncated tx: ours iff our program owns it, typed by its discriminator."""
