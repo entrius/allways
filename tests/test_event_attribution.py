@@ -5,6 +5,7 @@ from types import SimpleNamespace
 
 from solders.keypair import Keypair
 
+from allways.solana.client import AllwaysSolanaClient
 from allways.solana.events import decode_event, program_event_payloads
 from allways.solana.layouts import EVENT_DISCRIMINATORS, EVENT_LAYOUTS
 from allways.solana.program_feed import events_from_logs
@@ -131,3 +132,13 @@ def test_the_backfill_publishes_only_our_frames_events():
     for _ in range(3):
         feed.tick(1400)
     assert _keys((r.name, r.fields) for r in events.drain()) == [('SwapFulfilled', SWAP_KEY)]
+
+
+def test_get_event_logs_returns_only_our_frames_events():
+    # Another program's lines naming an unrelated swap never decode as ours.
+    txs = {'a': _frame(OTHER, _fulfilled(UNRELATED_KEY)), 'b': _frame(OTHER, _completed(UNRELATED_KEY))}
+    client = SimpleNamespace(
+        program_id=PROGRAM,
+        rpc=SimpleNamespace(get_transaction=lambda sig: {'meta': {'logMessages': txs[sig]}}),
+    )
+    assert [decode_event(raw) for sig in txs for raw in AllwaysSolanaClient.get_event_logs(client, sig)] == []

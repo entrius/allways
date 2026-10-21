@@ -582,6 +582,11 @@ class AllwaysSolanaClient:
         ]
         return self._send([self._ix('close_legacy_quote', b'', metas)])
 
+    def new_wallet_locks(self, wallets) -> int:
+        """How many wallet locks posting these wallets would claim — each pays the program's lock fee."""
+        locks = {pdas.addr_lock_pda(w, self.program_id) for w in wallets}
+        return sum(not self.rpc.get_account_info(lock) for lock in locks)  # no data = not yet claimed
+
     def unlocked_quotes(self) -> List[Tuple[str, object]]:
         """Standing quotes whose two wallets aren't both locked to their miner — what `close_unlocked_quote`
         reaps. Empty once every quote has been re-posted under wallet locks."""
@@ -960,7 +965,8 @@ class AllwaysSolanaClient:
         Names the taker + amounts, running the swap-size bounds + collateral gate + the collateral bind.
         `backing` must be the reservation's pinned `collateral_chain` — it is a PDA seed now (v3.1).
         `from_chain` + the (pinned deposit wallet `miner_from_addr`, user_from_addr) key seed the source_lock,
-        which blocks a second live reservation one deposit could satisfy — routed or self-represented alike."""
+        which blocks a second live reservation one deposit could satisfy — routed or self-represented alike.
+        The program refuses a `user_from_addr` whose wallet lock a miner holds (a posted miner wallet)."""
         router = self.keypair.pubkey()
         m = _as_pubkey(miner)
         lock_key = pdas.source_lock_key(miner_from_addr, user_from_addr)
@@ -984,6 +990,7 @@ class AllwaysSolanaClient:
             AccountMeta(self._attestation_meta(m, backing), False, False),
             AccountMeta(pdas.source_lock_pda(from_chain, lock_key, self.program_id), False, True),
             AccountMeta(SYSTEM_PROGRAM, False, False),
+            AccountMeta(pdas.addr_lock_pda(user_from_addr, self.program_id), False, False),
         ]
         return self._send([self._ix('finalize_reservation', args, metas)])
 

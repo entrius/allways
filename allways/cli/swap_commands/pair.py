@@ -14,6 +14,7 @@ from allways.cli.swap_commands.helpers import (
     get_cli_context,
     get_solana_cli_context,
     loading,
+    print_wallet_lock_fee,
     quote_update_fee_lamports,
     resolve_quote_backing,
     safe_read,
@@ -230,7 +231,7 @@ def post_pair(
     )
     console.print(f'  Pubkey:     [dim]{client.keypair.pubkey()}[/dim]\n')
 
-    # Per-direction churn fee for updating an existing quote (creation is free); keyed on each
+    # Per-direction churn fee for updating an existing quote (none on creation); keyed on each
     # quote's own updated_at. Total shown before the confirm so the fee is never a surprise.
     now = int(time.time())
     miner = client.keypair.pubkey()
@@ -245,6 +246,8 @@ def post_pair(
             f'  [yellow]Churn fee: {total_fee / 1e9:g} SOL[/yellow] '
             "[dim](updating existing quote(s); free 10 min after each direction's last change)[/dim]\n"
         )
+    if to_post:
+        print_wallet_lock_fee(client, [src_addr, dst_addr])
 
     if dry_run:
         console.print('[dim]--dry-run: nothing posted.[/dim]')

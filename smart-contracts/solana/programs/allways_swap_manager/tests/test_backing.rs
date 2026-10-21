@@ -332,6 +332,7 @@ fn finalize_ix_b(
             )
             .0,
             system_program: SYSTEM_PROGRAM,
+            from_addr_lock: addr_lock_pda(&pid(), "userSrcAddr"),
         }
         .to_account_metas(None),
     )

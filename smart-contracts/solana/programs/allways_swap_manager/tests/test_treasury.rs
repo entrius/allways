@@ -7,7 +7,7 @@ use {
         AccountDeserialize, InstructionData, ToAccountMetas,
     },
     allways_swap_manager::constants::{
-        discounted_reservation_fee, POOL_WINDOW_SECS, RESERVATION_FEE_LAMPORTS,
+        discounted_reservation_fee, ADDR_LOCK_FEE_LAMPORTS, POOL_WINDOW_SECS, RESERVATION_FEE_LAMPORTS,
     },
     allways_swap_manager::state::{Pool, Treasury},
     litesvm::LiteSVM,
@@ -185,7 +185,7 @@ fn setup_with_fee() -> (LiteSVM, Keypair, u64) {
     // sole bidder (vals[0]) won the seat → it finalizes the fill (BTC→SOL: to_amount == collateral).
     send(&mut svm, Instruction::new_with_bytes(pid(),
         &allways_swap_manager::instruction::FinalizeReservation { user: pool_user, user_from_addr: "userBTC".to_string(), user_to_addr: "userSOL".to_string(), collateral_amount: SOL_AMOUNT, from_amount: 1, to_amount: SOL_AMOUNT as u128, source_lock_key: allways_swap_manager::source_lock_key("mBTC", "userBTC") }.data(),
-        allways_swap_manager::accounts::FinalizeReservation { router: vals[0].pubkey(), config: cfg(), miner: miner.pubkey(), miner_state: miner_pda(&miner.pubkey()), reservation: resv_pda(&miner.pubkey()), attestation: None, source_lock: Pubkey::find_program_address(&[b"srclock", b"btc", &allways_swap_manager::source_lock_key("mBTC", "userBTC")], &pid()).0, system_program: SYS }.to_account_metas(None),
+        allways_swap_manager::accounts::FinalizeReservation { router: vals[0].pubkey(), config: cfg(), miner: miner.pubkey(), miner_state: miner_pda(&miner.pubkey()), reservation: resv_pda(&miner.pubkey()), attestation: None, source_lock: Pubkey::find_program_address(&[b"srclock", b"btc", &allways_swap_manager::source_lock_key("mBTC", "userBTC")], &pid()).0, system_program: SYS, from_addr_lock: addr_lock_pda(&pid(), "userBTC") }.to_account_metas(None),
     ), &vals[0].pubkey(), &vals[0]).expect("finalize");
 
     let key = skey("tx1");
@@ -217,9 +217,10 @@ fn setup_with_fee() -> (LiteSVM, Keypair, u64) {
     confirm(&mut svm, &vals[0]);
     confirm(&mut svm, &vals[1]);
 
-    // treasury = reservation fee + the 1% confirm fee (quote creation is free).
+    // treasury = the quote's two wallet locks + reservation fee + the 1% confirm fee.
     // The opener is one of 3 weight-1 validators, so its reservation fee is stake-discounted.
-    (svm, admin, SOL_AMOUNT / 100 + discounted_reservation_fee(RESERVATION_FEE_LAMPORTS, 1, 3))
+    let fees = 2 * ADDR_LOCK_FEE_LAMPORTS + discounted_reservation_fee(RESERVATION_FEE_LAMPORTS, 1, 3);
+    (svm, admin, SOL_AMOUNT / 100 + fees)
 }
 
 #[test]

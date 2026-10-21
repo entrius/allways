@@ -28,6 +28,7 @@ from allways.cli.swap_commands.helpers import (
     get_cli_context,
     get_solana_cli_context,
     loading,
+    print_wallet_lock_fee,
     quote_update_fee_lamports,
     resolve_quote_backing,
     safe_read,
@@ -188,7 +189,7 @@ def quotes_command(spread_bps, hub, backing, dry_run, yes, **spoke_opts):
     }
 
     # Show each direction's current rate + the churn fee this update will incur (per-direction,
-    # keyed on that quote's own updated_at). Creation is free; the fee decays to 0 over 10 min.
+    # keyed on that quote's own updated_at). Creation pays no churn fee; it decays to 0 over 10 min.
     hub_up = hub.upper()
     console.print(f'\n[bold]{hub_up}-numéraire quotes[/bold]  [dim](X per 1 {hub_up})[/dim]\n')
     total_fee = 0
@@ -200,7 +201,7 @@ def quotes_command(spread_bps, hub, backing, dry_run, yes, **spoke_opts):
             if other != b and client.get_quote(miner, sp.from_chain, sp.to_chain, other) is not None:
                 orphans.append((sp.from_chain, sp.to_chain, other))
         if cur is None:
-            note = '[dim]new — free[/dim]'
+            note = '[dim]new — no churn fee[/dim]'
         else:
             age = now - int(cur.updated_at)
             fee = quote_update_fee_lamports(age)
@@ -224,6 +225,7 @@ def quotes_command(spread_bps, hub, backing, dry_run, yes, **spoke_opts):
             f'\n[yellow]Total churn fee: {total_fee / 1e9:g} SOL[/yellow] '
             '[dim](→ treasury; each direction is free again 10 min after its last update)[/dim]'
         )
+    print_wallet_lock_fee(client, [a for sp in specs for a in (sp.from_addr, sp.to_addr)])
 
     # A quote is per (direction, backing): pricing a direction under one backing leaves a prior
     # quote on the OTHER purse live at its old price. Surface it — takers can still reserve it.
