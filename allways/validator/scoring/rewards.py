@@ -44,6 +44,7 @@ from allways.constants import (
 from allways.eligibility import RecentFills, backing_active, direction_eligible, is_eligible, quote_addresses_valid
 from allways.solana.pdas import BACKING_BITS
 from allways.utils.rate import is_executable_rate, min_executable_hub_leg, quantize_rate_fixed
+from allways.validator.scoring.fee_pool import FeePoolShare
 from allways.validator.scoring.trace import WeightingTrace, log_scoring_trace
 from allways.validator.world.snapshot import World
 
@@ -81,12 +82,18 @@ class ReplayEvent:
 
 @dataclass
 class DirectionTrace:
-    pool: float = 0.0
+    pool: float = 0.0  # the lane's volume-weighted pool, before the fee share
+    miner_share: float = 1.0  # the round's fee share (fee_pool)
     crown_time: Dict[str, float] = field(default_factory=dict)
     qualified_volume: int = 0  # the lane's qualified family notional over the pool window
     cap_weighted_time: Dict[str, float] = field(default_factory=dict)
     unfilled_time: int = 0
     best_rate: float = 0.0
+
+    @property
+    def paid_pool(self) -> float:
+        """What the lane pays this round: its pool scaled by the fee share."""
+        return self.pool * self.miner_share
 
 
 @dataclass
@@ -115,6 +122,7 @@ class RoundResult:
     rows: Tuple[ScoreRow, ...] = ()
     traces: Dict[Lane, DirectionTrace] = field(default_factory=dict)
     intervals: Dict[Lane, List[Interval]] = field(default_factory=dict)  # crown holders over the window
+    fee_pool: Optional[FeePoolShare] = None  # the share the round's pools were scaled by (None when halted)
 
 
 class AlphaPrices:
@@ -717,9 +725,10 @@ def score_round(
     prices: AlphaPrices,
     window_start: int,
     window_end: int,
+    fee_pool: FeePoolShare,
 ) -> RoundResult:
-    """Anchor the ledger to the World, replay each lane's crown over the window, pay the pools, recycle
-    the rest. The window is on the unix-time axis the ledger is keyed on."""
+    """Anchor the ledger to the World, replay each lane's crown over the window, pay each pool scaled by the
+    round's fee share, recycle the rest. The window is on the unix-time axis the ledger is keyed on."""
     n, now = len(hotkeys), window_end
     rewards = np.zeros(n, dtype=np.float32)
     if n == 0:
@@ -746,7 +755,8 @@ def score_round(
     eligibility = {hk: is_eligible(ms, now, hotkey=hk, recent_fills=recent_fills) for hk, ms in states.items()}
     swap_bounds = bounds_from_config(world.config)
 
-    # One trailing-day volume read feeds the pool weighting and each lane's β slice.
+    # One trailing-day volume read feeds the pool weighting and each lane's β slice. Each lane pays its pool × the
+    # fee share, so the paid pools sum to MINER_POOL_SHARE × share and at least the rest recycles.
     lane_volumes = ledger.get_qualified_lane_volumes(now - POOL_VOLUME_WINDOW_SECS, now)
     pools = compute_direction_pools(lane_volumes_to_directions(lane_volumes))
     quoted = ledger.quoted_lanes()
@@ -756,7 +766,7 @@ def score_round(
     rows: List[ScoreRow] = []
     for lane, pool in pools.items():
         from_chain, to_chain, backing = lane
-        trace = traces[lane] = DirectionTrace(pool=pool)
+        trace = traces[lane] = DirectionTrace(pool=pool, miner_share=fee_pool.share)
         qvol, trace.qualified_volume = qualified_volume_shares(lane_volumes.get(lane, {}), from_chain, to_chain)
         if lane not in quoted:
             continue  # never quoted: no crown, no dashboard rows to rewrite
@@ -783,7 +793,7 @@ def score_round(
             for hk, ms in states.items()
         }
         for row in build_direction_score_rows(
-            from_chain, to_chain, backing, pool, crown_time, trace.cap_weighted_time, lane_eligibility, qvol
+            from_chain, to_chain, backing, trace.paid_pool, crown_time, trace.cap_weighted_time, lane_eligibility, qvol
         ):
             uid = uid_of.get(row.hotkey)
             if uid is None:
@@ -813,5 +823,6 @@ def score_round(
         weighting_traces=weighting,
         swap_bounds=swap_bounds,
         live_rates=live_rates,
+        fee_pool=fee_pool,
     )
-    return RoundResult(window_start, window_end, hotkeys, rewards, False, tuple(rows), traces, intervals)
+    return RoundResult(window_start, window_end, hotkeys, rewards, False, tuple(rows), traces, intervals, fee_pool)

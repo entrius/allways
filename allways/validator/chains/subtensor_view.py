@@ -1,5 +1,5 @@
-"""The validator's read of Bittensor: the current block, and the subnet metagraph and alpha prices on a
-slow cadence.
+"""The validator's read of Bittensor: the current block, and the subnet metagraph, alpha prices and the subnet's
+own emission and moving price on a slow cadence.
 
 The only reader of the subnet's state on subtensor; weights, scoring and the stake-weight vote read the
 published ``Head`` instead of each calling subtensor. Its connection is its own (the TAO watcher and the
@@ -26,6 +26,9 @@ class Head:
     metagraph: Any  # bt.Metagraph: hotkeys, alpha_stake, …
     metagraph_read_at: float
     prices: Dict[int, Any] = field(default_factory=dict)  # netuid → alpha price (Balance), read with the metagraph
+    # ``subtensor.subnet(netuid)``, read with the metagraph: alpha_out_emission and moving_price for the fee-scaled
+    # pool. None when the last read failed, so a round keeps its last share rather than value a stale one.
+    subnet: Optional[Any] = None
 
     def block_at(self, now: float, seconds_per_block: float = 12.0) -> int:
         """The block now, projected from the last read (a read is at most one tick old)."""
@@ -46,6 +49,7 @@ class SubtensorView(Component):
         self._metagraph: Optional[Any] = None
         self._metagraph_at = 0.0
         self._prices: Dict[int, Any] = {}
+        self._subnet: Optional[Any] = None
 
     def setup(self) -> None:
         self._subtensor = self._factory()
@@ -59,4 +63,9 @@ class SubtensorView(Component):
                 self._prices = dict(self._subtensor.get_subnet_prices())
             except Exception as e:  # stale prices keep their last value; scoring checks their age
                 bt.logging.warning(f'subtensor: subnet prices unreadable: {e}')
-        self.out.set(Head(block, now, self._metagraph, self._metagraph_at, self._prices))
+            try:
+                self._subnet = self._subtensor.subnet(self.netuid)
+            except Exception as e:
+                self._subnet = None
+                bt.logging.warning(f'subtensor: subnet {self.netuid} info unreadable: {e}')
+        self.out.set(Head(block, now, self._metagraph, self._metagraph_at, self._prices, self._subnet))

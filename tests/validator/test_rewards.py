@@ -24,6 +24,7 @@ from allways.constants import (
 from allways.eligibility import direction_eligible, is_eligible, purse_active
 from allways.solana import pdas
 from allways.utils.rate import is_executable_rate, min_executable_hub_leg
+from allways.validator.scoring.fee_pool import FeePoolShare
 from allways.validator.scoring.ledger import ACTIVE, ACTIVITY, RATE, Ledger
 from allways.validator.scoring.rewards import (
     AlphaPrices,
@@ -467,7 +468,7 @@ def _round_world(failed_b=0):
 def _score(world):
     ledger = _ledger({'hk_a': NEXT, 'hk_b': BEST})
     prices = AlphaPrices({}, lambda: None)
-    return score_round(world, HOTKEYS, ledger, {}, prices, NOW - 1000, NOW)
+    return score_round(world, HOTKEYS, ledger, {}, prices, NOW - 1000, NOW, FeePoolShare(0.0, None, 1.0))
 
 
 def test_a_round_pays_the_crown_holder_its_lane_pool_and_recycles_the_rest():

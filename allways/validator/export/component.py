@@ -39,8 +39,8 @@ def score_rows(result: RoundResult) -> List[Tuple]:
 
 
 def pool_rows(result: RoundResult) -> List[Tuple]:
-    """``direction_pools`` rows for every paid or live lane. ``live`` is the pair's liveness (qualified volume
-    on any of its lanes), the same test the pools pay on, not ``pool > 0``."""
+    """``direction_pools`` rows for every paid or live lane, ``pool`` as paid (after the fee share). ``live`` is the
+    pair's liveness (qualified volume on any of its lanes), the same test the pools pay on, not ``pool > 0``."""
     pair_volume: Dict[Tuple[str, str], int] = {}
     for (f, t, _), trace in result.traces.items():
         pair = canonical_pair(f, t)
@@ -49,7 +49,7 @@ def pool_rows(result: RoundResult) -> List[Tuple]:
     for (f, t, b), trace in result.traces.items():
         live = pair_volume[canonical_pair(f, t)] > 0
         if trace.pool > 0 or live:
-            rows.append((result.window_end, f, t, b, trace.pool, int(trace.qualified_volume), live))
+            rows.append((result.window_end, f, t, b, trace.paid_pool, int(trace.qualified_volume), live))
     return rows
 
 

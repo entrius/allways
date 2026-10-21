@@ -34,7 +34,7 @@ TABLES = [
         'CREATE TABLE IF NOT EXISTS scoring_fills (swap_key TEXT PRIMARY KEY, at INTEGER NOT NULL, '
         'hotkey TEXT NOT NULL, from_chain TEXT NOT NULL, to_chain TEXT NOT NULL, backing TEXT NOT NULL, '
         'from_amount TEXT NOT NULL, to_amount TEXT NOT NULL, collateral_amount TEXT NOT NULL, '
-        'qualified INTEGER NOT NULL)',
+        "qualified INTEGER NOT NULL, fee TEXT NOT NULL DEFAULT '0')",
     ),
     ('scoring_bans', 'CREATE TABLE IF NOT EXISTS scoring_bans (hotkey TEXT PRIMARY KEY, at INTEGER NOT NULL)'),
 ]
@@ -62,6 +62,11 @@ class Ledger:
     def __init__(self, store: Store) -> None:
         self.store = store
         store.declare(OWNER, VERSION, TABLES)
+        # The swap's protocol fee, for the fee-scaled pool. Added in place: a VERSION bump would drop the ledger.
+        # Older rows read 0 and age out with the fills.
+        with store.tx() as c:
+            if 'fee' not in {r['name'] for r in c.execute('PRAGMA table_info(scoring_fills)')}:
+                c.execute("ALTER TABLE scoring_fills ADD COLUMN fee TEXT NOT NULL DEFAULT '0'")
 
     def _rows(self, sql: str, params: Tuple = ()) -> List[Any]:
         return self.store.conn().execute(sql, params).fetchall()
@@ -102,11 +107,25 @@ class Ledger:
             (int(at), ACTIVITY, hotkey, int(ActivityTransition.RESERVE_EXPIRE), hub, int(not_before)),
         )
 
-    def put_fill(self, swap_key: str, at: int, hotkey: str, lane: Tuple[str, str, str], legs, qualified: bool):
+    def put_fill(
+        self, swap_key: str, at: int, hotkey: str, lane: Tuple[str, str, str], legs, qualified: bool, fee: int = 0
+    ):
+        """``fee`` is the swap's protocol fee (``SwapCompleted.fee``) in the backing's smallest unit."""
         from_amount, to_amount, collateral_amount = (str(int(x)) for x in legs)
         self.store.conn().execute(
-            'INSERT OR IGNORE INTO scoring_fills VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)',
-            (swap_key, int(at), hotkey, *lane, from_amount, to_amount, collateral_amount, int(qualified)),
+            'INSERT OR IGNORE INTO scoring_fills (swap_key, at, hotkey, from_chain, to_chain, backing, from_amount, '
+            'to_amount, collateral_amount, qualified, fee) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)',
+            (
+                swap_key,
+                int(at),
+                hotkey,
+                *lane,
+                from_amount,
+                to_amount,
+                collateral_amount,
+                int(qualified),
+                str(int(fee)),
+            ),
         )
 
     def ban(self, hotkey: str, at: int) -> None:
@@ -211,7 +230,7 @@ class Ledger:
             except Exception as e:  # fail closed: an unjudged fill is unqualified
                 bt.logging.warning(f'fill qualification failed for {hotkey[:8]} {lane}: {e}')
         legs = (f['from_amount'], f['to_amount'], collateral)
-        self.put_fill(bytes(f['swap_key']).hex(), at, hotkey, lane, legs, qualified)
+        self.put_fill(bytes(f['swap_key']).hex(), at, hotkey, lane, legs, qualified, int(f.get('fee', 0)))
 
     # ── anchors from the World (once per round) ──
 
@@ -374,6 +393,14 @@ class Ledger:
             legs = (int(r['from_amount']), int(r['to_amount']), int(r['collateral_amount']))
             lane[r['hotkey']] = tuple(a + b for a, b in zip(prev, legs))
         return volumes
+
+    def swap_fees(self, start: int, end: int) -> Dict[str, int]:
+        """``{backing: fee_sum}`` of the swaps completed in ``(start, end]``, each in its backing's smallest unit.
+        Any lane, qualified or not."""
+        fees: Dict[str, int] = {}
+        for r in self._rows('SELECT backing, fee FROM scoring_fills WHERE at > ? AND at <= ?', (start, end)):
+            fees[r['backing']] = fees.get(r['backing'], 0) + int(r['fee'])
+        return fees
 
     def get_recent_fill_hotkeys(self, start: int, end: int) -> Dict[str, Set[str]]:
         out: Dict[str, Set[str]] = {}

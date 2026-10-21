@@ -12,13 +12,14 @@ from typing import Any, Callable, Dict, List, Optional, Tuple
 import bittensor as bt
 import numpy as np
 
-from allways.constants import MAX_SCORING_BACKFILL_SECS, RECYCLE_UID, SCORING_WINDOW_SECS
+from allways.constants import MAX_SCORING_BACKFILL_SECS, POOL_VOLUME_WINDOW_SECS, RECYCLE_UID, SCORING_WINDOW_SECS
 from allways.eligibility import quote_addresses_valid
 from allways.validator.chains.subtensor_view import Head
 from allways.validator.chains.watcher import ChainWatcher, Probe
 from allways.validator.feed.events import FeedStatus
 from allways.validator.runtime.bus import Latest, Subscription
 from allways.validator.runtime.component import Component
+from allways.validator.scoring.fee_pool import FeePool
 from allways.validator.scoring.ledger import Ledger
 from allways.validator.scoring.rewards import (
     AlphaPrices,
@@ -63,6 +64,7 @@ class Scoring(Component):
         self.feed_status, self.store, self.out = feed_status, store, out
         self.assets, self.watchers = assets, watchers
         self.ledger = Ledger(store)
+        self.fee_pool = FeePool(store)
         self.prices = AlphaPrices(assets, lambda: (self.head.get()[0] or SimpleNamespace(prices=None)).prices)
         self._held: List[Tuple[Any, str, float]] = []  # QuoteSets waiting on an address check
         self._dropped = 0
@@ -137,9 +139,11 @@ class Scoring(Component):
     def _round(self, world: World, head: Head, now: int, last: int) -> None:
         hotkeys = tuple(head.metagraph.hotkeys)
         if world.config.halted:
-            result = halted_round(hotkeys, last, now)
+            result = halted_round(hotkeys, last, now)  # recycles everything; the share is left as it was
         else:
-            result = score_round(world, hotkeys, self.ledger, self.assets, self.prices, last, now)
+            fees = self.ledger.swap_fees(now - POOL_VOLUME_WINDOW_SECS, now)
+            share = self.fee_pool.round(fees, head.subnet, now)
+            result = score_round(world, hotkeys, self.ledger, self.assets, self.prices, last, now, share)
         self.ledger.prune(now)
         with self.store.tx() as c:
             Store.set_meta(c, LAST_SCORED, str(now))

@@ -12,6 +12,7 @@ from allways.validator.chains.watcher import Verdict
 from allways.validator.feed.events import FeedStatus
 from allways.validator.runtime.bus import Latest, Topic
 from allways.validator.scoring.component import LAST_SCORED, RoundResult, Scoring, WeightSetter
+from allways.validator.scoring.fee_pool import MINER_SHARE
 from allways.validator.scoring.ledger import RATE
 from allways.validator.store.db import Store
 from allways.validator.world.snapshot import World
@@ -88,6 +89,8 @@ def _scoring(tmp_path, world, catching_up=False, watchers=None, db='v.db'):
     status.set(FeedStatus(catching_up, 1, NOW, (5, 'sig5')))
     events, gaps = Topic('events'), Topic('gaps')
     store = Store(str(tmp_path / db))
+    with store.tx() as c:  # pin the fee share at 1.0: no subnet read here, so each round keeps it and pays in full
+        Store.set_meta(c, MINER_SHARE, '1.0')
     scoring = Scoring(
         w, h, events.subscribe('scoring'), gaps.subscribe('scoring'), status, store, rounds, {}, watchers or {}
     )
