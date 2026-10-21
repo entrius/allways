@@ -61,6 +61,9 @@ class HubRelay(Component):
         )
         self.relay: Optional[BondRelay] = None
         self._held: List[Any] = []  # events whose ledger write failed, retried next tick
+        # The subscription overflowed: events this process will never see. From then on it never acks (a
+        # restart replays from the last ack) and its heartbeat stays down, which shuts the hub's entry fuse.
+        self._lost = False
         row = store.conn().execute('SELECT slot FROM acks WHERE consumer = ?', (self.name,)).fetchone()
         self._acked_slot = int(row['slot']) if row else 0
 
@@ -101,6 +104,12 @@ class HubRelay(Component):
         if self.relay is None:
             self._build()  # a failure backs off and retries: a transient vault fault never disables the hub
         status, _ = self.feed_status.get()  # read before draining: everything up to its cursor is drained below
+        if self.events.dropped and not self._lost:
+            self._lost = True
+            bt.logging.error(
+                f'{self.name}: {self.events.dropped} event(s) dropped before this relay read them — no longer '
+                'acking and holding the heartbeat down; restart the validator to replay them from the last ack'
+            )
         records = self._held + [
             r for r in self.events.drain() if r.name in RELAY_EVENTS and int(r.slot or 0) >= self._acked_slot
         ]
@@ -114,12 +123,12 @@ class HubRelay(Component):
                         bt.logging.warning(f'{self.name}: could not ingest {record.name}: {e}')
                         self._held.append(record)
                 # While a verdict is held the ack stays put, so a restart replays it from the feed.
-                if not self._held and status is not None and status.cursor is not None:
+                if not self._held and not self._lost and status is not None and status.cursor is not None:
                     Store.ack(c, self.name, *status.cursor)
         except Exception:
             self._held = records  # the transaction itself failed: nothing above landed
             raise
-        self.relay._ingest_healthy = not self._held
+        self.relay._ingest_healthy = not self._held and not self._lost
         self.relay.feed_caught_up = status is not None and not status.catching_up
         self.relay.step(int(now))
         boundary = int(self.ledger.get_relay_meta('fee_cadence_boundary') or 0)

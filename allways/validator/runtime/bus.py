@@ -4,7 +4,7 @@ from __future__ import annotations
 
 import threading
 from collections import deque
-from typing import Deque, Dict, Generic, List, Optional, Tuple, TypeVar
+from typing import Callable, Deque, Dict, Generic, List, Optional, Tuple, TypeVar
 
 T = TypeVar('T')
 
@@ -42,14 +42,17 @@ class Subscription(Generic[T]):
     """One subscriber's bounded buffer. When full, the oldest item is dropped and counted, so a slow
     consumer loses data visibly instead of stalling the publisher."""
 
-    def __init__(self, name: str, maxsize: int) -> None:
+    def __init__(self, name: str, maxsize: int, accept: Optional[Callable[[T], bool]] = None) -> None:
         self.name = name
+        self.accept = accept  # None takes everything; otherwise only what this subscriber reads ever fills its buffer
         self._items: Deque[T] = deque(maxlen=maxsize)
         self._lock = threading.Lock()
         self._ready = threading.Event()
         self.dropped = 0
 
     def _put(self, item: T) -> None:
+        if self.accept is not None and not self.accept(item):
+            return
         with self._lock:
             if len(self._items) == self._items.maxlen:
                 self.dropped += 1
@@ -76,11 +79,13 @@ class Topic(Generic[T]):
         self._subs: Dict[str, Subscription[T]] = {}
         self._lock = threading.Lock()
 
-    def subscribe(self, name: str, maxsize: int = 100_000) -> Subscription[T]:
+    def subscribe(
+        self, name: str, maxsize: int = 100_000, accept: Optional[Callable[[T], bool]] = None
+    ) -> Subscription[T]:
         with self._lock:
             if name in self._subs:
                 raise ValueError(f'{self.name}: subscriber {name!r} already registered')
-            sub: Subscription[T] = Subscription(name, maxsize)
+            sub: Subscription[T] = Subscription(name, maxsize, accept)
             self._subs[name] = sub
             return sub
 

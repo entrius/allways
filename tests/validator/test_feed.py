@@ -1,6 +1,8 @@
+from allways.validator.feed import events as events_mod
 from allways.validator.feed.events import (
     EMPTY_TX_RETRIES,
     HISTORY_HORIZON_SECS,
+    SWEEP_SECS,
     Backfill,
     EventFeed,
     HistoryGap,
@@ -168,3 +170,45 @@ def test_an_empty_transaction_holds_the_feed_then_becomes_a_gap():
 
     feed, gaps = _replay(_FlakyRpc(history, stuck, 'empty', times=EMPTY_TX_RETRIES), 10)
     assert feed._backfill is None and len(gaps.drain()) == 1  # given up as a gap, then the rest read
+
+
+class _LoggedRpc(_SigRpc):
+    """Every transaction carries one log line naming its signature, so each decodes to one event."""
+
+    def get_transaction(self, sig):
+        tx = super().get_transaction(sig)
+        tx['meta']['logMessages'] = [sig]
+        return tx
+
+
+def test_a_notification_the_live_socket_dropped_is_recovered_by_the_next_sweep(tmp_path, monkeypatch):
+    monkeypatch.setattr(
+        events_mod, 'events_from_logs', lambda logs, pid: [('QuoteSet', {'tx': logs[0]})] if logs else []
+    )
+    history = _history(3, spacing=10)
+    rpc, live = _LoggedRpc(history), _FakeLive()
+    feed, events, gaps = _feed(tmp_path, rpc, live, resume=history[-1]['signature'])
+    feed.setup()
+    for _ in range(3):
+        feed.tick(NOW)
+    events.drain()
+    rpc.tx_reads.clear()
+    feed._clock = SlotClock(lambda slot: NOW, min_interval=0)
+
+    # Three txs land on a busy socket; the second notification never arrives.
+    sigs = [f's-{NOW + t}' for t in (10, 20, 30)]
+    rpc.history[:0] = [{'signature': s, 'slot': 10_000 + i, 'blockTime': NOW, 'err': None} for i, s in enumerate(sigs)][
+        ::-1
+    ]
+    live.inbox += [_Pending(10_000, sigs[0], [('QuoteSet', {})]), _Pending(10_002, sigs[2], [('QuoteSet', {})])]
+    feed.tick(NOW + 30)
+    assert [e.signature for e in events.drain()] == [sigs[0], sigs[2]]
+
+    feed.tick(NOW + 30 + SWEEP_SECS)
+    assert [(e.signature, e.fields) for e in events.drain()] == [(sigs[1], {'tx': sigs[1]})]
+    assert rpc.tx_reads == [sigs[1]]  # only the one it never saw is decoded
+    status = feed.status.get()[0]
+    assert not status.catching_up and status.cursor[1] == sigs[2]  # nothing waits on a sweep
+    assert gaps.drain() == []
+    feed.tick(NOW + 30 + 2 * SWEEP_SECS)
+    assert events.drain() == [] and rpc.tx_reads == [sigs[1]]  # the overlap re-lists, never re-decodes

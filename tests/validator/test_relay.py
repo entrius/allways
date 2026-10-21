@@ -11,7 +11,7 @@ from allways.validator.actuator.executors import vote_set_attestation
 from allways.validator.actuator.planners import intent
 from allways.validator.feed.events import FeedStatus
 from allways.validator.hubs import hub
-from allways.validator.relay.component import HubRelay
+from allways.validator.relay.component import RELAY_EVENTS, HubRelay
 from allways.validator.relay.engine import RelayConfig
 from allways.validator.relay.ledger import RelayLedger
 from allways.validator.runtime.bus import Latest, Topic
@@ -115,7 +115,7 @@ def _world():
     )
 
 
-def _relay(tmp_path):
+def _relay(tmp_path, maxsize=100_000):
     world, status = Latest(), Latest()
     world.set(_world())
     status.set(FeedStatus(False, 1, NOW, (9, 'sig9')))
@@ -124,7 +124,7 @@ def _relay(tmp_path):
     relay = HubRelay(
         hub('tao'),
         world,
-        events.subscribe('relay-tao'),
+        events.subscribe('relay-tao', maxsize, accept=lambda r: r.name in RELAY_EVENTS),
         status,
         _Vault,
         inbox,
@@ -253,3 +253,35 @@ def test_an_unreadable_debit_ledger_holds_new_swaps(tmp_path):
 
     relay.ledger.owes_relay_debit = boom
     assert relay.has_pending_debit(MINER) is True
+
+
+def test_events_the_relay_never_reads_cannot_crowd_out_a_verdict(tmp_path, monkeypatch):
+    monkeypatch.setattr('allways.validator.relay.engine.RELAY_MINER_READ_INTERVAL_SECS', 0)
+    relay, events, _, store = _relay(tmp_path, maxsize=4)
+    relay.tick(NOW)
+    flood = [
+        EventRecord('CollateralPosted', {'miner': MINER, 'amount': 1, 'total': 1}, 15, NOW, f'f{i}') for i in range(50)
+    ]
+    events.publish_many(flood + [EventRecord('SwapTimedOut', _timed_out().fields, 20, NOW - 5, 'sig20')])
+    relay.feed_status.set(FeedStatus(False, 1, NOW, (20, 'sig20')))
+    relay.tick(NOW)
+    assert relay.events.dropped == 0 and relay.has_pending_debit(MINER)  # the verdict got through
+    assert store.resume_point(['relay-tao']) == 'sig20'
+
+
+def test_a_relay_that_lost_events_stops_acking_and_holds_its_heartbeat(tmp_path, monkeypatch):
+    monkeypatch.setattr('allways.validator.relay.engine.RELAY_MINER_READ_INTERVAL_SECS', 0)
+    relay, events, _, store = _relay(tmp_path, maxsize=2)
+    relay.tick(NOW)
+    before = store.resume_point(['relay-tao'])
+    lost = [
+        EventRecord('SwapTimedOut', _timed_out(bytes([i]) * 32).fields, 20 + i, NOW - 5, f'sig{20 + i}')
+        for i in range(5)
+    ]
+    events.publish_many(lost)
+    relay.feed_status.set(FeedStatus(False, 1, NOW, (24, 'sig24')))
+    relay.tick(NOW)
+    relay.tick(NOW + 60)
+    assert relay.events.dropped == 3
+    assert store.resume_point(['relay-tao']) == before  # a restart replays what this process never saw
+    assert relay.relay._ingest_healthy is False  # the heartbeat stays down, so the hub's entry fuse shuts

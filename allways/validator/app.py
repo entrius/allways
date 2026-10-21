@@ -26,7 +26,7 @@ from allways.validator.chains.watcher import ChainWatcher
 from allways.validator.export.component import Export
 from allways.validator.feed.events import EventFeed, LiveFeed
 from allways.validator.hubs import relayed_hubs
-from allways.validator.relay.component import HubRelay
+from allways.validator.relay.component import RELAY_EVENTS, HubRelay
 from allways.validator.runtime.bus import Latest, Topic
 from allways.validator.runtime.component import Component
 from allways.validator.runtime.deadline_queue import DeadlineQueue
@@ -102,7 +102,7 @@ def build(
         h.chain: HubRelay(
             h,
             world,
-            events.subscribe(f'relay-{h.chain}'),
+            events.subscribe(f'relay-{h.chain}', accept=lambda r: r.name in RELAY_EVENTS),
             feed_status,
             cfg.vaults[h.chain],
             inbox,

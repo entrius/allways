@@ -3,6 +3,8 @@
 Live events come off ``logsSubscribe``, whose payload already carries the log lines, so a quote re-post
 costs no ``getTransaction``. After a disconnect, a restart, or a fresh database, ``Backfill`` reads what
 was missed, but never further back than ``HISTORY_HORIZON_SECS`` and never more than one chunk per tick.
+A socket that stays up can still drop one notification, so every ``SWEEP_SECS`` the feed also lists the
+recent signatures and decodes only those it never saw.
 
 Records are NOT globally ordered (a backfilled event can arrive after newer live ones) and can repeat
 across a restart. Every consumer must be order-tolerant and idempotent by (signature, event index)."""
@@ -42,6 +44,10 @@ SILENT_SOCKET_SECS = 90.0
 # A listed signature whose getTransaction keeps coming back empty is retried this many ticks, then given
 # up as a history gap (consumers rescan) rather than skipped silently.
 EMPTY_TX_RETRIES = 5
+# A live socket can drop a notification without going quiet. This often the feed lists the signatures since
+# the sweep before last and decodes the unseen ones: about one listing a minute on mainnet.
+SWEEP_SECS = 60.0
+SWEEP_PAGES = 5
 
 
 class SeenSignatures:
@@ -238,7 +244,7 @@ class Backfill:
         self._paged = []
         self.paging_done = True
 
-    def peek(self, limit: int = BACKFILL_DECODES_PER_TICK) -> List[dict]:
+    def peek(self, limit: Optional[int] = BACKFILL_DECODES_PER_TICK) -> List[dict]:
         """The next entries, oldest first. Each stays queued until ``pop``: a failure resumes at it."""
         return self._queue[:limit]
 
@@ -289,6 +295,11 @@ class EventFeed(Component):
         self._last_event_at = 0.0
         self._empty_tries: dict = {}
         self._recovered = 0  # events the current backfill published
+        # The sweep lists back to ``_sweep_until`` (the newest signature the sweep before last listed): one
+        # sweep of overlap, so a signature that became visible late is still inside the next listing.
+        self._sweep_until: Optional[str] = None
+        self._sweep_next: Optional[str] = None
+        self._swept_at = 0.0
         self._truncated_window, self._truncated_count = 0, 0
 
     def setup(self) -> None:
@@ -307,6 +318,11 @@ class EventFeed(Component):
             self._backfill = Backfill(self._rpc, self.program_id, self._cursor and self._cursor[1], now)
         if self._backfill is not None:
             self._step_backfill(now)
+        elif self._sweep_until is None and self._cursor is not None:
+            self._sweep_until = self._sweep_next = self._cursor[1]  # sweeps start from where history is whole
+            self._swept_at = now
+        elif self._sweep_until is not None and now - self._swept_at >= SWEEP_SECS:
+            self._sweep(now)
         if self._backfill is None and self._newest_live is not None:
             self._cursor = max(self._cursor or self._newest_live, self._newest_live)
         # Set after publishing: whoever reads this status and then drains has everything up to cursor.
@@ -365,27 +381,10 @@ class EventFeed(Component):
         for entry in bf.peek():
             sig, slot = entry['signature'], int(entry.get('slot') or 0)
             if entry.get('err') is None and sig not in self.seen:
-                tx = self._rpc.get_transaction(sig)  # raises after its retries: this entry is retried next tick
-                if tx is None:
-                    tries = self._empty_tries[sig] = self._empty_tries.get(sig, 0) + 1
-                    if tries < EMPTY_TX_RETRIES:
-                        return  # not served yet: hold here, so nothing after it is published first
-                    bt.logging.warning(f'feed: {sig} has no transaction after {tries} tries, marking a gap')
-                    self.gaps.publish(HistoryGap(entry.get('blockTime') or now))
-                    tx = {}
-                self._empty_tries.pop(sig, None)
-                self._clock.anchor(slot, now)
-                block_time = tx.get('blockTime') or entry.get('blockTime') or self._clock.time_of(slot)
-                logs = (tx.get('meta') or {}).get('logMessages') or []
-                if self.seen.add(sig):
-                    records = [
-                        EventRecord(n, f, entry.get('slot'), block_time, sig)
-                        for n, f in events_from_logs(logs, self.program_id)
-                    ]
-                    if logs_truncated(logs):
-                        records += self._truncated(sig, entry.get('slot'), block_time, tx, now)
-                    self.out.publish_many(records)
-                    self._recovered += len(records)
+                published = self._publish_listed(entry, now)  # raises after its retries: retried next tick
+                if published is None:
+                    return  # not served yet: hold here, so nothing after it is published first
+                self._recovered += published
             self._cursor = (slot, sig)
             bf.pop()
         if bf.done:
@@ -393,3 +392,56 @@ class EventFeed(Component):
             log = bt.logging.info if self._recovered else bt.logging.debug
             log(f'feed: backfill complete, {self._recovered} missed event(s) recovered')
             self._backfill, self._recovered = None, 0
+
+    def _publish_listed(self, entry: dict, now: float) -> Optional[int]:
+        """Decode and publish one listed signature's events; how many were published, or None when its
+        transaction isn't served yet (retried; after ``EMPTY_TX_RETRIES`` it is published as a gap)."""
+        sig, slot = entry['signature'], int(entry.get('slot') or 0)
+        tx = self._rpc.get_transaction(sig)
+        if tx is None:
+            tries = self._empty_tries[sig] = self._empty_tries.get(sig, 0) + 1
+            if tries < EMPTY_TX_RETRIES:
+                return None
+            bt.logging.warning(f'feed: {sig} has no transaction after {tries} tries, marking a gap')
+            self.gaps.publish(HistoryGap(entry.get('blockTime') or now))
+            tx = {}
+        self._empty_tries.pop(sig, None)
+        self._clock.anchor(slot, now)
+        block_time = tx.get('blockTime') or entry.get('blockTime') or self._clock.time_of(slot)
+        logs = (tx.get('meta') or {}).get('logMessages') or []
+        if not self.seen.add(sig):
+            return 0  # arrived live meanwhile
+        records = [
+            EventRecord(n, f, entry.get('slot'), block_time, sig) for n, f in events_from_logs(logs, self.program_id)
+        ]
+        if logs_truncated(logs):
+            records += self._truncated(sig, entry.get('slot'), block_time, tx, now)
+        self.out.publish_many(records)
+        return len(records)
+
+    def _sweep(self, now: float) -> None:
+        """List the signatures since the sweep before last and publish any the live socket never delivered.
+        Unlike a backfill it leaves the cursor and the status alone: nothing waits on it."""
+        listing = Backfill(self._rpc, self.program_id, self._sweep_until, now)
+        listing.page(SWEEP_PAGES)
+        if not listing.paging_done:
+            # More traffic in two minutes than the sweep lists: name the gap, and restart the overlap from here.
+            bt.logging.warning(f'feed: sweep found over {SWEEP_PAGES} pages of new signatures, marking a gap')
+            self.gaps.publish(HistoryGap(now - 2 * SWEEP_SECS))
+            listing._finish()
+        entries = listing.peek(limit=None)
+        recovered, pending = 0, False
+        for entry in entries:
+            if entry.get('err') is not None or entry['signature'] in self.seen:
+                continue
+            published = self._publish_listed(entry, now)
+            if published is None:
+                pending = True  # not served yet: it stays inside the next sweep's listing
+            else:
+                recovered += published
+        if recovered:
+            bt.logging.warning(f'feed: sweep recovered {recovered} event(s) the live socket never delivered')
+        if not pending and entries:
+            # The next sweep lists back to this one's start, so each signature is listed by two sweeps.
+            self._sweep_until, self._sweep_next = self._sweep_next, entries[-1]['signature']
+        self._swept_at = now
