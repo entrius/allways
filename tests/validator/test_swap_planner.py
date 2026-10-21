@@ -216,3 +216,44 @@ def test_the_first_verified_swap_keeps_a_shared_delivery_across_a_restart(tmp_pa
     again = _planner(tmp_path, sol=sol)  # same database, new process
     report, _ = _decision(again, _world(second))
     assert report.decision == 'wait' and 'another swap' in report.reason
+
+
+# ── while the World catches up ───────────────────────────────────────────────
+
+
+def test_a_verified_claim_is_extended_not_attested_while_the_world_catches_up(tmp_path):
+    planner = _planner(tmp_path, btc=_Watcher(verify=_ok()))
+    claim = _swap('PendingAttestation')
+    near = _world(claim, reservation=_reservation(reserved_until=NOW + 60), complete=False)
+    report, (intent,) = _decision(planner, near)
+    assert report.decision == 'extend_reservation' and 'catching up' in report.reason
+    assert intent.key[0] == 'extend_reservation' and intent.payload.action.target_at > NOW + 60
+    far = _world(claim, reservation=_reservation(reserved_until=NOW + 600), complete=False)
+    report, intents = _decision(planner, far)
+    assert report.decision == 'wait' and intents == []
+    report, (intent,) = _decision(planner, _world(claim, reservation=_reservation(reserved_until=NOW + 60)))
+    assert intent.key[0] == 'vote_initiate'  # caught up: it votes
+
+
+def test_a_verified_delivery_is_extended_not_confirmed_or_claimed_while_the_world_catches_up(tmp_path):
+    planner = _planner(tmp_path, sol=_Watcher(verify=_ok(), cancel_evidence=Verdict(1, NOW)))
+    report, (intent,) = _decision(planner, _world(_swap(timeout_at=NOW + 60), complete=False))
+    assert report.decision == 'extend_timeout' and intent.key[0] == 'extend_timeout'
+    assert planner.memory.deliveries == {}  # an incomplete ledger never decides which swap a tx pays
+    report, (intent,) = _decision(planner, _world(_swap(timeout_at=NOW + 60)))
+    assert intent.key[0] == 'confirm_swap'
+
+
+def test_a_verified_claim_survives_a_long_catch_up_and_attests_after_it(tmp_path):
+    """A fresh database catches up for a long time; a claim the user already paid into must still be live at the
+    end, and attest then."""
+    planner = _planner(tmp_path, btc=_Watcher(verify=_ok()))
+    claim, reservation = _swap('PendingAttestation'), _reservation(reserved_until=NOW + 300)
+    for now in range(NOW, NOW + 40 * 60, 12):
+        world = _world(claim, reservation=reservation, complete=False)
+        for intent in planner.plan(world, now):
+            if intent.key[0] == 'extend_reservation':  # the extension lands
+                reservation.reserved_until = intent.payload.action.target_at
+        assert reservation.reserved_until > now, f'lapsed at +{now - NOW}s'
+    (intent,) = planner.plan(_world(claim, reservation=reservation), now)
+    assert intent.key[0] == 'vote_initiate'

@@ -137,7 +137,7 @@ class SwapPlanner:
             ctx = WorldContext(
                 world, self.watchers, self.providers, self.memory, int(now), self.owes_settlement, self.program_id
             )
-            action = decide(swap, ctx, int(now), self.fee_divisor)
+            action = decide(swap, ctx, int(now), self.fee_divisor, complete=world.complete)
             self._log(key, swap, action)
             legs = {c: _conf_pair(c, leg.info) for c, leg in ctx.legs.items()}
             report[key] = SwapReport(

@@ -53,8 +53,8 @@ class Decision(Enum):
     TIMEOUT = 'timeout'  # overdue and unproven → timeout_swap
     CANCEL = 'cancel'  # PendingAttestation whose reservation is gone → close_stale_claim (no slash)
     REFUSE = 'refuse'  # provably unpayable dest → cancel_swap (no slash, fee or strike)
-    EXTEND_RESERVATION = 'extend_reservation'  # source valid but unconfirmed near expiry
-    EXTEND_TIMEOUT = 'extend_timeout'  # dest valid but unconfirmed near timeout
+    EXTEND_RESERVATION = 'extend_reservation'  # source valid but unconfirmed (or the World catching up) near expiry
+    EXTEND_TIMEOUT = 'extend_timeout'  # dest valid but unconfirmed (or the World catching up) near timeout
     WAIT = 'wait'
     SKIP = 'skip'  # can't judge this tick (endpoint down, answer not in yet)
     REJECT = 'reject'  # a claim that can never attest; nothing to send
@@ -127,14 +127,16 @@ def user_receives(swap: Any, fee_divisor: int = FEE_DIVISOR) -> int:
     return apply_fee_deduction(int(swap.to_amount), fee_divisor)
 
 
-def decide(swap: Any, ctx: SwapContext, now: int, fee_divisor: int = FEE_DIVISOR) -> Action:
+def decide(swap: Any, ctx: SwapContext, now: int, fee_divisor: int = FEE_DIVISOR, complete: bool = True) -> Action:
+    """``complete``: the World's event-fed ledgers hold every event so far. Until then a verified leg never votes
+    (attest and confirm read those ledgers); its deadline is extended instead, so the claim can't lapse."""
     try:
-        return _decide(swap, ctx, now, fee_divisor)
+        return _decide(swap, ctx, now, fee_divisor, complete)
     except NotReady as e:
         return Action(Decision.SKIP, reason=f'waiting on {e or "a chain answer"}')
 
 
-def _decide(swap: Any, ctx: SwapContext, now: int, fee_divisor: int) -> Action:
+def _decide(swap: Any, ctx: SwapContext, now: int, fee_divisor: int, complete: bool) -> Action:
     status = status_of(swap)
     overdue = now >= int(swap.timeout_at)
     if status in ('Active', 'Fulfilled'):
@@ -155,7 +157,7 @@ def _decide(swap: Any, ctx: SwapContext, now: int, fee_divisor: int) -> Action:
                 reason_code=CANCEL_REASON_INVALID_DEST,
             )
     if status == 'PendingAttestation':
-        return _pending_attestation(swap, ctx, now, fee_divisor)
+        return _pending_attestation(swap, ctx, now, fee_divisor, complete)
     if status == 'Active':
         cancel = _cancel(swap, ctx, now, overdue, fee_divisor)
         if cancel is not None:
@@ -164,7 +166,7 @@ def _decide(swap: Any, ctx: SwapContext, now: int, fee_divisor: int) -> Action:
             return _overdue(swap, ctx, now, 'overdue', 'miner never fulfilled')
         return Action(Decision.WAIT, reason='awaiting miner mark_fulfilled')
     if status == 'Fulfilled':
-        return _fulfilled(swap, ctx, now, overdue, fee_divisor)
+        return _fulfilled(swap, ctx, now, overdue, fee_divisor, complete)
     return Action(Decision.WAIT, reason=f'status {status} — no action')
 
 
@@ -199,7 +201,18 @@ def _extend_target(chain: str, info: Any, deadline: int, ceiling: int, now: int)
     return target if target > deadline else None
 
 
-def _fulfilled(swap: Any, ctx: SwapContext, now: int, overdue: bool, fee_divisor: int) -> Action:
+def _catching_up(chain: str, info: Any, deadline: int, ceiling: int, now: int, extend: Decision, vote: str) -> Action:
+    """A verified leg while the World catches up: the vote waits for the ledgers it reads, and the deadline it
+    would have met is extended on the leg's own confirmations so the swap can't lapse meanwhile."""
+    field = 'reserved_until' if extend is Decision.EXTEND_RESERVATION else 'timeout_at'
+    why = f'leg verified, World catching up: {vote} waits for the ledgers'
+    target = _extend_target(chain, info, deadline, ceiling, now)
+    if target:
+        return Action(extend, target, reason=f'{why} → extend {field} to {target} (+{target - now}s)')
+    return Action(Decision.WAIT, reason=why)
+
+
+def _fulfilled(swap: Any, ctx: SwapContext, now: int, overdue: bool, fee_divisor: int, complete: bool) -> Action:
     # Only the dest leg is checked: Fulfilled implies the source was verified and frozen at attestation.
     dest = ctx.leg(
         swap.to_chain,
@@ -226,6 +239,16 @@ def _fulfilled(swap: Any, ctx: SwapContext, now: int, overdue: bool, fee_divisor
                 f'(+{target - now}s)',
             )
     elif dest.status == 'ok' and _fresh(ctx, swap.to_chain, dest.info, int(swap.initiated_at)):
+        if not complete:  # before the ledger reads: claim_delivery records the tx as this swap's
+            return _catching_up(
+                swap.to_chain,
+                dest.info,
+                int(swap.timeout_at),
+                int(swap.max_extend_at),
+                now,
+                Decision.EXTEND_TIMEOUT,
+                'confirm',
+            )
         if ctx.delivery_is_deposit(swap):
             return Action(
                 Decision.TIMEOUT if overdue else Decision.WAIT,
@@ -263,7 +286,7 @@ def _overdue(swap: Any, ctx: SwapContext, now: int, why: str, fault: str) -> Act
     return Action(Decision.TIMEOUT, reason=f'{why} — {fault}, slashing')
 
 
-def _pending_attestation(swap: Any, ctx: SwapContext, now: int, fee_divisor: int) -> Action:
+def _pending_attestation(swap: Any, ctx: SwapContext, now: int, fee_divisor: int, complete: bool) -> Action:
     reservation = ctx.reservation(swap)
     if reservation is not None and (
         int(reservation.reserved_until) < now
@@ -315,4 +338,14 @@ def _pending_attestation(swap: Any, ctx: SwapContext, now: int, fee_divisor: int
         return Action(Decision.WAIT, reason='source deposit stale/replayed — never attest')
     if ctx.owes_settlement(swap):
         return Action(Decision.WAIT, reason='miner owes an unapplied vault debit — refusing to attest')
+    if not complete:
+        return _catching_up(
+            swap.from_chain,
+            source.info,
+            int(reservation.reserved_until),
+            int(reservation.max_extend_at),
+            now,
+            Decision.EXTEND_RESERVATION,
+            'attest',
+        )
     return Action(Decision.ATTEST, reason='source verified + fresh')
