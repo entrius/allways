@@ -6,11 +6,15 @@ on-chain timeout counter plus a fill inside the trailing activity window, and th
 slice pays fills that were reserved on a crown holder (``fill_held_crown``). Any shortfall recycles
 to ``RECYCLE_UID`` — the burn is dynamic (whatever the pool did not earn) and
 deliberate: it keeps a penalty absolute rather than something weight
-normalization stretches back to 100%. Entry is ``score_and_reward_miners``.
+normalization stretches back to 100%. Every lane pool is first scaled by the round's
+``miner_share`` (``round_miner_share``: recent swap fees against the miners' emission), so
+the pools pay ``MINER_POOL_SHARE × miner_share`` and the rest recycles with the shortfall.
+Entry is ``score_and_reward_miners``.
 """
 
 from __future__ import annotations
 
+import statistics
 import time
 from dataclasses import dataclass, field
 from enum import IntEnum
@@ -34,8 +38,10 @@ from allways.constants import (
     DIRECTION_POOLS,
     ELIGIBILITY_FILL_WINDOW_SECS,
     EVENT_RETENTION_SECS,
+    FEE_POOL_MULTIPLE,
     HUB_CHAINS,
     MAX_SCORING_BACKFILL_SECS,
+    MINER_EMISSION_FRACTION,
     MINER_POOL_SHARE,
     POOL_VOLUME_ALPHA,
     POOL_VOLUME_WINDOW_SECS,
@@ -45,6 +51,7 @@ from allways.constants import (
     REWARD_MINER_STATES,
     SCORING_WINDOW_BLOCKS,
     SCORING_WINDOW_SECS,
+    SECONDS_PER_BLOCK,
     SWAP_OUTCOME_RETENTION_SECS,
     collateral_leg,
     declarable_backings,
@@ -66,12 +73,32 @@ if TYPE_CHECKING:
 
 @dataclass
 class DirectionTrace:
-    pool: float = 0.0
+    pool: float = 0.0  # the lane's volume-weighted pool, before the fee share
+    miner_share: float = 1.0  # the round's fee share (round_miner_share)
     crown_time: Dict[str, float] = field(default_factory=dict)
     qualified_volume: int = 0  # lane's qualified family notional over the pool window (family_notional)
     cap_weighted_time: Dict[str, float] = field(default_factory=dict)
     unfilled_time: int = 0
     best_rate: float = 0.0
+
+    @property
+    def paid_pool(self) -> float:
+        """What the lane pays this round: its pool scaled by the fee share."""
+        return self.pool * self.miner_share
+
+
+@dataclass
+class FeePoolShare:
+    """One round's fee-scaled pool inputs, in TAO over ``POOL_VOLUME_WINDOW_SECS``. ``fees_tao`` or
+    ``emission_tao`` is None when it could not be read; ``share`` is then the last round's."""
+
+    fees_tao: Optional[float]
+    emission_tao: Optional[float]
+    share: float
+
+    @property
+    def fresh(self) -> bool:
+        return self.fees_tao is not None and self.emission_tao is not None
 
 
 def due_for_scoring(current_block: int, last_scored_block: int, initial_scoring_done: bool) -> bool:
@@ -446,7 +473,8 @@ def compute_direction_pools(
     pair level means one leg can't be inflated without inflating the whole pair —
     then evenly across each direction's backing lanes (F4). No volume anywhere →
     ``DIRECTION_POOLS``, the same equal family shares split evenly (the silent-network
-    fallback). Pools sum to at most ``MINER_POOL_SHARE``.
+    fallback). Pools sum to at most ``MINER_POOL_SHARE``; the round pays each one scaled
+    by its ``miner_share`` (``DirectionTrace.paid_pool``).
 
     Notional is one unit per family (``family_notional``): the hub leg for SOL and
     TAO, the fill's TAO collateral for alpha. Units never mix across families, so
@@ -497,6 +525,90 @@ def compute_direction_pools(
                         MINER_POOL_SHARE * family_share * pair_share / len(directions) / len(lanes)
                     )
     return pools
+
+
+def fee_pool_share(fees_tao: float, emission_tao: float) -> float:
+    """``min(1, FEE_POOL_MULTIPLE × fees / emission)`` — the fraction of every lane pool a round pays."""
+    if emission_tao <= 0:
+        raise ValueError(f'miner emission must be positive, got {emission_tao}')
+    return min(1.0, max(0.0, FEE_POOL_MULTIPLE * fees_tao / emission_tao))
+
+
+def median_sol_tao_rate(store: ValidatorStateStore, start_time: int, end_time: int) -> Optional[float]:
+    """TAO per SOL at the median of the sol↔tao fills this validator cleared in ``(start_time, end_time]``;
+    None when none cleared."""
+    sol_unit, tao_unit = 10 ** get_chain_def('sol').decimals, 10 ** get_chain_def('tao').decimals
+    rates = [
+        (tao / tao_unit) / (sol / sol_unit)
+        for sol, tao in store.get_clearing_legs('sol', 'tao', start_time, end_time)
+        if sol > 0 and tao > 0
+    ]
+    rates += [
+        (tao / tao_unit) / (sol / sol_unit)
+        for tao, sol in store.get_clearing_legs('tao', 'sol', start_time, end_time)
+        if sol > 0 and tao > 0
+    ]
+    return float(statistics.median(rates)) if rates else None
+
+
+def window_fees_tao(store: ValidatorStateStore, start_time: int, end_time: int) -> Optional[float]:
+    """The swap fees completed in ``(start_time, end_time]``, in TAO: rao fees as-is, lamport fees at the
+    window's median sol↔tao clearing rate, else the last good one. None = a fee that cannot be priced."""
+    rate = median_sol_tao_rate(store, start_time, end_time)
+    if rate is not None:
+        store.set_sol_tao_rate(rate)
+    else:
+        rate = store.sol_tao_rate()
+    total = 0.0
+    for backing, fee in store.get_swap_fees(start_time, end_time).items():
+        if fee <= 0:
+            continue
+        units = fee / 10 ** get_chain_def(backing).decimals
+        if backing == 'tao':
+            total += units
+        elif backing == 'sol' and rate is not None:
+            total += units * rate
+        else:
+            return None
+    return total
+
+
+def miner_emission_tao(self: Validator, now: int) -> Optional[float]:
+    """The miners' alpha emission over ``POOL_VOLUME_WINDOW_SECS``, valued in TAO at the subnet's
+    on-chain alpha price: per-block alpha emission × ``MINER_EMISSION_FRACTION`` × blocks in the window
+    × price. One subtensor read, at most once per ``ALPHA_PRICE_TTL_SECS``; None on a failed read."""
+    read_at, value = getattr(self, 'miner_emission', None) or (None, None)
+    if read_at is not None and now - read_at < ALPHA_PRICE_TTL_SECS:
+        return value
+    try:
+        info = self.subtensor.subnet(int(self.config.netuid))
+        alpha_per_block = float(info.alpha_out_emission.tao)
+        price = float(info.price.tao)
+    except Exception as e:
+        bt.logging.warning(f'miner emission read failed: {e}')
+        return None
+    value = alpha_per_block * MINER_EMISSION_FRACTION * (POOL_VOLUME_WINDOW_SECS / SECONDS_PER_BLOCK) * price
+    if not value > 0:
+        bt.logging.warning(f'miner emission read returned {value} (alpha/block={alpha_per_block}, price={price})')
+        return None
+    self.miner_emission = (now, value)
+    return value
+
+
+def round_miner_share(self: Validator, now: int) -> FeePoolShare:
+    """This round's ``miner_share`` over the trailing ``POOL_VOLUME_WINDOW_SECS``, persisted for the next
+    round and the live score tip. An input that cannot be read keeps the last share; a validator with no
+    share yet starts at 0.0 (full recycle)."""
+    store = self.state_store
+    fees = window_fees_tao(store, now - POOL_VOLUME_WINDOW_SECS, now)
+    emission = miner_emission_tao(self, now)
+    if fees is None or emission is None:
+        share = store.miner_share()
+        bt.logging.warning(f'fee pool: input unavailable (fees={fees}, emission={emission}), keeping {share:.6f}')
+        return FeePoolShare(fees_tao=fees, emission_tao=emission, share=share)
+    share = fee_pool_share(fees, emission)
+    store.set_miner_share(share)
+    return FeePoolShare(fees_tao=fees, emission_tao=emission, share=share)
 
 
 def calculate_miner_rewards(self: Validator, current_time: int) -> Tuple[np.ndarray, Set[int]]:
@@ -570,13 +682,14 @@ def calculate_miner_rewards(self: Validator, current_time: int) -> Tuple[np.ndar
         swap_bounds = {}
 
     # Pools follow qualified demand: one volume read for the trailing day feeds both the
-    # pair-level pool weighting and each lane's β slice, so the pools it pays sum to exactly 1.
+    # pair-level pool weighting and each lane's β slice. Each lane pays its pool × the fee share.
+    fee_pool = round_miner_share(self, current_time)
     lane_volumes = self.state_store.get_qualified_lane_volumes(current_time - POOL_VOLUME_WINDOW_SECS, current_time)
     pools = compute_direction_pools(lane_volumes_to_directions(lane_volumes))
     quoted = self.state_store.quoted_lanes()
 
     for (from_chain, to_chain, backing), pool in pools.items():
-        trace = DirectionTrace(pool=pool)
+        trace = DirectionTrace(pool=pool, miner_share=fee_pool.share)
         direction_traces[(from_chain, to_chain, backing)] = trace
         qvol, trace.qualified_volume = qualified_volume_shares(
             lane_volumes.get((from_chain, to_chain, backing), {}), from_chain, to_chain
@@ -630,7 +743,7 @@ def calculate_miner_rewards(self: Validator, current_time: int) -> Tuple[np.ndar
             from_chain,
             to_chain,
             backing,
-            pool,
+            trace.paid_pool,
             crown_time=crown_time,
             cap_weighted_time=trace.cap_weighted_time,
             eligibility={
@@ -657,7 +770,7 @@ def calculate_miner_rewards(self: Validator, current_time: int) -> Tuple[np.ndar
     # The shortfall is burned to RECYCLE_UID rather than left for weight
     # normalization to stretch back over the earners. Normalization preserves
     # every ratio, so an undistributed pool would cost a shallow field nothing.
-    # Pools sum to MINER_POOL_SHARE, so at least BURN_RATE recycles every round.
+    # Paid pools sum to MINER_POOL_SHARE × miner_share, so at least that remainder recycles every round.
     recycle_uid = RECYCLE_UID if RECYCLE_UID < n_uids else 0
     distributed = float(rewards.sum())
     recycled = max(0.0, 1.0 - distributed)
@@ -675,6 +788,7 @@ def calculate_miner_rewards(self: Validator, current_time: int) -> Tuple[np.ndar
         weighting_traces=weighting_traces,
         swap_bounds=swap_bounds,
         live_rates=live_rates,
+        fee_pool=fee_pool,
     )
 
     if storage_enabled:
@@ -725,8 +839,9 @@ def miner_score_tuples(score_rows: List[ScoreRow], ts: int) -> List[Tuple]:
 
 def direction_pool_tuples(direction_traces: Dict[Tuple[str, str, str], DirectionTrace], ts: int) -> List[Tuple]:
     """Shape the round's pools for the ``direction_pools`` ledger: one row per paid or live lane
-    — ``(round_ts, from, to, backing, pool, qualified_volume, live)``; a dead, unpaid lane is
-    omitted (the registry holds ~21k). Hub / pair emission over time is a plain sum over these.
+    — ``(round_ts, from, to, backing, pool, qualified_volume, live)``, ``pool`` as paid (after the fee
+    share); a dead, unpaid lane is omitted (the registry holds ~21k). Hub / pair emission over time is a
+    plain sum over these.
 
     ``live`` is the PAIR's liveness — qualified volume on any of its lanes, the same test
     ``compute_direction_pools`` pays on — not ``pool > 0``: the silent-network fallback pays
@@ -741,7 +856,7 @@ def direction_pool_tuples(direction_traces: Dict[Tuple[str, str, str], Direction
             from_chain,
             to_chain,
             backing,
-            trace.pool,
+            trace.paid_pool,
             int(trace.qualified_volume),
             pair_volume[canonical_pair(from_chain, to_chain)] > 0,
         )
@@ -779,8 +894,10 @@ def snapshot_current_miner_scores(
     lane_volumes = self.state_store.get_qualified_lane_volumes(ts - POOL_VOLUME_WINDOW_SECS, ts)
     pools = compute_direction_pools(lane_volumes_to_directions(lane_volumes))
     quoted = self.state_store.quoted_lanes()
+    # The tip pays on the share the last round derived — the one the next round's weights start from.
+    miner_share = self.state_store.miner_share()
     for (from_chain, to_chain, backing), pool in pools.items():
-        trace = DirectionTrace(pool=pool)
+        trace = DirectionTrace(pool=pool, miner_share=miner_share)
         qvol, _ = qualified_volume_shares(lane_volumes.get((from_chain, to_chain, backing), {}), from_chain, to_chain)
         if pool <= 0 or (from_chain, to_chain, backing) not in quoted:
             continue  # dead pair or never-quoted lane: nothing to pay; the trace still lists it
@@ -809,7 +926,7 @@ def snapshot_current_miner_scores(
             from_chain,
             to_chain,
             backing,
-            pool,
+            trace.paid_pool,
             crown_time=crown_time,
             cap_weighted_time=trace.cap_weighted_time,
             eligibility={

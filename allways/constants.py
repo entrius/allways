@@ -212,6 +212,15 @@ LAUNCH_PAIRS: tuple[tuple[str, str], ...] = (
 # BURN_RATE of every round recycles to RECYCLE_UID before any shortfall.
 BURN_RATE = 0.0
 MINER_POOL_SHARE = 1.0 - BURN_RATE
+# Fee-scaled pool: every round, each lane pool is multiplied by
+# miner_share = min(1, FEE_POOL_MULTIPLE × fees / miner_emission) over POOL_VOLUME_WINDOW_SECS, so the
+# pools pay MINER_POOL_SHARE × miner_share and the rest recycles to RECYCLE_UID. fees = the 1% swap fee
+# (SwapCompleted.fee) in TAO; miner_emission = the miners' alpha emission over the same window in TAO.
+# A constant, not config: every validator must derive the same weights. Raise it to pay out more per fee.
+FEE_POOL_MULTIPLE = 2.0
+# Miners' cut of a subnet's alpha emission: the owner takes 18%, the other 82% splits evenly between
+# miners and validators.
+MINER_EMISSION_FRACTION = 0.41
 FAMILY_PAIR_COUNTS: Counter = Counter(scoring_family(*pair) for pair in LAUNCH_PAIRS)
 # Direction registry and the silent-network fallback: one entry per launch direction (both ways),
 # each family an equal share split evenly over its directions. The per-round pool values are
