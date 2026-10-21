@@ -345,7 +345,7 @@ class TestSendGuards:
         dst = keys[ixs[1].accounts[2]]
         assert str(dst) == ata(USER)
         # Recorded for the dedup guard under this obligation.
-        assert list(p.chain.broadcasted_txids.values())[0][:3] == (self.TO, AMOUNT, 'swap-1')
+        assert list(p.broadcasted_txids.values())[0][:3] == (self.TO, AMOUNT, 'swap-1')
 
     def test_existing_ata_gets_the_transfer_only(self, monkeypatch):
         # Its owner may have been reassigned, which would fail a CreateIdempotent and the whole send.
@@ -364,7 +364,7 @@ class TestSendGuards:
         rpc = self.rich()
         rpc.get_signature_statuses = lambda sigs: [{'confirmationStatus': 'finalized', 'err': None, 'slot': 7}]
         p = provider_with(rpc, keypair=MINER, monkeypatch=monkeypatch)
-        p.chain.broadcasted_txids['OLD'] = (self.TO, AMOUNT, '', 150)
+        p.broadcasted_txids['OLD'] = (self.TO, AMOUNT, '', 150)
         assert p.send_amount(self.TO, AMOUNT) == ('OLD', 7)
         assert rpc.sent == []
 

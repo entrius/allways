@@ -13,7 +13,7 @@ from typing import Any, Callable, Dict, List, Optional, Tuple
 import bittensor as bt
 
 from allways import __spec_version__
-from allways.assets.tao import Tao
+from allways.assets.tao import TaoChain
 from allways.constants import RECYCLE_UID
 from allways.solana.rpc import resolve_ws_url
 from allways.validator.actuator.actuator import Actuator
@@ -204,25 +204,23 @@ def build(
 def chain_watchers(
     assets: Dict[str, Any], fresh_subtensor: Optional[Callable[[], Any]] = None
 ) -> Dict[str, ChainWatcher]:
-    """One watcher per chain, shared by every asset on it (EVM tokens share their network's tip)."""
-    by_chain: Dict[str, ChainWatcher] = {}
+    """One watcher per chain object, shared by every asset bound to it (``create_assets`` gives each network one)."""
+    by_chain: Dict[int, ChainWatcher] = {}
     out: Dict[str, ChainWatcher] = {}
     for asset_id, asset in assets.items():
-        # Keyed by network name: each EVM token builds its own chain object for the same network, and every
-        # subnet alpha rides the subtensor.
-        network = asset.chain_def.host_chain or ('tao' if _on_subtensor(asset) else asset_id)
-        watcher = by_chain.get(network)
+        watcher = by_chain.get(id(asset.chain))
         if watcher is None:
+            name = 'tao' if _on_subtensor(asset) else asset.chain_def.host_chain or asset_id
             reconnect = SubtensorSwap(assets, fresh_subtensor) if fresh_subtensor and _on_subtensor(asset) else None
-            watcher = ChainWatcher(network, asset.chain, {}, asset.chain_def.seconds_per_block, reconnect)
-            by_chain[network] = watcher
+            watcher = ChainWatcher(name, asset.chain, {}, asset.chain_def.seconds_per_block, reconnect)
+            by_chain[id(asset.chain)] = watcher
         watcher.assets[asset_id] = asset
         out[asset_id] = watcher
     return out
 
 
 def _on_subtensor(asset: Any) -> bool:
-    return isinstance(asset.chain, Tao)
+    return isinstance(asset.chain, TaoChain)
 
 
 class SubtensorSwap:

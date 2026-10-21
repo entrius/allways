@@ -13,9 +13,17 @@ from bittensor.utils import ss58_encode
 
 from allways.assets.asset import ProviderUnreachableError
 from allways.assets.btc import Bitcoin
-from allways.assets.tao import Tao
+from allways.assets.tao import Tao, TaoChain
 
 BLOCK_TIME = 1_700_000_123
+
+
+def _bare_tao():
+    """A Tao on a TaoChain, both built without __init__ (no real subtensor needed)."""
+    p = Tao.__new__(Tao)
+    p._chain = TaoChain.__new__(TaoChain)
+    p.scan_cursors, p.broadcasted_txids = {}, {}
+    return p
 
 
 class _Resp:
@@ -66,16 +74,16 @@ def test_btc_api_surfaces_block_time(monkeypatch):
 
 def test_subtensor_block_at_returns_last_block_not_after_timestamp():
     timestamps = [100, 112, 124, 137, 149, 161]
-    p = Tao.__new__(Tao)
-    p.get_current_block_height = lambda: len(timestamps) - 1
-    p.get_block_time = lambda block: timestamps[block]
+    p = _bare_tao()
+    p.chain.get_current_block_height = lambda: len(timestamps) - 1
+    p.chain.get_block_time = lambda block: timestamps[block]
 
-    assert p.block_at(136) == 2
-    assert p.block_at(137) == 3
+    assert p.chain.block_at(136) == 2
+    assert p.chain.block_at(137) == 3
 
-    p.get_block_time = lambda block: None
+    p.chain.get_block_time = lambda block: None
     with pytest.raises(ProviderUnreachableError):
-        p.block_at(137)
+        p.chain.block_at(137)
 
 
 # ─── TAO deposit scanner (find_recent_outgoing) ─────────────────────────────
@@ -89,20 +97,20 @@ def _empty_block():
 
 
 def _scan_provider(head, blocks, readable_default=False):
-    p = Tao.__new__(Tao)  # skip __init__ (no real subtensor needed)
+    p = _bare_tao()  # skip __init__ (no real subtensor needed)
     p.subtensor = MagicMock()
     p.subtensor.get_current_block.return_value = head
-    p.block_cache = {}
-    p.block_hash_cache = {}
-    p.events_cache = {}
+    p.chain.block_cache = {}
+    p.chain.block_hash_cache = {}
+    p.chain.events_cache = {}
     p.scan_cursors = {}
     p.broadcasted_txids = {}
     if readable_default:
-        p.get_block = lambda n: blocks.get(n, _empty_block())
+        p.chain.get_block = lambda n: blocks.get(n, _empty_block())
     else:
-        p.get_block = lambda n: blocks.get(n)
-    p.get_block_hash = lambda n: f'0xblock{n}'
-    p.get_block_events = lambda h: (blocks.get(int(h.removeprefix('0xblock'))) or {}).get('_events', [])
+        p.chain.get_block = lambda n: blocks.get(n)
+    p.chain.get_block_hash = lambda n: f'0xblock{n}'
+    p.chain.get_block_events = lambda h: (blocks.get(int(h.removeprefix('0xblock'))) or {}).get('_events', [])
     return p
 
 
@@ -151,9 +159,9 @@ def _raw_transfer_block(txid, dest, amount, sender, settled=True):
 
 def test_tao_send_refuses_when_from_address_mismatches_wallet():
     # never broadcast from a wallet the validator's sender-pin would reject (wasted funds).
-    p = Tao.__new__(Tao)
-    p.wallet = MagicMock()
-    p.wallet.coldkeypub.ss58_address = 'minerTAO'
+    p = _bare_tao()
+    p.chain.wallet = MagicMock()
+    p.chain.wallet.coldkeypub.ss58_address = 'minerTAO'
     p.broadcasted_txids = {}
     assert p.send_amount('userTAO', 1000, from_address='someoneElse') is None
 
@@ -221,7 +229,7 @@ def test_tao_lost_hash_skips_a_transfer_owned_by_another_obligation():
     # A hash recorded under any scope belongs to a DIFFERENT swap this process sent — adopting it
     # would report the same tx for two swaps. With the window elapsed, the lost send is dead.
     blocks = {100: _raw_transfer_block('0xother', 'userTAO', 5000, 'minerTAO')}
-    p = _scan_provider(head=99 + Tao.LOST_SEND_DEAD_BLOCKS + 1, blocks=blocks, readable_default=True)
+    p = _scan_provider(head=99 + TaoChain.LOST_SEND_DEAD_BLOCKS + 1, blocks=blocks, readable_default=True)
     p.broadcasted_txids['swapA'] = ('userTAO', 5000, '0xother', 100)
     assert p._lost_hash_prior_landed('minerTAO', 'userTAO', 5000, seen_head=99) is None
 
@@ -229,15 +237,15 @@ def test_tao_lost_hash_skips_a_transfer_owned_by_another_obligation():
 def test_tao_lost_hash_waits_out_the_full_mortal_era():
     # Past the scan window but inside the 128-block mortal era the extrinsic can STILL include —
     # declaring it dead here re-sends into a double pay. Wait, don't clear.
-    p = _scan_provider(head=100 + Tao.SCAN_LOOKBACK_BLOCKS + 26, blocks={}, readable_default=True)
+    p = _scan_provider(head=100 + TaoChain.SCAN_LOOKBACK_BLOCKS + 26, blocks={}, readable_default=True)
     with pytest.raises(ProviderUnreachableError):
         p._lost_hash_prior_landed('minerTAO', 'userTAO', 5000, seen_head=100)
 
 
 def _send_provider(head, blocks):
     p = _scan_provider(head=head, blocks=blocks, readable_default=True)
-    p.wallet = MagicMock()
-    p.wallet.coldkeypub.ss58_address = 'minerTAO'
+    p.chain.wallet = MagicMock()
+    p.chain.wallet.coldkeypub.ss58_address = 'minerTAO'
     return p
 
 
@@ -271,7 +279,7 @@ def test_tao_scanner_skips_wrong_sender_and_underpay_then_advances_cursor():
     assert p.scan_cursors[('userTAO', 'minerTAO', 5000)] == 100
     # Next tick scans ONLY blocks past the cursor — the amortized-O(1) property.
     seen = []
-    p.get_block = lambda n: seen.append(n) or blocks.get(n, _empty_block())
+    p.chain.get_block = lambda n: seen.append(n) or blocks.get(n, _empty_block())
     p.subtensor.get_current_block.return_value = 102
     blocks[102] = _raw_transfer_block('0xdep', 'minerTAO', 6000, 'userTAO')
     assert p.find_recent_outgoing('userTAO', 'minerTAO', 5000) == '0xdep'
@@ -283,17 +291,17 @@ def test_tao_scanner_reads_past_an_unreadable_block_and_still_retries_it():
     deposit in k itself is found once the node serves k."""
     blocks = {101: _raw_transfer_block('0xafter', 'minerTAO', 5000, 'userTAO')}
     p = _scan_provider(head=102, blocks=blocks, readable_default=True)
-    served = p.get_block
-    p.get_block = lambda n: None if n == 100 else served(n)
+    served = p.chain.get_block
+    p.chain.get_block = lambda n: None if n == 100 else served(n)
     assert p.find_recent_outgoing('userTAO', 'minerTAO', 5000) == '0xafter'
 
     blocks = {100: _raw_transfer_block('0xdep', 'minerTAO', 5000, 'userTAO')}
     p = _scan_provider(head=102, blocks=blocks, readable_default=True)
-    served = p.get_block
-    p.get_block = lambda n: None if n == 100 else served(n)
+    served = p.chain.get_block
+    p.chain.get_block = lambda n: None if n == 100 else served(n)
     assert p.find_recent_outgoing('userTAO', 'minerTAO', 5000) is None
     assert p.scan_cursors[('userTAO', 'minerTAO', 5000)] == 99
-    p.get_block = served
+    p.chain.get_block = served
     assert p.find_recent_outgoing('userTAO', 'minerTAO', 5000) == '0xdep'
 
 
@@ -311,7 +319,7 @@ def test_settled_credit_ignores_events_from_other_extrinsics_and_recipients():
         _transfer_event('someoneElse', 5_000, 'userTAO', extrinsic_idx=0),  # different recipient
     ]
     p = _scan_provider(head=100, blocks=blocks)
-    assert p.settled_credit(100, 0, 'minerTAO') is None
+    assert p.chain.settled_credit(100, 0, 'minerTAO') is None
 
 
 @pytest.mark.parametrize(
@@ -338,8 +346,8 @@ def test_settled_credit_ignores_events_from_other_extrinsics_and_recipients():
 )
 def test_transfer_event_shapes_are_all_understood(record):
     """scalecodec emits several shapes across runtime versions; all must decode identically."""
-    assert Tao.event_extrinsic_idx(record) == 0
-    assert Tao._transfer_from_event(record) == ('A', 'B', 7)
+    assert TaoChain.event_extrinsic_idx(record) == 0
+    assert TaoChain._transfer_from_event(record) == ('A', 'B', 7)
 
 
 def test_non_transfer_events_are_not_read_as_transfers():
@@ -358,16 +366,16 @@ def test_non_transfer_events_are_not_read_as_transfers():
             },
         },
     ):
-        assert Tao._transfer_from_event(record) is None or Tao.event_extrinsic_idx(record) is None
+        assert TaoChain._transfer_from_event(record) is None or TaoChain.event_extrinsic_idx(record) is None
 
 
 def test_events_unavailable_raises_rather_than_reading_as_absent():
     """Fail closed as 'unknown', not 'no transfer' — the latter is slash-eligible upstream."""
-    p = Tao.__new__(Tao)
-    p.events_cache = {}
+    p = _bare_tao()
+    p.chain.events_cache = {}
     p.subtensor = SimpleNamespace(substrate=SimpleNamespace(get_events=MagicMock(side_effect=RuntimeError('rpc down'))))
     with pytest.raises(ProviderUnreachableError):
-        p.get_block_events('0xabc')
+        p.chain.get_block_events('0xabc')
 
 
 def _compact(value):
@@ -391,7 +399,7 @@ def test_raw_extrinsic_sender_is_read_past_the_multiaddress_variant_byte():
         + dest
         + _compact(5_000)  # Balances.transfer_keep_alive
     )
-    parsed = Tao.parse_raw_extrinsic((_compact(len(body)) + body).hex())
+    parsed = TaoChain.parse_raw_extrinsic((_compact(len(body)) + body).hex())
     assert parsed is not None
     assert parsed['sender'] == ss58_encode(sender, ss58_format=42)
     assert parsed['dest'] == ss58_encode(dest, ss58_format=42)
@@ -401,4 +409,4 @@ def test_raw_extrinsic_sender_is_read_past_the_multiaddress_variant_byte():
 def test_raw_extrinsic_rejects_non_id_multiaddress_rather_than_shifting():
     """A non-Id signer variant has no bare AccountId to read, so it must fail closed."""
     body = bytes([0x84, 0x01]) + bytes(range(32)) + bytes([0x01]) + b'\x11' * 64 + bytes([0x00] * 3)
-    assert Tao.parse_raw_extrinsic((_compact(len(body)) + body).hex()) is None
+    assert TaoChain.parse_raw_extrinsic((_compact(len(body)) + body).hex()) is None

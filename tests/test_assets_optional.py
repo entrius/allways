@@ -29,6 +29,9 @@ class _Ok:
     def check_connection(self, require_send=True):
         pass
 
+    def share_chain(self, shared):
+        pass  # its own chain: never shared
+
     def describe(self):
         return 'ok'
 

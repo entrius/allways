@@ -16,7 +16,7 @@ import pytest
 from allways.assets import ASSET_REGISTRY
 from allways.assets.asset import TransactionInfo
 from allways.assets.evm import EvmChain
-from allways.assets.tao import Tao
+from allways.assets.tao import TaoChain
 from allways.chains import get_chain_def
 from allways.solana.client import swap_key_from_tx_hash
 from allways.utils.rate import expected_swap_amounts
@@ -67,7 +67,7 @@ def _hex_hash_specs():
                 continue
             alpha_seen = True
         out.append(spec)
-    return [s for s in out if isinstance(_build(s).chain, (EvmChain, Tao))]
+    return [s for s in out if isinstance(_build(s).chain, (EvmChain, TaoChain))]
 
 
 HEX_SPECS = _hex_hash_specs()

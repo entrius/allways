@@ -1,6 +1,6 @@
 from abc import ABC, abstractmethod
 from dataclasses import dataclass
-from typing import Optional, Tuple
+from typing import Dict, Hashable, Optional, Tuple
 
 import bittensor as bt
 
@@ -76,8 +76,11 @@ class Asset(ABC):
         """One-line summary of the backend/API this provider talks to, for startup logs."""
         return self.chain_def.name
 
-    def clear_cache(self) -> None:
-        """Reset per-asset scratch caches at the start of a validator pass. No-op by default."""
+    def share_chain(self, shared: Dict[Hashable, Chain]) -> None:
+        """Bind this asset to the chain object ``shared`` already holds for its network, or register its own."""
+        key = self.chain.share_key()
+        if key is not None:
+            self._chain = shared.setdefault(key, self.chain)
 
     def can_send_from(self, address: str) -> bool:
         """True iff this provider's signing credentials control ``address`` — i.e. a ``send_amount``

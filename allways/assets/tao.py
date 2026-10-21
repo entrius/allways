@@ -1,6 +1,6 @@
 import re
 from hashlib import blake2b
-from typing import Any, Callable, Dict, Optional, Tuple
+from typing import Any, Callable, Dict, Hashable, Optional, Tuple
 
 import bittensor as bt
 from bittensor import Keypair
@@ -38,13 +38,13 @@ Broadcasts = Dict[str, Tuple[str, int, str, int]]
 BETA_ESCROW = ss58_encode((b'modl' + b'subtensr' + b'beta/esc').ljust(32, b'\0'), 42)
 
 
-class Tao(Asset, Chain):
-    """TAO chain provider using bt.Subtensor and substrate-interface.
+class TaoChain(Chain):
+    """The subtensor network: block/event reads and their caches, extrinsic decoding, the settled-transfer
+    scans and the send-landed checks — everything TAO and every subnet alpha share. One instance per
+    subtensor; each asset on it keeps its own scan cursors and send records and passes them in.
 
-    Owns its signing ``bt.Wallet`` when one is supplied at construction, so
-    callers of ``send_amount`` never need to pass key material. Validators
-    and read-only consumers can instantiate without a wallet and will get a
-    clear error if they attempt to send.
+    Holds the signing ``bt.Wallet`` when one is supplied, so callers of ``send_amount`` never need to pass
+    key material. Validators and read-only consumers construct it without one.
     """
 
     # Balances pallet index and transfer call indices on Subtensor
@@ -57,17 +57,13 @@ class Tao(Asset, Chain):
         self.block_cache: Dict[int, dict] = {}
         self.block_hash_cache: Dict[int, str] = {}
         self.events_cache: Dict[str, list] = {}
-        # Deposit-scanner head cursors, keyed per (from, to, amount) triple — see find_recent_outgoing.
-        self.scan_cursors: Dict[Tuple[str, str, int], int] = {}
-        # Own-broadcast dedup: subtensor.transfer can report failure — or raise mid-submit — on a transfer
-        # that actually included; without this the next poll re-sends and double-pays. hash '' = submit
-        # raised before the hash was learned (resolved by triple scan); seen_block 0 = head unreadable at
-        # record time (backfilled on the next poll).
-        self.broadcasted_txids: Broadcasts = {}
 
     @property
     def chain_def(self) -> ChainDefinition:
         return CHAIN_TAO
+
+    def share_key(self) -> Optional[Hashable]:
+        return (TaoChain, id(self.subtensor), id(self.wallet))
 
     def describe(self) -> str:
         return f'Subtensor {redact_endpoint(self.subtensor.chain_endpoint)}'
@@ -93,8 +89,23 @@ class Tao(Asset, Chain):
         if checked is not None:
             checked[id(self.subtensor)] = None
 
-    def clear_cache(self) -> None:
-        """Clear the block cache. Call at the start of each poll cycle."""
+    # Bound on each block cache, oldest out first. A validator empties them every pass (start_pass); the miner and
+    # the CLI never start one, so without a bound they would keep every block they ever read.
+    _CACHE_MAX = 512
+
+    @classmethod
+    def _remember(cls, cache: Dict[Any, Any], key: Any, value: Any) -> None:
+        cache[key] = value
+        while len(cache) > cls._CACHE_MAX:
+            try:
+                cache.pop(next(iter(cache)), None)
+            except (RuntimeError, StopIteration):  # another thread (the watcher's start_pass) changed it
+                return
+
+    def start_pass(self) -> None:
+        """Drop the block caches with the tip: two of them are keyed by height, so a reorg near the tip would
+        otherwise keep serving the replaced block, and nothing else bounds them."""
+        super().start_pass()
         self.block_cache.clear()
         self.block_hash_cache.clear()
         self.events_cache.clear()
@@ -185,17 +196,19 @@ class Tao(Asset, Chain):
 
     def get_block_hash(self, block_num: int) -> Optional[str]:
         """Block hash for a height, cached per poll cycle (settlement checks re-need it)."""
-        if block_num in self.block_hash_cache:
-            return self.block_hash_cache[block_num]
+        cached = self.block_hash_cache.get(block_num)
+        if cached is not None:
+            return cached
         block_hash = self.subtensor.substrate.get_block_hash(block_num)
         if block_hash:
-            self.block_hash_cache[block_num] = block_hash
+            self._remember(self.block_hash_cache, block_num, block_hash)
         return block_hash
 
     def get_block(self, block_num: int) -> Optional[dict]:
         """Fetch a block, using cache to avoid redundant RPC calls within a poll cycle."""
-        if block_num in self.block_cache:
-            return self.block_cache[block_num]
+        cached = self.block_cache.get(block_num)
+        if cached is not None:
+            return cached
 
         block_hash = self.get_block_hash(block_num)
         if not block_hash:
@@ -204,7 +217,7 @@ class Tao(Asset, Chain):
         try:
             block = self.subtensor.substrate.get_block(block_hash)
             if block:
-                self.block_cache[block_num] = block
+                self._remember(self.block_cache, block_num, block)
             return block
         except Exception as e:
             bt.logging.debug(f'Block fetch failed for block {block_num}, falling back to raw: {e}')
@@ -229,7 +242,7 @@ class Tao(Asset, Chain):
                     parsed_exts.append(parsed)
 
             block = {'extrinsics': parsed_exts, '_raw': True}
-            self.block_cache[block_num] = block
+            self._remember(self.block_cache, block_num, block)
             return block
         except Exception as e:
             bt.logging.debug(f'Raw block fetch failed for block {block_num}: {e}')
@@ -242,8 +255,9 @@ class Tao(Asset, Chain):
         'unknown', never as 'no transfer'. Returning None here would map to a slash-eligible
         verdict on a node hiccup.
         """
-        if block_hash in self.events_cache:
-            return self.events_cache[block_hash]
+        cached = self.events_cache.get(block_hash)
+        if cached is not None:
+            return cached
         try:
             events = self.subtensor.substrate.get_events(block_hash)
         except Exception as e:
@@ -251,7 +265,7 @@ class Tao(Asset, Chain):
         if events is None:
             raise ProviderUnreachableError(f'TAO events unavailable for {block_hash[:16]}...')
         events = list(events)
-        self.events_cache[block_hash] = events
+        self._remember(self.events_cache, block_hash, events)
         return events
 
     @staticmethod
@@ -448,25 +462,6 @@ class Tao(Asset, Chain):
         """Index of ``ext`` within the full block: raw blocks are pre-filtered, so they carry it explicitly."""
         return ext.get('extrinsic_idx', position) if is_raw else position
 
-    def fetch_matching_tx(
-        self,
-        tx_hash: str,
-        expected_recipient: str,
-        expected_amount: int,
-        block_hint: int = 0,
-        max_scan_blocks: int = 150,
-    ) -> Optional[TransactionInfo]:
-        """Scan for a TAO transfer matching recipient + amount. Raises ProviderUnreachableError if unreachable."""
-        return self.scan_for_tx(
-            tx_hash,
-            expected_recipient,
-            expected_amount,
-            block_hint,
-            max_scan_blocks,
-            self.decode_transfer,
-            self.settled_transfer,
-        )
-
     def scan_for_tx(
         self,
         tx_hash: str,
@@ -649,7 +644,7 @@ class Tao(Asset, Chain):
                 return None
             return ext_hash, ext.get('dest', ''), ext.get('amount', 0), ext.get('sender', '')
 
-        ext_hash = Tao.extrinsic_hash(ext)
+        ext_hash = TaoChain.extrinsic_hash(ext)
         if not ext_hash:
             return None
 
@@ -686,12 +681,6 @@ class Tao(Asset, Chain):
     # original can still include → double pay (the re-send takes nonce N+1 once it lands).
     LOST_SEND_DEAD_BLOCKS = 130
     _MAX_SCAN_CURSORS = 64
-
-    def find_recent_outgoing(self, from_addr: str, to_addr: str, amount: int) -> Optional[str]:
-        """Extrinsic hash of a recent transfer ``from_addr`` → ``to_addr`` of >= ``amount`` rao, else None."""
-        return self.find_outgoing(
-            self.scan_cursors, from_addr, to_addr, amount, self.decode_transfer, self.settled_transfer
-        )
 
     def find_outgoing(
         self,
@@ -758,16 +747,6 @@ class Tao(Asset, Chain):
             bt.logging.debug(f'TAO get_current_block_height failed: {e}')
             return None
 
-    def get_balance(self, address: str) -> int:
-        """Balance of a TAO address in rao; raises when the read fails.
-
-        Unknown is not zero: a swallowed read reported an empty wallet, which reads as
-        "cannot fund this leg" and drops the miner's quotes on a network blip."""
-        try:
-            return int(self.subtensor.get_balance(address))
-        except Exception as e:
-            raise ProviderUnreachableError(f'TAO balance unavailable for {address}: {e}') from e
-
     def canonical_tx_hash(self, tx_hash: str) -> Optional[str]:
         """Extrinsic hash only; a ``<block>-<idx>`` id is resolved to its hash (``locate_transfer``) first."""
         return canonical_hex_tx_hash(tx_hash, prefixed=True)
@@ -801,13 +780,6 @@ class Tao(Asset, Chain):
         except Exception as e:
             bt.logging.error(f'TAO verify_from_proof failed: {e}')
             return False
-
-    def _own_transfer_landed(
-        self, tx_hash: str, from_addr: str, to_addr: str, amount: int, seen_head: Optional[int] = None
-    ) -> Optional[SendResult]:
-        return self.own_send_landed(
-            tx_hash, from_addr, to_addr, amount, seen_head, self.decode_transfer, self.settled_transfer
-        )
 
     def own_send_landed(
         self,
@@ -854,13 +826,6 @@ class Tao(Asset, Chain):
                     return None  # included but the transfer failed → moved nothing → safe to re-send
                 return (tx_hash, block_num)
         return None
-
-    def _lost_hash_prior_landed(
-        self, from_addr: str, to_addr: str, amount: int, seen_head: int
-    ) -> Optional[SendResult]:
-        return self.lost_send_landed(
-            from_addr, to_addr, amount, seen_head, self.decode_transfer, self.settled_transfer, self.broadcasted_txids
-        )
 
     def lost_send_landed(
         self,
@@ -946,6 +911,107 @@ class Tao(Asset, Chain):
             broadcasted.pop(next(iter(broadcasted)))
         return attempt_head
 
+
+class Tao(Asset):
+    """Native TAO on the subtensor: Balances transfers, settled by ``Balances.Transfer``.
+
+    Composes a `TaoChain` (``self._chain``), shared with every subnet alpha on the same subtensor. The scan
+    cursors and own-broadcast records stay here, per asset: a TAO send and an alpha send must never collide.
+    """
+
+    def __init__(self, subtensor: bt.Subtensor, wallet: Optional['bt.Wallet'] = None):
+        self._chain = TaoChain(subtensor, wallet)
+        # Deposit-scanner head cursors, keyed per (from, to, amount) triple — see find_recent_outgoing.
+        self.scan_cursors: Dict[Tuple[str, str, int], int] = {}
+        # Own-broadcast dedup: subtensor.transfer can report failure — or raise mid-submit — on a transfer
+        # that actually included; without this the next poll re-sends and double-pays. hash '' = submit
+        # raised before the hash was learned (resolved by triple scan); seen_block 0 = head unreadable at
+        # record time (backfilled on the next poll).
+        self.broadcasted_txids: Broadcasts = {}
+
+    @property
+    def chain_def(self) -> ChainDefinition:
+        return CHAIN_TAO
+
+    @property
+    def subtensor(self) -> bt.Subtensor:
+        return self.chain.subtensor
+
+    @subtensor.setter
+    def subtensor(self, subtensor: bt.Subtensor) -> None:
+        self.chain.subtensor = subtensor
+
+    @property
+    def wallet(self) -> Optional['bt.Wallet']:
+        return self.chain.wallet
+
+    def describe(self) -> str:
+        return self.chain.describe()
+
+    def can_send_from(self, address: str) -> bool:
+        return self.chain.can_send_from(address)
+
+    def check_connection(self, checked: Optional[Dict[int, Optional[Exception]]] = None, **kwargs) -> None:
+        self.chain.check_connection(checked=checked)
+
+    def fetch_matching_tx(
+        self,
+        tx_hash: str,
+        expected_recipient: str,
+        expected_amount: int,
+        block_hint: int = 0,
+        max_scan_blocks: int = 150,
+    ) -> Optional[TransactionInfo]:
+        """Scan for a TAO transfer matching recipient + amount. Raises ProviderUnreachableError if unreachable."""
+        return self.chain.scan_for_tx(
+            tx_hash,
+            expected_recipient,
+            expected_amount,
+            block_hint,
+            max_scan_blocks,
+            self.chain.decode_transfer,
+            self.chain.settled_transfer,
+        )
+
+    def find_recent_outgoing(self, from_addr: str, to_addr: str, amount: int) -> Optional[str]:
+        """Extrinsic hash of a recent transfer ``from_addr`` → ``to_addr`` of >= ``amount`` rao, else None."""
+        return self.chain.find_outgoing(
+            self.scan_cursors, from_addr, to_addr, amount, self.chain.decode_transfer, self.chain.settled_transfer
+        )
+
+    def locate_transfer(self, block_num: int, ext_idx: int) -> Tuple[str, int]:
+        return self.chain.locate_transfer(block_num, ext_idx, self.chain.decode_transfer)
+
+    def get_balance(self, address: str) -> int:
+        """Balance of a TAO address in rao; raises when the read fails.
+
+        Unknown is not zero: a swallowed read reported an empty wallet, which reads as
+        "cannot fund this leg" and drops the miner's quotes on a network blip."""
+        try:
+            return int(self.subtensor.get_balance(address))
+        except Exception as e:
+            raise ProviderUnreachableError(f'TAO balance unavailable for {address}: {e}') from e
+
+    def _own_transfer_landed(
+        self, tx_hash: str, from_addr: str, to_addr: str, amount: int, seen_head: Optional[int] = None
+    ) -> Optional[SendResult]:
+        return self.chain.own_send_landed(
+            tx_hash, from_addr, to_addr, amount, seen_head, self.chain.decode_transfer, self.chain.settled_transfer
+        )
+
+    def _lost_hash_prior_landed(
+        self, from_addr: str, to_addr: str, amount: int, seen_head: int
+    ) -> Optional[SendResult]:
+        return self.chain.lost_send_landed(
+            from_addr,
+            to_addr,
+            amount,
+            seen_head,
+            self.chain.decode_transfer,
+            self.chain.settled_transfer,
+            self.broadcasted_txids,
+        )
+
     def send_amount(
         self, to_address: str, amount: int, from_address: Optional[str] = None, dedup_key: Optional[str] = None
     ) -> SendResult:
@@ -967,14 +1033,14 @@ class Tao(Asset, Chain):
         from_ss58 = self.wallet.coldkeypub.ss58_address
         scope = dedup_key or ''
         try:
-            landed = self.prior_send_landed(
+            landed = self.chain.prior_send_landed(
                 self.broadcasted_txids,
                 scope,
                 from_ss58,
                 to_address,
                 amount,
-                self.decode_transfer,
-                self.settled_transfer,
+                self.chain.decode_transfer,
+                self.chain.settled_transfer,
             )
         except Exception as e:
             bt.logging.error(f'TAO prior send unresolved ({e}) — not re-sending, would risk a double pay')
@@ -984,7 +1050,7 @@ class Tao(Asset, Chain):
             return landed
         # landed is None → nothing recorded, or the prior send provably moved nothing: fresh send.
 
-        attempt_head = self.record_send_attempt(self.broadcasted_txids, scope, to_address, amount)
+        attempt_head = self.chain.record_send_attempt(self.broadcasted_txids, scope, to_address, amount)
         try:
             response = self.subtensor.transfer(
                 wallet=self.wallet,

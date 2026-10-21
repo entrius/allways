@@ -91,50 +91,50 @@ class TestSendDedup:
 
     def _p(self, status, slot=1000, seen=1000, slot_fails=False):
         p = provider_with(DedupRpc(status, slot, slot_fails))
-        p.chain.broadcasted_txids['SIG'] = (*self.WANT, seen)
+        p.broadcasted_txids['SIG'] = (*self.WANT, seen)
         return p
 
     def test_reuses_landed_prior(self):
         p = self._p({'err': None, 'slot': 123, 'confirmationStatus': 'confirmed'})
-        assert p.chain.prior_broadcast(self.WANT) == ('SIG', 123)
+        assert p.chain.prior_broadcast(p.broadcasted_txids, self.WANT) == ('SIG', 123)
 
     def test_processed_only_prior_waits(self):
         # `processed` can sit on a minority fork that never settles. Reusing it would mark the
         # leg delivered while the user is never paid → slash. Wait for confirmed/finalized.
         p = self._p({'err': None, 'slot': 50, 'confirmationStatus': 'processed'})
         with pytest.raises(SolanaRpcError):
-            p.chain.prior_broadcast(self.WANT)
-        assert 'SIG' in p.chain.broadcasted_txids  # kept: re-probed next pass
+            p.chain.prior_broadcast(p.broadcasted_txids, self.WANT)
+        assert 'SIG' in p.broadcasted_txids  # kept: re-probed next pass
 
     def test_failed_prior_dropped_allows_fresh_send(self):
         p = self._p({'err': 'InstructionError', 'slot': 10, 'confirmationStatus': 'finalized'})
-        assert p.chain.prior_broadcast(self.WANT) is None
-        assert 'SIG' not in p.chain.broadcasted_txids
+        assert p.chain.prior_broadcast(p.broadcasted_txids, self.WANT) is None
+        assert 'SIG' not in p.broadcasted_txids
 
     def test_pending_recent_prior_waits(self):
         p = self._p(None, slot=1010)  # head 1010, seen 1000 → within TTL, not on chain → must wait
         with pytest.raises(SolanaRpcError):
-            p.chain.prior_broadcast(self.WANT)
+            p.chain.prior_broadcast(p.broadcasted_txids, self.WANT)
 
     def test_expired_unlanded_prior_allows_fresh_send(self):
         p = self._p(None, slot=2000)  # head-seen = 1000 > 150 TTL → blockhash expired, never landed
-        assert p.chain.prior_broadcast(self.WANT) is None
-        assert 'SIG' not in p.chain.broadcasted_txids
+        assert p.chain.prior_broadcast(p.broadcasted_txids, self.WANT) is None
+        assert 'SIG' not in p.broadcasted_txids
 
     def test_unknown_record_slot_waits_and_backfills(self):
         # get_slot failed at record time (seen=0). head - 0 >> TTL must NOT read as "expired" —
         # the tx may still be propagating. Backfill seen with the current head and wait.
         p = self._p(None, slot=2000, seen=0)
         with pytest.raises(SolanaRpcError):
-            p.chain.prior_broadcast(self.WANT)
-        assert p.chain.broadcasted_txids['SIG'] == (*self.WANT, 2000)
+            p.chain.prior_broadcast(p.broadcasted_txids, self.WANT)
+        assert p.broadcasted_txids['SIG'] == (*self.WANT, 2000)
 
     def test_head_unreadable_pending_prior_waits(self):
         # no status AND no head → nothing is resolvable; never evict, never re-send.
         p = self._p(None, seen=0, slot_fails=True)
         with pytest.raises(SolanaRpcError):
-            p.chain.prior_broadcast(self.WANT)
-        assert p.chain.broadcasted_txids['SIG'] == (*self.WANT, 0)  # no head to backfill from
+            p.chain.prior_broadcast(p.broadcasted_txids, self.WANT)
+        assert p.broadcasted_txids['SIG'] == (*self.WANT, 0)  # no head to backfill from
 
 
 class TestSendGuard:

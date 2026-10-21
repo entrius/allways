@@ -19,7 +19,7 @@ import time
 import click
 
 from allways.assets.asset import ProviderUnreachableError
-from allways.assets.tao import Tao, parse_extrinsic_id
+from allways.assets.tao import TaoChain, parse_extrinsic_id
 from allways.cli.dendrite_lite import (
     broadcast_until_quorum,
     discover_quorum_axons,
@@ -60,7 +60,7 @@ def _resolve_extrinsic_id(client, from_chain: str, block_num: int, ext_idx: int)
     provider = gate_provider(from_chain, client)
     if provider is None:
         fail(f'Cannot read {from_chain.upper()} to resolve extrinsic {block_num}-{ext_idx}.')
-    if not isinstance(provider.chain, Tao):
+    if not isinstance(provider.chain, TaoChain):
         fail(f'`{block_num}-{ext_idx}` is a Subtensor extrinsic id; post the {from_chain.upper()} tx hash instead.')
     try:
         return provider.locate_transfer(block_num, ext_idx)

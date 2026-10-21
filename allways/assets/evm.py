@@ -2,7 +2,7 @@ import os
 import re
 from collections import OrderedDict
 from dataclasses import dataclass
-from typing import Any, Dict, List, Mapping, Optional, Tuple
+from typing import Any, Dict, Hashable, List, Mapping, Optional, Tuple
 from urllib.parse import urlparse
 
 import bittensor as bt
@@ -349,6 +349,9 @@ class EvmChain(Chain):
         except Exception as e:
             raise ConnectionError(f'Cannot reach {self.network_def.label} RPC: {e}') from e
         return chain_id, tip
+
+    def share_key(self) -> Optional[Hashable]:
+        return (EvmChain, *self.probe_key)
 
     def http_sessions(self) -> List[Any]:
         return [self.http]

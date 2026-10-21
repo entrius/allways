@@ -15,7 +15,7 @@ from bittensor import Keypair
 from solders.pubkey import Pubkey
 
 from allways.assets.asset import ProviderUnreachableError
-from allways.assets.tao import Tao, parse_extrinsic_id
+from allways.assets.tao import TaoChain, parse_extrinsic_id
 from allways.chains import SUPPORTED_CHAINS, canonical_pair
 from allways.cli.swap_commands.swap_intake import (
     MinerCandidate,
@@ -515,7 +515,7 @@ def _deposit_ref(provider, from_tx_hash: str, from_tx_block: int) -> Optional[Tu
     extrinsic_id = parse_extrinsic_id(from_tx_hash)
     if extrinsic_id is None:
         return from_tx_hash, from_tx_block
-    if not isinstance(provider.chain, Tao):
+    if not isinstance(provider.chain, TaoChain):
         return None
     try:
         tx_hash, block = provider.locate_transfer(*extrinsic_id)

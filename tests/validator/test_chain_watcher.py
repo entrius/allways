@@ -10,7 +10,7 @@ class _Chain:
         self.tip_reads = 0
         self._cached = None
 
-    def clear_pass_tip(self):
+    def start_pass(self):
         self._cached = None
 
     def cached_block_height(self):
@@ -95,10 +95,11 @@ def test_an_endpoint_failure_is_unknown_not_no_and_is_retried():
 
 
 def test_assets_on_one_network_share_a_watcher():
-    # Each EVM token builds its own chain object for its network, so sharing goes by the network's name.
+    # create_assets binds every asset on a network to one chain object, and the watcher goes by that object.
+    ethereum = _Chain()
     assets = {
-        'eth': _Asset(_Chain(), host='ethereum', spb=12),
-        'ethusdc': _Asset(_Chain(), host='ethereum', spb=12),
+        'eth': _Asset(ethereum, host='ethereum', spb=12),
+        'ethusdc': _Asset(ethereum, host='ethereum', spb=12),
         'btc': _Asset(_Chain()),
     }
     watchers = chain_watchers(assets)
@@ -124,23 +125,23 @@ def test_a_tip_frozen_while_checks_wait_reconnects_the_chain():
 
 
 def test_every_subnet_alpha_shares_the_tao_watcher():
-    from allways.assets.tao import Tao
+    from allways.assets.tao import TaoChain
 
-    subtensor = Tao.__new__(Tao)
-    assets = {'tao': _Asset(subtensor, spb=12), 'sn3': _Asset(Tao.__new__(Tao), spb=12), 'btc': _Asset(_Chain())}
+    subtensor = TaoChain.__new__(TaoChain)
+    assets = {'tao': _Asset(subtensor, spb=12), 'sn3': _Asset(subtensor, spb=12), 'btc': _Asset(_Chain())}
     watchers = chain_watchers(assets)
     assert watchers['sn3'] is watchers['tao'] and watchers['tao'].name == 'chain-tao'
     assert len({id(w) for w in watchers.values()}) == 2
 
 
 def test_a_reconnect_hands_every_tao_provider_the_new_subtensor_and_closes_the_old(monkeypatch):
-    from allways.assets.tao import Tao
+    from allways.assets.tao import TaoChain
     from allways.validator.app import SubtensorSwap
 
     monkeypatch.setattr(SubtensorSwap, '_done_at', 0.0)
     old, new = SimpleNamespace(closed=0), SimpleNamespace()
     old.close = lambda: setattr(old, 'closed', old.closed + 1)
-    tao, alpha = Tao.__new__(Tao), Tao.__new__(Tao)
+    tao, alpha = TaoChain.__new__(TaoChain), TaoChain.__new__(TaoChain)
     tao.subtensor = alpha.subtensor = old
     SubtensorSwap({'tao': _Asset(tao), 'sn3': _Asset(alpha), 'btc': _Asset(_Chain())}, lambda: new)()
     assert tao.subtensor is new and alpha.subtensor is new and old.closed == 1

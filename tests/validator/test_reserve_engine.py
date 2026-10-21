@@ -1121,12 +1121,12 @@ def test_swap_status_by_pair_reads_that_pairs_slot_not_the_freshest(tmp_path):
 
 def test_confirm_resolves_an_extrinsic_id_through_the_source_chain_and_claims_the_inner_hash():
     # The app relays btcli's `<block>-<idx>` unchanged; the seam resolves, claims and echoes the inner hash.
-    from allways.assets.tao import Tao
+    from allways.assets.tao import TaoChain
 
     INNER_HASH = '0x' + 'ab' * 32
 
     class _AlphaProvider(_FakeProvider):
-        chain = Tao(SimpleNamespace())
+        chain = TaoChain(SimpleNamespace())
         verified = None
 
         def locate_transfer(self, block_num, ext_idx):

@@ -13,7 +13,7 @@ from allways.assets.asset import (
     SendResult,
     TransactionInfo,
 )
-from allways.assets.sol import LOG_SOL, RESERVED_ACCOUNTS, SolanaChain
+from allways.assets.sol import LOG_SOL, RESERVED_ACCOUNTS, Broadcasts, SolanaChain
 from allways.chains import ChainDefinition
 from allways.constants import CANCEL_REASON_SOL_RESERVED, CANCEL_REASON_SPL_FROZEN
 from allways.solana.rpc import SolanaRpc, TransientRpcError, classify_cluster
@@ -116,6 +116,8 @@ class SplToken(Asset):
     ):
         self._chain_def = chain_def
         self._chain = SolanaChain(solana_rpc_url, solana_keypair, timeout=timeout)
+        # Own-broadcast dedup, per asset — see Sol.__init__.
+        self.broadcasted_txids: Broadcasts = {}
         # Resolved lazily: the cluster is only knowable from the RPC's genesis hash, and construction
         # must stay offline (create_assets builds every provider before any check).
         self._mint: Optional[Pubkey] = None
@@ -398,7 +400,7 @@ class SplToken(Asset):
 
         want = (str(to_address), int(amount), dedup_key or '')
         what = f'{amount} {self.chain_def.native_unit} to {to_address}'
-        decided, result = self.chain.resolve_prior_send(want, what)
+        decided, result = self.chain.resolve_prior_send(self.broadcasted_txids, want, what)
         if decided:
             return result
 
@@ -428,4 +430,4 @@ class SplToken(Asset):
         except Exception as e:
             bt.logging.error(f'{LOG_SOL} {self.chain_def.id} send_amount build failed: {e}')
             return None
-        return self.chain.broadcast(ixs, want, what)
+        return self.chain.broadcast(self.broadcasted_txids, ixs, want, what)

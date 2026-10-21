@@ -1,6 +1,6 @@
 import base64
 import time
-from typing import Any, Dict, List, Optional, Tuple
+from typing import Any, Dict, Hashable, List, Optional, Tuple
 
 import base58
 import bittensor as bt
@@ -15,6 +15,8 @@ from allways.constants import CANCEL_REASON_SOL_RESERVED
 from allways.solana.rpc import SolanaRpc, SolanaRpcError, TransientRpcError, resolve_rpc_url
 
 LOG_SOL = '[Solana]'
+# sig -> (to, amount, dedup_scope, seen_slot); one dict per asset (see Sol.__init__).
+Broadcasts = Dict[str, Tuple[str, int, str, int]]
 
 # Solana's reserved account keys: the runtime demotes these to read-only in EVERY transaction, so
 # a transfer to one always fails (ReadonlyLamportChange) and no miner could ever deliver to it.
@@ -97,9 +99,10 @@ def system_transfers(keys: List[str], tx: dict, meta: dict) -> List[Tuple[str, s
 
 class SolanaChain(Chain):
     """The Solana network: RPC transport, slot tip, ed25519 address/proof crypto and the own-broadcast
-    dedup guard — everything an asset ON Solana (native SOL, an SPL token) shares. Assets compose one
+    dedup logic — everything an asset ON Solana (native SOL, an SPL token) shares. Assets compose one
     of these (``self._chain``) exactly as EVM assets compose ``EvmChain``; chain members call each
-    other on plain ``self``."""
+    other on plain ``self``. Each asset keeps its own broadcast records and passes them in, so SOL and
+    an SPL token on one shared chain can never reuse each other's payout."""
 
     # A Solana blockhash expires well within ~60s; past this an unlanded sig is dead.
     BROADCAST_TTL_SLOTS = 150
@@ -110,9 +113,6 @@ class SolanaChain(Chain):
         self.rpc_url = resolve_rpc_url(solana_rpc_url)
         self.rpc = SolanaRpc(self.rpc_url, timeout=timeout)
         self.keypair = solana_keypair
-        # Own-broadcast dedup: sig -> (to, amount, dedup_scope, seen_slot). A confirm() timeout returns
-        # None even when the transfer landed; without this the next poll re-signs and double-pays.
-        self.broadcasted_txids: dict[str, tuple] = {}
 
     def describe(self) -> str:
         return f'Solana RPC {self.rpc_url}'
@@ -150,6 +150,9 @@ class SolanaChain(Chain):
         if tip is None:
             return 0
         return max(0, tip - int(slot) + 1)
+
+    def share_key(self) -> Optional[Hashable]:
+        return (SolanaChain, self.rpc_url, str(self.keypair.pubkey()) if self.keypair is not None else None)
 
     def http_sessions(self) -> List[Any]:
         return [self.rpc._session]
@@ -199,7 +202,7 @@ class SolanaChain(Chain):
 
     # --- own-broadcast dedup + send loop (shared by every asset that signs with this keypair) ---
 
-    def broadcast(self, instructions: list, want: tuple, what: str) -> SendResult:
+    def broadcast(self, broadcasted: Broadcasts, instructions: list, want: tuple, what: str) -> SendResult:
         """Sign ``instructions`` with the chain keypair and send, retrying a stale blockhash. ``want``
         is the (to, amount, dedup) obligation recorded BEFORE confirm so a confirm() timeout on a tx
         that landed is reused by ``prior_broadcast`` next pass instead of paid twice."""
@@ -212,7 +215,7 @@ class SolanaChain(Chain):
                 blockhash = Hash.from_string(self.rpc.get_latest_blockhash())
                 tx = Transaction.new_signed_with_payer(instructions, self.keypair.pubkey(), [self.keypair], blockhash)
                 sig = self.rpc.send_transaction(base64.b64encode(bytes(tx)).decode())
-                self.record_broadcast(sig, want)
+                self.record_broadcast(broadcasted, sig, want)
                 status = self.rpc.confirm(sig)
                 slot = int(status.get('slot') or 0)
                 bt.logging.info(f'{LOG_SOL} sent {what} (sig: {sig}, slot: {slot})')
@@ -226,11 +229,11 @@ class SolanaChain(Chain):
         bt.logging.error(f'{LOG_SOL} send failed after blockhash retries: {last_err}')
         return None
 
-    def record_broadcast(self, sig: str, want: tuple) -> None:
+    def record_broadcast(self, broadcasted: Broadcasts, sig: str, want: tuple) -> None:
         head = self.current_slot()
-        self.broadcasted_txids[sig] = (*want, head if head is not None else 0)
-        if len(self.broadcasted_txids) > 256:
-            self.broadcasted_txids.pop(next(iter(self.broadcasted_txids)))
+        broadcasted[sig] = (*want, head if head is not None else 0)
+        if len(broadcasted) > 256:
+            broadcasted.pop(next(iter(broadcasted)))
 
     def current_slot(self) -> Optional[int]:
         try:
@@ -238,13 +241,13 @@ class SolanaChain(Chain):
         except Exception:
             return None
 
-    def prior_broadcast(self, want: tuple) -> Optional[SendResult]:
+    def prior_broadcast(self, broadcasted: Broadcasts, want: tuple) -> Optional[SendResult]:
         """Reusable (sig, slot) from a prior own broadcast for this (to, amount, dedup) obligation that
         provably landed — so a confirm() timeout that returned None can never cause a second pay. None
         when no prior send can have moved funds; RAISES when the prior send is unresolved (not yet
         expired, or only at ``processed`` commitment) — the caller must wait, not re-send."""
         head = self.current_slot()
-        for sig, (to, amt, scope, seen) in list(self.broadcasted_txids.items()):
+        for sig, (to, amt, scope, seen) in list(broadcasted.items()):
             if (to, amt, scope) != want:
                 continue
             st = (self.rpc.get_signature_statuses([sig]) or [None])[0]
@@ -256,24 +259,24 @@ class SolanaChain(Chain):
                     raise SolanaRpcError(f'prior send {sig[:16]}... only processed — waiting for confirmed')
                 if st.get('err') is None:
                     return (sig, int(st.get('slot') or 0))  # settled at majority commitment → reuse
-                del self.broadcasted_txids[sig]  # failed on-chain → moved nothing, a fresh send is safe
+                del broadcasted[sig]  # failed on-chain → moved nothing, a fresh send is safe
                 continue
             if head is not None:
                 if int(seen) <= 0:
                     # get_slot failed at record time, so the record's age is unknown: backfill with the
                     # current head so the TTL counts from now — "can't tell" must read recent, never expired.
-                    self.broadcasted_txids[sig] = (to, amt, scope, head)
+                    broadcasted[sig] = (to, amt, scope, head)
                 elif head - int(seen) > self.BROADCAST_TTL_SLOTS:
-                    del self.broadcasted_txids[sig]  # blockhash long expired unlanded → safe to resend
+                    del broadcasted[sig]  # blockhash long expired unlanded → safe to resend
                     continue
             raise SolanaRpcError(f'prior send {sig[:16]}... not on-chain yet and not expired — waiting a pass')
         return None
 
-    def resolve_prior_send(self, want: tuple, what: str) -> tuple[bool, SendResult]:
+    def resolve_prior_send(self, broadcasted: Broadcasts, want: tuple, what: str) -> tuple[bool, SendResult]:
         """``(decided, result)``: decided=True means the caller must return ``result`` as-is — a reused
         prior tx, or None because a prior send is still unresolved (re-sending would risk a double pay)."""
         try:
-            prior = self.prior_broadcast(want)
+            prior = self.prior_broadcast(broadcasted, want)
         except Exception as e:
             bt.logging.error(f'{LOG_SOL} prior send unresolved ({e}) — not re-sending, would risk a double pay')
             return True, None
@@ -303,6 +306,9 @@ class Sol(Asset):
         self, solana_rpc_url: Optional[str] = None, solana_keypair: Optional[Keypair] = None, timeout: int = 30
     ):
         self._chain = SolanaChain(solana_rpc_url, solana_keypair, timeout=timeout)
+        # Own-broadcast dedup: sig -> (to, amount, dedup_scope, seen_slot). A confirm() timeout returns
+        # None even when the transfer landed; without this the next poll re-signs and double-pays.
+        self.broadcasted_txids: Broadcasts = {}
 
     # Transport + signer live on the chain; exposed here because callers and tests address the asset.
     @property
@@ -491,7 +497,7 @@ class Sol(Asset):
 
         want = (str(to_address), int(amount), dedup_key or '')
         what = f'{amount} lamports to {to_address}'
-        decided, result = self.chain.resolve_prior_send(want, what)
+        decided, result = self.chain.resolve_prior_send(self.broadcasted_txids, want, what)
         if decided:
             return result
 
@@ -506,4 +512,4 @@ class Sol(Asset):
         except Exception as e:
             bt.logging.error(f'{LOG_SOL} send_amount build failed: {e}')
             return None
-        return self.chain.broadcast([ix], want, what)
+        return self.chain.broadcast(self.broadcasted_txids, [ix], want, what)

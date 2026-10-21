@@ -6,7 +6,7 @@ import pytest
 
 from allways.assets.alpha import Alpha
 from allways.assets.asset import ProviderUnreachableError
-from allways.assets.tao import BETA_ESCROW, Tao
+from allways.assets.tao import BETA_ESCROW, TaoChain
 from allways.chains import CHAIN_SN7
 
 MINER = 'minerCold'
@@ -90,7 +90,7 @@ def test_beta_escrow_is_never_a_valid_payee_on_tao_or_alpha():
     # Keyless protocol custody: transfer_stake into it fails (CannotUseSystemAccount), TAO sent there is
     # stranded. Invalid at the chain, so reserve refuses it and an in-flight swap cancels no-fault.
     assert BETA_ESCROW == '5EYCAe5jLQhn6ofDSwHx3AZmsZPVFHnKpstqap4vqwDWtp7s'
-    for chain in (Tao(SimpleNamespace()), Alpha(CHAIN_SN7, SimpleNamespace()).chain):
+    for chain in (TaoChain(SimpleNamespace()), Alpha(CHAIN_SN7, SimpleNamespace()).chain):
         assert not chain.is_valid_address(BETA_ESCROW)
         assert chain.is_valid_address('5GrwvaEF5zXb26Fz9rcQpDWS57CtERHpNehXCPcNoHGKutQY')
 
@@ -298,7 +298,7 @@ def test_send_reuses_a_prior_broadcast_per_dedup_key():
     assert len(calls) == 1
     assert p.send_amount(USER, 5_000, dedup_key='swap-2') == (TXID, BLOCK)
     assert len(calls) == 2
-    assert not p.chain.broadcasted_txids
+    assert not hasattr(p.chain, 'broadcasted_txids')
 
 
 def test_ambiguous_response_records_the_attempt_and_the_next_call_adopts_the_landed_send():

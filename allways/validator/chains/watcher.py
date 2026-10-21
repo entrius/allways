@@ -111,7 +111,7 @@ class ChainWatcher(Component):
     def tick(self, now: float) -> None:
         if not self._open(now):
             return  # nothing to judge: an idle chain costs no tip read
-        self.chain.clear_pass_tip()
+        self.chain.start_pass()
         tip = self.chain.cached_block_height()  # the one tip read this tick; every check below shares it
         self._watch_tip(tip, now)
         for request in self._due(now, tip):

@@ -27,7 +27,7 @@ from allways.assets.qnt import Qnt
 from allways.assets.sol import Sol, SolanaChain
 from allways.assets.solusdc import SolUsdc
 from allways.assets.spl_token import SplToken
-from allways.assets.tao import Tao
+from allways.assets.tao import Tao, TaoChain
 from allways.assets.uni import Uni
 from allways.chains import ALPHA_CHAINS
 
@@ -115,10 +115,10 @@ MAX_CHECK_LANES = 4
 def check_lane(provider: Asset) -> Hashable:
     """The backend a provider's startup check talks to. Checks on one lane run one after another, in registry
     order; only different lanes overlap. One lane per chain class, split per network for EVM, so no backend is
-    asked two things at once — the TAO provider and every alpha bind a ``Tao`` and so share the subtensor's lane."""
+    asked two things at once — the TAO provider and every alpha share one ``TaoChain`` and so the subtensor's lane."""
     chain = provider.chain
-    if isinstance(chain, Tao):
-        return Tao
+    if isinstance(chain, TaoChain):
+        return TaoChain
     if isinstance(chain, EvmChain):
         return EvmChain, chain.env_prefix
     return type(chain)
@@ -143,7 +143,7 @@ def run_checks(pending: List[Tuple[int, Asset]], require_send: bool) -> Dict[int
         failed: Dict[int, Exception] = {}
         for position, provider in lane:
             try:
-                if isinstance(provider.chain, (Tao, EvmChain)):
+                if isinstance(provider.chain, (TaoChain, EvmChain)):
                     provider.check_connection(require_send=require_send, checked=checked)
                 else:
                     provider.check_connection(require_send=require_send)
@@ -151,7 +151,7 @@ def run_checks(pending: List[Tuple[int, Asset]], require_send: bool) -> Dict[int
                 failed[position] = e
         return failed
 
-    own_lane = lanes.pop(Tao, [])
+    own_lane = lanes.pop(TaoChain, [])
     if not lanes:
         return run_lane(own_lane)
     workers = min(MAX_CHECK_LANES - 1, len(lanes))
@@ -208,6 +208,7 @@ def create_assets(
 
     # Constructors stay on the calling thread, in registry order; only the checks fan out.
     built: List[Tuple[str, str, Optional[Asset], Optional[Exception]]] = []
+    shared: Dict[Hashable, Chain] = {}  # one chain object per network, bound across every asset on it
     for chain_id, cls, kwarg_names in ASSET_REGISTRY:
         name = getattr(cls, 'func', cls).__name__  # a partial (alpha rows) has no __name__ of its own
         provider: Optional[Asset] = None
@@ -215,7 +216,7 @@ def create_assets(
         try:
             provider_kwargs = {k: kwargs[k] for k in kwarg_names if k in kwargs}
             provider = cls(**provider_kwargs)
-            provider.chain  # a missing Chain binding fails here at boot, not mid-pass
+            provider.share_chain(shared)  # a missing Chain binding fails here at boot, not mid-pass
         except Exception as e:
             provider, error = None, e
         if check:
