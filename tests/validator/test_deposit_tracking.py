@@ -393,7 +393,7 @@ def test_non_canonical_in_flight_claim_refuses_to_attest(spec):
         rules, swap = _claim(spec, spelling)
         action = rules.decide(swap, now=1500)
         assert action.decision == Decision.REJECT and 'canonical' in action.reason, spelling
-        assert 'canonical' in attest_reject_reason(rules.providers, swap, 100), spelling
+        assert 'canonical' in attest_reject_reason(rules.providers.get, swap, 100), spelling
 
 
 @family
@@ -410,11 +410,17 @@ def test_a_variant_claim_in_the_ledger_refuses_the_canonical_claim(spec):
 
 @family
 def test_a_live_swap_on_a_variant_spelling_refuses_the_canonical_claim(spec):
-    # Even before its ledger row arrives, a live swap spending the deposit under another key blocks it.
+    # A live swap spends its deposit under another key: the World marks the case-blind row spent as soon as it
+    # reads the Swap, with or without its events (test_world: a live swap spends its deposit / a restore re-marks).
     rules, swap = _claim(spec, _canonical(spec))
+    variant = _variants(spec)[-1]
     live = make_swap(status='Active', from_chain=spec.chain_id, key=b'\x09' * 32)
-    live.from_tx_hash = _variants(spec)[-1]
-    rules.world = replace(rules.world, accounts={'Swap': {'pda': live}})
+    live.from_tx_hash = variant
+    rules.world = replace(
+        rules.world,
+        accounts={'Swap': {'pda': live}},
+        deposits={tx_key(variant): DepositClaim(swap_key_from_tx_hash(variant).hex(), 1, 1, initiated=True)},
+    )
     action = rules.decide(swap, now=1500)
     assert action.decision == Decision.REJECT and 'already claimed' in action.reason
 

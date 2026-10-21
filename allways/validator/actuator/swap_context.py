@@ -4,12 +4,12 @@ actuator's own memory of what it verified. Nothing here waits on a chain: an ans
 
 from __future__ import annotations
 
-from typing import Any, Callable, Dict, Optional, Tuple
+from typing import Any, Callable, Dict, Optional, Set, Tuple
 
 from allways.cli.swap_commands.swap_intake import collateral_matches, leg_value
 from allways.solana import pdas
 from allways.solana.client import swap_key_from_tx_hash
-from allways.validator.actuator.swaps import Leg, NotReady, status_of
+from allways.validator.actuator.swaps import Leg, NotReady
 from allways.validator.chains.watcher import ChainWatcher, Probe, Verdict, verify_probe
 from allways.validator.feed.events import HISTORY_HORIZON_SECS
 from allways.validator.store.db import Store
@@ -43,6 +43,7 @@ class SwapMemory:
             (r['miner'], r['tx_key']): (r['swap_key'], r['seen_at'])
             for r in conn.execute('SELECT * FROM actuator_deliveries')
         }
+        self.delivered: Set[str] = {k for _, k in self.deliveries}  # tx_key of every delivery verified here
         self.collateral: Dict[Tuple[str, str, int, int], bool] = {
             (r['miner'], r['backing'], r['created_at'], r['collateral_amount']): bool(r['ok'])
             for r in conn.execute('SELECT * FROM actuator_collateral')
@@ -52,6 +53,7 @@ class SwapMemory:
         held = self.deliveries.get((miner, key))
         if held is None:
             self.deliveries[(miner, key)] = (swap_key, now)
+            self.delivered.add(key)
             with self.store.tx() as c:
                 c.execute('INSERT OR IGNORE INTO actuator_deliveries VALUES (?, ?, ?, ?)', (miner, key, swap_key, now))
             return True
@@ -69,6 +71,7 @@ class SwapMemory:
             return
         for k in stale:
             del self.deliveries[k]
+        self.delivered = {k for _, k in self.deliveries}
         with self.store.tx() as c:
             c.execute('DELETE FROM actuator_deliveries WHERE seen_at < ?', (floor,))
 
@@ -169,24 +172,17 @@ class WorldContext:
 
     def deposit_claimed(self, swap: Any) -> bool:
         """Another swap claimed this deposit first, or a swap already spent it (a closed swap's key can be
-        claimed again)."""
-        key, deposit = swap_key_from_tx_hash(swap.from_tx_hash).hex(), tx_key(swap.from_tx_hash)
-        held = self.world.deposits.get(deposit)
-        if held is not None and (held.swap_key != key or held.initiated):
-            return True
-        for _, other in self.world.all('Swap'):
-            if status_of(other) in ('Active', 'Fulfilled') and tx_key(other.from_tx_hash) == deposit:
-                if swap_key_from_tx_hash(other.from_tx_hash).hex() != key:
-                    return True
-        return False
+        claimed again). The ledger covers every live swap: the World marks a live Swap's deposit spent
+        whenever it reads one, under whichever spelling it used."""
+        held = self.world.deposits.get(tx_key(swap.from_tx_hash))
+        return held is not None and (held.swap_key != swap_key_from_tx_hash(swap.from_tx_hash).hex() or held.initiated)
 
     def payout_reuse(self, swap: Any) -> bool:
         """The deposit is a delivery this validator verified for some swap. A payout from a posted miner wallet
         can't be named as a taker's source at all (``finalize_reservation`` refuses it), and a delivery a miner
         only reported is not evidence: ``to_tx_hash`` is free text, so any miner could name a user's real
         deposit and get it refused."""
-        deposit = tx_key(swap.from_tx_hash)
-        return any(k == deposit for _, k in self.memory.deliveries)
+        return tx_key(swap.from_tx_hash) in self.memory.delivered
 
     def delivery_is_deposit(self, swap: Any) -> bool:
         """Some swap claimed this swap's delivery tx as its source deposit, so it pays that swap, not this one."""

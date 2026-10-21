@@ -308,3 +308,24 @@ def test_a_live_swap_spends_its_deposit_even_without_its_events(tmp_path):
     assert held.initiated
     reader._note_initiated(SimpleNamespace(status='PendingAttestation', from_tx_hash='ab' * 32), slot=301)
     assert len(reader._deposits) == 1  # a claim not yet attested spends nothing
+
+
+def test_a_restored_world_marks_every_live_swaps_deposit_spent(tmp_path):
+    """The deposit ledger alone decides "already claimed", so a restart must not bring back a live swap's
+    deposit as unspent, whatever the saved ledger row says."""
+    client = _Client()
+    live = SimpleNamespace(status='Active', from_tx_hash='ABCDEF' * 10 + 'ab12')
+    client._store('SwapPda1111', layouts.DISCRIMINATORS['Swap'] + b'live')
+    decode = client._decode
+    client._decode = lambda name, raw: live if name == 'Swap' else decode(name, raw)
+    reader, _, _, _, out = _reader(client, tmp_path)
+    reader.tick(NOW)
+    (held,) = out.get()[0].deposits.values()
+    assert held.initiated
+    with reader.store.tx() as c:
+        c.execute('UPDATE world_deposits SET initiated = 0')  # a save whose row predates the swap going live
+
+    again, _, _, _, out = _reader(client, tmp_path)
+    again.tick(NOW)
+    (held,) = out.get()[0].deposits.values()
+    assert held.initiated

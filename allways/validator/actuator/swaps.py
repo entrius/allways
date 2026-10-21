@@ -9,7 +9,7 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 from enum import Enum
-from typing import Any, Optional, Protocol
+from typing import Any, Callable, Optional, Protocol
 
 from allways.chains import compute_extension_target_secs, get_chain_def
 from allways.constants import CANCEL_REASON_INVALID_DEST, EXTENSION_PADDING_SECONDS, FEE_DIVISOR
@@ -27,13 +27,14 @@ def is_tx_fresh(info: Any, floor_unix: int, grace: int = 0) -> bool:
     return block_time is not None and block_time >= floor_unix - grace
 
 
-def attest_reject_reason(providers: Any, swap: Any, fee_divisor: int) -> Optional[str]:
-    """Why a PendingAttestation claim must never attest, or None. Offline and deterministic (quorum votes)."""
-    from_provider = providers.get(swap.from_chain)
+def attest_reject_reason(provider: Callable[[str], Optional[Any]], swap: Any, fee_divisor: int) -> Optional[str]:
+    """Why a PendingAttestation claim must never attest, or None. Offline and deterministic (quorum votes).
+    ``provider`` looks an asset up by chain id."""
+    from_provider = provider(swap.from_chain)
     # Swap keys hash the raw string, so a claim must carry the chain's one canonical spelling.
     if from_provider is not None and from_provider.chain.canonical_tx_hash(swap.from_tx_hash) != swap.from_tx_hash:
         return 'source tx hash not in canonical form — refusing to attest'
-    to_provider = providers.get(swap.to_chain)
+    to_provider = provider(swap.to_chain)
     if to_provider is not None and not to_provider.chain.is_valid_address(swap.user_to_addr):
         return 'dest address invalid — refusing to attest'
     expected_to, _ = expected_swap_amounts(swap, fee_divisor)  # must agree with the pinned miner rate
@@ -149,15 +150,8 @@ def _decide(swap: Any, ctx: SwapContext, now: int, fee_divisor: int) -> Action:
         cancel = _cancel(swap, ctx, fee_divisor)
         if cancel is not None:
             return cancel
-        if overdue and ctx.delivery_refused(swap):
-            if now < int(swap.max_extend_at):
-                return Action(Decision.WAIT, reason='overdue but dest may refuse — deferring, not slashing')
-            return Action(
-                Decision.TIMEOUT,
-                reason='dest refuses past max_extend_at, no sound cancel evidence — terminal, slashing',
-            )
         if overdue:
-            return Action(Decision.TIMEOUT, reason='overdue, miner never fulfilled — slashing')
+            return _overdue(swap, ctx, now, 'overdue', 'miner never fulfilled')
         return Action(Decision.WAIT, reason='awaiting miner mark_fulfilled')
     if status == 'Fulfilled':
         return _fulfilled(swap, ctx, now, overdue, fee_divisor)
@@ -238,14 +232,20 @@ def _fulfilled(swap: Any, ctx: SwapContext, now: int, overdue: bool, fee_divisor
     # would wait forever on a delivery that failed the freshness floor.
     if dest.status != 'ok' and dest.checked_at < int(swap.timeout_at):
         return Action(Decision.WAIT, reason=f'{why} — re-checking the dest after the deadline before any slash')
+    return _overdue(swap, ctx, now, f'{why} + overdue', 'dest unverifiable')
+
+
+def _overdue(swap: Any, ctx: SwapContext, now: int, why: str, fault: str) -> Action:
+    """An overdue swap with no sound cancel evidence: a dest that may refuse defers the slash until
+    max_extend_at; otherwise the miner is slashed."""
     if ctx.delivery_refused(swap):
         if now < int(swap.max_extend_at):
-            return Action(Decision.WAIT, reason=f'{why} + overdue but dest may refuse — deferring, not slashing')
+            return Action(Decision.WAIT, reason=f'{why} but dest may refuse — deferring, not slashing')
         return Action(
             Decision.TIMEOUT,
-            reason=f'{why} + dest refuses past max_extend_at, no sound cancel evidence — terminal, slashing',
+            reason=f'{why}, dest refuses past max_extend_at, no sound cancel evidence — terminal, slashing',
         )
-    return Action(Decision.TIMEOUT, reason=f'{why} + overdue — dest unverifiable, slashing')
+    return Action(Decision.TIMEOUT, reason=f'{why} — {fault}, slashing')
 
 
 def _pending_attestation(swap: Any, ctx: SwapContext, now: int, fee_divisor: int) -> Action:
@@ -255,7 +255,7 @@ def _pending_attestation(swap: Any, ctx: SwapContext, now: int, fee_divisor: int
         or bytes(reservation.claimed_swap_key) != swap_key_from_tx_hash(swap.from_tx_hash)
     ):
         return Action(Decision.CANCEL, reason='reservation expired/superseded — reaping stale claim')
-    reason = attest_reject_reason(_Providers(ctx), swap, fee_divisor)
+    reason = attest_reject_reason(ctx.provider, swap, fee_divisor)
     if reason is None and ctx.payout_reuse(swap):
         reason = "source tx is another swap's payout, not a deposit"
     if reason is None and ctx.deposit_claimed(swap):
@@ -301,13 +301,3 @@ def _pending_attestation(swap: Any, ctx: SwapContext, now: int, fee_divisor: int
     if ctx.owes_settlement(swap):
         return Action(Decision.WAIT, reason='miner owes an unapplied vault debit — refusing to attest')
     return Action(Decision.ATTEST, reason='source verified + fresh')
-
-
-class _Providers:
-    """The ``providers.get(chain)`` view attest_reject_reason expects, over the context."""
-
-    def __init__(self, ctx: SwapContext) -> None:
-        self._ctx = ctx
-
-    def get(self, chain: str) -> Optional[Any]:
-        return self._ctx.provider(chain)

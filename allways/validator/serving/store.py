@@ -162,8 +162,7 @@ class ServingStore:
 
     def is_recorded_payout(self, tx_hash: str) -> bool:
         """A delivery this validator verified. Not one a miner merely reported: see WorldContext.payout_reuse."""
-        key = tx_key(tx_hash)
-        return any(k == key for _, k in self.memory.deliveries)
+        return tx_key(tx_hash) in self.memory.delivered
 
     def collateral_verdict(self, miner, backing, created_at, collateral_amount) -> Optional[bool]:
         return self.memory.collateral.get((str(miner), str(backing), int(created_at), int(collateral_amount)))

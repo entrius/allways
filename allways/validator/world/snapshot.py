@@ -240,6 +240,10 @@ class WorldReader(Component):
             r['swap_key']: Fulfillment(r['to_tx_hash'], r['block_time'], r['miner'], bool(r['settled']))
             for r in persist.load(self.store, 'world_fulfillments')
         }
+        # The saved rows replaced the ledger the accounts above wrote: mark the live swaps' deposits again, so a
+        # live swap spends its deposit however the save was ordered.
+        for pda, swap in self._accounts.get('Swap', {}).items():
+            self._note_initiated(swap, self._slot_of.get(('Swap', pda), 0))
         self._scan_slot = int(self.store.get_meta('world.scan_slot') or 0)
         self._slot = int(self.store.get_meta('world.slot') or 0)
         self._refresh_attribution()

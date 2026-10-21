@@ -892,7 +892,7 @@ def _add_reject_reason(ctx, swap, swap_key: bytes, stage: str, detail: dict) -> 
         return
     report = ctx.report().get(swap_key.hex())
     planned = report.reason if report is not None and report.decision == 'reject' and report.reason else None
-    reason = attest_reject_reason(ctx.providers, swap, FEE_DIVISOR) or planned
+    reason = attest_reject_reason(ctx.providers.get, swap, FEE_DIVISOR) or planned
     if reason is not None:
         detail['reject_reason'] = reason
 
