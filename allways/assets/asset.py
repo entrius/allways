@@ -38,18 +38,17 @@ class TransactionInfo:
 class Asset(ABC):
     """A thing you can swap: verify a payment of it, send it, gate it.
 
-    Every asset lives on a `Chain` (`self.chain`). Single-asset networks (btc/tao/sol,
-    and eth until a second EVM asset lands) fuse the two: the class implements both and
-    `.chain` returns itself. The registry row stays a `ChainDefinition` in chains.py —
-    the wire says chain; in code an id resolves to an Asset.
+    Every asset lives on a `Chain` (`self.chain`). A single-asset network (btc) fuses the
+    two: the class implements both and `.chain` returns itself. The registry row stays a
+    `ChainDefinition` in chains.py — the wire says chain; in code an id resolves to an Asset.
 
     Seam rule: asset-side code asks chain questions through ``self.chain``; chain
     members calling each other keep plain ``self`` (they move together on a split).
 
     Adding a new asset:
     1. Add its ChainDefinition to chains.py
-    2. Implement this interface (or reuse a family class, e.g. an ERC-20)
-    3. Register it in ASSET_REGISTRY; add {ENV_PREFIX}_* vars to .env
+    2. Reuse a family class (EvmCoin, Erc20, SplToken) or implement this interface
+    3. Register it in ASSET_REGISTRY (a family class binds its row with ``partial``); add {ENV_PREFIX}_* vars to .env
     """
 
     # Non-fused assets (tokens on a multi-asset chain) set this at construction.

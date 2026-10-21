@@ -97,13 +97,13 @@ def test_evm_network_names_match_the_rpc_registry():
             assert set(asset.chain_def.networks) == set(served.chain_ids), chain_id
 
 
-def test_a_partial_bound_provider_degrades_by_its_class_name(monkeypatch):
-    """Alpha rows are `partial(Alpha, chain_def)`, which carries no __name__: the failure branches
-    formatted `cls.__name__` and raised AttributeError instead of the intended warning/RuntimeError,
-    so an optional alpha that failed its check (a subtensor hiccup at boot) killed the neuron."""
+def test_a_partial_bound_provider_degrades_by_its_chain_id(monkeypatch):
+    """Most rows are `partial(<family>, chain_def)`, which carries no __name__: the failure branches once
+    formatted `cls.__name__` and raised AttributeError instead of the intended warning/RuntimeError, so an
+    optional alpha that failed its check (a subtensor hiccup at boot) killed the neuron. They name the row."""
     monkeypatch.setattr(cp, 'ASSET_REGISTRY', (('sn7', partial(_Boom), ()), ('sol', _Ok, ())))
     assert set(cp.create_assets(check=True, required_chains={'sol'})) == {'sol'}
-    with pytest.raises(RuntimeError, match='_Boom failed startup check'):
+    with pytest.raises(RuntimeError, match='sn7 failed startup check'):
         cp.create_assets(check=True, required_chains={'sn7', 'sol'})
 
 
@@ -117,7 +117,7 @@ def tao_and_alphas(monkeypatch):
     monkeypatch.setattr(cp, 'ASSET_REGISTRY', rows)
     connected = []
     monkeypatch.setattr(tao_module.bt.logging, 'success', lambda msg, *a, **k: connected.append(msg))
-    monkeypatch.setattr(cp.bt.logging, 'warning', lambda *a, **k: None)  # 128 "Alpha disabled" lines
+    monkeypatch.setattr(cp.bt.logging, 'warning', lambda *a, **k: None)  # 128 "sn<N> disabled" lines
     subtensor = MagicMock(name='subtensor')
     subtensor.get_current_block.return_value = 123
     subtensor.chain_endpoint = 'wss://entrypoint-finney.opentensor.ai:443'
@@ -129,9 +129,9 @@ def test_a_failed_shared_check_disables_every_alpha_without_re_asking(tao_and_al
     subtensor.get_current_block.side_effect = RuntimeError('throttled')
     assert cp.create_assets(check=True, require_send=False, required_chains={'sol'}, subtensor=subtensor) == {}
     assert subtensor.get_current_block.call_count == 1
-    with pytest.raises(RuntimeError, match='Tao failed startup check: Cannot reach Subtensor: throttled'):
+    with pytest.raises(RuntimeError, match='tao failed startup check: Cannot reach Subtensor: throttled'):
         cp.create_assets(check=True, require_send=False, required_chains={'tao'}, subtensor=subtensor)
-    with pytest.raises(RuntimeError, match='Alpha failed startup check: Cannot reach Subtensor: throttled'):
+    with pytest.raises(RuntimeError, match='sn7 failed startup check: Cannot reach Subtensor: throttled'):
         cp.create_assets(check=True, require_send=False, required_chains={'sn7'}, subtensor=subtensor)
 
 
@@ -199,13 +199,13 @@ def test_a_failed_shared_probe_fails_every_asset_on_that_network_without_re_aski
     ladder = len(evm_module.ETHEREUM.rpc_urls['mainnet'])
     assert Counter(calls)[('ETH', 'eth_chainId')] == ladder and ('ETH', 'eth_blockNumber') not in calls
     assert [line for line in warned if 'disabled' in line] == [
-        f'{spec.asset_cls.__name__} disabled: Cannot reach any Ethereum RPC'
+        f'{spec.chain_id} disabled: Cannot reach any Ethereum RPC'
         f' — {spec.chain_id}-pair swaps cannot be fulfilled until this is fixed'
         for spec in on_ethereum
     ]
-    with pytest.raises(RuntimeError, match='Ether failed startup check: Cannot reach any Ethereum RPC'):
+    with pytest.raises(RuntimeError, match='eth failed startup check: Cannot reach any Ethereum RPC'):
         cp.create_assets(check=True, require_send=False, required_chains={'eth'})
-    with pytest.raises(RuntimeError, match='EthUsdc failed startup check: Cannot reach any Ethereum RPC'):
+    with pytest.raises(RuntimeError, match='ethusdc failed startup check: Cannot reach any Ethereum RPC'):
         cp.create_assets(check=True, require_send=False, required_chains={'ethusdc'})
 
 
@@ -232,7 +232,7 @@ def test_the_first_failure_in_registry_order_fails_the_boot_whichever_lane_fails
 
     first, second = lanes(2, check)
     monkeypatch.setattr(cp, 'ASSET_REGISTRY', (('btc', first, ()), ('sol', second, ())))
-    with pytest.raises(RuntimeError, match='_Lane0 failed startup check: first row'):
+    with pytest.raises(RuntimeError, match='btc failed startup check: first row'):
         cp.create_assets(check=True)
-    with pytest.raises(RuntimeError, match='_Lane1 failed startup check: second row'):
+    with pytest.raises(RuntimeError, match='sol failed startup check: second row'):
         cp.create_assets(check=True, required_chains={'sol'})

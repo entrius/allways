@@ -10,8 +10,7 @@ strong enough that a wrong verdict can't hand a defaulting miner a free pass:
   - passive chains (BTC/TAO) and the base default: never — they can't refuse a payout.
 """
 
-from allways.assets.eth import Ether
-from allways.assets.ethusdc import EthUsdc
+from allways.assets import asset_spec
 from allways.assets.sol import RESERVED_ACCOUNTS, Sol
 from allways.constants import (
     CANCEL_REASON_ERC20_BLACKLIST,
@@ -30,7 +29,7 @@ def _evm(monkeypatch):
     monkeypatch.setenv('ETH_NETWORK', 'mainnet')
     monkeypatch.delenv('ETH_RPC_URLS', raising=False)
     monkeypatch.delenv('ETH_PRIVATE_KEY', raising=False)
-    return Ether()
+    return asset_spec('eth').cls()
 
 
 def _stub(provider, tx, receipt):
@@ -92,7 +91,7 @@ class TestErc20CancelEvidence:
     def _provider(self, monkeypatch, blacklisted, paused):
         monkeypatch.setenv('ETH_NETWORK', 'sepolia')
         monkeypatch.delenv('ETH_RPC_URLS', raising=False)
-        p = EthUsdc()
+        p = asset_spec('ethusdc').cls()
         from allways.assets.erc20 import SEL_IS_BLACKLISTED
 
         p._eth_call = lambda selector, address='', block='latest': (

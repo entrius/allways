@@ -33,14 +33,6 @@ IX_CREATE_ATA_IDEMPOTENT = 1
 ATA_RENT_LAMPORTS = 2_039_280
 TX_FEE_LAMPORTS = 5_000
 
-# Issuer deployments per (asset id, cluster) beside the mainnet mint in the registry row. Keyed by
-# the genesis-hash cluster name — Solana has no {PREFIX}_NETWORK; the cluster is whatever the RPC
-# serves. {ASSET_ID}_TOKEN_MINT overrides either (e2e fakes on localnet, emergency repoint).
-CLUSTER_MINTS = {
-    # Circle-verified USDC on devnet (developers.circle.com). No Circle USDC exists on testnet.
-    'solusdc': {'devnet': '4zMMC9srt5Ri5X14GAgXhaHii3GnPAEERYPJgZJDncDU'},
-}
-
 
 def associated_token_address(owner: str, mint: Pubkey) -> Pubkey:
     """The canonical token account for (owner, mint) — where a plain wallet receives the token."""
@@ -164,7 +156,7 @@ class SplToken(Asset):
         cluster = classify_cluster(self.rpc.get_genesis_hash())
         if cluster == 'mainnet':
             return self.chain_def.asset_locator
-        mint = CLUSTER_MINTS.get(self.chain_def.id, {}).get(cluster)
+        mint = self.chain_def.testnet_locator(cluster)
         if not mint:
             raise MissingTestnetDeployment(f'No {self.chain_def.id} mint on the {cluster} cluster — set {var}')
         return mint

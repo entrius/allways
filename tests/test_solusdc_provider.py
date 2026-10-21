@@ -1,13 +1,13 @@
-"""SolUsdc — Circle USDC on Solana, the first SPL token beside native SOL. Offline: the RPC is a
+"""solusdc — Circle USDC on Solana, the first SPL token beside native SOL. Offline: the RPC is a
 method→response stub injected through the composed chain; keypairs and ATA derivation are real."""
 
 import pytest
 from solders.keypair import Keypair
 from solders.pubkey import Pubkey
 
+from allways.assets import asset_spec
 from allways.assets.asset import MissingTestnetDeployment, ProviderUnreachableError
 from allways.assets.sol import RESERVED_ACCOUNTS
-from allways.assets.solusdc import SolUsdc
 from allways.assets.spl_token import (
     ASSOCIATED_TOKEN_PROGRAM_ID,
     ATA_RENT_LAMPORTS,
@@ -128,7 +128,7 @@ class FakeRpc:
 def provider_with(rpc, keypair=None, monkeypatch=None):
     if monkeypatch is not None:
         monkeypatch.delenv('SOLUSDC_TOKEN_MINT', raising=False)
-    p = SolUsdc(solana_rpc_url='fake://rpc', solana_keypair=keypair)
+    p = asset_spec('solusdc').cls(solana_rpc_url='fake://rpc', solana_keypair=keypair)
     p.rpc = rpc
     return p
 

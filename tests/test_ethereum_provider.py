@@ -1,4 +1,4 @@
-"""EvmCoin / EvmChain unit tests, run on Ether — all offline (RPC layer mocked, signing is pure crypto).
+"""EvmCoin / EvmChain unit tests, run on eth — all offline (RPC layer mocked, signing is pure crypto).
 
 The representative suite for the shared native-coin provider and the EVM transport: casing at
 comparison boundaries, the settled cache, the endpoint failover ladder and absence quorum, send
@@ -12,8 +12,8 @@ from typing import Optional
 import pytest
 from eth_account import Account
 
+from allways.assets import asset_spec
 from allways.assets.asset import ProviderUnreachableError
-from allways.assets.eth import Ether
 from allways.assets.evm import EvmRpcError
 from allways.assets.evm_coin import DUST_PROBE_WEI, SWAP_PROBE_WEI, ZERO_ADDRESS
 
@@ -30,7 +30,7 @@ def provider(monkeypatch):
     monkeypatch.setenv('ETH_NETWORK', 'mainnet')
     monkeypatch.delenv('ETH_RPC_URLS', raising=False)
     monkeypatch.delenv('ETH_PRIVATE_KEY', raising=False)
-    return Ether()
+    return asset_spec('eth').cls()
 
 
 def rpc_stub(provider, responses: dict):

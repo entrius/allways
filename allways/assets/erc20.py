@@ -39,36 +39,17 @@ MAX_TOKEN_TRANSFER_GAS = 150_000
 # Floor and estimator-down fallback: covers FiatToken's worst case while staying under the cap.
 DEFAULT_TOKEN_TRANSFER_GAS = 120_000
 
-# Testnet deployments per (asset id, network). The canonical mainnet deployment is the
-# registry row's asset_locator; {ASSET_ID}_TOKEN_CONTRACT overrides either (e2e fakes,
-# emergency repoint) — each address lives exactly once. Keyed by asset, not by network
-# prefix: one network can host several tokens, and each pins its own contract.
-TESTNET_TOKEN_CONTRACTS = {
-    # Circle-verified native USDC on Arbitrum Sepolia (developers.circle.com, 2026-08-07).
-    'arbusdc': {'sepolia': '0x75faf114eafb1BDbe2F0316DF893fd58CE46AA4d'},
-    # Circle-verified native USDC on Base Sepolia (developers.circle.com, 2026-08-11).
-    'baseusdc': {'sepolia': '0x036CbD53842c5426634e7929541eC2318f3dCF7e'},
-    # Circle-verified native USDC on Ethereum Sepolia (developers.circle.com, 2026-08-11).
-    'ethusdc': {'sepolia': '0x1c7D4B196Cb0C7B01d743Fbc6116a902379C7238'},
-    # Same address as mainnet and byte-identical runtime bytecode (keccak
-    # 0xdeba17f1…0868, 12567 bytes) — verified symbol UNI, 18 decimals, 1e27 supply.
-    'uni': {'sepolia': '0x1f9840a85d5aF5bf1D1762F925BDADdC4201F984'},
-    # Quant's official test QNT, dispensed by its documented getTestQNT faucet
-    # (0xCe8623CD…54825, docs.overledger.dev). Verified plain ERC20 — immutable, no
-    # pause/blacklist, probes revert — so the row's declared surface holds on Sepolia.
-    'qnt': {'sepolia': '0x81Dc68CB065ec6D9a4d24f6e2F442dc2A236D853'},
-    # Circle-verified native USDC on Polygon Amoy (developers.circle.com, 2026-08-12).
-    'polusdc': {'amoy': '0x41E94Eb019C0762f9Bfcf9Fb1E58725BfB0e7582'},
-}
-
 
 def _token_contract(chain_def: ChainDefinition, network: str) -> str:
+    """The token's contract on ``network``: {ASSET_ID}_TOKEN_CONTRACT when set (e2e fakes, emergency repoint),
+    else the row's address for that network. Keyed by asset, not by network prefix: one network hosts several
+    tokens, and each pins its own contract."""
     var = f'{chain_def.id.upper()}_TOKEN_CONTRACT'
     override = os.environ.get(var)
     if override:
         return override
     if network != 'mainnet':
-        contract = TESTNET_TOKEN_CONTRACTS.get(chain_def.id, {}).get(network)
+        contract = chain_def.testnet_locator(network)
         if not contract:
             raise MissingTestnetDeployment(f'No {chain_def.id} token contract for network {network!r} — set {var}')
         return contract

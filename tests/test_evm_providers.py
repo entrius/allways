@@ -11,17 +11,12 @@ import pytest
 from eth_account import Account
 from eth_utils import keccak
 
-from allways.assets import ASSET_REGISTRY, MissingTestnetDeployment
+from allways.assets import ASSET_REGISTRY, MissingTestnetDeployment, asset_spec
 from allways.assets import evm_coin as evm_coin_module
 from allways.assets.asset import ProviderUnreachableError
-from allways.assets.avax import Avax
-from allways.assets.bnb import Bnb
-from allways.assets.cro import Cro
-from allways.assets.erc20 import SEL_TRANSFER, TESTNET_TOKEN_CONTRACTS, TRANSFER_TOPIC0, Erc20
+from allways.assets.erc20 import SEL_TRANSFER, TRANSFER_TOPIC0, Erc20
 from allways.assets.evm import FALLBACK_PRIORITY_FEE_WEI, POLYGON, EvmRpcError
 from allways.assets.evm_coin import MAX_WALK_BLOCKS, EvmCoin
-from allways.assets.hype import Hype
-from allways.assets.pol import Pol
 from allways.chains import CHAIN_PAXG, SUPPORTED_CHAINS, get_chain_def
 from allways.utils.rate import is_executable_rate
 from allways.validator.chain.gateway import Meter, MeteredAdapter
@@ -303,7 +298,7 @@ def test_a_test_network_uses_its_own_pin_or_refuses_to_build(spec, monkeypatch):
     owner = next(c for c in SUPPORTED_CHAINS.values() if c.env_prefix == chain_def.env_prefix and c.networks)
     network = owner.testnet_network
     monkeypatch.setenv(f'{chain_def.env_prefix}_NETWORK', network)
-    pinned = TESTNET_TOKEN_CONTRACTS.get(spec.chain_id, {}).get(network)
+    pinned = chain_def.testnet_locator(network)
     if pinned is None:
         with pytest.raises(MissingTestnetDeployment, match=f'{spec.chain_id.upper()}_TOKEN_CONTRACT'):
             spec.cls()
@@ -405,12 +400,12 @@ class TestBscDeliveryGates:
             probed.append(params[1])
             return '0xef0100' + '11' * 20 if params[1] == hex(9_970) else '0x'
 
-        provider = rpc_stub(Bnb(), {'eth_blockNumber': hex(10_000), 'eth_getCode': code_at})
+        provider = rpc_stub(asset_spec('bnb').cls(), {'eth_blockNumber': hex(10_000), 'eth_getCode': code_at})
         assert provider.delivery_refused(RECIPIENT, frozen_now - 60) is True
         assert probed == ['latest', hex(9_940), hex(9_970)]
 
     def test_slash_gate_does_not_exempt_a_dest_that_never_had_code(self, frozen_now):
-        provider = rpc_stub(Bnb(), {'eth_blockNumber': hex(10_000), 'eth_getCode': '0x'})
+        provider = rpc_stub(asset_spec('bnb').cls(), {'eth_blockNumber': hex(10_000), 'eth_getCode': '0x'})
         assert provider.delivery_refused(RECIPIENT, frozen_now - 60) is False
 
 
@@ -435,7 +430,7 @@ def test_polygon_tip_is_clamped_to_its_protocol_floor(monkeypatch, fee_answer):
         broadcast['raw'] = params[0]
         return TX
 
-    provider = Pol()
+    provider = asset_spec('pol').cls()
     rpc_stub(
         provider,
         send_responses(
@@ -453,13 +448,19 @@ def test_polygon_tip_is_clamped_to_its_protocol_floor(monkeypatch, fee_answer):
 def test_cronos_mainnet_ladder_keeps_an_archive_rung_behind_the_fresh_one():
     # Only the official gateway serves the historical state the slash gate reads; publicnode keeps
     # ~100 blocks. The leader tracks the tip, the archive rung is reached by fall-through.
-    assert Cro().chain.rpc_bases == ['https://cronos-evm-rpc.publicnode.com', 'https://evm.cronos.org']
+    assert asset_spec('cro').cls().chain.rpc_bases == [
+        'https://cronos-evm-rpc.publicnode.com',
+        'https://evm.cronos.org',
+    ]
 
 
 def test_avalanche_rpc_urls_keep_the_c_chain_path(monkeypatch):
     # Ava Labs' gateways are path-bearing (/ext/bc/C/rpc); only a trailing slash may be trimmed.
     monkeypatch.setenv('AVAX_RPC_URLS', 'https://api.avax.network/ext/bc/C/rpc/,https://backup.example')
-    assert Avax().chain.rpc_bases == ['https://api.avax.network/ext/bc/C/rpc', 'https://backup.example']
+    assert asset_spec('avax').cls().chain.rpc_bases == [
+        'https://api.avax.network/ext/bc/C/rpc',
+        'https://backup.example',
+    ]
 
 
 def test_avalanche_atomic_import_is_not_a_deposit():
@@ -473,13 +474,15 @@ def test_avalanche_atomic_import_is_not_a_deposit():
         'blockGasCost': '0x0',
         'timestampMilliseconds': '0x18f',
     }
-    provider = rpc_stub(Avax(), {'eth_blockNumber': hex(10_000), 'eth_getBlockByNumber': atomic_block})
+    provider = rpc_stub(
+        asset_spec('avax').cls(), {'eth_blockNumber': hex(10_000), 'eth_getBlockByNumber': atomic_block}
+    )
     assert provider.find_recent_outgoing(OTHER, RECIPIENT, 1) is None
 
 
 def test_sub_second_chain_scan_is_bounded_and_parks_below_an_unreadable_block():
     # 5 min of HyperEVM blocks is ~300 sequential reads per first scan, past the public budget.
-    provider = Hype()
+    provider = asset_spec('hype').cls()
     assert provider.SCAN_LOOKBACK_BLOCKS > MAX_WALK_BLOCKS
     scanned = []
 
@@ -494,7 +497,7 @@ def test_sub_second_chain_scan_is_bounded_and_parks_below_an_unreadable_block():
     def boom(params):
         raise ConnectionError('down')
 
-    provider = rpc_stub(Hype(), {'eth_blockNumber': hex(10_000), 'eth_getBlockByNumber': boom})
+    provider = rpc_stub(asset_spec('hype').cls(), {'eth_blockNumber': hex(10_000), 'eth_getBlockByNumber': boom})
     assert provider.find_recent_outgoing(RECIPIENT, RECIPIENT, 1) is None
     # Never leap a block the scan could not read — the deposit in it must stay reachable.
     assert provider.scan_cursors[(RECIPIENT.lower(), RECIPIENT.lower(), 1)] == 10_000 - MAX_WALK_BLOCKS

@@ -1,4 +1,4 @@
-"""Erc20/ArbUsdc unit tests — all offline (RPC layer mocked, signing is pure crypto).
+"""Erc20 unit tests, run on arbusdc — all offline (RPC layer mocked, signing is pure crypto).
 
 The representative suite for the shared Erc20 provider: the provable payer is the log's `from`
 topic, never the tx envelope; dual-balance sends (token and gas); the slash gate's history
@@ -11,7 +11,7 @@ from typing import Optional
 
 import pytest
 
-from allways.assets.arbusdc import ArbUsdc
+from allways.assets import asset_spec
 from allways.assets.asset import ProviderUnreachableError
 from allways.assets.erc20 import (
     SEL_BALANCE_OF,
@@ -39,7 +39,7 @@ def provider(monkeypatch):
     monkeypatch.setenv('ARB_NETWORK', 'sepolia')
     for var in ('ARB_RPC_URLS', 'ARB_PRIVATE_KEY', 'ARBUSDC_TOKEN_CONTRACT'):
         monkeypatch.delenv(var, raising=False)
-    return ArbUsdc()
+    return asset_spec('arbusdc').cls()
 
 
 def rpc_stub(provider, responses: dict):
