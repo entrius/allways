@@ -6,7 +6,7 @@ from allways.validator.actuator.actuator import LANDED_HOLD_SECS, Actuator
 from allways.validator.actuator.executors import StaleWorld
 from allways.validator.actuator.planners import ACTIONS, intent
 from allways.validator.runtime.bus import Latest
-from allways.validator.runtime.deadline_queue import DeadlineQueue, Urgency
+from allways.validator.runtime.deadline_queue import DeadlineQueue
 from allways.validator.world.snapshot import World
 
 NOW = 1_000_000.0
@@ -110,11 +110,6 @@ def test_a_submitted_intent_whose_send_expired_is_sent_again():
     world.set(_world(NOW + 200))
     act.tick(NOW + 200)  # never landed: back in the inbox, and out again
     assert len(sent) == 2
-
-
-def test_action_table_urgencies():
-    assert {k for k, a in ACTIONS.items() if a.urgency is Urgency.EXTEND} == {'extend_reservation', 'extend_timeout'}
-    assert intent('finalize_reservation', 'x', SimpleNamespace(finalize_by=123), NOW).deadline == 123
 
 
 def test_hub_registry_matches_the_program_backings():

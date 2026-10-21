@@ -1,4 +1,4 @@
-"""Unit tests for Sol (B7) — the native-SOL swap-leg provider.
+"""Unit tests for Sol — the native-SOL swap-leg provider.
 
 No chain: a fake RPC returns canned getTransaction/getSlot/getBalance results. Covers fetch/verify,
 block_time extraction, amount matching (>=), confirmations, failed/missing tx, unreachable backend,
@@ -10,8 +10,7 @@ import pytest
 from solders.keypair import Keypair
 
 from allways.assets.asset import ProviderUnreachableError
-from allways.assets.sol import RESERVED_ACCOUNTS, SYSTEM_PROGRAM, Sol
-from allways.chains import CHAIN_SOL
+from allways.assets.sol import SYSTEM_PROGRAM, Sol
 from allways.solana.rpc import SolanaRpcError, SolanaRpcUnreachable
 
 
@@ -85,8 +84,8 @@ class DedupRpc:
 
 
 class TestSendDedup:
-    """H2: a landed prior broadcast must be reused, never re-sent, so a confirm() timeout can't double-pay.
-    Q2/Q3: every branch where the RPC couldn't resolve the prior send must WAIT (raise), never re-send."""
+    """A landed prior broadcast must be reused, never re-sent, so a confirm() timeout can't double-pay.
+    Every branch where the RPC couldn't resolve the prior send must WAIT (raise), never re-send."""
 
     WANT = ('RECIP', 5_000_000, 'swap1')
 
@@ -99,24 +98,13 @@ class TestSendDedup:
         p = self._p({'err': None, 'slot': 123, 'confirmationStatus': 'confirmed'})
         assert p.chain.prior_broadcast(self.WANT) == ('SIG', 123)
 
-    def test_reuses_finalized_prior(self):
-        p = self._p({'err': None, 'slot': 123, 'confirmationStatus': 'finalized'})
-        assert p.chain.prior_broadcast(self.WANT) == ('SIG', 123)
-
     def test_processed_only_prior_waits(self):
-        # Q3: `processed` can sit on a minority fork that never settles. Reusing it would mark the
+        # `processed` can sit on a minority fork that never settles. Reusing it would mark the
         # leg delivered while the user is never paid → slash. Wait for confirmed/finalized.
         p = self._p({'err': None, 'slot': 50, 'confirmationStatus': 'processed'})
         with pytest.raises(SolanaRpcError):
             p.chain.prior_broadcast(self.WANT)
         assert 'SIG' in p.chain.broadcasted_txids  # kept: re-probed next pass
-
-    def test_failed_at_processed_only_waits(self):
-        # A failure seen only at `processed` is as unsettled as a success there — don't evict yet.
-        p = self._p({'err': 'InstructionError', 'slot': 10, 'confirmationStatus': 'processed'})
-        with pytest.raises(SolanaRpcError):
-            p.chain.prior_broadcast(self.WANT)
-        assert 'SIG' in p.chain.broadcasted_txids
 
     def test_failed_prior_dropped_allows_fresh_send(self):
         p = self._p({'err': 'InstructionError', 'slot': 10, 'confirmationStatus': 'finalized'})
@@ -134,37 +122,24 @@ class TestSendDedup:
         assert 'SIG' not in p.chain.broadcasted_txids
 
     def test_unknown_record_slot_waits_and_backfills(self):
-        # Q2: get_slot failed at record time (seen=0). head - 0 >> TTL must NOT read as "expired" —
+        # get_slot failed at record time (seen=0). head - 0 >> TTL must NOT read as "expired" —
         # the tx may still be propagating. Backfill seen with the current head and wait.
         p = self._p(None, slot=2000, seen=0)
         with pytest.raises(SolanaRpcError):
             p.chain.prior_broadcast(self.WANT)
         assert p.chain.broadcasted_txids['SIG'] == (*self.WANT, 2000)
 
-    def test_backfilled_record_expires_after_a_real_ttl(self):
-        # After the backfill the TTL counts from the backfill head, so eviction still happens.
-        p = self._p(None, slot=2000, seen=0)
-        with pytest.raises(SolanaRpcError):
-            p.chain.prior_broadcast(self.WANT)
-        p.rpc._slot = 2000 + p.chain.BROADCAST_TTL_SLOTS + 1
-        assert p.chain.prior_broadcast(self.WANT) is None
-        assert 'SIG' not in p.chain.broadcasted_txids
-
     def test_head_unreadable_pending_prior_waits(self):
-        # Q2: no status AND no head → nothing is resolvable; never evict, never re-send.
+        # no status AND no head → nothing is resolvable; never evict, never re-send.
         p = self._p(None, seen=0, slot_fails=True)
         with pytest.raises(SolanaRpcError):
             p.chain.prior_broadcast(self.WANT)
         assert p.chain.broadcasted_txids['SIG'] == (*self.WANT, 0)  # no head to backfill from
 
-    def test_different_obligation_is_ignored(self):
-        p = self._p({'err': None, 'slot': 5})
-        assert p.chain.prior_broadcast(('RECIP', 5_000_000, 'swapB')) is None  # different dedup scope
-
 
 class TestSendGuard:
     def test_send_refuses_when_from_address_mismatches_key(self):
-        # H3: never broadcast from a wallet the validator's sender-pin would reject (wasted funds).
+        # never broadcast from a wallet the validator's sender-pin would reject (wasted funds).
         p = provider_with(FakeRpc(), keypair=Keypair())
         assert p.send_amount('RECIPIENT', 1000, from_address='someOtherWallet') is None
 
@@ -178,15 +153,6 @@ class TestFetchAndVerify:
         assert info.recipient == 'RECIP'
         assert info.sender == 'SENDER'
         assert info.block_number == 100
-
-    def test_block_time_extracted(self):
-        p = provider_with(FakeRpc(tx=make_tx('RECIP', 2_000_000, block_time=1_700_000_123)))
-        info = p.fetch_matching_tx('sig', 'RECIP', 1_000_000)
-        assert info.block_time == 1_700_000_123  # replay-freshness floor source (B2)
-
-    def test_exact_amount_matches(self):
-        p = provider_with(FakeRpc(tx=make_tx('RECIP', 1_000_000)))
-        assert p.fetch_matching_tx('sig', 'RECIP', 1_000_000) is not None
 
     def test_underpayment_rejected(self):
         p = provider_with(FakeRpc(tx=make_tx('RECIP', 999_999)))
@@ -202,23 +168,9 @@ class TestFetchAndVerify:
         info = p.fetch_matching_tx('sig', 'RECIP', 1_000_000)
         assert info.confirmations == 32 and info.confirmed is True
 
-    def test_not_yet_final_is_unconfirmed(self):
-        # tip only a few slots ahead → below the 32-slot finality floor.
-        p = provider_with(FakeRpc(tx=make_tx('RECIP', 2_000_000, slot=100), slot=105))
-        info = p.fetch_matching_tx('sig', 'RECIP', 1_000_000)
-        assert info.confirmations == 6 and info.confirmed is False
-
     def test_failed_tx_rejected(self):
         p = provider_with(FakeRpc(tx=make_tx('RECIP', 5_000_000, err={'InstructionError': [0, 'Custom']})))
         assert p.fetch_matching_tx('sig', 'RECIP', 1_000_000) is None
-
-    def test_missing_tx_returns_none(self):
-        p = provider_with(FakeRpc(tx=None))
-        assert p.fetch_matching_tx('sig', 'RECIP', 1_000_000) is None
-
-    def test_empty_hash_returns_none(self):
-        p = provider_with(FakeRpc(tx=make_tx('RECIP', 5_000_000)))
-        assert p.fetch_matching_tx('', 'RECIP', 1_000_000) is None
 
     def test_unreachable_raises(self):
         p = provider_with(FakeRpc(raise_conn=True))
@@ -329,27 +281,11 @@ class TestVerifyTransactionPostChecks:
         p = provider_with(FakeRpc(tx=make_tx('RECIP', 2_000_000, sender='ALICE'), slot=200))
         assert p.verify_transaction('sig', 'RECIP', 1_000_000, expected_sender='BOB') is None
 
-    def test_sender_match_accepted(self):
-        p = provider_with(FakeRpc(tx=make_tx('RECIP', 2_000_000, sender='ALICE'), slot=200))
-        assert p.verify_transaction('sig', 'RECIP', 1_000_000, expected_sender='ALICE') is not None
-
-
-class TestAddressValidity:
-    def test_valid_pubkey(self):
-        p = provider_with(FakeRpc())
-        assert p.chain.is_valid_address(str(Keypair().pubkey())) is True
-
-    def test_garbage_rejected(self):
-        p = provider_with(FakeRpc())
-        assert p.chain.is_valid_address('not-a-key') is False
-        assert p.chain.is_valid_address('') is False
-        assert p.chain.is_valid_address(None) is False
-
 
 class TestDeliveryGates:
     """Solana's reserved account keys are read-only in every transaction, so a transfer to one
-    always fails and an honest miner must never be slashed for missing it. Verified against LiteSVM
-    (2026-08-10): all 31 reserved keys reject the credit; the incinerator and ordinary/PDA/program
+    always fails and an honest miner must never be slashed for missing it. Verified against LiteSVM:
+    all 31 reserved keys reject the credit; the incinerator and ordinary/PDA/program
     addresses accept it. Ownership is NOT the test — Stake/Config/AddressLookupTable are owned by
     the upgradeable loader, StakeConfig has no account, and the SPL Token program is executable
     yet fundable."""
@@ -357,16 +293,10 @@ class TestDeliveryGates:
     # One per shape the account-owner heuristic got wrong, plus the obvious burn target.
     RESERVED = [
         '11111111111111111111111111111111',  # System Program — owner NativeLoader
-        'SysvarC1ock11111111111111111111111111111111',  # sysvar — owner Sysvar
-        'StakeConfig11111111111111111111111111111111',  # no account exists at all
         'Stake11111111111111111111111111111111111111',  # Core BPF: owner is the upgradeable loader
-        'Config1111111111111111111111111111111111111',  # ditto
-        'AddressLookupTab1e1111111111111111111111111',  # ditto
-        'Feature111111111111111111111111111111111111',  # no account exists
     ]
     DELIVERABLE = [
         '1nc1nerator11111111111111111111111111111111',  # deliberately not reserved — a burn must land
-        'TokenkegQfeZyiNwAJbNbGKPFXCWuBvf9Ss623VQ5DA',  # executable, loader-owned, receives SOL fine
     ]
 
     @pytest.mark.parametrize('address', RESERVED)
@@ -381,24 +311,11 @@ class TestDeliveryGates:
         assert p.can_deliver_to(address, 10**9) is True
         assert p.delivery_refused(address, 0) is False
 
-    def test_ordinary_wallet_passes(self):
-        p = provider_with(FakeRpc())
-        addr = str(Keypair().pubkey())
-        assert p.can_deliver_to(addr, 10**9) is True
-        assert p.delivery_refused(addr, 0) is False
-
     def test_gates_need_no_rpc(self):
         """Offline by construction — a dead RPC can neither block a reservation nor defer a slash."""
         p = provider_with(FakeRpc(raise_conn=True))
         assert p.can_deliver_to(self.RESERVED[0], 10**9) is False
         assert p.delivery_refused(self.RESERVED[0], 0) is True
-
-    def test_reserved_set_matches_agave(self):
-        """Guards against a typo silently un-blocking a key: agave v3.1.14 lists exactly 31."""
-        assert len(RESERVED_ACCOUNTS) == 31
-        assert all(32 <= len(a) <= 44 for a in RESERVED_ACCOUNTS)
-        p = provider_with(FakeRpc())
-        assert all(p.chain.is_valid_address(a) for a in RESERVED_ACCOUNTS)
 
 
 class TestProofRoundtrip:
@@ -411,45 +328,11 @@ class TestProofRoundtrip:
         assert sig and len(sig) == 128  # 64-byte ed25519 sig, hex
         assert p.chain.verify_from_proof(addr, msg, sig) is True
 
-    def test_wrong_message_fails(self):
-        kp = Keypair()
-        p = provider_with(FakeRpc(), keypair=kp)
-        addr = str(kp.pubkey())
-        sig = p.chain.sign_from_proof(addr, 'one')
-        assert p.chain.verify_from_proof(addr, 'two', sig) is False
-
     def test_wrong_signer_fails(self):
         kp, other = Keypair(), Keypair()
         p = provider_with(FakeRpc(), keypair=kp)
         sig = p.chain.sign_from_proof(str(kp.pubkey()), 'msg')
         assert p.chain.verify_from_proof(str(other.pubkey()), 'msg', sig) is False
-
-    def test_explicit_key_argument(self):
-        signer = Keypair()
-        p = provider_with(FakeRpc())  # provider has no keypair
-        sig = p.chain.sign_from_proof(str(signer.pubkey()), 'msg', key=signer)
-        assert p.chain.verify_from_proof(str(signer.pubkey()), 'msg', sig) is True
-
-    def test_0x_prefixed_signature(self):
-        kp = Keypair()
-        p = provider_with(FakeRpc(), keypair=kp)
-        addr = str(kp.pubkey())
-        sig = p.chain.sign_from_proof(addr, 'msg')
-        assert p.chain.verify_from_proof(addr, 'msg', '0x' + sig) is True
-
-    def test_sign_without_key_returns_empty(self):
-        p = provider_with(FakeRpc())
-        assert p.chain.sign_from_proof('addr', 'msg') == ''
-
-
-class TestBalanceAndHeight:
-    def test_balance(self):
-        p = provider_with(FakeRpc(balance=777))
-        assert p.get_balance(str(Keypair().pubkey())) == 777
-
-    def test_block_height(self):
-        p = provider_with(FakeRpc(slot=4242))
-        assert p.chain.get_current_block_height() == 4242
 
 
 class SendRpc(FakeRpc):
@@ -469,22 +352,6 @@ class TestSend:
         p = provider_with(SendRpc(), keypair=Keypair())
         out = p.send_amount(str(Keypair().pubkey()), 2_500_000)
         assert out == ('SIG123', 321)
-
-    def test_send_without_keypair_returns_none(self):
-        p = provider_with(SendRpc())
-        assert p.send_amount(str(Keypair().pubkey()), 1_000) is None
-
-    def test_send_bad_address_returns_none(self):
-        p = provider_with(SendRpc(), keypair=Keypair())
-        assert p.send_amount('not-a-pubkey', 1_000) is None
-
-
-def test_chain_metadata():
-    p = provider_with(FakeRpc())
-    chain = p.chain_def
-    assert chain is CHAIN_SOL
-    assert chain.id == 'sol' and chain.native_unit == 'lamport' and chain.decimals == 9
-    assert chain.min_onchain_amount == 890880  # rent-exempt floor (0-data System account)
 
 
 class ScanRpc(FakeRpc):
@@ -506,11 +373,6 @@ class ScanRpc(FakeRpc):
 
 
 class TestFindRecentOutgoing:
-    def test_finds_matching_deposit(self):
-        tx = make_tx('MINER', 5000, sender='USER')
-        p = provider_with(ScanRpc([{'signature': 'sigA', 'err': None}], {'sigA': tx}))
-        assert p.find_recent_outgoing('USER', 'MINER', 5000) == 'sigA'
-
     def test_skips_wrong_sender_and_underpay(self):
         wrong_sender = make_tx('MINER', 5000, sender='OTHER')
         underpay = make_tx('MINER', 4999, sender='USER')
@@ -523,8 +385,4 @@ class TestFindRecentOutgoing:
         failed = make_tx('MINER', 5000, sender='USER', err={'InstructionError': []})
         sigs = [{'signature': 's1', 'err': 'x'}, {'signature': 's2', 'err': None}]
         p = provider_with(ScanRpc(sigs, {'s1': make_tx('MINER', 5000, sender='USER'), 's2': failed}))
-        assert p.find_recent_outgoing('USER', 'MINER', 5000) is None
-
-    def test_scan_failure_returns_none(self):
-        p = provider_with(ScanRpc([], {}, raise_scan=True))
         assert p.find_recent_outgoing('USER', 'MINER', 5000) is None

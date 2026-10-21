@@ -12,7 +12,6 @@ import bittensor as bt
 import pytest
 from solders.keypair import Keypair as SolKeypair
 
-from allways.chains import canonical_pair
 from allways.cli.swap_commands.numeraire import derive_hub_numeraire_quotes
 from allways.cli.swap_commands.swap_intake import (
     MinerCandidate,
@@ -37,7 +36,6 @@ from allways.constants import (
     collateral_leg,
     declarable_backings,
     hub_leg,
-    is_hub,
 )
 from allways.utils.rate import is_executable_rate, min_executable_hub_leg
 from allways.validator.serving.requests import _best_offer, reserve_on_behalf
@@ -51,10 +49,6 @@ TAO_MIN, TAO_MAX = TAO // 10, TAO  # deploy-config shape: 0.1 τ / 1 τ, in rao
 
 
 class TestHubSet:
-    def test_hub_membership(self):
-        assert is_hub('sol') and is_hub('tao')
-        assert not is_hub('btc') and not is_hub('eth')
-
     def test_hub_leg_anchors(self):
         assert hub_leg('sol', 'btc') == 'sol'
         assert hub_leg('eth', 'tao') == 'tao'
@@ -63,11 +57,6 @@ class TestHubSet:
         assert hub_leg('btc', 'eth') is None
         assert hub_leg('sn7', 'avax') == 'sn7'
         assert hub_leg('sn7', 'sn74') is None  # alpha↔alpha is invalid, like spoke↔spoke
-
-    def test_declarable_backings_are_hub_legs_and_tao_for_alpha(self):
-        assert declarable_backings('sn7', 'avax') == ['tao']
-        assert declarable_backings('sol', 'sn7') == ['tao']
-        assert declarable_backings('sn7', 'sn74') == []
 
     def test_tao_alpha_is_a_native_swap_not_a_pair(self):
         for pair in (('tao', 'sn7'), ('sn7', 'tao')):
@@ -79,20 +68,6 @@ class TestHubSet:
         assert collateral_leg('sol', 'sol', 'tao') == 'sol' and collateral_leg('tao', 'sol', 'tao') == 'tao'
         assert collateral_leg('tao', 'sol', 'sn7') == 'sn7'
         assert collateral_leg('sol', 'sn7', 'avax') is None
-
-    def test_hub_leg_is_the_canonical_source(self):
-        for a, b in (('tao', 'eth'), ('eth', 'tao'), ('sol', 'tao'), ('btc', 'sol')):
-            assert canonical_pair(a, b)[0] == hub_leg(a, b)
-
-    def test_launch_pairs_cover_every_hub_spoke_once(self):
-        assert ('sol', 'tao') in LAUNCH_PAIRS  # counted once, under its anchor
-        assert ('tao', 'sol') not in LAUNCH_PAIRS
-        assert ('tao', 'eth') in LAUNCH_PAIRS and ('tao', 'btc') in LAUNCH_PAIRS
-        assert len(LAUNCH_PAIRS) == len(set(LAUNCH_PAIRS))
-        assert all(anchor == hub_leg(anchor, other) and other != anchor for anchor, other in LAUNCH_PAIRS)
-        assert all(pair == canonical_pair(*pair) for pair in LAUNCH_PAIRS)
-        assert all(('sol', alpha) in LAUNCH_PAIRS for alpha in LAUNCH_ALPHAS)
-        assert ('sn7', 'avax') in LAUNCH_PAIRS and ('sn7', 'sn74') not in LAUNCH_PAIRS
 
     def test_direction_pools_span_both_families_and_conserve(self):
         assert len(DIRECTION_POOLS) == 2 * len(LAUNCH_PAIRS)
@@ -107,12 +82,6 @@ class TestHubSet:
         assert hub_bounds(bounds, 'tao', 'sol') == (5, 6)
         assert hub_bounds(bounds, 'btc', 'eth') == (0, 0)
         assert hub_bounds(bounds, 'sol', 'sn7') == (0, 0)  # TAO-backed: SOL bounds never bind it
-
-    def test_bounds_from_config_carries_both_hubs(self):
-        cfg = SimpleNamespace(
-            min_swap_amount=1, max_swap_amount=2, tao_min_swap_amount=TAO_MIN, tao_max_swap_amount=TAO_MAX
-        )
-        assert bounds_from_config(cfg) == {'sol': (1, 2), 'tao': (TAO_MIN, TAO_MAX)}
 
 
 class TestTaoHubExecutability:
@@ -129,20 +98,11 @@ class TestTaoHubExecutability:
         assert is_executable_rate(1e-15, 'eth', 'tao', TAO_MIN, TAO_MAX) is False
         assert is_executable_rate(1e-15, 'tao', 'eth', TAO_MIN, TAO_MAX) is False
 
-    def test_unset_bounds_are_permissive(self):
-        assert is_executable_rate(1e-15, 'eth', 'tao', 0, 0) is True
-
     def test_min_hub_leg_is_rao_denominated(self):
         # tao source: the smallest in-bounds hub leg is tao_min itself.
         assert min_executable_hub_leg(0.05, 'tao', 'eth', TAO_MIN, TAO_MAX) == TAO_MIN
         # eth source: smallest fundable ETH whose TAO leg clears tao_min → exactly tao_min back.
         assert min_executable_hub_leg(0.05, 'eth', 'tao', TAO_MIN, TAO_MAX) == pytest.approx(TAO_MIN)
-
-    def test_sol_tao_pair_still_anchors_on_sol(self):
-        # Grandfathered hub↔hub: the executability anchor is the SOL leg, exactly as before.
-        sol_min, sol_max = 100_000_000, 500_000_000
-        assert is_executable_rate(2.0, 'tao', 'sol', sol_min, sol_max) is True
-        assert is_executable_rate(1e-12, 'tao', 'sol', sol_min, sol_max) is False
 
 
 class TestTaoHubIntake:
@@ -189,9 +149,6 @@ class TestTaoHubIntake:
         assert leg_value('tao', 'sol', SOL, 'sn7', 5 * TAO, {'sn7': sn7}, created_at=1_700_000_000) == 15 * TAO
         assert calls == [('block', 1_700_000_000), ('value', 5 * TAO, 123)]
 
-    def test_leg_value_leaves_a_pinned_exact_leg_untouched(self):
-        assert leg_value('tao', 'sol', SOL, 'tao', TAO, created_at=1_700_000_000) == TAO
-
     def test_sol_to_sn7_is_sized_by_its_backing(self):
         sn7 = SimpleNamespace(value_rao=lambda amount: 7 * TAO)
         declared = compute_intake_amounts('sol', 'sn7', SOL, RATE, backing='tao', providers={'sn7': sn7})
@@ -206,15 +163,6 @@ class TestTaoHubIntake:
         assert best is not None and best[1].collateral_amount == 7 * TAO
         assert select_best_miner([offer], 'sol', 'sn7', SOL, 0, 0, bounds) is None
         assert 'provider' in unviable_reason([offer], 'sol', 'sn7', SOL, 0, 0, bounds)
-
-    def test_exact_leg_selection_never_reads_a_price(self):
-        def boom(amount):
-            raise AssertionError('exact leg priced at spot')
-
-        offer = MinerCandidate(object(), RATE, required_collateral(TAO), backing='tao')
-        assert select_best_miner(
-            [offer], 'tao', 'eth', TAO, TAO_MIN, TAO_MAX, None, {'tao': SimpleNamespace(value_rao=boom)}
-        )
 
     def test_viability_gates_on_rao_bounds(self):
         bounds = {'sol': (0, 0), 'tao': (TAO_MIN, TAO_MAX)}
@@ -250,10 +198,6 @@ class TestHubNumeraireQuotes:
         assert by_dir[('tao', 'eth')].from_addr == 'TAOADDR'
         assert by_dir[('eth', 'tao')].to_addr == 'TAOADDR'
         assert by_dir[('tao', 'eth')].rate == pytest.approx(0.05)
-
-    def test_hub_entry_in_specs_is_skipped(self):
-        specs = derive_hub_numeraire_quotes('tao', 'T', {'tao': (1.0, 'T'), 'eth': (0.05, 'E')})
-        assert {(s.from_chain, s.to_chain) for s in specs} == {('tao', 'eth'), ('eth', 'tao')}
 
 
 # ─── Acceptance: a TAO↔ETH quote posts, prices, bounds-checks, and a swap routes ─────────

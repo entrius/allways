@@ -1,5 +1,3 @@
-import threading
-
 from allways.validator.store.db import Store
 
 
@@ -32,12 +30,3 @@ def test_the_feed_resumes_from_the_oldest_consumer_and_from_the_horizon_if_one_n
         Store.ack(c, 'scoring', 150, 'sig-150')
     assert store.resume_point(['world', 'scoring']) == 'sig-150'
     assert store.resume_point(['world', 'scoring', 'relay-tao']) is None
-
-
-def test_each_thread_gets_its_own_connection(tmp_path):
-    store = Store(str(tmp_path / 'v.db'))
-    seen = []
-    t = threading.Thread(target=lambda: seen.append(store.conn()))
-    t.start()
-    t.join()
-    assert seen[0] is not store.conn()

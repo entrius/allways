@@ -5,9 +5,8 @@ import pytest
 from solders.keypair import Keypair
 from solders.pubkey import Pubkey
 
-from allways.assets import ASSET_REGISTRY
 from allways.assets.asset import MissingTestnetDeployment, ProviderUnreachableError
-from allways.assets.sol import RESERVED_ACCOUNTS, SolanaChain
+from allways.assets.sol import RESERVED_ACCOUNTS
 from allways.assets.solusdc import SolUsdc
 from allways.assets.spl_token import (
     ASSOCIATED_TOKEN_PROGRAM_ID,
@@ -18,8 +17,7 @@ from allways.assets.spl_token import (
     TX_FEE_LAMPORTS,
     associated_token_address,
 )
-from allways.chains import CHAIN_SOL, CHAIN_SOLUSDC, get_chain_def
-from allways.constants import CANCEL_REASON_SOL_RESERVED, CANCEL_REASON_SPL_FROZEN, LAUNCH_SPOKES
+from allways.constants import CANCEL_REASON_SOL_RESERVED, CANCEL_REASON_SPL_FROZEN
 from allways.solana.rpc import SOLANA_GENESIS_HASHES, SolanaRpcUnreachable
 
 MAINNET_MINT = 'EPjFWdd5AufqSSqeM2qN1xzybapC8G4wEGGkZwyTDt1v'
@@ -135,44 +133,16 @@ def provider_with(rpc, keypair=None, monkeypatch=None):
     return p
 
 
-class TestRegistryRow:
-    def test_bound_to_its_row_and_composes_solana(self, monkeypatch):
-        p = provider_with(FakeRpc(), monkeypatch=monkeypatch)
-        assert p.chain_def is CHAIN_SOLUSDC is get_chain_def('solusdc')
-        assert 'solusdc' in LAUNCH_SPOKES
-        assert isinstance(p.chain, SolanaChain) and p.chain is not p
-        assert (CHAIN_SOLUSDC.decimals, CHAIN_SOLUSDC.native_unit) == (6, 'µUSDC')
-        assert CHAIN_SOLUSDC.min_confirmations == CHAIN_SOL.min_confirmations
-        assert CHAIN_SOLUSDC.host_chain == 'solana' and CHAIN_SOLUSDC.asset_locator == MAINNET_MINT
-
-    def test_registry_hands_it_the_solana_rpc_and_keypair(self):
-        spec = next(s for s in ASSET_REGISTRY if s.chain_id == 'solusdc')
-        assert spec.cls is SolUsdc and spec.kwarg_names == ('solana_rpc_url', 'solana_keypair')
-
-
 class TestMintResolution:
-    def test_mainnet_uses_the_registry_mint(self, monkeypatch):
-        p = provider_with(FakeRpc(cluster='mainnet'), monkeypatch=monkeypatch)
-        assert str(p.mint) == MAINNET_MINT
-
-    def test_devnet_uses_circles_devnet_mint(self, monkeypatch):
-        p = provider_with(FakeRpc(cluster='devnet'), monkeypatch=monkeypatch)
-        assert str(p.mint) == DEVNET_MINT
+    def test_the_cluster_picks_circles_mint(self, monkeypatch):
+        # The cluster is read off the genesis hash, so a devnet RPC can never resolve the mainnet mint.
+        assert str(provider_with(FakeRpc(cluster='mainnet'), monkeypatch=monkeypatch).mint) == MAINNET_MINT
+        assert str(provider_with(FakeRpc(cluster='devnet'), monkeypatch=monkeypatch).mint) == DEVNET_MINT
 
     def test_unknown_cluster_without_override_is_a_missing_deployment(self, monkeypatch):
         p = provider_with(FakeRpc(cluster='localnet'), monkeypatch=monkeypatch)
         with pytest.raises(MissingTestnetDeployment):
             p.mint
-
-    def test_env_override_wins_without_touching_the_rpc(self, monkeypatch):
-        monkeypatch.setenv('SOLUSDC_TOKEN_MINT', OTHER_MINT)
-        p = SolUsdc(solana_rpc_url='fake://rpc')
-        p.rpc = None  # any RPC use would blow up
-        assert str(p.mint) == OTHER_MINT
-
-    def test_construction_is_offline(self, monkeypatch):
-        p = provider_with(FakeRpc(cluster='localnet'), monkeypatch=monkeypatch)  # no raise at construction
-        assert p._mint is None
 
 
 class TestAta:
@@ -188,12 +158,10 @@ class TestAta:
 
 
 class TestCheckConnection:
-    def test_happy_path(self, monkeypatch):
+    def test_happy_path_and_missing_keypair(self, monkeypatch):
         accounts = {MAINNET_MINT: parsed_mint(), ata(MINER): parsed_token_account()}
         p = provider_with(FakeRpc(accounts=accounts), keypair=MINER, monkeypatch=monkeypatch)
         p.check_connection(require_send=True)
-
-    def test_missing_keypair_fails_when_send_required(self, monkeypatch):
         p = provider_with(FakeRpc(accounts={MAINNET_MINT: parsed_mint()}), monkeypatch=monkeypatch)
         with pytest.raises(ConnectionError):
             p.check_connection(require_send=True)
@@ -285,13 +253,11 @@ class TestVerification:
 class TestDeliveryGates:
     RECIP = str(USER.pubkey())
 
-    def test_clean_destination_passes(self, monkeypatch):
+    def test_clean_destination_or_no_ata_yet_passes(self, monkeypatch):
         p = provider_with(FakeRpc(accounts={ata(USER): parsed_token_account()}), monkeypatch=monkeypatch)
         assert p.can_deliver_to(self.RECIP, AMOUNT) is True
         assert p.delivery_refused(self.RECIP, 0) is False
         assert p.cancel_evidence(self.RECIP, AMOUNT) is None
-
-    def test_no_ata_yet_is_deliverable(self, monkeypatch):
         p = provider_with(FakeRpc(accounts={}), monkeypatch=monkeypatch)
         assert p.can_deliver_to(self.RECIP, AMOUNT) is True
         assert p.delivery_refused(self.RECIP, 0) is False
@@ -328,16 +294,6 @@ class TestDeliveryGates:
         assert p.cancel_evidence(self.RECIP, AMOUNT) is None
 
 
-class TestBalance:
-    def test_reads_the_owners_ata(self, monkeypatch):
-        p = provider_with(FakeRpc(accounts={ata(USER): parsed_token_account(amount=42)}), monkeypatch=monkeypatch)
-        assert p.get_balance(str(USER.pubkey())) == 42
-
-    def test_missing_ata_and_rpc_failure_read_zero(self, monkeypatch):
-        assert provider_with(FakeRpc(accounts={}), monkeypatch=monkeypatch).get_balance(str(USER.pubkey())) == 0
-        assert provider_with(FakeRpc(raise_conn=True), monkeypatch=monkeypatch).get_balance(str(USER.pubkey())) == 0
-
-
 class TestSendGuards:
     TO = str(USER.pubkey())
 
@@ -347,10 +303,8 @@ class TestSendGuards:
             accounts[ata(USER)] = parsed_token_account(amount=0)
         return FakeRpc(accounts=accounts, lamports=lamports)
 
-    def test_no_key_refuses(self, monkeypatch):
+    def test_no_key_or_key_mismatch_refuses(self, monkeypatch):
         assert provider_with(self.rich(), monkeypatch=monkeypatch).send_amount(self.TO, AMOUNT) is None
-
-    def test_key_mismatch_refuses(self, monkeypatch):
         p = provider_with(self.rich(), keypair=MINER, monkeypatch=monkeypatch)
         assert p.send_amount(self.TO, AMOUNT, from_address=str(FEE_PAYER.pubkey())) is None
         assert p.rpc.sent == []

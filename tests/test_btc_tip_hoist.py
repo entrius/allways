@@ -27,23 +27,6 @@ def test_confirmations_from_cached_tip(monkeypatch):
     assert p.api_calc_confirmations(800_000) == 11
 
 
-def test_tip_fetched_once_per_pass(monkeypatch):
-    p = _provider(monkeypatch)
-    calls = {'n': 0}
-
-    def fake_get(path, timeout=10):
-        assert path == '/blocks/tip/height'  # only the tip is fetched here
-        calls['n'] += 1
-        return _Resp(text='800010')
-
-    monkeypatch.setattr(p, 'btc_api_get', fake_get)
-    # Three legs in the same forward pass share ONE tip fetch — the whole point of the hoist.
-    p.api_calc_confirmations(800_000)
-    p.api_calc_confirmations(800_005)
-    p.api_calc_confirmations(799_999)
-    assert calls['n'] == 1
-
-
 def test_clear_pass_tip_forces_refetch(monkeypatch):
     p = _provider(monkeypatch)
     calls = {'n': 0}

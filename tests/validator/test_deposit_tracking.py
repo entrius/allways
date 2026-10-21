@@ -38,6 +38,7 @@ SOL_SIG = '5VERv8NMvzbJMEkV8xnrLkEaWRtSz9CosKDYjCJjBRnbJLgp8uirBgmQpjKhoR4tjF3Zp
 CREATED_AT = 1000
 FRESH = CREATED_AT + 5
 URL_SUFFIXES = ('#1', '#2', '?x', '/', '%20', ' ')
+JUNK_SUFFIXES = ('#1', '%20', '\n')  # one URL fragment, one encoded space, one trailing whitespace
 
 
 @pytest.fixture(autouse=True)
@@ -71,8 +72,8 @@ def _hex_hash_specs():
 
 HEX_SPECS = _hex_hash_specs()
 BTC_SPEC, SOL_SPEC, ETH_SPEC = _spec('btc'), _spec('sol'), _spec('eth')
-# One per hash family: UTXO (bare hex), EVM native, ERC-20, TAO, alpha.
-FAMILY_SPECS = [BTC_SPEC] + [s for s in HEX_SPECS if s.chain_id in ('eth', 'baseusdc', 'tao') or s.chain_id[:2] == 'sn']
+# One per hash family: UTXO (bare hex), EVM, TAO, alpha. base58 Solana has its own tests below.
+FAMILY_SPECS = [BTC_SPEC] + [s for s in HEX_SPECS if s.chain_id in ('eth', 'tao') or s.chain_id[:2] == 'sn']
 
 
 def _canonical(spec):
@@ -80,38 +81,35 @@ def _canonical(spec):
 
 
 def _variants(spec):
-    """Every honest spelling of the one deposit the RPC would accept, canonical one excluded."""
+    """Honest spellings of the one deposit the RPC would accept: a case variant and a 0X prefix."""
     if spec is BTC_SPEC:
-        return [HEX, HEX.upper()]
-    return ['0x' + HEX, '0x' + HEX.upper(), '0X' + HEX, '0X' + HEX.lower()]
+        return [HEX.upper()]
+    return ['0x' + HEX.upper(), '0X' + HEX.lower()]
 
 
 def _junk(spec):
     canonical = _canonical(spec)
     wrong_prefix = '0x' + HEX if spec is BTC_SPEC else HEX
-    return [canonical + s for s in URL_SUFFIXES + ('\n',)] + [' ' + canonical, wrong_prefix, canonical[:-1], '']
+    return [canonical + s for s in JUNK_SUFFIXES] + [' ' + canonical, wrong_prefix, canonical[:-1], '']
 
 
-def _family_cases(spellings):
-    return [pytest.param(s, h, id=f'{s.chain_id}-{h!r}') for s in FAMILY_SPECS for h in spellings(s)]
+family = pytest.mark.parametrize('spec', FAMILY_SPECS, ids=lambda s: s.chain_id)
 
 
 # ── canonicalizers ───────────────────────────────────────────────────────────
 
 
-def test_hex_hash_specs_cover_every_evm_network_and_tao():
+def test_every_hex_chain_collapses_every_casing_to_lowercase_0x():
     ids = {s.chain_id for s in HEX_SPECS}
     assert {'eth', 'baseusdc', 'tao'} <= ids and any(i.startswith('sn') for i in ids)
-
-
-@pytest.mark.parametrize('spec', HEX_SPECS, ids=lambda s: s.chain_id)
-def test_hex_chains_collapse_every_casing_to_lowercase_0x(spec):
-    chain = _build(spec).chain
     canonical = '0x' + HEX.lower()
-    for spelling in _variants(spec) + [canonical]:
-        assert chain.canonical_tx_hash(spelling) == canonical
-    for bad in (HEX, '0x' + HEX[:-1], '0x' + HEX + '00', '0x' + HEX[:-1] + 'g', '0x' + HEX + '\n', '', '123-4'):
-        assert chain.canonical_tx_hash(bad) is None
+    spellings = ['0x' + HEX, '0x' + HEX.upper(), '0X' + HEX, '0X' + HEX.lower(), canonical]
+    for spec in HEX_SPECS:
+        chain = _build(spec).chain
+        for spelling in spellings:
+            assert chain.canonical_tx_hash(spelling) == canonical, (spec.chain_id, spelling)
+        for bad in (HEX, '0x' + HEX[:-1], '0x' + HEX + '00', '0x' + HEX[:-1] + 'g', '0x' + HEX + '\n', '', '123-4'):
+            assert chain.canonical_tx_hash(bad) is None, (spec.chain_id, bad)
 
 
 def test_btc_collapses_to_bare_lowercase_hex():
@@ -120,21 +118,21 @@ def test_btc_collapses_to_bare_lowercase_hex():
     assert btc.canonical_tx_hash('0x' + HEX) is None
 
 
-@pytest.mark.parametrize('suffix', URL_SUFFIXES)
-def test_hash_with_url_suffix_has_no_canonical_form(suffix):
+def test_hash_with_url_suffix_has_no_canonical_form():
     # Lookups interpolate the hash into a URL path, where a fragment or query string is dropped.
-    assert _build(BTC_SPEC).chain.canonical_tx_hash(HEX.lower() + suffix) is None
-    assert _build(ETH_SPEC).chain.canonical_tx_hash('0x' + HEX.lower() + suffix) is None
+    for suffix in URL_SUFFIXES:
+        assert _build(BTC_SPEC).chain.canonical_tx_hash(HEX.lower() + suffix) is None, suffix
+        assert _build(ETH_SPEC).chain.canonical_tx_hash('0x' + HEX.lower() + suffix) is None, suffix
 
 
-@pytest.mark.parametrize('chain_id', ['sol', 'solusdc'])
-def test_solana_signatures_are_untouched(chain_id):
-    chain = _build(_spec(chain_id)).chain
-    assert chain.canonical_tx_hash(SOL_SIG) == SOL_SIG  # base58 is case-sensitive
-    assert chain.canonical_tx_hash(SOL_SIG.lower()) == SOL_SIG.lower()
+def test_solana_signatures_are_untouched():
+    for chain_id in ('sol', 'solusdc'):
+        chain = _build(_spec(chain_id)).chain
+        assert chain.canonical_tx_hash(SOL_SIG) == SOL_SIG  # base58 is case-sensitive
+        assert chain.canonical_tx_hash(SOL_SIG.lower()) == SOL_SIG.lower()
 
 
-@pytest.mark.parametrize('spec', FAMILY_SPECS, ids=lambda s: s.chain_id)
+@family
 def test_the_ledger_key_agrees_with_every_chains_canonical_spelling(spec):
     # Events carry no chain, so the ledgers key by tx_key: it must fold every honest spelling onto the
     # canonical one's key, or a variant claim lands in its own ledger row.
@@ -193,7 +191,7 @@ class _Relay:
         self.client._reservation = {'sol': _confirm_reservation(from_chain=self.spec.chain_id, **over)}
 
 
-@pytest.mark.parametrize('spec', FAMILY_SPECS, ids=lambda s: s.chain_id)
+@family
 def test_canonical_claim_lands_under_the_canonical_string(spec, tmp_path):
     relay = _Relay(spec, {'sol': dict(created_at=CREATED_AT)}, tmp_path)
     r = relay.confirm(_variants(spec)[-1])
@@ -203,7 +201,7 @@ def test_canonical_claim_lands_under_the_canonical_string(spec, tmp_path):
     assert relay.store.deposit_claim(canonical) == (swap_key_from_tx_hash(canonical).hex(), False)
 
 
-@pytest.mark.parametrize('spec', FAMILY_SPECS, ids=lambda s: s.chain_id)
+@family
 def test_claimed_deposit_is_not_claimed_again_on_the_other_hub(spec, tmp_path):
     # Two live slots on different hubs whose senders normalize equal.
     hubs = {
@@ -218,9 +216,9 @@ def test_claimed_deposit_is_not_claimed_again_on_the_other_hub(spec, tmp_path):
     assert len(relay.client.claims) == 1
 
 
-@pytest.mark.parametrize('spec', FAMILY_SPECS, ids=lambda s: s.chain_id)
+@family
 def test_a_variant_claim_in_the_ledger_blocks_the_canonical_claim(spec, tmp_path):
-    # The 10-16 shape: the deposit was already claimed under another spelling, so under another swap key.
+    # The deposit was already claimed under another spelling, so under another swap key.
     # The variant's swap PDA is elsewhere; only the case-blind ledger links the two.
     relay = _Relay(spec, {'sol': dict(created_at=CREATED_AT)}, tmp_path)
     variant = _variants(spec)[-1]
@@ -233,7 +231,7 @@ def test_a_variant_claim_in_the_ledger_blocks_the_canonical_claim(spec, tmp_path
     assert relay.client.claims == []
 
 
-@pytest.mark.parametrize('spec', FAMILY_SPECS, ids=lambda s: s.chain_id)
+@family
 def test_deposit_stays_used_after_its_swap_closes(spec, tmp_path):
     # The first swap was initiated and its PDA closed; a later reservation sees the World's ledger row.
     relay = _Relay(spec, {'sol': dict(created_at=CREATED_AT)}, tmp_path)
@@ -283,7 +281,7 @@ def test_failed_submit_can_be_retried(tmp_path):
     assert relay.confirm('0x' + HEX).ok
 
 
-@pytest.mark.parametrize('spec', FAMILY_SPECS, ids=lambda s: s.chain_id)
+@family
 def test_junk_spellings_never_claim(spec, tmp_path):
     relay = _Relay(spec, {'sol': dict(created_at=CREATED_AT)}, tmp_path)
     for junk in _junk(spec):
@@ -383,32 +381,34 @@ def _claim(spec, from_tx_hash, created_at=1200):
     return rules, swap
 
 
-@pytest.mark.parametrize('spec', FAMILY_SPECS, ids=lambda s: s.chain_id)
+@family
 def test_canonical_in_flight_claim_attests(spec):
     rules, swap = _claim(spec, _canonical(spec))
     assert rules.decide(swap, now=1500).decision == Decision.ATTEST
 
 
-@pytest.mark.parametrize('spec,spelling', _family_cases(_variants) + _family_cases(_junk))
-def test_non_canonical_in_flight_claim_refuses_to_attest(spec, spelling):
-    rules, swap = _claim(spec, spelling)
-    action = rules.decide(swap, now=1500)
-    assert action.decision == Decision.REJECT and 'canonical' in action.reason
-    assert 'canonical' in attest_reject_reason(rules.providers, swap, 100)
+@family
+def test_non_canonical_in_flight_claim_refuses_to_attest(spec):
+    for spelling in _variants(spec) + _junk(spec):
+        rules, swap = _claim(spec, spelling)
+        action = rules.decide(swap, now=1500)
+        assert action.decision == Decision.REJECT and 'canonical' in action.reason, spelling
+        assert 'canonical' in attest_reject_reason(rules.providers, swap, 100), spelling
 
 
-@pytest.mark.parametrize('spec,variant', _family_cases(_variants))
-def test_a_variant_claim_in_the_ledger_refuses_the_canonical_claim(spec, variant):
+@family
+def test_a_variant_claim_in_the_ledger_refuses_the_canonical_claim(spec):
     # One deposit, two spellings, two swap keys: the earlier claim holds the case-blind ledger row.
-    rules, swap = _claim(spec, _canonical(spec))
-    rules.world = replace(
-        rules.world, deposits={tx_key(variant): DepositClaim(swap_key_from_tx_hash(variant).hex(), 1, 1)}
-    )
-    action = rules.decide(swap, now=1500)
-    assert action.decision == Decision.REJECT and 'already claimed' in action.reason
+    for variant in _variants(spec):
+        rules, swap = _claim(spec, _canonical(spec))
+        rules.world = replace(
+            rules.world, deposits={tx_key(variant): DepositClaim(swap_key_from_tx_hash(variant).hex(), 1, 1)}
+        )
+        action = rules.decide(swap, now=1500)
+        assert action.decision == Decision.REJECT and 'already claimed' in action.reason, variant
 
 
-@pytest.mark.parametrize('spec', FAMILY_SPECS, ids=lambda s: s.chain_id)
+@family
 def test_a_live_swap_on_a_variant_spelling_refuses_the_canonical_claim(spec):
     # Even before its ledger row arrives, a live swap spending the deposit under another key blocks it.
     rules, swap = _claim(spec, _canonical(spec))
@@ -481,33 +481,36 @@ def _delivery(spec, to_tx_hash, n=1):
     return swap
 
 
-@pytest.mark.parametrize('spec,spelling', _family_cases(_variants))
-def test_honest_delivery_spelling_verifies_in_canonical_form(spec, spelling):
-    rules, dest = _deliveries(spec)
-    assert rules.decide(_delivery(spec, spelling), now=1500).decision == Decision.CONFIRM
-    assert dest.calls[-1].tx_hash == _canonical(spec)
+@family
+def test_honest_delivery_spelling_verifies_in_canonical_form(spec):
+    for spelling in _variants(spec):
+        rules, dest = _deliveries(spec)
+        assert rules.decide(_delivery(spec, spelling), now=1500).decision == Decision.CONFIRM, spelling
+        assert dest.calls[-1].tx_hash == _canonical(spec)
 
 
-@pytest.mark.parametrize('spec,spelling', _family_cases(_junk))
-def test_junk_delivery_spelling_never_verifies(spec, spelling):
-    rules, dest = _deliveries(spec)
-    swap = _delivery(spec, spelling)
-    assert rules.decide(swap, now=1500).decision == Decision.WAIT
-    assert rules.decide(swap, now=2500).decision == Decision.TIMEOUT
-    assert [c for c in dest.calls if not isinstance(c, tuple)] == []  # never sent to the chain
+@family
+def test_junk_delivery_spelling_never_verifies(spec):
+    for spelling in _junk(spec):
+        rules, dest = _deliveries(spec)
+        swap = _delivery(spec, spelling)
+        assert rules.decide(swap, now=1500).decision == Decision.WAIT, spelling
+        assert rules.decide(swap, now=2500).decision == Decision.TIMEOUT, spelling
+        assert [c for c in dest.calls if not isinstance(c, tuple)] == []  # never sent to the chain
 
 
-@pytest.mark.parametrize('spec,spelling', _family_cases(_variants) + _family_cases(_junk))
-def test_one_delivery_confirms_one_swap_whatever_the_second_spelling(spec, spelling):
-    rules, _ = _deliveries(spec)
-    first, second = _delivery(spec, _canonical(spec)), _delivery(spec, spelling, 2)
-    assert rules.decide(first, now=1500).decision == Decision.CONFIRM
-    assert rules.decide(second, now=1500).decision == Decision.WAIT
-    assert rules.decide(second, now=2500).decision == Decision.TIMEOUT
-    assert rules.decide(first, now=1501).decision == Decision.CONFIRM  # the second never blocks the first
+@family
+def test_one_delivery_confirms_one_swap_whatever_the_second_spelling(spec):
+    for spelling in _variants(spec) + _junk(spec):
+        rules, _ = _deliveries(spec)
+        first, second = _delivery(spec, _canonical(spec)), _delivery(spec, spelling, 2)
+        assert rules.decide(first, now=1500).decision == Decision.CONFIRM, spelling
+        assert rules.decide(second, now=1500).decision == Decision.WAIT, spelling
+        assert rules.decide(second, now=2500).decision == Decision.TIMEOUT, spelling
+        assert rules.decide(first, now=1501).decision == Decision.CONFIRM, spelling  # second never blocks first
 
 
-@pytest.mark.parametrize('spec', FAMILY_SPECS, ids=lambda s: s.chain_id)
+@family
 def test_a_claimed_source_deposit_never_confirms_a_delivery(spec):
     rules, _ = _deliveries(spec)
     rules.world = replace(rules.world, deposits={tx_key(_canonical(spec)): DepositClaim('ee' * 32, 1, 1400)})
@@ -524,19 +527,20 @@ def test_solana_delivery_signature_is_verified_as_given():
     assert rules.decide(_delivery(SOL_SPEC, '', 2), now=1500).decision == Decision.WAIT
 
 
-@pytest.mark.parametrize('spec,spelling', _family_cases(_variants))
-def test_completed_swap_replaces_a_local_delivery_claim(spec, spelling):
+@family
+def test_completed_swap_replaces_a_local_delivery_claim(spec):
     # This validator verified swap 1 on the tx first; the chain completing swap 2 on it wins the tx.
-    rules, _ = _deliveries(spec)
-    first = _delivery(spec, _canonical(spec))
-    assert rules.decide(first, now=1500).decision == Decision.CONFIRM
-    other = swap_key_from_tx_hash('srctx2').hex()
-    reported = Fulfillment(spelling, 1400, str(first.miner))
-    rules.world = replace(rules.world, fulfillments={other: reported})
-    assert rules.decide(first, now=1501).decision == Decision.CONFIRM  # only reported: no claim on the tx
-    rules.world = replace(rules.world, fulfillments={other: replace(reported, settled=True)})
-    action = rules.decide(first, now=1502)
-    assert action.decision == Decision.WAIT and 'another swap' in action.reason
+    for spelling in _variants(spec):
+        rules, _ = _deliveries(spec)
+        first = _delivery(spec, _canonical(spec))
+        assert rules.decide(first, now=1500).decision == Decision.CONFIRM
+        other = swap_key_from_tx_hash('srctx2').hex()
+        reported = Fulfillment(spelling, 1400, str(first.miner))
+        rules.world = replace(rules.world, fulfillments={other: reported})
+        assert rules.decide(first, now=1501).decision == Decision.CONFIRM  # only reported: no claim on the tx
+        rules.world = replace(rules.world, fulfillments={other: replace(reported, settled=True)})
+        action = rules.decide(first, now=1502)
+        assert action.decision == Decision.WAIT and 'another swap' in action.reason, spelling
 
 
 def test_another_miners_completion_does_not_take_the_tx():
@@ -555,7 +559,7 @@ def _claimed(tx_hash, slot, sig):
 
 
 def test_two_spellings_of_one_deposit_fold_into_one_ledger_row(tmp_path):
-    # The 10-16 replay end to end: '0X…UPPER' claimed first, '0x…lower' later. The World keeps one row (the
+    # End to end: '0X…UPPER' claimed first, '0x…lower' later. The World keeps one row (the
     # earlier claim), and the canonical claim is refused attestation off it.
     reader, events, _, _, out = _reader(_Client(), tmp_path)
     reader.tick(WORLD_NOW)

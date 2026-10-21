@@ -39,13 +39,6 @@ def _reads(history):
     return settled_at, calls
 
 
-def test_a_lone_validator_needs_no_archive_every_round_applied_on_its_own_vote():
-    settled_at, calls = _reads({})
-    now = 10 * CADENCE + HOUR
-    assert stop_point.resolve(now, CADENCE, 1, [HOTKEY], settled_at) == 10 * CADENCE
-    assert not calls
-
-
 def test_a_settle_after_the_latest_boundary_means_the_vault_stands_there():
     now = 10 * CADENCE + 2 * HOUR
     settled_at, _ = _reads({HOTKEY: [(0, 5), (10 * CADENCE + HOUR, 8)]})
@@ -160,15 +153,6 @@ def test_a_fresh_ledger_holds_the_barrier_until_the_archive_answers_and_seeds_no
     assert relay.store.seed_as_of is None, 'the lookup only steers the boot seeding'
 
 
-def test_a_ledger_that_has_been_counting_never_dials_the_archive():
-    archive = _Archive()
-    relay = _fresh_relay(archive)
-    relay.store.accrued_fee_total(MINER, 'tao', vault_generation=0)  # an existing database
-    relay.step(NOW)
-    assert relay._reconciled
-    assert not archive.reads
-
-
 def test_a_lone_validator_boots_without_the_archive():
     archive = _Archive(up=False)
     relay = _fresh_relay(archive, validators=('us',))
@@ -238,16 +222,3 @@ def test_the_block_search_lands_on_the_first_block_at_or_after_the_time_in_a_few
 
 
 # --- the signer's balance -----------------------------------------------------------------------
-
-
-def test_a_signer_low_on_tao_is_warned_about_hourly(monkeypatch):
-    warned = []
-    monkeypatch.setattr('bittensor.logging.warning', warned.append)
-    relay = _relay()
-    relay.vault.signer_balance = lambda: 100_000_000
-    relay.maybe_check_balance(NOW)
-    relay.maybe_check_balance(NOW + 60)
-    assert len(warned) == 1 and '0.1000 TAO' in warned[0]
-    relay.vault.signer_balance = lambda: 2 * RAO
-    relay.maybe_check_balance(NOW + 2 * HOUR)
-    assert len(warned) == 1

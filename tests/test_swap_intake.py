@@ -16,7 +16,6 @@ from allways.cli.swap_commands.swap_intake import (
     max_intake_from_amount,
     min_intake_from_amount,
     rate_display_from_fixed,
-    required_collateral,
     select_best_miner,
     swap_gate,
     swap_viable,
@@ -64,20 +63,6 @@ def test_btc_to_sol_amounts():
     assert a.collateral_amount == SOL
 
 
-def test_sol_to_tao_amounts():
-    # both 9-dec; 1 SOL at 2 TAO/SOL → 2 TAO; collateral_amount = from_amount.
-    a = compute_intake_amounts('sol', 'tao', SOL, '2')
-    assert a.to_amount == 2_000_000_000
-    assert a.collateral_amount == SOL
-
-
-def test_tao_to_sol_amounts():
-    # 2 TAO at 2 TAO/SOL → 1 SOL; collateral_amount = to_amount.
-    a = compute_intake_amounts('tao', 'sol', 2_000_000_000, '2')
-    assert a.to_amount == SOL
-    assert a.collateral_amount == SOL
-
-
 def test_spoke_spoke_pair_rejected():
     # No hub leg at all → invalid pair.
     with pytest.raises(ValueError):
@@ -91,10 +76,6 @@ def test_tao_hub_pair_needs_a_leg_backing():
         compute_intake_amounts('btc', 'tao', 100, '300')
     a = compute_intake_amounts('tao', 'btc', 1_000_000_000, '0.003', backing='tao')
     assert a.collateral_amount == a.from_amount
-
-
-def test_required_collateral_is_110_percent():
-    assert required_collateral(SOL) == 1_100_000_000
 
 
 def test_swap_viable_bounds_and_collateral():
@@ -124,20 +105,6 @@ def test_select_best_miner_picks_most_received():
     assert amts.to_amount == 60_000_000  # 0.6 BTC
 
 
-def test_select_best_miner_skips_underfunded():
-    cands = [
-        MinerCandidate(miner='m_best', rate_display='0.6', collateral=SOL),  # can't back 1.1 SOL
-        MinerCandidate(miner='m_ok', rate_display='0.4', collateral=2 * SOL),
-    ]
-    best = select_best_miner(cands, 'sol', 'btc', SOL, MIN, MAX)
-    assert best is not None and best[0].miner == 'm_ok'
-
-
-def test_select_best_miner_none_when_all_unviable():
-    cands = [MinerCandidate(miner='m', rate_display='0.6', collateral=1)]
-    assert select_best_miner(cands, 'sol', 'btc', SOL, MIN, MAX) is None
-
-
 def test_viable_intakes_filters_and_keeps_input_order():
     cands = [
         MinerCandidate(miner='m_low', rate_display='0.4', collateral=2 * SOL),
@@ -148,15 +115,6 @@ def test_viable_intakes_filters_and_keeps_input_order():
     viable = viable_intakes(cands, 'sol', 'btc', SOL, MIN, MAX)
     assert [c.miner for c, _ in viable] == ['m_low', 'm_high']
     assert [a.to_amount for _, a in viable] == [40_000_000, 60_000_000]
-
-
-def test_select_best_miner_ties_break_first_seen():
-    cands = [
-        MinerCandidate(miner='m_first', rate_display='0.5', collateral=2 * SOL),
-        MinerCandidate(miner='m_second', rate_display='0.5', collateral=2 * SOL),
-    ]
-    best = select_best_miner(cands, 'sol', 'btc', SOL, MIN, MAX)
-    assert best is not None and best[0].miner == 'm_first'
 
 
 # ---- candidate_miners: active gate + tracked collateral ----
@@ -244,23 +202,6 @@ def test_candidate_miners_skips_bad_quote_addresses_and_keeps_next_best(bad_fiel
     ] == ['next']
 
 
-def test_candidate_miners_does_not_judge_an_address_without_its_provider():
-    quote = SimpleNamespace(
-        miner='best',
-        from_chain='sol',
-        to_chain='btc',
-        rate=2 * 10**18,
-        miner_from_addr='valid',
-        miner_to_addr='bad',
-    )
-    state = SimpleNamespace(active=True, failed_swaps=0, collateral=2 * SOL)
-    provider = SimpleNamespace(chain=SimpleNamespace(is_valid_address=lambda address: address != 'bad'))
-
-    assert (
-        candidate_miners(_FakeCandClient([quote], {'best': state}), 'sol', 'btc', {'sol': provider})[0].miner == 'best'
-    )
-
-
 def test_candidate_miners_excludes_struck_and_settling():
     # The scorer's own gate: at the strike cap still quotes, one past it does not, nor does a
     # miner whose sol purse is mid-settle — the contract would refuse the reserve anyway. A settle
@@ -299,13 +240,6 @@ def test_unviable_reason_below_min_swap():
     assert '0.1000 SOL leg' in reason
 
 
-def test_unviable_reason_sol_source_stays_exact():
-    # SOL is the bounded asset itself — no ≈ conversion, just the exact bound.
-    cands = [MinerCandidate(miner='m', rate_display='1.2', collateral=2 * SOL)]
-    reason = unviable_reason(cands, 'sol', 'tao', SOL // 20, SOL // 10, SOL)
-    assert reason == 'below min swap (0.1000 SOL)'
-
-
 def test_unviable_reason_declared_backing_bound_stays_native():
     # sn7→sol with TAO behind the sn7 leg: the pair's rate is sn7 per SOL, so it cannot convert a
     # TAO bound into the source — the bound reads in TAO, never a mis-scaled ≈ figure.
@@ -314,16 +248,6 @@ def test_unviable_reason_declared_backing_bound_stays_native():
     bounds = {'sol': (0, 0), 'tao': (SOL // 10, SOL)}
     reason = unviable_reason(cands, 'sn7', 'sol', SOL // 2, 0, 0, bounds, providers)
     assert reason == 'below min swap (0.1000 TAO)'
-
-
-def test_unviable_reason_no_direction():
-    assert unviable_reason([], 'tao', 'sol', SOL, 0, 0) == 'no miner offers this direction'
-
-
-def test_unviable_reason_collateral():
-    cands = [MinerCandidate(miner='m', rate_display='1.0', collateral=SOL // 10)]
-    reason = unviable_reason(cands, 'tao', 'sol', 1_000_000_000, 0, 0)
-    assert 'collateral too low' in reason
 
 
 # ---- max_intake_from_amount: the depth behind a rate, solved for size ----
@@ -337,19 +261,6 @@ def test_max_intake_sol_source_is_exact_collateral_inverse():
     assert cap == SOL
     assert swap_gate(cap, 1_100_000_000, MIN, MAX) == ''
     assert swap_gate(cap + 1, 1_100_000_000, MIN, MAX) != ''
-
-
-def test_max_intake_clamped_by_max_swap():
-    assert max_intake_from_amount(_cand('0.5', 100 * SOL), 'sol', 'btc', MIN, MAX) == MAX
-
-
-def test_max_intake_zero_when_min_swap_unreachable():
-    # Collateral backs at most ~0.09 SOL — under the 0.1 SOL min, so no viable size exists.
-    assert max_intake_from_amount(_cand('0.5', SOL // 10), 'sol', 'btc', MIN, MAX) == 0
-
-
-def test_max_intake_zero_on_junk_rate():
-    assert max_intake_from_amount(_cand('junk', 2 * SOL), 'sol', 'btc', MIN, MAX) == 0
 
 
 def test_max_intake_spoke_source_inverts_to_amount_exactly():

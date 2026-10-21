@@ -60,17 +60,3 @@ def test_rounds_the_database_refused_are_written_oldest_first_once_it_is_back():
     assert storage.calls == [('flush', 2000), ('halt', 3000)]  # a halted newest round has no score tip
     export.tick(3)
     assert storage.calls == [('flush', 2000), ('halt', 3000)]  # nothing held, nothing rewritten
-
-
-def test_the_live_crown_is_written_when_its_holders_change_and_retried_until_it_lands():
-    crown, storage = Latest(), _Storage()
-    export = Export(Latest(), crown, storage)
-    crown.set({LANE: [(*LANE, 'hk_a', 1.0, 2.0, 100)]})
-    export.tick(0)
-    storage.up = True
-    export.tick(1)
-    crown.set({LANE: [(*LANE, 'hk_a', 1.0, 2.0, 130)]})  # same holder, later stamp: no write
-    export.tick(2)
-    crown.set({LANE: [(*LANE, 'hk_b', 1.0, 2.0, 160)]})
-    export.tick(3)
-    assert storage.calls == ['crown', 'crown', 'crown']

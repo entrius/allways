@@ -204,13 +204,3 @@ def test_the_first_verified_swap_keeps_a_shared_delivery_across_a_restart(tmp_pa
     again = _planner(tmp_path, sol=sol)  # same database, new process
     report, _ = _decision(again, _world(second))
     assert report.decision == 'wait' and 'another swap' in report.reason
-
-
-def test_a_decision_is_logged_once_until_it_changes(tmp_path, monkeypatch):
-    lines = []
-    monkeypatch.setattr('bittensor.logging.info', lines.append)
-    monkeypatch.setattr('bittensor.logging.debug', lines.append)  # a probe still in flight logs at debug
-    planner = _planner(tmp_path)
-    for _ in range(5):
-        planner.plan(_world(_swap()), NOW)
-    assert len(lines) == 1

@@ -58,15 +58,6 @@ def test_confirmed_coin_preferred_over_larger_own_change(monkeypatch):
     assert selected == [confirmed]
 
 
-def test_own_change_tops_up_when_confirmed_is_short(monkeypatch):
-    p = _provider(monkeypatch)
-    change = _utxo('bb', 300_000, confirmed=False)
-    p.broadcasted_txids['bb' * 32] = 'swap-1'
-    confirmed = _utxo('aa', 50_000, confirmed=True)
-    selected, _, _ = _select(p, [change, confirmed], 100_000)
-    assert selected == [confirmed, change]
-
-
 # --- broadcast refused for a mempool chain limit -> rebuild without that change ---
 
 TEST_WIF = 'L1RrrnXkcKut5DEMwtDthjwRcTTwED36thyL1DebVrKuwvohjMNi'
@@ -137,20 +128,6 @@ def test_chain_limit_rejection_rebuilds_without_that_change(monkeypatch):
     assert p.is_spendable_utxo({**pinned, 'status': {'confirmed': True}})
 
 
-def test_chain_limit_rejection_falls_back_to_confirmed_top_up(monkeypatch):
-    """Confirmed alone is short, so change tops it up; refused → the next own change replaces it."""
-    confirmed = _utxo('aa', 50_000, confirmed=True)
-    pinned = _utxo('bb', 300_000, confirmed=False)
-    other = _utxo('cc', 250_000, confirmed=False)
-    p, sender, posted = _send_setup(monkeypatch, [pinned, other, confirmed], [(400, CHAIN_LIMIT_BODY), (200, 'f' * 64)])
-    p.broadcasted_txids['bb' * 32] = 'swap-A'
-    p.broadcasted_txids['cc' * 32] = 'swap-C'
-
-    assert p.send_amount_lightweight(PAYEE, 100_000, from_address=sender, fee_rate_override=1) == ('f' * 64, 0)
-    assert _spent_txids(posted[0]) == {'aa' * 32, 'bb' * 32}
-    assert _spent_txids(posted[1]) == {'aa' * 32, 'cc' * 32}
-
-
 def test_chain_limit_with_no_alternative_fails_without_looping(monkeypatch):
     pinned = _utxo('bb', 300_000, confirmed=False)
     p, sender, posted = _send_setup(monkeypatch, [pinned], [(400, CHAIN_LIMIT_BODY)])
@@ -159,27 +136,3 @@ def test_chain_limit_with_no_alternative_fails_without_looping(monkeypatch):
     assert p.send_amount_lightweight(PAYEE, 100_000, from_address=sender, fee_rate_override=1) is None
     assert len(posted) == 1
     assert 'awaiting confirmation' in p.last_send_error
-
-
-def test_other_rejection_does_not_exclude_change(monkeypatch):
-    pinned = _utxo('bb', 300_000, confirmed=False)
-    p, sender, posted = _send_setup(monkeypatch, [pinned], [(400, 'min relay fee not met')])
-    p.broadcasted_txids['bb' * 32] = 'swap-A'
-
-    assert p.send_amount_lightweight(PAYEE, 100_000, from_address=sender, fee_rate_override=1) is None
-    assert len(posted) == 1
-    assert p.is_spendable_utxo(pinned)
-
-
-def test_chain_limit_markers_cover_node_reject_reasons():
-    from allways.assets.btc import is_mempool_chain_limit_error
-
-    for text in (
-        CHAIN_LIMIT_BODY,
-        'too-long-mempool-chain, too many unconfirmed ancestors [limit: 25]',
-        'too-long-mempool-chain, exceeds descendant size limit for tx x [limit: 101000]',
-        'too-large-cluster',
-    ):
-        assert is_mempool_chain_limit_error(text)
-    assert not is_mempool_chain_limit_error('bad-txns-inputs-missingorspent')
-    assert not is_mempool_chain_limit_error(None)

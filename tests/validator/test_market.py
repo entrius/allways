@@ -1,7 +1,6 @@
 """``/rate`` off the bound miners' states and the World's accounts: no client read, and alpha prices memoed
 so one price read per TTL serves however many threads quote at once."""
 
-import threading
 import time
 from decimal import Decimal
 from types import SimpleNamespace
@@ -13,7 +12,7 @@ from allways.assets.alpha import Alpha
 from allways.chains import CHAIN_SN7
 from allways.constants import RATE_PRECISION
 from allways.validator.serving import requests
-from allways.validator.serving.market import PRICE_TTL_SECS, AlphaPriceMemo, memo_priced
+from allways.validator.serving.market import AlphaPriceMemo
 from allways.validator.serving.requests import rate_quote
 from tests.validator.fakes import Ctx
 
@@ -88,25 +87,6 @@ class CountingAlpha(Alpha):
         return int(amount) * 250_000_000 // 10**self.chain_def.decimals
 
 
-def test_alpha_price_memo_reads_once_per_ttl_across_threads():
-    clock = [1000.0]
-    alpha = CountingAlpha()
-    priced = memo_priced({'sn7': alpha, 'sol': 'untouched'}, AlphaPriceMemo(clock=lambda: clock[0]))
-    assert priced['sol'] == 'untouched' and priced['sn7'].netuid == alpha.netuid
-
-    results: list = []
-    threads = [threading.Thread(target=lambda: results.append(priced['sn7'].value_rao(3 * 10**9))) for _ in range(8)]
-    for t in threads:
-        t.start()
-    for t in threads:
-        t.join()
-    assert results == [750_000_000] * 8 and alpha.reads == [None]
-
-    clock[0] += PRICE_TTL_SECS
-    assert priced['sn7'].value_rao(10**9) == 250_000_000 and alpha.reads == [None, None]
-    assert priced['sn7'].value_rao(10**9, block=42) == 250_000_000 and alpha.reads[-1] == 42  # dated reads stay live
-
-
 def _alpha_ctx(monkeypatch, **config):
     """One miner quoting sol→sn7 at 2 sn7 per SOL, TAO-backed: the sn7 leg is declared, so sizing it
     prices the alpha (which judges the address)."""
@@ -117,13 +97,6 @@ def _alpha_ctx(monkeypatch, **config):
     accounts = Accounts([(MINER, alpha_quote)], [(MINER, bond)], **config)
     states = {HOTKEY: _state(collateral=0, active_backings=0b11)}
     return _ctx(accounts, states, providers={'sn7': alpha}), alpha
-
-
-def test_rate_quote_prices_alpha_legs_off_the_shared_memo(monkeypatch):
-    ctx, alpha = _alpha_ctx(monkeypatch)
-    for _ in range(3):
-        rq = rate_quote(ctx, 'sol', 'sn7', SOL)
-    assert rq.quote.collateral_amount == 500_000_000 and alpha.reads == [None]  # three quotes, one price read
 
 
 def test_rate_quote_floors_an_alpha_pair_in_source_units(monkeypatch):

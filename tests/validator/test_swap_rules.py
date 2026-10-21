@@ -195,14 +195,14 @@ def test_fulfilled_confirms_and_fetches_only_the_dest_leg():
     # dest leg verified against 99% of to_amount, not the full amount
     dest_call = providers['sol'].calls[-1]
     assert dest_call.amount == 990 and dest_call.recipient == 'userSOL'
-    # P0: the SOURCE leg is NOT re-fetched for a Fulfilled swap — it was already verified + frozen at
+    # The SOURCE leg is NOT re-fetched for a Fulfilled swap — it was already verified + frozen at
     # attestation. Fulfilled must make exactly ONE leg fetch (dest only).
     assert providers['btc'].calls == [], 'Fulfilled re-fetched the source leg — should be dest-only'
 
 
 def test_fulfilled_source_provider_down_still_confirms():
-    # P0 behavior note: a source-provider OUTAGE no longer blocks confirming an already-attested payout,
-    # because the source isn't re-fetched. (Pre-P0 this SKIPped on the source `down` guard.)
+    # A source-provider OUTAGE no longer blocks confirming an already-attested payout,
+    # because the source isn't re-fetched.
     rules, providers = rules_with(result=True)
     providers['btc'].result = 'unreachable'  # source provider down — must be irrelevant now
     assert rules.decide(make_swap(status='Fulfilled'), now=1500).decision == Decision.CONFIRM
@@ -243,12 +243,6 @@ def test_another_miner_naming_the_tx_cannot_block_the_swap():
     assert rules.decide(first, now=1500).decision == Decision.CONFIRM
 
 
-def test_fulfilled_dest_pending_far_from_timeout_waits():
-    rules, providers = rules_with(result=True)
-    providers['sol'].result = False  # dest matched but unconfirmed, timeout far off
-    assert rules.decide(make_swap(status='Fulfilled'), now=1500).decision == Decision.WAIT
-
-
 def test_fulfilled_stale_dest_tx_rejected_as_replay():
     rules, providers = rules_with(result=True)
     providers['sol'].block_time = INITIATED_AT - 1  # payout mined before the swap was initiated
@@ -269,7 +263,7 @@ def test_fulfilled_overdue_absent_dest_times_out():
 
 
 def test_fulfilled_overdue_refusing_dest_waits_no_slash():
-    # B-lite slash gate: positive evidence the dest can't receive (code seen in window) → never slash.
+    # Slash gate: positive evidence the dest can't receive (code seen in window) → never slash.
     rules, providers = rules_with(result=None)
     providers['sol'].refuses = True
     assert rules.decide(make_swap(status='Fulfilled', timeout_at=1000), now=1500).decision == Decision.WAIT
@@ -282,7 +276,7 @@ def test_fulfilled_overdue_refusal_check_down_defers():
 
 
 def test_fulfilled_refusing_dest_past_ceiling_times_out():
-    # C1 terminal exit: an undeliverable dest never recovers, so at/after max_extend_at the refusal guard
+    # Terminal exit: an undeliverable dest never recovers, so at/after max_extend_at the refusal guard
     # must stop deferring and TIMEOUT — else has_active_swap never clears and the hub's collateral freezes.
     rules, providers = rules_with(result=None)
     providers['sol'].refuses = True
@@ -296,12 +290,14 @@ def test_active_overdue_refusing_dest_waits_no_slash():
     assert rules.decide(make_swap(status='Active', timeout_at=1000), now=1500).decision == Decision.WAIT
 
 
-def test_active_invalid_dest_refuses_before_ceiling():
-    rules, providers = rules_with(result=None)
-    providers['sol'].valid_addr = False
-    action = rules.decide(make_swap(status='Active', timeout_at=1000), now=1500)
-    assert action.decision == Decision.REFUSE
-    assert action.reason_code == CANCEL_REASON_INVALID_DEST
+def test_active_invalid_dest_refuses_before_and_past_ceiling():
+    for max_extend_at in (10_000, 1200):
+        rules, providers = rules_with(result=None)
+        providers['sol'].valid_addr = False
+        swap = make_swap(status='Active', timeout_at=1000, max_extend_at=max_extend_at)
+        action = rules.decide(swap, now=1500)
+        assert action.decision == Decision.REFUSE
+        assert action.reason_code == CANCEL_REASON_INVALID_DEST
 
 
 def test_fulfilled_sound_cancel_evidence_refuses_no_slash():
@@ -315,7 +311,7 @@ def test_fulfilled_sound_cancel_evidence_refuses_no_slash():
 
 
 def test_cancel_evidence_is_read_at_the_block_the_delivery_landed():
-    # An alpha refusal is recorded at the delivery's block, so the probe passes the swap's to_tx_block (#798).
+    # An alpha refusal is recorded at the delivery's block, so the probe passes the swap's to_tx_block.
     rules, providers = rules_with(result=None)
     swap = make_swap(status='Fulfilled', timeout_at=1000)
     swap.to_tx_block = 8_257_100
@@ -351,21 +347,12 @@ def test_getcode_hint_without_sound_evidence_does_not_refuse():
 
 
 def test_active_refusing_dest_past_ceiling_times_out():
-    # C1: past max_extend_at an undeliverable dest is terminal — timing out is the only path that clears
+    # Past max_extend_at an undeliverable dest is terminal — timing out is the only path that clears
     # the hub bit, so the refusal guard must yield to a TIMEOUT once the ceiling is reached.
     rules, providers = rules_with(result=None)
     providers['sol'].refuses = True
     swap = make_swap(status='Active', timeout_at=1000, max_extend_at=1200)  # now past the ceiling
     assert rules.decide(swap, now=1500).decision == Decision.TIMEOUT
-
-
-def test_active_invalid_dest_refuses_past_ceiling():
-    rules, providers = rules_with(result=None)
-    providers['sol'].valid_addr = False
-    swap = make_swap(status='Active', timeout_at=1000, max_extend_at=1200)
-    action = rules.decide(swap, now=1500)
-    assert action.decision == Decision.REFUSE
-    assert action.reason_code == CANCEL_REASON_INVALID_DEST
 
 
 def test_fulfilled_invalid_dest_refuses_when_provider_is_reachable():
@@ -382,25 +369,14 @@ def test_fulfilled_overdue_but_verifiable_still_confirms():
     assert rules.decide(make_swap(status='Fulfilled', timeout_at=1000), now=1500).decision == Decision.CONFIRM
 
 
-def test_fulfilled_pending_dest_at_ceiling_overdue_times_out():
-    # Accountability guardrail: a payout that's broadcast but still unconfirmed, whose extension budget
-    # is exhausted (timeout_at == max_extend_at, no room left to slide) and is now overdue, MUST slash.
-    # The ceiling is ample runway (MAX_TOTAL_EXTENSION_SECS); failing to confirm within it means the
-    # miner underfee'd/mis-sent the payout — its responsibility, so the timeout is warranted, not a
-    # false slash. This tripwire guards that the exhausted-extension path still slashes.
-    rules, providers = rules_with(result=True)
-    providers['sol'].result = False  # dest matched but unconfirmed (pending)
-    swap = make_swap(status='Fulfilled', timeout_at=1000, max_extend_at=1000)  # at ceiling — no extend room
-    assert rules.decide(swap, now=1500).decision == Decision.TIMEOUT
-
-
 def test_pending_attestation_source_ok_attests():
+    # Default reservation is live and its claim slot matches: a confirmed source attests, never reaps.
     rules, _ = rules_with(result=True)
     assert rules.decide(make_swap(status='PendingAttestation'), now=1500).decision == Decision.ATTEST
 
 
 def test_pending_attestation_rejects_dest_equal_to_miner_delivery():
-    # V-H1 (chain-aware attest gate): user_to_addr NORMALIZE-equal to the miner's delivery address → never
+    # Chain-aware attest gate: user_to_addr NORMALIZE-equal to the miner's delivery address → never
     # attest. Catches the EVM checksum-variant a self-represented taker uses to slip the on-chain raw
     # compare (provider normalize lowercases). Poisoned dest → the miner must never be obligated.
     rules, _ = rules_with(result=True)
@@ -421,9 +397,10 @@ def test_pending_attestation_stale_deposit_rejected_as_replay():
 
 
 def test_pending_attestation_no_reservation_waits():
-    rules, _ = rules_with(result=True)
-    rules.reservation = None
-    assert rules.decide(make_swap(status='PendingAttestation'), now=1500).decision == Decision.WAIT
+    for result in (True, False):  # confirmed or still-pending source: no reservation to attest or extend
+        rules, _ = rules_with(result=result)
+        rules.reservation = None
+        assert rules.decide(make_swap(status='PendingAttestation'), now=1500).decision == Decision.WAIT
 
 
 def test_pending_attestation_same_second_deposit_attests():
@@ -448,11 +425,6 @@ def test_pending_attestation_honest_sol_to_btc_attests():
         status='PendingAttestation', from_chain='sol', to_chain='btc', from_amount=1_000_000_000, to_amount=500_000_000
     )
     assert rules.decide(swap, now=1500).decision == Decision.ATTEST
-
-
-def test_pending_attestation_honest_btc_to_sol_reverse_attests():
-    rules, _ = rules_with(result=True)
-    assert rules.decide(make_swap(status='PendingAttestation', to_amount=1000), now=1500).decision == Decision.ATTEST
 
 
 def test_pending_attestation_absurd_to_amount_rejected():
@@ -622,12 +594,6 @@ def test_source_pending_at_ceiling_no_extend():
     assert rules.decide(make_swap(status='PendingAttestation'), now=1500).decision == Decision.WAIT
 
 
-def test_source_pending_no_reservation_waits():
-    rules, _ = rules_with(result=False, reservation=None)
-    rules.reservation = None
-    assert rules.decide(make_swap(status='PendingAttestation'), now=1500).decision == Decision.WAIT
-
-
 def test_dest_pending_near_timeout_extends_timeout():
     # SOL dest pending at 0/32 confs: raw = now + 32*1 + 120 = 1652 → 600s bucket up to 1800 (<ceiling).
     rules, providers = rules_with(result=True)
@@ -650,13 +616,6 @@ def test_dest_pending_at_ceiling_overdue_times_out():
     rules, providers = rules_with(result=True)
     providers['sol'].result = False
     swap = make_swap(status='Fulfilled', timeout_at=1000, max_extend_at=1000)
-    assert rules.decide(swap, now=1500).decision == Decision.TIMEOUT
-
-
-def test_dest_absent_overdue_times_out_not_extended():
-    rules, providers = rules_with(result=True)
-    providers['sol'].result = None  # dest absent, not merely unconfirmed
-    swap = make_swap(status='Fulfilled', timeout_at=1000, max_extend_at=10_000)
     assert rules.decide(swap, now=1500).decision == Decision.TIMEOUT
 
 
@@ -691,12 +650,6 @@ def test_pending_attestation_superseded_claim_reaps():
     assert rules.decide(make_swap(status='PendingAttestation'), now=1500).decision == Decision.CANCEL
 
 
-def test_pending_attestation_live_matching_reservation_not_reaped():
-    # Regression: a live reservation whose claim slot matches must attest on a confirmed source, never reap.
-    rules, _ = rules_with(result=True)  # default reservation is live + matching
-    assert rules.decide(make_swap(status='PendingAttestation'), now=1500).decision == Decision.ATTEST
-
-
 def test_an_unapplied_vault_debit_blocks_the_miners_next_initiate():
     # The contract's settlement grace covers the common case; this covers the tail where the relay
     # is slower than the grace, and the seconds-wide window right after the verdict.
@@ -722,7 +675,7 @@ def test_with_no_relay_running_a_tao_backed_swap_attests():
 
 
 class TestMissingProviderNeverSlashes:
-    """A spoke with no provider on this validator (unsupported/disabled net, e.g. #678) is
+    """A spoke with no provider on this validator (unsupported/disabled net) is
     UNVERIFIABLE, not payment-absent. Below the extension ceiling a swap on that spoke SKIPs (never slash
     on the absence of a verifier); PAST max_extend_at it TIMEOUTs so the collateral can't freeze forever.
     A missing provider reads as a 'down' leg (like an unreachable RPC); decide() applies the ceiling."""

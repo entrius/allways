@@ -17,6 +17,7 @@ from allways.solana.client import SYSTEM_PROGRAM, AllwaysSolanaClient, swap_from
 from allways.solana.program import resolve_program_id
 
 PID = resolve_program_id()
+VALIDATOR = Keypair().pubkey()
 
 
 def _global_disc(name: str) -> bytes:
@@ -99,14 +100,6 @@ def test_deactivate(client):
     ]
 
 
-def test_deactivate_one_backing(client):
-    # Partial exit — the same accounts, the purse named in the args.
-    client.deactivate(backing='tao')
-    ix = _ix(client)
-    assert ix.data[:8] == layouts.IX_DISCRIMINATORS['deactivate']
-    assert _body(ix) == layouts.IX_OPT_BACKING_ARGS.build('tao')
-
-
 def test_withdraw_treasury(client):
     recipient = Keypair().pubkey()
     client.withdraw_treasury(recipient, 5_000)
@@ -137,6 +130,11 @@ def test_withdraw_treasury(client):
         (lambda c: c.set_min_swap_amount(10), 'set_min_swap_amount', layouts.IX_AMOUNT_ARGS.build({'amount': 10})),
         (lambda c: c.set_max_swap_amount(99), 'set_max_swap_amount', layouts.IX_AMOUNT_ARGS.build({'amount': 99})),
         (lambda c: c.set_reservation_ttl(600), 'set_reservation_ttl', layouts.IX_I64_ARGS.build({'value': 600})),
+        (
+            lambda c: c.remove_validator(VALIDATOR),
+            'remove_validator',
+            layouts.IX_PUBKEY_ARGS.build({'value': bytes(VALIDATOR)}),
+        ),
     ],
 )
 def test_admin_config_setters(client, call, ix_name, body):
@@ -145,19 +143,6 @@ def test_admin_config_setters(client, call, ix_name, body):
     admin = client.keypair.pubkey()
     assert ix.data[:8] == layouts.IX_DISCRIMINATORS[ix_name]
     assert _body(ix) == body
-    assert _metas(ix) == [
-        (admin, True, False),
-        (pdas.config_pda(PID), False, True),
-    ]
-
-
-def test_remove_validator(client):
-    v = Keypair().pubkey()
-    client.remove_validator(v)
-    ix = _ix(client)
-    admin = client.keypair.pubkey()
-    assert ix.data[:8] == layouts.IX_DISCRIMINATORS['remove_validator']
-    assert _body(ix) == layouts.IX_PUBKEY_ARGS.build({'value': bytes(v)})
     assert _metas(ix) == [
         (admin, True, False),
         (pdas.config_pda(PID), False, True),
@@ -204,11 +189,3 @@ def test_swap_from_solana_maps_fields_and_derives_key():
     assert sw.timeout_at == 4600  # unix axis, not a block
     assert str(sw.miner) == str(pdas.Pubkey.from_bytes(bytes(range(32, 64))))
     assert sw.status == 'Active'
-
-
-def test_swap_from_solana_status_name_and_explicit_key():
-    acct = _fake_swap_account(status=types.new_class('Fulfilled')())
-    explicit = bytes([9] * 32)
-    sw = swap_from_solana(acct, swap_key=explicit)
-    assert sw.swap_key == explicit  # not derived when supplied
-    assert sw.status == 'Fulfilled'

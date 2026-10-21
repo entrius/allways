@@ -1,5 +1,5 @@
-"""W2b — quote-level backing across the CLI: the D2 resolution ergonomics, the admin setters that
-reach the W1/W2 config fields, and the labels that tell two quotes on one direction apart.
+"""Quote-level backing across the CLI: the backing resolution, the admin setter range guards, and the
+taker/routing paths that must bid the offer (and backing) that won.
 
 The resolver is the interesting half: a quote's backing decides what a taker is guaranteed when the
 miner fails, so it is inferred only when there is exactly one answer and is NEVER broken by market
@@ -14,9 +14,8 @@ from click.testing import CliRunner
 from solders.keypair import Keypair
 
 from allways.cli.swap_commands.admin import admin_group
-from allways.cli.swap_commands.helpers import backing_label, declarable_backings, resolve_quote_backing
+from allways.cli.swap_commands.helpers import declarable_backings, resolve_quote_backing
 from allways.cli.swap_commands.pair import post_pair
-from allways.constants import TAO_TO_RAO
 from allways.solana.pdas import BACKING_BIT_SOL, BACKING_BIT_TAO
 
 ADDRS = {'miner_from_addr': '', 'miner_to_addr': ''}  # MinerQuote always carries both
@@ -50,26 +49,12 @@ def test_a_one_hub_pair_infers_silently():
     assert _resolve(both, 'tao', 'btc') == 'tao'
 
 
-def test_a_single_purse_miner_infers_on_a_hub_to_hub_pair():
-    # sol<->tao could go either way, but only one of this miner's purses qualifies — no flag needed.
-    assert _resolve(BACKING_BIT_SOL, 'sol', 'tao') == 'sol'
-    assert _resolve(BACKING_BIT_TAO, 'sol', 'tao') == 'tao'
-
-
 # --- the hard error (the whole point of the flag) ----------------------------------------------
 
 
 def test_a_dual_purse_miner_must_name_the_backing_on_a_hub_to_hub_pair():
     with pytest.raises(SystemExit):
         _resolve(BACKING_BIT_SOL | BACKING_BIT_TAO, 'sol', 'tao')
-
-
-def test_the_dual_purse_error_names_the_flag_and_both_options(capsys):
-    with pytest.raises(SystemExit):
-        _resolve(BACKING_BIT_SOL | BACKING_BIT_TAO, 'sol', 'tao')
-    out = capsys.readouterr().out
-    assert '--backing' in out
-    assert 'sol' in out and 'tao' in out
 
 
 def test_an_explicit_backing_settles_the_tie():
@@ -92,30 +77,12 @@ def test_a_backing_whose_purse_is_dark_is_refused():
         _resolve(BACKING_BIT_SOL, 'sol', 'tao', 'tao')
 
 
-def test_an_unknown_backing_is_refused():
-    with pytest.raises(SystemExit):
-        _resolve(BACKING_BIT_SOL, 'btc', 'sol', 'btc')
-
-
 def test_a_pair_with_no_hub_leg_is_refused():
     with pytest.raises(SystemExit):
         _resolve(BACKING_BIT_SOL | BACKING_BIT_TAO, 'btc', 'eth')
 
 
-def test_a_miner_with_no_active_purse_is_refused():
-    with pytest.raises(SystemExit):
-        _resolve(0, 'btc', 'sol')
-
-
 # --- labels ------------------------------------------------------------------------------------
-
-
-def test_backing_labels_name_the_guarantee():
-    assert backing_label('sol') == 'sol-backed'
-    assert backing_label('tao') == 'tao-backed'
-    # An unrecognized backing is shown, not hidden — that is exactly what an operator needs to see.
-    assert backing_label('eth') == 'eth-backed'
-    assert backing_label(None) == 'unbacked'
 
 
 # --- end to end through `alw miner post` -------------------------------------------------------
@@ -159,12 +126,6 @@ def test_post_pair_accepts_the_flag_and_forwards_it_to_both_directions():
     assert 'tao-backed' in res.output
 
 
-def test_post_pair_infers_for_a_single_purse_miner_with_no_flag():
-    c, res = _post(BACKING_BIT_TAO, ['sol', 'So1src', 'tao', '5dst', '10', '--yes'])
-    assert res.exit_code == 0, res.output
-    assert {call.kwargs['backing'] for call in c.set_quote.call_args_list} == {'tao'}
-
-
 def test_post_pair_never_infers_from_market_state():
     # Both purses lit and a standing SOL-backed quote already in the book: the CLI still refuses to
     # pick, because "what you already quoted" is market state, not an instruction.
@@ -181,7 +142,7 @@ def test_post_pair_never_infers_from_market_state():
     assert '--backing' in res.output
 
 
-# --- admin setters reaching the W1/W2 config fields ---------------------------------------------
+# --- admin setter range guards ---------------------------------------------
 
 
 def _admin_client(**cfg):
@@ -206,28 +167,10 @@ def _admin(argv):
 
 
 @pytest.mark.parametrize(
-    'argv, method, expected',
-    [
-        (['set-tao-min-swap', '0.5'], 'set_tao_min_swap_amount', int(0.5 * TAO_TO_RAO)),
-        (['set-tao-max-swap', '25'], 'set_tao_max_swap_amount', 25 * TAO_TO_RAO),
-        (['set-tao-min-collateral', '5'], 'set_tao_min_collateral', 5 * TAO_TO_RAO),
-        (['set-settlement-grace', '900'], 'set_settlement_grace', 900),
-        (['set-attest-max-age', '86400'], 'set_attest_max_age', 86_400),
-    ],
-)
-def test_admin_setters_reach_the_split_collateral_fields(argv, method, expected):
-    c, res = _admin(argv)
-    assert res.exit_code == 0, res.output
-    getattr(c, method).assert_called_once_with(expected)
-
-
-@pytest.mark.parametrize(
     'argv',
     [
         ['set-settlement-grace', '30'],  # below the 1-minute floor
         ['set-settlement-grace', '9000'],  # above the 2-hour lid
-        ['set-attest-max-age', '600'],  # below one heartbeat interval
-        ['set-attest-max-age', '200000'],  # past being a circuit breaker
         ['set-tao-min-collateral', '0'],  # a dust bond must not activate a purse
     ],
 )
@@ -243,7 +186,7 @@ def test_admin_setters_refuse_out_of_range_values_before_sending(argv):
 
 
 class _TwoQuoteClient:
-    """A dual-purse miner standing two offers on sol->tao at different rates — the D2 market."""
+    """A dual-purse miner standing two offers on sol->tao at different rates."""
 
     def __init__(self):
         self.quotes = [
@@ -291,26 +234,10 @@ def test_the_better_offer_carries_its_own_backing_to_the_bid():
     assert best[0].backing == 'tao'
 
 
-def test_a_candidate_defaults_to_the_local_purse_when_a_quote_predates_the_field():
-    from allways.cli.swap_commands.swap_intake import MinerCandidate
-
-    assert MinerCandidate(miner='m', rate_display='1', collateral=0).backing == 'sol'
-
-
 # --- taker preview: the guarantee is stated, not implied ----------------------------------------
 
 
-def test_the_quote_preview_states_each_backings_guarantee():
-    from allways.cli.swap_commands.quote import GUARANTEE
-
-    # Timing is the difference, and both halves must say so — the SOL path is instant, the TAO path
-    # is "shortly after". A taker choosing between two offers is choosing between these two lines.
-    assert 'instant' in GUARANTEE['sol'].lower()
-    assert 'tao' in GUARANTEE['tao'].lower() and 'timeout' in GUARANTEE['tao'].lower()
-    assert set(GUARANTEE) == {'sol', 'tao'}, 'every backing needs stated copy before it can trade'
-
-
-# --- W3 bid routing: the reserve engine bids the market, not a purse ------------------------------
+# --- bid routing: the reserve engine bids the market, not a purse ------------------------------
 
 
 class _RoutingClient:

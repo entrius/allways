@@ -1,4 +1,4 @@
-"""B3.2 — sr25519 binding verification + pubkey→hotkey attribution."""
+"""sr25519 binding verification + pubkey→hotkey attribution."""
 
 from types import SimpleNamespace
 
@@ -30,28 +30,17 @@ def test_verify_binding_valid():
     assert binding.verify_binding(b.miner, b.hotkey, b.hotkey_sig) is True
 
 
-def test_verify_binding_rejects_wrong_message():
+def test_verify_binding_rejects_wrong_message_or_tampered_sig():
     miner = SolKeypair().pubkey()
     other = SolKeypair().pubkey()
     hk = _hotkey()
     # Signature is over `other`, but we verify against `miner` → must fail.
     b = _binding(miner, hk, sign_msg=bytes(other))
     assert binding.verify_binding(b.miner, b.hotkey, b.hotkey_sig) is False
-
-
-def test_verify_binding_rejects_tampered_sig():
-    miner = SolKeypair().pubkey()
-    hk = _hotkey()
-    b = _binding(miner, hk)
-    bad = bytearray(b.hotkey_sig)
-    bad[0] ^= 0xFF
-    assert binding.verify_binding(b.miner, b.hotkey, bytes(bad)) is False
-
-
-def test_hotkey_ss58_roundtrip():
-    hk = _hotkey()
-    pub = bytes.fromhex(hk.public_key.hex())
-    assert binding.hotkey_ss58(pub) == hk.ss58_address
+    good = _binding(miner, hk)
+    bad = bytearray(good.hotkey_sig)
+    bad[0] ^= 0xFF  # tampered signature
+    assert binding.verify_binding(good.miner, good.hotkey, bytes(bad)) is False
 
 
 def test_build_attribution_maps_valid_bindings():

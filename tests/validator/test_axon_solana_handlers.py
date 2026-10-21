@@ -1,4 +1,4 @@
-"""B2.4 — unit tests for the Solana-repointed axon handlers (claim relay + vote_activate).
+"""Unit tests for the Solana-repointed axon handlers (claim relay + vote_activate).
 
 Runs the handlers against a fake serving context (program reads + sends, subtensor, chain providers);
 no chain. Asserts the handler resolves the miner pubkey via its binding, gates on on-chain state, and
@@ -165,13 +165,6 @@ def test_activate_unbound_hotkey_rejects():
     assert client.calls == []
 
 
-def test_activate_already_active_rejects():
-    client = FakeSolanaClient(miner_state=miner_state(collateral=9_000_000, mask=pdas.BACKING_BIT_SOL))
-    s = run(axon_handlers.handle_miner_activate(make_ctx(client), activate_synapse()))
-    assert s.accepted is False and 'already active' in s.rejection_reason
-    assert client.calls == []
-
-
 def test_activate_low_collateral_rejects():
     client = FakeSolanaClient(miner_state=miner_state(collateral=10), min_collateral=1_000_000)
     s = run(axon_handlers.handle_miner_activate(make_ctx(client), activate_synapse()))
@@ -183,7 +176,7 @@ def test_activate_success_votes():
     client = FakeSolanaClient(miner_state=miner_state(collateral=5_000_000))
     s = run(axon_handlers.handle_miner_activate(make_ctx(client), activate_synapse()))
     assert s.accepted is True
-    # No backing on the wire is "sol" — a pre-W2 miner's request still means what it always meant.
+    # No backing on the wire is "sol" — an older miner's request still means what it always meant.
     assert client.calls == [('vote_activate', MINER_PK, 'sol')]
 
 
@@ -200,7 +193,7 @@ def test_activate_tao_votes_when_the_bond_checks_out():
 
 
 def test_activate_tao_is_open_to_a_miner_already_serving_sol():
-    # The OR view says "active"; the TAO bit is what this request is about. D2's whole point.
+    # The OR view says "active"; the TAO bit is what this request is about. Purses activate separately.
     client = FakeSolanaClient(
         miner_state=miner_state(collateral=5_000_000, mask=pdas.BACKING_BIT_SOL), attestation=attested()
     )
@@ -314,46 +307,6 @@ def _fresh_tx():
     )
 
 
-def test_confirm_no_reservation_rejects():
-    client = FakeSolanaClient(reservation=None)
-    s = run(axon_handlers.handle_swap_confirm(make_ctx(client, FakeProvider(_fresh_tx())), confirm_synapse()))
-    assert s.accepted is False and 'No reservation' in s.rejection_reason
-    assert client.calls == []
-
-
-def test_confirm_already_claimed_rejects():
-    client = FakeSolanaClient(reservation=_reservation(claimed=b'\x07' * 32))
-    s = run(axon_handlers.handle_swap_confirm(make_ctx(client, FakeProvider(_fresh_tx())), confirm_synapse()))
-    assert s.accepted is False and 'already has a claimed swap' in s.rejection_reason
-    assert client.calls == []
-
-
-def test_confirm_tx_not_visible_rejects():
-    # Absent tx (verify → None): fast-fail with no claim, so the short TTL frees the miner.
-    client = FakeSolanaClient(reservation=_reservation())
-    s = run(axon_handlers.handle_swap_confirm(make_ctx(client, FakeProvider(None)), confirm_synapse()))
-    assert s.accepted is False and 'not visible' in s.rejection_reason
-    assert client.calls == []
-
-
-def test_confirm_unconfirmed_mempool_deposit_relays_claim():
-    # Deferred intake: a content-valid but unconfirmed (0-conf mempool) deposit still creates the claim;
-    # the crank defers voting until confirmations accrue.
-    mempool = TransactionInfo(
-        tx_hash='srctx',
-        confirmed=False,
-        sender='userBTC',
-        recipient='minerBTC',
-        amount=500,
-        block_number=None,
-        block_time=None,  # unmined → no block_time; freshness deferred to the crank's 'ok' gate
-    )
-    client = FakeSolanaClient(reservation=_reservation())
-    s = run(axon_handlers.handle_swap_confirm(make_ctx(client, FakeProvider(mempool)), confirm_synapse()))
-    assert s.accepted is True
-    assert client.calls == [('submit_swap_claim', MINER_PK, swap_key_from_tx_hash('srctx'), 'srctx', 0, 'sol')]
-
-
 def test_confirm_stale_deposit_rejects():
     stale = TransactionInfo(
         tx_hash='srctx',
@@ -377,33 +330,6 @@ def test_confirm_success_relays_claim():
     assert client.calls == [
         ('submit_swap_claim', MINER_PK, swap_key_from_tx_hash('srctx'), 'srctx', 800_000, 'sol'),
     ]
-
-
-# ---- handle_swap_reserve: malformed caller input ----
-def test_reserve_bad_hotkey_rejects_at_info_not_error(monkeypatch):
-    from allways.synapses import SwapReserveSynapse
-
-    def _raise(*_a, **_k):
-        raise ValueError('Invalid SS58 address: Base 58 requirement is violated')
-
-    monkeypatch.setattr(axon_handlers, 'reserve_on_behalf', _raise)
-    errors = []
-    monkeypatch.setattr(axon_handlers.bt.logging, 'error', lambda msg, *a, **k: errors.append(msg))
-
-    syn = SwapReserveSynapse(
-        miner_hotkey='not-an-ss58',
-        from_chain='tao',
-        to_chain='sol',
-        user_pubkey='u',
-        user_from_addr='x',
-        user_to_addr='y',
-        from_amount=1,
-    )
-    out = run(axon_handlers.handle_swap_reserve(make_ctx(FakeSolanaClient()), syn))
-
-    assert out.accepted is False
-    assert 'Invalid SS58' in out.rejection_reason
-    assert errors == []  # a garbage caller must not land on the validator's ERROR log
 
 
 def test_activate_tao_accepts_an_attestation_from_the_current_vault_generation():

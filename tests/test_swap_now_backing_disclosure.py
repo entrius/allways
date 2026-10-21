@@ -1,4 +1,4 @@
-"""`alw swap now` must disclose WHICH purse backs the offer (F8).
+"""`alw swap now` must disclose WHICH purse backs the offer.
 
 The failure guarantee — SOL refund vs TAO reimbursement — is what a taker is owed if the miner
 fails, and it differs by backing. `swap now` previously showed rate + receive amount but never the

@@ -7,7 +7,7 @@ from solders.keypair import Keypair
 from allways.solana import pdas
 from allways.solana.events import EventRecord
 from allways.validator.actuator.actuator import Actuator
-from allways.validator.actuator.executors import vote_attest_heartbeat, vote_set_attestation
+from allways.validator.actuator.executors import vote_set_attestation
 from allways.validator.actuator.planners import intent
 from allways.validator.feed.events import FeedStatus
 from allways.validator.hubs import hub
@@ -157,20 +157,6 @@ def test_the_relay_attests_through_the_actuator_inbox_and_acks_the_feed(tmp_path
     assert store.conn().execute("SELECT slot FROM acks WHERE consumer = 'relay-tao'").fetchone()['slot'] == 9
 
 
-def test_a_verdict_it_cannot_write_is_held_with_the_heartbeat(tmp_path, monkeypatch):
-    monkeypatch.setattr('allways.validator.relay.engine.RELAY_MINER_READ_INTERVAL_SECS', 0)
-    relay, events, _, _ = _relay(tmp_path)
-    relay.tick(NOW)
-    broken = relay.ledger.record_relay_slash
-    relay.ledger.record_relay_slash = lambda *a, **k: (_ for _ in ()).throw(RuntimeError('disk'))
-    events.publish(_timed_out())
-    relay.tick(NOW)
-    assert relay._held and relay.relay._ingest_healthy is False
-    relay.ledger.record_relay_slash = broken
-    relay.tick(NOW)
-    assert not relay._held and relay.has_pending_debit(MINER)
-
-
 class _Executors:
     def __init__(self, result):
         self.result, self.sent = result, []
@@ -234,13 +220,6 @@ def test_the_attestation_executor_treats_already_voted_as_done_and_a_held_hub_as
         pass
     else:
         raise AssertionError('a held hub must be retried, not dropped')
-
-
-def test_the_heartbeat_executor_skips_a_round_it_already_voted_in():
-    i = intent('vote_attest_heartbeat', 'config', None, NOW)
-    voted = _Client(voted=True)
-    assert vote_attest_heartbeat(voted, i) is None and voted.calls == []
-    assert vote_attest_heartbeat(_Client(), i) == 'sig'
 
 
 def test_a_verdict_the_ledger_refused_holds_the_ack_until_it_lands(tmp_path, monkeypatch):

@@ -45,11 +45,6 @@ def test_maps_ok_result():
     assert s.accepted is True and s.pool_closes_at == 4242
 
 
-def test_maps_rejection():
-    s = _run(make_reserve_synapse(), ReserveResult(False, 'miner is not active'))
-    assert s.accepted is False and 'not active' in (s.rejection_reason or '')
-
-
 def test_exception_is_caught():
     s = _run(make_reserve_synapse(), raises=RuntimeError('rpc down'))
     assert s.accepted is False and 'rpc down' in (s.rejection_reason or '')

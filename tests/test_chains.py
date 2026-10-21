@@ -9,18 +9,11 @@ from allways.assets.erc20 import Erc20
 from allways.assets.evm import EVM_NETWORKS
 from allways.chains import (
     CHAIN_ARBUSDC,
-    CHAIN_ASTER,
-    CHAIN_AVAX,
-    CHAIN_BASEUSDC,
-    CHAIN_BNB,
     CHAIN_BTC,
-    CHAIN_CRO,
     CHAIN_ETH,
     CHAIN_ETHUSDC,
-    CHAIN_HYPE,
     CHAIN_POL,
     CHAIN_POLUSDC,
-    CHAIN_QNT,
     CHAIN_SN7,
     CHAIN_SN74,
     CHAIN_SOL,
@@ -37,57 +30,28 @@ from allways.constants import family
 
 
 class TestGetChain:
-    def test_btc(self):
-        assert get_chain_def('btc') is CHAIN_BTC
-
-    def test_tao(self):
-        assert get_chain_def('tao') is CHAIN_TAO
-
-    def test_eth(self):
-        assert get_chain_def('eth') is CHAIN_ETH
-
-    def test_arbusdc(self):
-        assert get_chain_def('arbusdc') is CHAIN_ARBUSDC
-
-    def test_hype(self):
-        assert get_chain_def('hype') is CHAIN_HYPE
-
-    def test_bnb(self):
-        assert get_chain_def('bnb') is CHAIN_BNB
-
-    def test_avax(self):
-        assert get_chain_def('avax') is CHAIN_AVAX
-
-    def test_baseusdc(self):
-        assert get_chain_def('baseusdc') is CHAIN_BASEUSDC
-
-    def test_ethusdc(self):
-        assert get_chain_def('ethusdc') is CHAIN_ETHUSDC
-
-    def test_cro(self):
-        assert get_chain_def('cro') is CHAIN_CRO
-
-    def test_aster(self):
-        assert get_chain_def('aster') is CHAIN_ASTER
-
-    def test_uni(self):
-        assert get_chain_def('uni') is CHAIN_UNI
-
-    def test_qnt(self):
-        assert get_chain_def('qnt') is CHAIN_QNT
-
-    def test_pol(self):
-        assert get_chain_def('pol') is CHAIN_POL
-
-    def test_polusdc(self):
-        assert get_chain_def('polusdc') is CHAIN_POLUSDC
-
-    def test_solusdc(self):
-        assert get_chain_def('solusdc') is CHAIN_SOLUSDC
-
-    def test_unsupported_raises(self):
+    def test_every_registered_asset_resolves_to_its_row(self):
+        for spec in ASSET_REGISTRY:
+            assert get_chain_def(spec.chain_id) is SUPPORTED_CHAINS[spec.chain_id], spec.chain_id
+            assert get_chain_def(spec.chain_id).id == spec.chain_id
+        assert get_chain_def('btc') is CHAIN_BTC and get_chain_def('tao') is CHAIN_TAO
         with pytest.raises(KeyError):
             get_chain_def('doge')
+
+    def test_assets_on_one_evm_network_agree_on_its_finality_and_clock(self):
+        """Two assets on one chain must not disagree about its reorg depth or its clock, and every
+        EVM row's confirmation wait stays inside the program's 600s default fulfillment grace."""
+        for chain in SUPPORTED_CHAINS.values():
+            if chain.host_chain not in EVM_NETWORKS:
+                continue
+            assert chain.min_confirmations * chain.seconds_per_block < 600, chain.id
+            owner = next(c for c in SUPPORTED_CHAINS.values() if c.env_prefix == chain.env_prefix and c.networks)
+            if owner.asset_locator is None:  # the network's native coin
+                assert (chain.min_confirmations, chain.seconds_per_block, chain.replay_grace_secs) == (
+                    owner.min_confirmations,
+                    owner.seconds_per_block,
+                    owner.replay_grace_secs,
+                ), chain.id
 
     def test_ids_are_lowercase_and_fit_the_wire(self):
         """Every registry id must be lowercase (the program rejects cased ids at intake, PDAs
@@ -193,8 +157,7 @@ class TestCanonicalPair:
         assert canonical_pair('tao', 'eth') == ('tao', 'eth')
         assert canonical_pair('eth', 'tao') == ('tao', 'eth')
         assert canonical_pair('thor', 'tao') == ('tao', 'thor')
-
-    def test_no_hub_alphabetical(self):
+        # No hub on either side: alphabetical.
         assert canonical_pair('eth', 'btc') == ('btc', 'eth')
         assert canonical_pair('btc', 'eth') == ('btc', 'eth')
 
@@ -224,21 +187,9 @@ class TestComputeExtensionTargetSecs:
         # BTC needs 2 confs: remaining=2, raw = 10000 + 2*600 + 120 = 11320, bucket up to 11400.
         assert compute_extension_target_secs('btc', 0, self.NOW, self.CEILING) == 11_400
 
-    def test_btc_one_conf(self):
-        # remaining=1, raw = 10000 + 600 + 120 = 10720, bucket up to 10800.
-        assert compute_extension_target_secs('btc', 1, self.NOW, self.CEILING) == 10_800
-
     def test_btc_fully_confirmed_only_padding(self):
         # remaining clamps to 0: raw = 10000 + 120 = 10120, bucket up to 10200.
         assert compute_extension_target_secs('btc', 5, self.NOW, self.CEILING) == 10_200
-
-    def test_tao_remaining_confs(self):
-        # TAO needs 6 confs, 12s each: remaining=6, raw = 10000 + 72 + 120 = 10192, bucket up to 10200.
-        assert compute_extension_target_secs('tao', 0, self.NOW, self.CEILING) == 10_200
-
-    def test_target_is_strictly_after_now(self):
-        target = compute_extension_target_secs('btc', 0, self.NOW, self.CEILING)
-        assert target > self.NOW
 
     def test_result_is_bucket_aligned(self):
         for confs in range(0, 4):
@@ -249,30 +200,6 @@ class TestComputeExtensionTargetSecs:
         # A ceiling below the computed target wins — the contract caps target_at at max_extend_at.
         ceiling = self.NOW + 500
         assert compute_extension_target_secs('btc', 0, self.NOW, ceiling) == ceiling
-
-    def test_eth_remaining_confs(self):
-        # ETH needs 32 confs, 12s each: remaining=32, raw = 10000 + 384 + 120 = 10504, bucket up to 10800.
-        assert compute_extension_target_secs('eth', 0, self.NOW, self.CEILING) == 10_800
-
-    def test_arbusdc_remaining_confs(self):
-        # arbusdc needs 90 confs, 1s each: remaining=90, raw = 10000 + 90 + 120 = 10210, bucket up to 10800.
-        assert compute_extension_target_secs('arbusdc', 0, self.NOW, self.CEILING) == 10_800
-
-    def test_hype_remaining_confs(self):
-        # hype needs 2 confs, 1s each: remaining=2, raw = 10000 + 2 + 120 = 10122, bucket up to 10200.
-        assert compute_extension_target_secs('hype', 0, self.NOW, self.CEILING) == 10_200
-
-    def test_bnb_remaining_confs(self):
-        # bnb needs 15 confs, 1s each: remaining=15, raw = 10000 + 15 + 120 = 10135, bucket up to 10200.
-        assert compute_extension_target_secs('bnb', 0, self.NOW, self.CEILING) == 10_200
-
-    def test_baseusdc_remaining_confs(self):
-        # baseusdc needs 120 confs, 2s each: remaining=120, raw = 10000 + 240 + 120 = 10360, bucket up to 10800.
-        assert compute_extension_target_secs('baseusdc', 0, self.NOW, self.CEILING) == 10_800
-
-    def test_cro_remaining_confs(self):
-        # cro needs 2 confs, 1s each: remaining=2, raw = 10000 + 2 + 120 = 10122, bucket up to 10200.
-        assert compute_extension_target_secs('cro', 0, self.NOW, self.CEILING) == 10_200
 
     def test_pol_remaining_confs(self):
         # pol needs 100 confs at the stored 1s: raw = 10000 + 100 + 120 = 10220, bucket up to 10800.
@@ -286,15 +213,11 @@ class TestComputeExtensionTargetSecs:
         assert cover == 220
         assert cover >= CHAIN_POL.min_confirmations * 1.5
 
-    def test_polusdc_matches_the_chain_it_shares(self):
+    @pytest.mark.parametrize('token,host', (('polusdc', 'pol'), ('solusdc', 'sol')))
+    def test_a_token_extends_exactly_as_the_chain_it_shares(self, token, host):
         # A token and its host coin must extend identically — same confs, same stored block time.
-        assert compute_extension_target_secs('polusdc', 0, self.NOW, self.CEILING) == compute_extension_target_secs(
-            'pol', 0, self.NOW, self.CEILING
-        )
-
-    def test_solusdc_matches_the_chain_it_shares(self):
-        assert compute_extension_target_secs('solusdc', 0, self.NOW, self.CEILING) == compute_extension_target_secs(
-            'sol', 0, self.NOW, self.CEILING
+        assert compute_extension_target_secs(token, 0, self.NOW, self.CEILING) == compute_extension_target_secs(
+            host, 0, self.NOW, self.CEILING
         )
 
     def test_unsupported_chain_raises(self):

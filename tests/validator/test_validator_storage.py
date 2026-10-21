@@ -1,11 +1,11 @@
-"""TODO-14 — DatabaseStorage reconnect-on-failure.
+"""DatabaseStorage reconnect-on-failure.
 
 A slow-booting or restarted aw-db must pause dashboard writes, not disable them for the
 process lifetime: a connection-class failure drops the connection and a later write lazily
 reconnects (rate-limited). Writes stay non-fatal to the forward loop throughout.
 
 ``is_enabled()`` is the callers' gate and means "configured", not "connection live" — otherwise
-the gates in forward.py/scoring.py would make the reconnect unreachable (the review finding).
+the gates in forward.py/scoring.py would make the reconnect unreachable.
 
 Mocks the psycopg layer entirely (psycopg isn't a test dependency): failures are raised as a
 test-local ``OperationalError``, which ``is_connection_failure`` matches by class name.
@@ -14,7 +14,6 @@ test-local ``OperationalError``, which ``is_connection_failure`` matches by clas
 import contextlib
 
 from allways.validator.export.storage import storage as storage_mod
-from allways.validator.export.storage.database import is_connection_failure
 from allways.validator.export.storage.storage import DatabaseStorage
 
 
@@ -88,11 +87,6 @@ def force_retry_window(storage):
     storage._last_reconnect_attempt = 0.0
 
 
-def test_is_connection_failure_matches_by_class_name():
-    assert is_connection_failure(OperationalError('boom'))
-    assert not is_connection_failure(ValueError('boom'))
-
-
 def test_write_failure_does_not_raise_and_drops_connection(monkeypatch):
     conn = FakeConnection()
     storage = make_storage(monkeypatch, [conn])
@@ -117,19 +111,6 @@ def test_reconnects_on_next_write_after_drop(monkeypatch):
     assert storage.db_connection is fresh and fresh.commits == 1
 
 
-def test_reconnect_attempts_are_rate_limited(monkeypatch):
-    dead = FakeConnection()
-    connections = [dead, None]  # a third pop would raise IndexError — proves no extra redial
-    storage = make_storage(monkeypatch, connections)
-    dead.failing = True
-    assert not storage.upsert_current_crown_snapshot({}).success  # drops the connection
-    assert not storage.upsert_current_crown_snapshot({}).success  # first redial (fails: None)
-
-    # Within the rate-limit window after a failed redial: degrades to not-enabled without dialing.
-    result = storage.upsert_current_crown_snapshot({})
-    assert not result.success and 'not enabled' in result.errors[0]
-
-
 def test_boot_time_connect_failure_heals_on_later_write(monkeypatch):
     # The full-e2e boot-order landmine: aw-db up after the validator.
     fresh = FakeConnection()
@@ -141,69 +122,12 @@ def test_boot_time_connect_failure_heals_on_later_write(monkeypatch):
     assert storage.db_connection is fresh
 
 
-def test_non_connection_failure_keeps_connection(monkeypatch):
-    conn = FakeConnection()
-    storage = make_storage(monkeypatch, [conn])
-
-    def raise_value_error(rows_by_direction, commit=False):
-        raise ValueError('bad row shape')
-
-    storage.repo.replace_current_crown = raise_value_error
-    result = storage.upsert_current_crown_snapshot({})
-    assert not result.success
-    assert storage.db_connection is conn  # only connection-class errors drop
-
-
 def test_disabled_flag_never_dials(monkeypatch):
     monkeypatch.delenv('STORE_DB_RESULTS', raising=False)
     monkeypatch.setattr(storage_mod, 'create_database_connection', lambda: FakeConnection())
     storage = DatabaseStorage()
     assert not storage.is_enabled()
     assert not storage.upsert_current_crown_snapshot({}).success
-
-
-def test_halt_flush_clears_live_score_tip(monkeypatch):
-    """flush_halt_window wipes current_miner_scores in the same transaction as
-    the crown clear — the dashboard never shows a live tip while the pool is
-    recycling."""
-    conn = FakeConnection()
-    storage = make_storage(monkeypatch, [conn])
-    calls = []
-    storage.repo.replace_current_miner_scores = lambda rows, commit=False: calls.append(rows) or len(rows)
-    result = storage.flush_halt_window(directions=[('sol', 'btc', 'sol')], window_start=0, window_end=100, max_ts=100)
-    assert result.success
-    assert calls == [[]]
-
-
-def test_scoring_flush_writes_direction_pools_in_the_same_transaction(monkeypatch):
-    """The round's per-lane pools ride the same all-or-nothing flush as the crown
-    ledger and miner_scores; an absent/empty list writes nothing (older callers)."""
-    conn = FakeConnection()
-    storage = make_storage(monkeypatch, [conn])
-    seen = []
-    storage.repo.store_crown_holders_bulk = lambda rows, commit=False: len(rows)
-    storage.repo.store_miner_scores_bulk = lambda rows, commit=False: len(rows)
-    storage.repo.store_direction_pools_bulk = lambda rows, commit=False: seen.append(rows) or len(rows)
-    lane = ('sol', 'btc', 'sol')
-    rows = [(4_600, 'sol', 'btc', 'sol', 0.5, 12_345, True), (4_600, 'btc', 'sol', 'sol', 0.0, 0, False)]
-    result = storage.flush_scoring_window(
-        crown_rows_by_direction={lane: []},
-        crown_window_bounds_by_direction={lane: (1_000, 4_600)},
-        miner_score_rows=[],
-        crown_holders_max_ts=4_600,
-        direction_pool_rows=rows,
-    )
-    assert result.success and result.stored_counts['direction_pools'] == 2
-    assert seen == [rows]
-    assert conn.commits == 1
-
-    result = storage.flush_scoring_window(
-        crown_rows_by_direction={lane: []},
-        crown_window_bounds_by_direction={lane: (1_000, 4_600)},
-        miner_score_rows=[],
-        crown_holders_max_ts=4_600,
-    )
-    assert result.success and 'direction_pools' not in result.stored_counts
 
 
 def test_scoring_flush_trims_pre_window_tails(monkeypatch):

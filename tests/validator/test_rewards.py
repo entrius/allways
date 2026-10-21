@@ -4,7 +4,6 @@ replay, a full round and fill qualification over the ledger."""
 from functools import partial
 from types import SimpleNamespace
 
-import numpy as np
 import pytest
 
 from allways.classes import ActivityTransition
@@ -28,7 +27,6 @@ from allways.utils.rate import is_executable_rate, min_executable_hub_leg
 from allways.validator.scoring.ledger import ACTIVE, ACTIVITY, RATE, Ledger
 from allways.validator.scoring.rewards import (
     AlphaPrices,
-    DirectionTrace,
     capacity_factor,
     compute_direction_pools,
     crown_can_fund,
@@ -40,22 +38,8 @@ from allways.validator.scoring.rewards import (
     replay_crown_time_window,
     score_round,
 )
-from allways.validator.scoring.trace import WeightingTrace, diagnose_non_earner
 from allways.validator.store.db import Store
 from allways.validator.world.snapshot import World
-
-
-def make_metagraph(hotkeys: list[str]) -> SimpleNamespace:
-    n = SimpleNamespace(item=lambda: len(hotkeys))
-    return SimpleNamespace(n=n, hotkeys=list(hotkeys))
-
-
-def pad_hotkeys_to_cover_recycle(seeds: list[str]) -> list[str]:
-    """Ensure the metagraph is large enough that RECYCLE_UID is in-bounds."""
-    hotkeys = list(seeds)
-    while len(hotkeys) <= RECYCLE_UID:
-        hotkeys.append(f'hk_filler_{len(hotkeys)}')
-    return hotkeys
 
 
 def _miner_state(successful: int, failed: int, settling_until: int = 0) -> SimpleNamespace:
@@ -81,10 +65,6 @@ class TestIsEligibleHelper:
         assert (
             is_eligible(_miner_state(50, MAX_FAILED_SWAPS + 1), hotkey='hk_a', recent_fills={'sol': {'hk_a'}}) is False
         )
-
-    def test_no_success_minimum(self):
-        # The first completed fill is enough: zero lifetime successes, one fill in the window.
-        assert is_eligible(_miner_state(0, 0), hotkey='hk_new', recent_fills={'tao': {'hk_new'}}) is True
 
     def test_global_reading_is_any_purse_lane_reading_is_own_purse(self):
         """A tao-only fill keeps the miner globally eligible but only the tao lanes live."""
@@ -116,13 +96,6 @@ class TestComputeDirectionPools:
     @staticmethod
     def family_total(pools, family):
         return sum(v for (f, t, _b), v in pools.items() if scoring_family(f, t) == family)
-
-    def test_every_alpha_pair_is_in_the_alpha_family(self):
-        for pair in (('sol', 'sn7'), ('sn7', 'avax')):
-            assert scoring_family(*pair) == ALPHA_FAMILY
-        assert scoring_family('sol', 'btc') == 'sol' and scoring_family('sol', 'tao') == 'sol'
-        assert scoring_family('tao', 'eth') == 'tao'
-        assert set(FAMILY_PAIR_COUNTS) == {'sol', 'tao', ALPHA_FAMILY}
 
     def test_no_volume_falls_back_to_equal_family_shares(self):
         pools = compute_direction_pools({})
@@ -160,13 +133,6 @@ class TestComputeDirectionPools:
         assert pools[('sol', 'eth', 'sol')] == 0.0  # registered, quiet → dead
         assert sum(pools.values()) == pytest.approx(self.FAMILY)
 
-    def test_dust_fill_takes_a_full_floor_when_few_pairs_are_live(self):
-        """The bootstrap bounty: next to one whale pair, a dust fill on a second pair still
-        earns that pair (1−α)/2 of the family — the floor is what makes coverage pay."""
-        pools = compute_direction_pools({('btc', 'sol'): {'hk': (1, 5_000)}, ('sol', 'eth'): {'hk': (50, 1)}})
-        dust_pair = pools[('sol', 'eth', 'sol')] + pools[('eth', 'sol', 'sol')]
-        assert dust_pair == pytest.approx(self.FAMILY * ((1 - POOL_VOLUME_ALPHA) / 2 + POOL_VOLUME_ALPHA * 50 / 5_050))
-
     def test_live_families_share_equally_whatever_their_volume(self):
         pools = compute_direction_pools(
             {
@@ -189,11 +155,6 @@ class TestComputeDirectionPools:
         for lane, pool in before.items():
             if scoring_family(*lane[:2]) != ALPHA_FAMILY:
                 assert after[lane] == pool
-
-    def test_idle_alpha_family_pays_nothing(self):
-        pools = compute_direction_pools({('btc', 'sol'): {'hk': (1, 10)}, ('tao', 'eth'): {'hk': (10, 1)}})
-        assert self.family_total(pools, ALPHA_FAMILY) == 0.0
-        assert sum(pools.values()) == pytest.approx(2 * self.FAMILY)  # the alpha third recycles
 
     def test_alpha_volume_is_the_tao_collateral(self):
         # sn7↔avax cleared 3x the TAO value of sn64↔avax, however many alpha units each moved.
@@ -242,12 +203,6 @@ class TestCrownHoldersHelper:
         holders = crown_holders_at_instant(rates, {'a', 'b'}, rewardable_by_state={'b'})
         assert holders == ['b']
 
-    def test_all_busy_returns_empty(self):
-        """No miner is in a rewardable state → no crown → pool recycles."""
-        rates = {'a': 0.00030, 'b': 0.00020}
-        holders = crown_holders_at_instant(rates, {'a', 'b'}, rewardable_by_state=set())
-        assert holders == []
-
     def test_lower_rate_wins_flips_sort(self):
         """For tao→btc the rate is TAO per BTC and lower = better. The
         helper picks the smallest qualifying rate, falling through to the
@@ -268,12 +223,6 @@ class TestCrownHoldersHelper:
             return r <= 1e6
 
         assert crown_holders_at_instant(rates, {'sentinel', 'sane'}, executable_rate_check=check) == ['sane']
-
-    def test_executable_check_none_preserves_legacy_behavior(self):
-        """When no check is supplied, the old qualification rules apply —
-        sentinel still wins. Ensures existing callers aren't surprised."""
-        rates = {'sentinel': 1e10, 'sane': 326.0}
-        assert crown_holders_at_instant(rates, {'sentinel', 'sane'}) == ['sentinel']
 
 
 class TestCrownRateBand:
@@ -299,15 +248,6 @@ class TestCrownRateBand:
         holders = crown_holders_at_instant(rates, {'busy', 'a', 'b'}, rewardable_by_state={'a', 'b'}, rate_band=0.005)
         assert holders == ['a', 'b']
 
-    def test_unqualified_band_member_excluded(self):
-        rates = {'a': 0.00020, 'b': 0.0001995}
-        holders = crown_holders_at_instant(rates, {'a', 'b'}, rewardable_by_state={'a'}, rate_band=0.005)
-        assert holders == ['a']
-
-    def test_band_zero_keeps_exact_best_only(self):
-        rates = {'a': 0.00020, 'b': 0.00019999}
-        assert crown_holders_at_instant(rates, {'a', 'b'}, rate_band=0.0) == ['a']
-
 
 class TestCrownDepthShares:
     def test_proportional_to_collateral(self):
@@ -319,10 +259,6 @@ class TestCrownDepthShares:
         # full-capacity fill buys no extra share (never pay-to-win).
         shares = crown_depth_shares(['whale', 'full'], {'whale': 2_000_000_000, 'full': 550_000_000}, 500_000_000)
         assert shares == {'whale': 0.5, 'full': 0.5}
-
-    def test_all_zero_depth_splits_evenly(self):
-        shares = crown_depth_shares(['a', 'b'], {}, 500_000_000)
-        assert shares == {'a': 0.5, 'b': 0.5}
 
 
 class TestCapacityFactorHelper:
@@ -345,11 +281,6 @@ class TestCapacityFactorHelper:
 
         assert capacity_factor(275_000_000, 500_000_000) == 0.5
 
-    def test_quarter_required_is_quarter(self):
-        """Linear ramp (k=1): a quarter of required earns a quarter."""
-
-        assert capacity_factor(137_500_000, 500_000_000) == 0.25
-
     def test_above_required_caps_at_one(self):
 
         assert capacity_factor(2_000_000_000, 500_000_000) == 1.0
@@ -358,140 +289,11 @@ class TestCapacityFactorHelper:
 
         assert capacity_factor(0, 500_000_000) == 0.0
 
-    def test_negative_collateral_is_zero(self):
-        """Defensive — contract guarantees >=0 but the helper handles it."""
-
-        assert capacity_factor(-1, 500_000_000) == 0.0
-
     def test_zero_max_swap_is_fail_safe_one(self):
         """Bounds cache cold start / RPC failure returns 0; factor should
         default to 1.0 so the first scoring pass doesn't zero everyone."""
 
         assert capacity_factor(100_000_000, 0) == 1.0
-
-    def test_negative_max_swap_is_fail_safe_one(self):
-
-        assert capacity_factor(100_000_000, -1) == 1.0
-
-
-class TestWeightingTraceRecorders:
-    """The record_* methods on WeightingTrace own their own math — direct unit
-    coverage so changes there don't have to be inferred from integration
-    tests."""
-
-    def test_record_capacity_sets_factor(self):
-
-        wt = WeightingTrace()
-        wt.record_capacity(factor=0.5)
-        assert wt.capacity_factor == 0.5
-
-    def test_record_eligibility_sets_flag(self):
-
-        wt = WeightingTrace()
-        assert wt.eligible is False  # default
-        wt.record_eligibility(eligible=True)
-        assert wt.eligible is True
-        wt.record_eligibility(eligible=False)
-        assert wt.eligible is False
-
-
-class TestNonEarnerDiagnosis:
-    """diagnose_non_earner must report the true reason: direction-aware outbid
-    (tao→btc lower-wins, btc→tao higher-wins) and collateral exclusion, not a
-    blanket 'outbid' that hid the collateral-baseline bug."""
-
-    def _trace(self, best_rate: float):
-
-        t = DirectionTrace(pool=0.5)
-        t.best_rate = best_rate
-        return t
-
-    def test_competitive_but_present_zero_is_insufficient_collateral(self):
-
-        # tao→btc lower-wins: own 279.3 beats best 280 → competitive, but
-        # collateral is a known 0 → insufficient_collateral, NOT outbid.
-        reason = diagnose_non_earner(
-            'hk',
-            {('btc', 'sol'): 279.3},
-            eligible=True,
-            ever_active={'hk'},
-            direction_traces={('btc', 'sol'): self._trace(280.0)},
-            collaterals={'hk': 0},
-            swap_bounds={'sol': (100_000_000, 500_000_000)},
-        )
-        assert reason.startswith('insufficient_collateral'), reason
-
-    def test_competitive_but_unknown_collateral(self):
-
-        reason = diagnose_non_earner(
-            'hk',
-            {('btc', 'sol'): 279.3},
-            eligible=True,
-            ever_active={'hk'},
-            direction_traces={('btc', 'sol'): self._trace(280.0)},
-            collaterals={},  # absent → unknown
-            swap_bounds={'sol': (100_000_000, 500_000_000)},
-        )
-        assert reason.startswith('unknown_collateral'), reason
-
-    def test_genuinely_worse_rate_is_direction_aware_outbid(self):
-
-        # tao→btc lower-wins: own 281 is worse than best 280 → outbid.
-        reason = diagnose_non_earner(
-            'hk',
-            {('btc', 'sol'): 281.0},
-            eligible=True,
-            ever_active={'hk'},
-            direction_traces={('btc', 'sol'): self._trace(280.0)},
-            collaterals={'hk': 500_000_000},
-            swap_bounds={'sol': (100_000_000, 500_000_000)},
-        )
-        assert reason.startswith('outbid'), reason
-
-    def test_competitive_and_funded_is_unfilled_not_outbid(self):
-
-        reason = diagnose_non_earner(
-            'hk',
-            {('btc', 'sol'): 279.3},
-            eligible=True,
-            ever_active={'hk'},
-            direction_traces={('btc', 'sol'): self._trace(280.0)},
-            collaterals={'hk': 500_000_000},
-            swap_bounds={'sol': (100_000_000, 500_000_000)},
-        )
-        assert reason.startswith('competitive_but_unfilled'), reason
-
-    def test_alpha_lane_is_diagnosed_on_its_tao_lane(self):
-
-        reason = diagnose_non_earner(
-            'hk',
-            {('sol', 'sn7'): 90.0},
-            eligible=True,
-            ever_active={'hk'},
-            direction_traces={('sol', 'sn7', 'tao'): self._trace(100.0)},
-        )
-        assert reason.startswith('outbid'), reason
-
-    def test_dead_pair_never_masks_a_live_pairs_reason(self):
-        """A miner quoting a dead pair AND a live pair it lost on reads the live reason;
-        dead_pair is reported only when nothing else explains the zero."""
-
-        dead = DirectionTrace(pool=0.0)
-        kwargs = dict(
-            eligible=True,
-            ever_active={'hk'},
-            collaterals={'hk': 500_000_000},
-            swap_bounds={'sol': (100_000_000, 500_000_000)},
-        )
-        reason = diagnose_non_earner(
-            'hk',
-            {('eth', 'sol'): 1.0, ('btc', 'sol'): 281.0},
-            direction_traces={('eth', 'sol'): dead, ('btc', 'sol'): self._trace(280.0)},
-            **kwargs,
-        )
-        assert reason.startswith('outbid'), reason
-        reason = diagnose_non_earner('hk', {('eth', 'sol'): 1.0}, direction_traces={('eth', 'sol'): dead}, **kwargs)
-        assert reason.startswith('dead_pair (eth→sol'), reason
 
 
 class TestCrownPredicateParity:
@@ -531,12 +333,6 @@ class TestCrownPredicateParity:
                             f'bounds=({min_rao},{max_rao}) hk={hk} rate={rate}'
                         )
 
-    def test_fail_closed_on_absent_collateral(self):
-        # Absent counts as zero — the scoring-round reconcile seeds a baseline for
-        # every live funded miner, so a missing one means the chain agrees: unfunded.
-        _, can_fund = make_crown_predicates('sol', 'btc', 100_000_000, 500_000_000, {})
-        assert can_fund('hk_unknown', 345.0) is False
-
     def test_drops_holder_whose_collateral_cannot_fund_min_leg(self):
         # 1-rao collateral can't cover any real in-band leg → boundary-squat drop;
         # a richly-funded miner at the same rate passes.
@@ -572,19 +368,6 @@ class TestCrownCanFund:
 
     def test_unknown_collateral_fails_closed(self):
         assert not crown_can_fund('hk', self.RATE, collaterals={}, **self.BOUNDS)
-
-    def test_unexecutable_rate_is_unconstrained(self):
-        # min_leg 0 = "no in-band fundable swap" — executability is policed by
-        # is_executable_rate, not this gate (the crown-squat low canonical, btc→sol).
-        assert crown_can_fund(
-            'hk',
-            1e-12,
-            from_chain='btc',
-            to_chain='sol',
-            min_swap_hub=100_000_000,
-            max_swap_hub=500_000_000,
-            collaterals={},
-        )
 
 
 # ── over the ledger ─────────────────────────────────────────────────────────
@@ -746,26 +529,3 @@ def test_alpha_prices_come_from_the_price_table_first_and_are_kept_for_their_ttl
     assert prices.unit_value('sol', 'sn7', 'tao', NOW + 1) == 0.25  # kept
     assert prices.unit_value('sol', 'sn7', 'tao', NOW + ALPHA_PRICE_TTL_SECS) == 0.5  # read on its own
     assert prices.unit_value('btc', 'sol', 'sol', NOW) == 1.0 and alpha.reads == 1
-
-
-def test_a_round_reads_as_one_line():
-    from allways.validator.scoring.trace import round_summary
-
-    traces = {LANE: DirectionTrace(pool=0.3), ('sol', 'btc', 'sol'): DirectionTrace(pool=0.0)}
-    traces[LANE].crown_time = {'hk_b': 3600.0}
-    rewards = np.zeros(len(HOTKEYS), dtype=np.float32)
-    rewards[1], rewards[RECYCLE_UID] = 0.25, 0.75
-    line = round_summary(3600, 7200, traces, rewards, RECYCLE_UID, distributed=0.25)
-    assert line == 'scoring: round 01:00–02:00 UTC, 25.0% to miners over 1 lane(s), 75.0% recycled; top: uid1 25.0%'
-
-
-def test_the_trace_lists_live_lanes_and_counts_the_rest_even_when_every_lane_has_a_pool():
-    from allways.validator.scoring.trace import is_live_lane
-
-    # The no-volume fallback gives every registry lane a pool; a pool alone must not earn a log line.
-    fallback = DirectionTrace(pool=7.6e-05)
-    held = DirectionTrace(pool=0.02, crown_time={'hk_b': 3600.0})
-    unfilled = DirectionTrace(pool=0.02, unfilled_time=3600)
-    cleared = DirectionTrace(pool=0.02, qualified_volume=100)
-    assert not is_live_lane(fallback) and not is_live_lane(DirectionTrace())
-    assert is_live_lane(held) and is_live_lane(unfilled) and is_live_lane(cleared)

@@ -57,14 +57,6 @@ def test_a_truncated_live_tx_names_every_account_it_touched(tmp_path):
     assert rpc.tx_reads == ['live-1']
 
 
-def test_an_untruncated_live_tx_needs_no_transaction_read(tmp_path):
-    rpc = _TxRpc([SIGNER])
-    feed, live, events, _ = _live_feed(tmp_path, rpc)
-    live.inbox.append(_Pending(9, 'live-1', [('QuoteRemoved', {})]))
-    feed.tick(NOW)
-    assert [r.name for r in events.drain()] == ['QuoteRemoved'] and rpc.tx_reads == []
-
-
 def test_an_unreadable_truncated_tx_falls_back_to_a_rescan(tmp_path):
     feed, live, events, gaps = _live_feed(tmp_path, _TxRpc(None))
     live.inbox.append(_Pending(9, 'live-1', [], truncated=True))

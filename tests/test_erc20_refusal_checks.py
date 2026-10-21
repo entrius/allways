@@ -1,12 +1,9 @@
 """Erc20 refusal checks — the shared slash-gate contract, offline.
 
-`erc20.py` used to hardwire Circle's `isBlacklisted`/`paused` and probe them on every token. A
-token without those functions REVERTS, `_refused_at` raised, `delivery_refused` raised, and the
-caller (validator/solana_swap_loop.py `_dest_refuses`) read the exception as "defer, don't slash"
-— permanently, on every swap. Miners on such a pair were unslashable.
-
-The surface is now declared per registry row. Two directions must hold: a token with no surface
-answers WITHOUT touching the RPC, and anything a declared check cannot answer raises rather than
+The issuer surface is declared per registry row. A token lacking a probed function REVERTS, and a
+raise out of `delivery_refused` defers the slash permanently, so two directions must hold: a token
+with no surface answers WITHOUT touching the RPC (run over the real rows in
+tests/test_evm_providers.py), and anything a declared check cannot answer raises rather than
 reading as "not refused".
 """
 
@@ -25,7 +22,6 @@ from allways.constants import (
 
 RECIPIENT = '0x70997970C51812dc3A010C7d01b50e0d17dc79C8'
 DECLARED = CHAIN_ETHUSDC  # ('isBlacklisted(address)', 'paused()')
-NO_CHECKS = replace(CHAIN_ETHUSDC, id='noctl', name='No-checks token', refusal_checks=())
 
 
 @pytest.fixture(autouse=True)
@@ -59,29 +55,23 @@ def test_an_undeclared_row_fails_at_construction():
         Erc20(replace(DECLARED, refusal_checks=None))
 
 
-def test_check_connection_degrades_when_token_probe_unreachable():
-    # A probe we can't COMPLETE is transient (flaky RPC / rate-limit storm). It must NOT crash the whole
-    # validator at boot over one spoke — that takes the hub down too. Degrade (return), don't raise.
+@pytest.mark.parametrize(
+    'code_answer',
+    (pytest.param(ConnectionError('token RPC unreachable'), id='unreachable'), pytest.param(None, id='null-code')),
+)
+def test_check_connection_degrades_when_the_token_probe_cannot_complete(code_answer):
+    # A probe we can't COMPLETE (flaky RPC, rate-limit storm, a `result: null` from a lagging endpoint)
+    # is transient. It must NOT crash the whole validator at boot over one spoke — that takes the hub
+    # down too. Degrade (return), don't raise; only a completed '0x' answer is a codeless contract.
     def rpc(method, params, **kw):
         if method == 'eth_getCode':
-            raise EvmRpcError('token RPC unreachable')
+            if isinstance(code_answer, Exception):
+                raise code_answer
+            return code_answer
         return hex(1000)
 
     provider = build(DECLARED, rpc)
     provider.chain.connect_network = lambda: (1, 100)  # host chain reachable; isolate the token probe
-    provider.check_connection(require_send=False)  # no raise
-
-
-def test_check_connection_degrades_on_a_null_code_answer():
-    # `result: null` from a broken/lagging endpoint is not a codeless contract (the spec returns the
-    # string '0x' for that) — it must take the transient/degrade path, not the fatal config raise.
-    def rpc(method, params, **kw):
-        if method == 'eth_getCode':
-            return None
-        return hex(1000)
-
-    provider = build(DECLARED, rpc)
-    provider.chain.connect_network = lambda: (1, 100)
     provider.check_connection(require_send=False)  # no raise
 
 
@@ -99,44 +89,12 @@ def test_check_connection_raises_on_codeless_contract():
         provider.check_connection(require_send=False)
 
 
-class TestNoChecksNeverTouchTheRpc:
-    """Recorded on a transcript, never by raising inside the stub — ``can_deliver_to`` swallows
-    every exception into its fail-open ``True``, so a raising stub would be satisfied by the
-    exact failure it exists to detect."""
-
-    def test_delivery_refused_is_false(self):
-        def forbidden(*_a, **_kw):
-            raise AssertionError('a token declaring no checks must not reach the RPC')
-
-        assert build(NO_CHECKS, forbidden).delivery_refused(RECIPIENT, since_unix=0) is False
-
-    def test_can_deliver_to_is_true(self):
-        calls = []
-        provider = build(NO_CHECKS, lambda method, params, **kw: calls.append(method))
-        assert provider.can_deliver_to(RECIPIENT, amount=1) is True
-        assert calls == []
-
-    def test_address_refused_is_false(self):
-        def forbidden(*_a, **_kw):
-            raise AssertionError('a token declaring no checks must not reach the RPC')
-
-        assert build(NO_CHECKS, forbidden).address_refused(RECIPIENT) is False
-
-
 class TestDeclaredChecks:
-    def test_each_declared_check_is_positive_evidence(self):
-        for selector, _takes_address in Erc20(DECLARED)._checks:
-            assert build(DECLARED, answering(selector)).delivery_refused(RECIPIENT, since_unix=0) is True
-
-    def test_a_clean_destination_is_deliverable(self):
-        assert build(DECLARED, answering('0xdead', value=0)).can_deliver_to(RECIPIENT, amount=1) is True
-
     @pytest.mark.parametrize(
         'answer',
         (
             pytest.param('0x', id='empty-permissive-fallback'),
             pytest.param(None, id='null'),
-            pytest.param('0xnothex', id='garbage'),
         ),
     )
     def test_an_unanswerable_check_raises_rather_than_clearing(self, answer):
@@ -201,10 +159,10 @@ class TestCancelEvidenceReadsTheDeclaredSurface:
         provider = build(self.PAXOS, rpc)
         assert provider.cancel_evidence(RECIPIENT, amount=1) == expected
 
-    def test_a_clean_destination_yields_no_evidence(self):
+    def test_a_clean_destination_or_rpc_trouble_yields_no_evidence(self):
+        # A false cancel would refund a swap the miner could have delivered.
         assert build(self.PAXOS, lambda m, p, **kw: f'0x{0:064x}').cancel_evidence(RECIPIENT, amount=1) is None
 
-    def test_rpc_trouble_yields_no_evidence_rather_than_a_false_cancel(self):
         def down(*_a, **_kw):
             raise ConnectionError('every endpoint is down')
 

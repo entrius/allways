@@ -11,7 +11,7 @@ from solders.keypair import Keypair as SolKeypair
 
 from allways.constants import RATE_PRECISION
 from allways.validator.serving import requests
-from allways.validator.serving.requests import ROUTED_REQUEST_TTL_SECS, draw_pool_winner, finalize_won_seats
+from allways.validator.serving.requests import ROUTED_REQUEST_TTL_SECS, finalize_won_seats
 from tests.validator.fakes import Ctx, serving_store
 
 NOW = 1_000_000
@@ -96,7 +96,7 @@ def test_won_seat_finalizes_fifo_user_at_pinned_rate(tmp_path):
 
 
 def test_finalize_commits_the_canonical_source_form(tmp_path):
-    # V-C2: the finalize hash + source-lock PDA are byte-keyed on this string, so a cased variant
+    # The finalize hash + source-lock PDA are byte-keyed on this string, so a cased variant
     # (queued pre-normalization or by an older validator) must land canonical at commit time.
     client = SweepClient(None)
     client._reservation = _drawn_seat(client)
@@ -118,9 +118,9 @@ def _live_sibling(*, from_chain='sol', from_addr='', reserved_until=NOW + 300):
 
 
 def test_duplicate_source_addr_on_other_hub_is_refused(tmp_path):
-    # V-C2: a source address may back only one live-unclaimed reservation per miner. The winner's
+    # A source address may back only one live-unclaimed reservation per miner. The winner's
     # from_addr already backs a LIVE reservation on the miner's tao hub (same from_chain), so a single
-    # deposit could satisfy both — refuse to finalize the duplicate rather than let it be siphoned.
+    # deposit could satisfy both — refuse to finalize the duplicate.
     client = SweepClient(None)
     client._reservation = _drawn_seat(client)  # the sol seat we're about to finalize
     client.siblings['tao'] = _live_sibling(from_chain='sol', from_addr=f'{USER_A[:6]}src')
@@ -129,19 +129,19 @@ def test_duplicate_source_addr_on_other_hub_is_refused(tmp_path):
     assert finalize_won_seats(v, NOW) == []
     assert not client.finalized, 'colliding-source seat must not be finalized'
     # Queue is NOT dropped: the only user collides, so nothing finalizes this pass, but the entry persists
-    # (its sibling may clear, or the TTL prunes it) — dropping it would be a griefing lever (see below).
+    # (its sibling may clear, or the TTL prunes it); dropping it would let one entry clear the queue (see below).
     assert v.store.distinct_routed_pools() != [], 'colliding queue must persist, not be dropped'
 
 
 def test_colliding_front_user_does_not_block_an_honest_user(tmp_path):
-    # V-C2 griefing guard: from_addrs are public, so an attacker can queue a front (oldest) request whose
+    # from_addrs are public, so anyone can queue a front (oldest) request whose
     # source collides with a live seat. That must NOT knock out the honest queued users behind it — the
     # sweep skips the colliding entry and finalizes the next eligible user.
     client = SweepClient(None)
     client._reservation = _drawn_seat(client)
     client.siblings['tao'] = _live_sibling(from_chain='sol', from_addr=f'{USER_A[:6]}src')  # USER_A collides
     v = _validator(tmp_path, client)
-    _queue(v.store, USER_A, created_at=NOW - 50)  # oldest, colliding — the griefer
+    _queue(v.store, USER_A, created_at=NOW - 50)  # oldest, colliding
     _queue(v.store, USER_B, created_at=NOW - 5)  # honest, non-colliding
     assert finalize_won_seats(v, NOW) == [MINER]
     assert len(client.finalized) == 1 and client.finalized[0][1] == USER_B, 'honest user must still be served'
@@ -207,11 +207,6 @@ def test_price_fault_at_finalize_leaves_verdict_to_ingest(tmp_path):
     v = _declared_validator(tmp_path, client)
     assert finalize_won_seats(v, NOW) == [MINER]
     assert v.store.collateral_verdict(MINER, 'tao', NOW, 10**9) is None
-
-
-def test_draw_pool_winner_is_fifo_stub():
-    oldest = {'user_pubkey': USER_A, 'created_at': 1}
-    assert draw_pool_winner([oldest, {'user_pubkey': USER_B, 'created_at': 2}]) is oldest
 
 
 def test_seat_lost_to_other_router_drops_queue_without_tx(tmp_path):

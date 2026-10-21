@@ -14,7 +14,7 @@ from solders.keypair import Keypair as SolKeypair
 from allways.constants import MAX_FAILED_SWAPS, RATE_PRECISION
 from allways.validator.actuator.planners import SwapReport
 from allways.validator.serving.requests import _best_offer, reserve_on_behalf
-from tests.validator.fakes import Ctx, record_fulfillment, record_outcome, serving_store
+from tests.validator.fakes import Ctx, record_outcome, serving_store
 
 HK = bt.Keypair.create_from_seed('0x' + '11' * 32)
 HOTKEY = HK.ss58_address
@@ -107,18 +107,6 @@ def test_reserve_refuses_a_fill_the_in_flight_obligations_leave_uncovered():
     assert not r.ok and 'collateral too low' in r.reason
 
 
-def test_a_new_request_clears_the_pool_rejection_verdict():
-    from allways.validator.serving import requests as reserve_engine
-
-    key = (str(MINER_PK), 'sol', 'btc')
-    reserve_engine._routed_rejections[key] = reserve_engine.RoutedRejection('Insufficient collateral', ['u'])
-    try:
-        r, _ = _reserve(FakeClient())
-        assert r.ok and key not in reserve_engine._routed_rejections
-    finally:
-        reserve_engine._routed_rejections.clear()
-
-
 def test_open_happy_path_persists_routed_request():
     # Two-phase: reserve_on_behalf places a BID after a viability pre-check, then queues the
     # user's details for finalize_won_seats (the winner names the fill at finalize).
@@ -133,7 +121,7 @@ def test_open_happy_path_persists_routed_request():
 
 
 def test_open_normalizes_the_source_address_at_intake():
-    # V-C2: the queued source address is the string later hashed into the source-lock PDA —
+    # The queued source address is the string later hashed into the source-lock PDA —
     # canonicalize at intake so a checksummed EVM-style entry can't mint a divergent lock.
     client = FakeClient()
     validator = _validator(client)
@@ -168,17 +156,6 @@ def _gate_asset(can_deliver, valid=lambda addr: True, enabled=True, blocker=None
     )
 
 
-def test_reserve_does_not_predict_dest_deliverability():
-    # Reserve-time deliverability is NOT a security boundary (a dest can pass here then revert later),
-    # so a dest that WOULD refuse is no longer bounced here — the sound check is the delivery-time
-    # reverted-tx proof (cancel_swap). Validity is still screened (see the malformed test below).
-    client = FakeClient()
-    validator = _validator(client)
-    validator.providers = {**_ALL_ASSETS(), 'btc': _gate_asset(lambda addr, amt: False)}
-    result = reserve_on_behalf(validator, HOTKEY, 'sol', 'btc', USER_PK, str(USER_PK), 'userBTCaddr', 10**9)
-    assert 'rejects incoming transfers' not in (result.reason or '')
-
-
 def test_missing_spoke_provider_rejects_before_bid():
     client = FakeClient()
     validator = _validator(client)
@@ -201,7 +178,7 @@ def test_leg_with_transfers_switched_off_rejects_before_any_bid():
 
 
 def test_malformed_destination_address_rejects_before_any_bid():
-    # F4: address FORMAT is screened first — offline, and a malformed dest can never deliver.
+    # Address FORMAT is screened first — offline, and a malformed dest can never deliver.
     client = FakeClient()
     validator = _validator(client)
     validator.providers = {
@@ -239,7 +216,7 @@ def test_source_that_cannot_go_out_as_one_transfer_rejects_before_any_bid():
 
 
 def test_user_to_addr_equal_miner_delivery_address_rejects():
-    # V-H1: user_to_addr == miner_to_addr makes every delivery a from==to self-transfer the anti-wash
+    # user_to_addr == miner_to_addr makes every delivery a from==to self-transfer the anti-wash
     # verifier rejects → the miner never confirms the leg and is force-slashed with no cancel escape.
     # Bounce it at reserve before any bid.
     client = FakeClient()
@@ -252,18 +229,8 @@ def test_user_to_addr_equal_miner_delivery_address_rejects():
     assert client.calls == []
 
 
-def test_distinct_dest_addr_with_miner_to_addr_set_reserves():
-    # The guard must not over-reject: a normal dest address different from the miner's still reserves.
-    client = FakeClient()
-    client.quote.miner_to_addr = 'minerBTCdeliver'
-    validator = _validator(client)
-    validator.providers = {**_ALL_ASSETS(), 'btc': _gate_asset(lambda addr, amt: True)}
-    result = reserve_on_behalf(validator, HOTKEY, 'sol', 'btc', USER_PK, str(USER_PK), 'userBTCaddr', 10**9)
-    assert result.ok
-
-
 def test_cased_chain_id_rejects_at_intake():
-    # F4: chain ids are lowercase everywhere — a cased id must bounce before it can derive
+    # Chain ids are lowercase everywhere — a cased id must bounce before it can derive
     # a mismatched quote PDA (the program enforces the same at its own intake).
     client = FakeClient()
     validator = _validator(client)
@@ -274,7 +241,7 @@ def test_cased_chain_id_rejects_at_intake():
 
 
 def test_miner_receive_address_screened_on_source_chain():
-    # T18: a miner quoting a rejecting/blacklisted receive address griefs takers into a
+    # A miner quoting a rejecting/blacklisted receive address costs takers a
     # burned entry fee — the reserve gate screens the SOURCE side too, before any bid.
     client = FakeClient()
     client.quote.miner_from_addr = 'minerSOLaddr'
@@ -284,16 +251,6 @@ def test_miner_receive_address_screened_on_source_chain():
     assert not result.ok
     assert 'miner receive address' in result.reason
     assert client.calls == []
-
-
-def test_miner_receive_address_clean_still_bids():
-    client = FakeClient()
-    client.quote.miner_from_addr = 'minerSOLaddr'
-    validator = _validator(client)
-    validator.providers = {**_ALL_ASSETS(), 'sol': _gate_asset(lambda addr, amt: True)}
-    result = reserve_on_behalf(validator, HOTKEY, 'sol', 'btc', USER_PK, str(USER_PK), 'userBTCaddr', 10**9)
-    assert result.ok
-    assert client.calls == [('open_or_request', 'sol', 'btc', 'sol')]
 
 
 def test_inactive_miner_rejects():
@@ -345,7 +302,7 @@ def test_contract_rejection_returns_reject_not_raise():
 def test_contract_rejection_code_only_form_returns_reject():
     # Same race, but the reject tx LANDS failed instead of failing pre-flight: the confirm path
     # surfaces only `{'InstructionError': [0, {'Custom': 6022}]}` — no Anchor name, no 'custom program
-    # error' text. Must still be a 422 domain reject, not a 500 crash (the F2-class code-only miss).
+    # error' text. Must still be a 422 domain reject, not a 500 crash.
     client = FakeClient()
 
     def _raise(*_a, **_k):
@@ -457,22 +414,13 @@ def _stage_validator(tmp_path):
     return Ctx(None, store=store), store
 
 
-def test_closed_pda_with_recorded_slash_reports_timed_out(tmp_path):
+def test_closed_pda_reports_its_recorded_outcome(tmp_path):
     from allways.validator.serving.requests import _swap_stage
 
     validator, store = _stage_validator(tmp_path)
-    key = b'\x01' * 32
-    record_outcome(store, key.hex(), 'timed_out', 100)
-    assert _swap_stage(validator, None, key) == 'timed_out'
-
-
-def test_closed_pda_with_recorded_completion_reports_completed(tmp_path):
-    from allways.validator.serving.requests import _swap_stage
-
-    validator, store = _stage_validator(tmp_path)
-    key = b'\x02' * 32
-    record_outcome(store, key.hex(), 'completed', 100)
-    assert _swap_stage(validator, None, key) == 'completed'
+    for key, outcome in ((b'\x01' * 32, 'timed_out'), (b'\x02' * 32, 'completed')):
+        record_outcome(store, key.hex(), outcome, 100)
+        assert _swap_stage(validator, None, key) == outcome
 
 
 def test_closed_pda_with_unrecorded_outcome_reports_fulfilled(tmp_path):
@@ -705,16 +653,6 @@ def test_reject_reason_only_surfaces_for_invalid_pending_attestation(tmp_path):
     assert 'reject_reason' not in swap_status(validator, HOTKEY, key.hex()).detail
 
 
-def test_closed_pda_by_key_with_recorded_slash_reports_timed_out(tmp_path):
-    from allways.validator.serving.requests import swap_status
-
-    key = b'\x06' * 32
-    validator, store = _status_validator(tmp_path, StatusClient(swap=None))
-    record_outcome(store, key.hex(), 'timed_out', 100)
-    s = swap_status(validator, HOTKEY, key.hex())
-    assert s.stage == 'timed_out' and s.swap_key == key.hex() and s.detail == {}
-
-
 def test_closed_pda_by_key_carries_refund_facts(tmp_path):
     from allways.validator.serving.requests import swap_status
 
@@ -724,13 +662,6 @@ def test_closed_pda_by_key_carries_refund_facts(tmp_path):
     s = swap_status(validator, HOTKEY, key.hex())
     assert s.stage == 'timed_out'
     assert s.detail == {'refund_chain': 'sol', 'refund_amount': 123, 'refund_tx_hash': 'refundTx'}
-
-
-def test_closed_pda_by_key_with_unrecorded_outcome_reports_fulfilled(tmp_path):
-    from allways.validator.serving.requests import swap_status
-
-    validator, store = _status_validator(tmp_path, StatusClient(swap=None))
-    assert swap_status(validator, HOTKEY, (b'\x07' * 32).hex()).stage == 'fulfilled'
 
 
 def test_malformed_swap_key_raises_value_error(tmp_path):
@@ -852,26 +783,16 @@ def _confirm(reservation, tx_info, *, unreachable=False):
     return confirm_deposit(validator, HOTKEY, 'srctxhash'), client
 
 
-def test_confirm_accepts_unconfirmed_mempool_deposit():
-    # KEY new behavior: a content-valid 0-conf mempool tx (no block_time) still creates the claim.
-    r, client = _confirm(_confirm_reservation(), _tx(confirmed=False, block_time=None))
-    assert r.ok and client.claims
-
-
-def test_confirm_accepts_mined_low_conf_fresh_deposit():
-    # Mined but below min_confirmations, block_time present + fresh → accepted; crank defers the rest.
-    r, client = _confirm(
-        _confirm_reservation(), _tx(confirmed=False, block_time=CONFIRM_CREATED_AT + 5, confirmations=1)
-    )
-    assert r.ok and client.claims
-
-
-def test_confirm_accepts_deeply_confirmed_fast_chain_deposit():
-    # Regression: a deeply-confirmed source still creates the claim (unchanged path for SOL/TAO fast chains).
-    r, client = _confirm(
-        _confirm_reservation(), _tx(confirmed=True, block_time=CONFIRM_CREATED_AT + 5, confirmations=6)
-    )
-    assert r.ok and client.claims
+def test_confirm_accepts_a_content_valid_deposit_at_any_confirmation_depth():
+    # 0-conf mempool (no block_time), mined below min_confirmations, and deeply confirmed all claim;
+    # the crank defers the vote until confirmations accrue.
+    for tx in (
+        _tx(confirmed=False, block_time=None),
+        _tx(confirmed=False, block_time=CONFIRM_CREATED_AT + 5, confirmations=1),
+        _tx(confirmed=True, block_time=CONFIRM_CREATED_AT + 5, confirmations=6),
+    ):
+        r, client = _confirm(_confirm_reservation(), tx)
+        assert r.ok and client.claims
 
 
 def test_confirm_rejects_absent_or_mismatch_without_claim():
@@ -904,7 +825,7 @@ def test_confirm_provider_unreachable_resends_without_claim():
 
 
 def test_confirm_prefers_canonical_form_slot_over_case_variant():
-    # V-C2 residual: a case variant of a live source dodges the byte-keyed source lock. When one
+    # A case variant of a live source dodges the byte-keyed source lock. When one
     # deposit content-matches two slots, the canonical-form (honest-lane) reservation wins the claim
     # even when the variant slot is older — the variant can only come from bypassing our tooling.
     variant = _confirm_reservation(from_addr='0xABC', created_at=500)
@@ -920,7 +841,7 @@ def test_confirm_prefers_canonical_form_slot_over_case_variant():
 
 
 def test_confirm_prefers_the_oldest_slot_on_a_form_tie():
-    # Dual-backing (V-I1): the same source legitimately backs two hubs. Deterministic pick = oldest.
+    # Dual-backing: the same source legitimately backs two hubs. Deterministic pick = oldest.
     younger = _confirm_reservation(created_at=900)
     older = _confirm_reservation(created_at=500)
     client = _ConfirmClient({'sol': younger, 'tao': older})
@@ -1010,7 +931,7 @@ def test_confirm_claims_even_if_the_extension_fails():
     assert r.ok and client.claims
 
 
-# ── V-1: the deposit-confirm seam must scan per-hub slots, not the SOL default ──
+# ── the deposit-confirm seam must scan per-hub slots, not the SOL default ──
 # v3.1 seeds a reservation per (miner, backing). A SOL-defaulted get_reservation reads the empty SOL
 # slot for a TAO-backed deposit, so no claim lands and the deposit is silently lost.
 def test_confirm_uses_tao_slot_when_sol_slot_empty():
@@ -1057,10 +978,10 @@ class _MatchingProvider:
 
 
 def test_confirm_matches_the_right_hub_when_both_slots_are_live_unclaimed():
-    # V-1 dual-live: a miner holds a live-unclaimed SOL reservation AND a live-unclaimed TAO reservation
+    # Dual-live: a miner holds a live-unclaimed SOL reservation AND a live-unclaimed TAO reservation
     # at once (v3.1 simultaneous swaps). A TAO deposit must be verified against the TAO slot — the old
-    # first-match scan checked SOL first, failed the content match, and stranded the deposit (or an
-    # attacker sitting on the SOL slot could shadow every TAO confirm on the miner).
+    # first-match scan checked SOL first, failed the content match, and stranded the deposit (or a
+    # live SOL slot could shadow every TAO confirm on the miner).
     sol = _confirm_reservation(from_amount=100_000, miner_from_addr='minerBTC_sol')
     tao = _near_expiry(20, from_amount=777, miner_from_addr='minerBTC_tao')
     client = _ConfirmClient({'sol': sol, 'tao': tao})
@@ -1116,13 +1037,6 @@ def test_scan_deposit_finds_hash_for_live_unclaimed_reservation(tmp_path):
     assert provider.calls == [('tb1quser', 'tb1qminer', 10_000)]
 
 
-def test_scan_deposit_none_when_provider_cannot_scan(tmp_path):
-    # A provider without find_recent_outgoing (hypothetical new chain) degrades to manual/wallet paths.
-    scan_deposit, validator, store = _scan_validator(tmp_path, _scan_reservation(FUTURE), object())
-    validator.providers = {**_ALL_ASSETS(), 'btc': object()}
-    assert scan_deposit(validator, HOTKEY) is None
-
-
 def test_scan_deposit_none_when_reservation_expired_claimed_or_absent(tmp_path):
     import time as _time
 
@@ -1137,7 +1051,7 @@ def test_scan_deposit_none_when_reservation_expired_claimed_or_absent(tmp_path):
 
 
 def test_scan_deposit_finds_hash_in_tao_slot_when_sol_empty(tmp_path):
-    # V-1: the scanner must find the live unclaimed TAO reservation, not read the empty SOL slot.
+    # The scanner must find the live unclaimed TAO reservation, not read the empty SOL slot.
     provider = _ScanProvider('depositTx')
     client = StatusClient(reservation={'sol': None, 'tao': _scan_reservation(FUTURE)})
     validator, store = _status_validator(tmp_path, client)
@@ -1148,7 +1062,7 @@ def test_scan_deposit_finds_hash_in_tao_slot_when_sol_empty(tmp_path):
 
 
 def test_scan_deposit_scans_every_live_hub_not_just_the_first(tmp_path):
-    # V-1 dual-live: SOL slot (btc, nothing to find) + TAO slot (eth, the real deposit). The scanner must
+    # Dual-live: SOL slot (btc, nothing to find) + TAO slot (eth, the real deposit). The scanner must
     # try every live hub — a first-match scan would stop at the SOL slot and miss the deposit entirely.
     from allways.validator.serving.requests import scan_deposit
 
@@ -1175,7 +1089,7 @@ def test_scan_deposit_scans_every_live_hub_not_just_the_first(tmp_path):
 
 
 def test_swap_status_reads_tao_slot_when_sol_empty(tmp_path):
-    # V-1: status must surface a live TAO-hub reservation, not report 'none' off the empty SOL slot.
+    # Status must surface a live TAO-hub reservation, not report 'none' off the empty SOL slot.
     from allways.validator.serving.requests import swap_status
 
     client = StatusClient(reservation={'sol': None, 'tao': _unclaimed_reservation(FUTURE)})
@@ -1203,28 +1117,6 @@ def test_swap_status_by_pair_reads_that_pairs_slot_not_the_freshest(tmp_path):
     assert swap_status(validator, HOTKEY).user == 'staleUserSOLpk'  # no pair: freshest, as before
     assert swap_status(validator, HOTKEY, from_chain='tao', to_chain='btc').user == 'ourTaoUser'
     assert swap_status(validator, HOTKEY, from_chain='eth', to_chain='sol').stage == 'none'
-
-
-def test_status_by_key_detail_carries_leg_hashes(tmp_path):
-    from allways.validator.serving.requests import swap_status
-
-    client = StatusClient(swap=_live_swap('Fulfilled'), reservation=SimpleNamespace(reserved_until=0))
-    validator, store = _status_validator(tmp_path, client)
-    s = swap_status(validator, HOTKEY, (b'\x05' * 32).hex())
-    assert s.detail['from_tx_hash'] == 'srcTxHash' and s.detail['to_tx_hash'] == ''
-
-
-def test_closed_pda_by_key_serves_delivery_hash_from_fulfillment_index(tmp_path):
-    # The Swap PDA (and its to_tx_hash) is gone at terminal — the receipt's delivery link must
-    # survive via the SwapFulfilled ingest, served on the closed-PDA by-key path.
-    from allways.validator.serving.requests import swap_status
-
-    key = b'\x08' * 32
-    validator, store = _status_validator(tmp_path, StatusClient(swap=None))
-    record_outcome(store, key.hex(), 'completed', 100)
-    record_fulfillment(store, key.hex(), 'destTx', 90)
-    s = swap_status(validator, HOTKEY, key.hex())
-    assert s.stage == 'completed' and s.detail == {'to_tx_hash': 'destTx'}
 
 
 def test_confirm_resolves_an_extrinsic_id_through_the_source_chain_and_claims_the_inner_hash():

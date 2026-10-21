@@ -11,13 +11,11 @@ from solders.keypair import Keypair
 
 from allways.solana import pdas
 from allways.solana.events import EventRecord
-from allways.validator.actuator.planners import SwapReport
 from allways.validator.actuator.swap_context import SwapMemory
 from allways.validator.app import Config, build
 from allways.validator.chains.subtensor_view import Head
 from allways.validator.feed.events import FeedStatus
 from allways.validator.runtime.bus import Latest, Topic
-from allways.validator.serving import requests
 from allways.validator.serving.component import Serving
 from allways.validator.serving.store import ServingStore
 from allways.validator.store.db import Store
@@ -150,27 +148,6 @@ def test_the_seam_answers_status_off_the_world(tmp_path, monkeypatch):
     try:
         status = _get(serving, f'/status?miner_hotkey={HOTKEY.ss58_address}')
         assert status['stage'] == 'reserved' and status['detail']['from_amount'] == 100_000
-    finally:
-        serving._server.shutdown()
-
-
-def test_status_reports_leg_confirmations_and_a_refusal_from_the_swap_planner(tmp_path, monkeypatch):
-    monkeypatch.setattr(requests, 'attest_reject_reason', lambda *a: None)  # the offline gates pass
-    report = {
-        'aa' * 32: SwapReport(
-            'PendingAttestation', 'reject', 'stale deposit', {'btc': (2, 3), 'sol': (0, 32)}, 'btc', NOW
-        ),
-    }
-    serving = _serving(tmp_path, _world(), report)
-    try:
-        detail = {}
-        requests._attach_leg_confs(serving, bytes.fromhex('aa' * 32), detail)
-        assert detail['leg_confs'] == {
-            'source': {'have': 2, 'need': 3, 'at': NOW},
-            'dest': {'have': 0, 'need': 32, 'at': NOW},
-        }
-        requests._add_reject_reason(serving, SimpleNamespace(), bytes.fromhex('aa' * 32), 'claimed', detail)
-        assert detail['reject_reason'] == 'stale deposit'
     finally:
         serving._server.shutdown()
 

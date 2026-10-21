@@ -1,9 +1,10 @@
 """Erc20/ArbUsdc unit tests — all offline (RPC layer mocked, signing is pure crypto).
 
-Covers the token-specific hazards: settlement truth is the Transfer log of the PINNED
-contract (never tx.value — F2), the provable payer is the log's `from` topic (F5),
-dual-balance sends (F6), and the Circle-shaped delivery gates (blacklist + pause, no
-getCode — F3). Shared EVM plumbing (failover, proofs, casing) is covered by the ETH suite.
+The representative suite for the shared Erc20 provider: the provable payer is the log's `from`
+topic, never the tx envelope; dual-balance sends (token and gas); the slash gate's history
+sampling; send dedup; the getLogs scanner. The per-row invariants (pinned-contract settlement,
+network guards, declared refusal checks) run over every token row in tests/test_evm_providers.py;
+shared EVM plumbing (failover, proofs, casing) is covered by tests/test_ethereum_provider.py.
 """
 
 from typing import Optional
@@ -20,7 +21,6 @@ from allways.assets.erc20 import (
     TRANSFER_TOPIC0,
 )
 from allways.assets.evm import EvmRpcError
-from allways.chains import CHAIN_ARBUSDC
 
 # Well-known dev key (hardhat account #0) — never funded on mainnet, deterministic address.
 TEST_KEY = '0xac0974bec39a17e36ba4a6b4d238ff944bacb478cbed5efcae784d7bf4f2ff80'
@@ -98,54 +98,12 @@ def eth_call_views(blacklisted=(), paused=False, balances=None):
 
 
 class TestTransferLogVerification:
-    def test_settled_transfer_matches(self, provider):
-        rpc_stub(provider, mined_tx_responses())
-        info = provider.verify_transaction(TX, RECIPIENT, AMOUNT)
-        assert info is not None
-        assert info.amount == AMOUNT
-        assert info.sender == SENDER
-        assert info.confirmed  # 101 confs >= 90
-        assert info.block_time == 100
-
-    def test_unconfirmed_below_min_confs(self, provider):
-        rpc_stub(provider, mined_tx_responses(tip=1_000_010))
-        info = provider.verify_transaction(TX, RECIPIENT, AMOUNT)
-        assert info is not None and not info.confirmed
-
-    def test_wrong_contract_log_rejected(self, provider):
-        # F2: a Transfer of USDC.e / a fake token must never satisfy a native-USDC leg.
-        fake = transfer_log(contract='0x' + '99' * 20)
-        rpc_stub(provider, mined_tx_responses(logs=[fake]))
-        assert provider.verify_transaction(TX, RECIPIENT, AMOUNT) is None
-
-    def test_wrong_recipient_rejected(self, provider):
-        rpc_stub(provider, mined_tx_responses(logs=[transfer_log(recipient='0x' + '22' * 20)]))
-        assert provider.verify_transaction(TX, RECIPIENT, AMOUNT) is None
-
     def test_underpay_rejected_overpay_accepted(self, provider):
         rpc_stub(provider, mined_tx_responses(logs=[transfer_log(amount=AMOUNT - 1)]))
         assert provider.verify_transaction(TX, RECIPIENT, AMOUNT) is None
         rpc_stub(provider, mined_tx_responses(logs=[transfer_log(amount=AMOUNT + 5)]))
         info = provider.verify_transaction(TX, RECIPIENT, AMOUNT)
         assert info is not None and info.amount == AMOUNT + 5
-
-    def test_multi_log_tx_scans_all_logs(self, provider):
-        noise = [
-            transfer_log(contract='0x' + '99' * 20),  # other token
-            transfer_log(recipient='0x' + '22' * 20),  # other recipient
-            transfer_log(),  # the real leg
-        ]
-        rpc_stub(provider, mined_tx_responses(logs=noise))
-        assert provider.verify_transaction(TX, RECIPIENT, AMOUNT) is not None
-
-    def test_reverted_rejected(self, provider):
-        rpc_stub(provider, mined_tx_responses(status='0x0'))
-        assert provider.verify_transaction(TX, RECIPIENT, AMOUNT) is None
-
-    def test_receipt_unavailable_raises(self, provider):
-        rpc_stub(provider, mined_tx_responses(receipt=None))
-        with pytest.raises(ProviderUnreachableError):
-            provider.verify_transaction(TX, RECIPIENT, AMOUNT)
 
     def test_rpc_unreachable_raises(self, provider):
         def boom(params):
@@ -155,38 +113,8 @@ class TestTransferLogVerification:
         with pytest.raises(ProviderUnreachableError):
             provider.verify_transaction(TX, RECIPIENT, AMOUNT)
 
-    def test_missing_block_timestamp_raises(self, provider):
-        responses = mined_tx_responses()
-        responses['eth_getBlockByNumber'] = {'hash': BLOCK_HASH, 'timestamp': '0x0'}
-        rpc_stub(provider, responses)
-        with pytest.raises(ProviderUnreachableError):
-            provider.verify_transaction(TX, RECIPIENT, AMOUNT)
-
-    def test_not_found_returns_none(self, provider):
-        rpc_stub(provider, {'eth_getTransactionByHash': None})
-        assert provider.verify_transaction(TX, RECIPIENT, AMOUNT) is None
-
-    def test_checksummed_recipient_matches_lowercase_topic(self, provider):
-        rpc_stub(provider, mined_tx_responses())
-        assert provider.verify_transaction(TX, RECIPIENT.lower(), AMOUNT) is not None
-        assert provider.verify_transaction(TX, RECIPIENT, AMOUNT) is not None  # EIP-55 form
-
-    def test_settled_cache_skips_receipt_refetch(self, provider):
-        calls: dict = {}
-        responses = mined_tx_responses()
-
-        def fake_rpc(method, params, timeout=15, **kw):
-            calls[method] = calls.get(method, 0) + 1
-            return responses[method]
-
-        provider.chain.eth_rpc = fake_rpc
-        assert provider.verify_transaction(TX, RECIPIENT, AMOUNT) is not None
-        provider.chain.clear_pass_tip()
-        assert provider.verify_transaction(TX, RECIPIENT, AMOUNT) is not None
-        assert calls['eth_getTransactionReceipt'] == 1  # second pass served from the cache
-
     def test_settled_cache_never_vouches_for_a_different_leg(self, provider):
-        # Caught live (2026-08-07): the match lives in the receipt logs the cache skips, so a
+        # The match lives in the receipt logs the cache skips, so a
         # cached settled read must re-check recipient + amount or any claim on the tx passes.
         rpc_stub(provider, mined_tx_responses())
         assert provider.verify_transaction(TX, RECIPIENT, AMOUNT) is not None
@@ -197,15 +125,6 @@ class TestTransferLogVerification:
 
 
 class TestSenderPin:
-    def test_sender_from_log_topic_any_casing(self, provider):
-        rpc_stub(provider, mined_tx_responses())
-        checksummed = '0x' + SENDER.removeprefix('0x').upper()
-        assert provider.verify_transaction(TX, RECIPIENT, AMOUNT, expected_sender=checksummed) is not None
-
-    def test_sender_mismatch_rejected(self, provider):
-        rpc_stub(provider, mined_tx_responses())
-        assert provider.verify_transaction(TX, RECIPIENT, AMOUNT, expected_sender=TEST_ADDR) is None
-
     def test_tx_from_is_not_the_pin(self, provider):
         # The tx envelope sender (router/sponsor) differs from the log party — the log wins.
         responses = mined_tx_responses()
@@ -241,54 +160,14 @@ class TestPendingCalldata:
         assert info is not None and not info.confirmed
         assert info.sender == SENDER and info.amount == AMOUNT
 
-    def test_pending_to_other_contract_rejected(self, provider):
-        rpc_stub(provider, {'eth_getTransactionByHash': self._pending(to='0x' + '99' * 20)})
-        assert provider.verify_transaction(TX, RECIPIENT, AMOUNT) is None
-
-    def test_pending_underpay_rejected(self, provider):
+    def test_pending_underpay_or_wrong_recipient_rejected(self, provider):
         rpc_stub(provider, {'eth_getTransactionByHash': self._pending(amount=AMOUNT - 1)})
         assert provider.verify_transaction(TX, RECIPIENT, AMOUNT) is None
-
-    def test_pending_wrong_recipient_rejected(self, provider):
         rpc_stub(provider, {'eth_getTransactionByHash': self._pending(recipient='0x' + '22' * 20)})
         assert provider.verify_transaction(TX, RECIPIENT, AMOUNT) is None
 
 
 class TestDeliveryGates:
-    def test_clean_dest_passes(self, provider):
-        rpc_stub(provider, {'eth_call': eth_call_views()})
-        assert provider.can_deliver_to(RECIPIENT, AMOUNT) is True
-
-    def test_zero_address_is_not_a_valid_dest(self, provider):
-        # USDC transfer() reverts to the zero address (no blacklist/pause gate would catch it), so a
-        # reservation aimed there would strand the miner into a slash. The format gate must reject it.
-        assert provider.chain.is_valid_address('0x' + '00' * 20) is False
-
-    def test_blacklisted_dest_blocks_reserve(self, provider):
-        rpc_stub(provider, {'eth_call': eth_call_views(blacklisted=[RECIPIENT])})
-        assert provider.can_deliver_to(RECIPIENT, AMOUNT) is False
-
-    def test_paused_token_blocks_reserve(self, provider):
-        rpc_stub(provider, {'eth_call': eth_call_views(paused=True)})
-        assert provider.can_deliver_to(RECIPIENT, AMOUNT) is False
-
-    def test_reserve_gate_fails_open_on_rpc_trouble(self, provider):
-        def boom(params):
-            raise ConnectionError('down')
-
-        rpc_stub(provider, {'eth_call': boom})
-        assert provider.can_deliver_to(RECIPIENT, AMOUNT) is True
-
-    def test_slash_gate_blacklisted_now(self, provider):
-        rpc_stub(provider, {'eth_blockNumber': hex(1000), 'eth_call': eth_call_views(blacklisted=[RECIPIENT])})
-        assert provider.delivery_refused(RECIPIENT, since_unix=0) is True
-
-    def test_slash_gate_paused_token(self, provider):
-        # A pause makes delivery impossible for EVERYONE through no fault of the miner —
-        # the slash gate must defer exactly like the reserve gate refuses.
-        rpc_stub(provider, {'eth_blockNumber': hex(1000), 'eth_call': eth_call_views(paused=True)})
-        assert provider.delivery_refused(RECIPIENT, since_unix=0) is True
-
     def test_slash_gate_samples_history(self, provider):
         # Clean at latest, blacklisted at a sampled historical block (freeze lifted mid-window).
         def call(params):
@@ -301,10 +180,6 @@ class TestDeliveryGates:
 
         rpc_stub(provider, {'eth_blockNumber': hex(1000), 'eth_call': call})
         assert provider.delivery_refused(RECIPIENT, since_unix=0) is True
-
-    def test_slash_gate_clean_is_false(self, provider):
-        rpc_stub(provider, {'eth_blockNumber': hex(1000), 'eth_call': eth_call_views()})
-        assert provider.delivery_refused(RECIPIENT, since_unix=0) is False
 
     def test_slash_gate_raises_on_rpc_trouble(self, provider):
         # The caller defers the slash — a flaky RPC postpones, never falsifies.
@@ -340,15 +215,6 @@ class TestSendGuards:
             'eth_sendRawTransaction': '0x' + 'ee' * 32,
         }
 
-    def test_no_key_refused(self, provider):
-        assert provider.send_amount(RECIPIENT, AMOUNT) is None
-        assert 'ARB_PRIVATE_KEY' in provider.last_send_error
-
-    def test_key_mismatch_refused(self, provider, monkeypatch):
-        monkeypatch.setenv('ARB_PRIVATE_KEY', TEST_KEY)
-        assert provider.send_amount(RECIPIENT, AMOUNT, from_address=RECIPIENT) is None
-        assert 'key mismatch' in provider.last_send_error
-
     def test_insufficient_token_balance_refused(self, provider, monkeypatch):
         monkeypatch.setenv('ARB_PRIVATE_KEY', TEST_KEY)
         rpc_stub(provider, self._send_responses(token_balance=AMOUNT - 1))
@@ -375,18 +241,6 @@ class TestSendGuards:
         rpc_stub(provider, responses)
         assert provider.send_amount(RECIPIENT, AMOUNT) is None
         assert 'insufficient balance' in provider.last_send_error
-
-    def test_reverting_transfer_refused(self, provider, monkeypatch):
-        monkeypatch.setenv('ARB_PRIVATE_KEY', TEST_KEY)
-        responses = self._send_responses()
-
-        def revert(params):
-            raise EvmRpcError('rpc error', {'code': 3, 'message': 'execution reverted: account is blacklisted'})
-
-        responses['eth_estimateGas'] = revert
-        rpc_stub(provider, responses)
-        assert provider.send_amount(RECIPIENT, AMOUNT) is None
-        assert 'refuses' in provider.last_send_error
 
     def test_revert_detected_by_code_when_message_lacks_the_word(self, provider, monkeypatch):
         # The old string-match missed a code-3 revert phrased without "revert" and would have
@@ -476,12 +330,6 @@ class TestScanner:
         rpc_stub(provider, {'eth_blockNumber': hex(1000), 'eth_getLogs': logs})
         assert provider.find_recent_outgoing(TEST_ADDR, RECIPIENT, AMOUNT) == found
 
-    def test_underpaying_log_ignored_cursor_advances(self, provider):
-        rpc_stub(provider, {'eth_blockNumber': hex(1000), 'eth_getLogs': [{'data': hex(1), 'transactionHash': TX}]})
-        assert provider.find_recent_outgoing(TEST_ADDR, RECIPIENT, AMOUNT) is None
-        key = (TEST_ADDR.lower(), RECIPIENT.lower(), AMOUNT)
-        assert provider.scan_cursors[key] == 1000
-
     def test_failed_range_parks_cursor(self, provider):
         def boom(params):
             raise ConnectionError('range too large')
@@ -493,44 +341,7 @@ class TestScanner:
         assert provider.scan_cursors[key] == 1000 - provider.SCAN_LOOKBACK_BLOCKS
 
 
-class TestNetworkAndContract:
-    def test_unknown_network_raises(self, monkeypatch):
-        monkeypatch.setenv('ARB_NETWORK', 'seplia')
-        with pytest.raises(ValueError, match='ARB_NETWORK'):
-            ArbUsdc()
-
-    def test_unset_defaults_to_mainnet_with_registry_contract(self, monkeypatch):
-        for var in ('ARB_NETWORK', 'ARB_RPC_URLS', 'ARBUSDC_TOKEN_CONTRACT'):
-            monkeypatch.delenv(var, raising=False)
-        p = ArbUsdc()
-        assert p.chain.network == 'mainnet'
-        assert p.token_contract == CHAIN_ARBUSDC.asset_locator
-
-    def test_sepolia_uses_testnet_deployment(self, provider):
-        assert provider.token_contract == CONTRACT
-
-    def test_env_override_wins(self, monkeypatch):
-        monkeypatch.setenv('ARB_NETWORK', 'sepolia')
-        monkeypatch.setenv('ARBUSDC_TOKEN_CONTRACT', '0x' + '42' * 20)
-        assert ArbUsdc().token_contract == '0x' + '42' * 20
-
-    def test_lookback_window_is_time_based(self, provider):
-        # 1s blocks → the ≈5 min dedup/scan window is 300 blocks, not ETH's 25.
-        assert provider.SCAN_LOOKBACK_BLOCKS == 300
-
-    def test_chain_binding(self, provider):
-        assert provider.chain_def is CHAIN_ARBUSDC
-        assert provider.chain.chain_id == 421_614
-        # Composed, not fused: the first non-fused asset — a second Arbitrum token shares the chain.
-        assert provider.chain is not provider
-
-
 class TestCheckConnection:
-    def test_chain_id_mismatch_fails(self, provider):
-        rpc_stub(provider, {'eth_chainId': '0x1', 'eth_blockNumber': '0x10'})
-        with pytest.raises(ConnectionError, match='chain id'):
-            provider.check_connection(require_send=False)
-
     def test_missing_key_fails_when_send_required(self, provider):
         with pytest.raises(ConnectionError, match='ARB_PRIVATE_KEY'):
             provider.check_connection(require_send=True)
@@ -545,11 +356,6 @@ class TestCheckConnection:
 
         provider.chain.eth_rpc = fake_rpc
         with pytest.raises(ConnectionError, match='drpc serves chain id 1'):
-            provider.check_connection(require_send=False)
-
-    def test_codeless_contract_fails(self, provider):
-        rpc_stub(provider, {'eth_chainId': hex(421_614), 'eth_blockNumber': '0x10', 'eth_getCode': '0x'})
-        with pytest.raises(ConnectionError, match='no code'):
             provider.check_connection(require_send=False)
 
     def test_happy_path_paused_only_warns(self, provider):

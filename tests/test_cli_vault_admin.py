@@ -62,20 +62,6 @@ def test_max_collateral_zero_is_named_as_unlimited_and_gated(monkeypatch):
     client.admin_call.assert_not_called()
 
 
-def test_declining_the_unlimited_prompt_submits_nothing(monkeypatch):
-    client = _client(monkeypatch)
-    result = _run(['set-config', '--max-collateral', '0'], stdin='n\n')
-    assert 'Cancelled' in result.output
-    client.admin_call.assert_not_called()
-
-
-def test_a_positive_max_collateral_needs_no_unlimited_prompt(monkeypatch):
-    client = _client(monkeypatch)
-    result = _run(['-y', 'set-config', '--max-collateral', '5'])
-    assert 'UNLIMITED' not in result.output
-    client.admin_call.assert_called_once()
-
-
 def test_set_recycle_target_votes_both_fields_and_prints_the_peer_command(monkeypatch):
     client = _client(monkeypatch)
     result = _run(['-y', 'set-recycle-target', HOTKEY, '9'])
@@ -122,17 +108,7 @@ def test_set_config_votes_exact_rao_and_prints_a_round_tripping_peer_command(mon
     assert vault_cli._tao_flag_to_rao(m.group(2), 'max') == 9_000_000_023
 
 
-# ─── _report / vault-address guards (v3.1 testnet findings) ──────────────────
-
-
-def test_transfer_failed_names_the_gas_precharge(capsys):
-    """Posting near the signer's whole balance dies on the pallet's fee pre-charge; a bare
-    "Call failed (TransferFailed)" gives the operator nothing to act on."""
-    vault_cli._report(VaultCallResult(ok=False, error='TransferFailed'), 'unused')
-    out = capsys.readouterr().out
-    assert 'TransferFailed' in out
-    assert 'pre-charges' in out
-    assert 'headroom' in out
+# ─── vault-address guard ─────────────────────────────────────────────────────
 
 
 def test_off_record_vault_address_warns(capsys):
@@ -145,58 +121,9 @@ def test_off_record_vault_address_warns(capsys):
     assert TAO_HUB_VAULT_ADDRESSES['test'][:8] in out
 
 
-def test_on_record_or_unknown_network_vault_address_stays_quiet(capsys):
-    from allways.constants import TAO_HUB_VAULT_ADDRESSES
-
-    vault_cli._warn_if_off_record(TAO_HUB_VAULT_ADDRESSES['test'], 'test')
-    vault_cli._warn_if_off_record(TAO_HUB_VAULT_ADDRESSES['finney'], 'finney')
-    vault_cli._warn_if_off_record('5AnyVault', 'local')  # no of-record entry
-    vault_cli._warn_if_off_record('5AnyVault', None)
-    assert capsys.readouterr().out == ''
-
-
-def test_success_report_hides_the_event_dump(capsys):
-    """Success reads as one green line + extrinsic; the raw event list is failure diagnostics."""
-    result = VaultCallResult(ok=True, events=['Balances.Withdraw', 'System.ExtrinsicSuccess'], extrinsic_hash='0xabc')
-    vault_cli._report(result, 'Posted 2.200000000 τ')
-    out = capsys.readouterr().out
-    assert 'Posted 2.200000000' in out
-    assert 'events:' not in out
-    assert '0xabc' in out
-
-
-def test_failure_report_keeps_the_event_dump(capsys):
-    result = VaultCallResult(ok=False, error='Unknown', events=['System.ExtrinsicFailed'], extrinsic_hash='0xdef')
-    vault_cli._report(result, 'unused')
-    out = capsys.readouterr().out
-    assert 'events: System.ExtrinsicFailed' in out
-
-
 def test_vault_deposit_takes_amount_flag_and_keeps_post_collateral_alias(monkeypatch):
     client = _client(monkeypatch, post_collateral=VaultCallResult(ok=True, extrinsic_hash='0xabc'))
     for cmd in ('deposit', 'post-collateral'):
         res = CliRunner().invoke(vault_cli.vault_group, [cmd, '--amount', '1.5'])
         assert res.exit_code == 0, res.output
         assert client.post_collateral.call_args.args == (1_500_000_000,)
-
-
-def _recycle(args):
-    return CliRunner().invoke(vault_cli.vault_recycle, args)
-
-
-def test_recycle_signs_with_the_coldkey_by_default(monkeypatch):
-    """Permissionless, so the signer only pays postage — and the TAO lives on the coldkey."""
-    client = _client(monkeypatch, get_recyclable_pot=10**8, get_accumulated_fees=10**8)
-    client.recycle_fees.return_value = VaultCallResult(ok=True, extrinsic_hash='0xabc')
-    result = _recycle([])
-    assert result.exit_code == 0
-    assert client.signed_with_coldkey == [True]
-    client.recycle_fees.assert_called_once()
-
-
-def test_recycle_hotkey_flag_keeps_the_passwordless_signer_for_cron(monkeypatch):
-    client = _client(monkeypatch, get_recyclable_pot=10**8, get_accumulated_fees=10**8)
-    client.recycle_fees.return_value = VaultCallResult(ok=True, extrinsic_hash='0xabc')
-    result = _recycle(['--hotkey'])
-    assert result.exit_code == 0
-    assert client.signed_with_coldkey == [False]

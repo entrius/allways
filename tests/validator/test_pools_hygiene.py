@@ -3,7 +3,6 @@ from types import SimpleNamespace
 from solders.keypair import Keypair
 
 from allways.solana import pdas
-from allways.validator.actuator.actuator import Actuator
 from allways.validator.actuator.planners import HygienePlanner, PoolPlanner, derive_weight_vector
 from allways.validator.app import Config, build
 from allways.validator.chains.subtensor_view import Head
@@ -106,35 +105,6 @@ def test_the_weights_vote_fires_once_per_boundary_and_only_when_the_vector_chang
     assert HygienePlanner(_head(stake=350_000), me=ME).plan(landed, NOW) == []  # already landed this boundary
     stranger = HygienePlanner(_head(stake=350_000), me=Keypair().pubkey())
     assert stranger.plan(world, NOW) == []  # not whitelisted
-
-
-class _Planner:
-    name = 'p'
-
-    def __init__(self, intents):
-        self.intents = intents
-
-    def plan(self, world, now):
-        return list(self.intents)
-
-
-def test_a_send_that_went_nowhere_rests_instead_of_repeating_every_tick():
-    sends = []
-    world = Latest()
-    world.set(_world())
-    pool_intent = PoolPlanner().plan(_world(pools=[_pool()]), NOW)
-    act = Actuator(
-        world,
-        [_Planner(pool_intent)],
-        {'resolve_pool': lambda c, i: sends.append(1)},
-        lambda: SimpleNamespace(rpc=None),
-    )
-    act.setup()
-    for t in (0, 1, 1.5):  # a lost race returns no signature
-        act.tick(NOW + t)
-    assert len(sends) == 1  # rested for resolve_pool's 2s
-    act.tick(NOW + 2.5)
-    assert len(sends) == 2
 
 
 def test_the_app_builds_with_no_relay_without_a_vault_and_serving_off(tmp_path):

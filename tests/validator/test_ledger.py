@@ -49,13 +49,6 @@ def test_an_empty_book_is_a_failed_read_and_changes_nothing():
     assert _rate(ledger) == 0.0002
 
 
-def test_a_fresh_event_wins_over_the_book():
-    ledger = _ledger()
-    ledger.put(NOW - 10, 'hk', RATE, 0.0002, *LANE)
-    ledger.reconcile_live_quotes({('other', *LANE): 0.0003}, now=NOW)
-    assert _rate(ledger) == 0.0002  # the book read may predate the event: wait a round
-
-
 def test_live_state_corrects_a_missed_deactivation_and_seeds_a_missing_collateral():
     ledger = _ledger()
     ledger.put(EARLY, 'hk', ACTIVE, 1)

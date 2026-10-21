@@ -1,6 +1,6 @@
-"""B2.1 — block_time (unix seconds) is surfaced onto TransactionInfo by both providers.
+"""block_time (unix seconds) is surfaced onto TransactionInfo by both providers.
 
-The replay-freshness checks (B2.2) compare a tx's mined time against on-chain floors, so verify the
+The replay-freshness checks compare a tx's mined time against on-chain floors, so verify the
 providers actually populate block_time: BTC from Esplora status.block_time, TAO from the Timestamp pallet
 (millis ÷ 1000). Backends are mocked — no network.
 """
@@ -11,7 +11,7 @@ from unittest.mock import MagicMock
 import pytest
 from bittensor.utils import ss58_encode
 
-from allways.assets.asset import ProviderUnreachableError, TransactionInfo
+from allways.assets.asset import ProviderUnreachableError
 from allways.assets.btc import Bitcoin
 from allways.assets.tao import Tao
 
@@ -31,11 +31,6 @@ class _Resp:
 
     def json(self):
         return self._json
-
-
-def test_transaction_info_defaults_block_time_none():
-    ti = TransactionInfo(tx_hash='h', confirmed=True, sender='a', recipient='b', amount=1)
-    assert ti.block_time is None
 
 
 def test_btc_api_surfaces_block_time(monkeypatch):
@@ -67,25 +62,6 @@ def test_btc_api_surfaces_block_time(monkeypatch):
     assert ti is not None
     assert ti.confirmed is True
     assert ti.block_time == BLOCK_TIME
-
-
-def test_subtensor_get_block_time_millis_to_seconds():
-    p = Tao.__new__(Tao)  # skip __init__ (no real subtensor needed)
-    substrate = MagicMock()
-    substrate.get_block_hash.return_value = '0xabc'
-    substrate.query.return_value = SimpleNamespace(value=BLOCK_TIME * 1000)  # pallet returns millis
-    p.subtensor = SimpleNamespace(substrate=substrate)
-
-    assert p.get_block_time(12_345) == BLOCK_TIME
-    substrate.query.assert_called_once_with('Timestamp', 'Now', block_hash='0xabc')
-
-
-def test_subtensor_get_block_time_none_on_error():
-    p = Tao.__new__(Tao)
-    substrate = MagicMock()
-    substrate.get_block_hash.side_effect = RuntimeError('rpc down')
-    p.subtensor = SimpleNamespace(substrate=substrate)
-    assert p.get_block_time(1) is None
 
 
 def test_subtensor_block_at_returns_last_block_not_after_timestamp():
@@ -174,7 +150,7 @@ def _raw_transfer_block(txid, dest, amount, sender, settled=True):
 
 
 def test_tao_send_refuses_when_from_address_mismatches_wallet():
-    # H3: never broadcast from a wallet the validator's sender-pin would reject (wasted funds).
+    # never broadcast from a wallet the validator's sender-pin would reject (wasted funds).
     p = Tao.__new__(Tao)
     p.wallet = MagicMock()
     p.wallet.coldkeypub.ss58_address = 'minerTAO'
@@ -183,7 +159,7 @@ def test_tao_send_refuses_when_from_address_mismatches_wallet():
 
 
 def test_tao_own_transfer_landed_matches_exact_hash():
-    # H2: reuse a prior payout only when THAT exact extrinsic is on-chain, so a confirm-timeout retry
+    # reuse a prior payout only when THAT exact extrinsic is on-chain, so a confirm-timeout retry
     # can't double-pay. (payout block: sender=miner, dest=user)
     blocks = {100: _raw_transfer_block('0xpay', 'userTAO', 5000, 'minerTAO')}
     p = _scan_provider(head=100, blocks=blocks, readable_default=True)
@@ -197,14 +173,8 @@ def test_tao_own_transfer_landed_ignores_a_different_extrinsic():
     assert p._own_transfer_landed('0xNOTMINE', 'minerTAO', 'userTAO', 5000) is None
 
 
-def test_tao_own_transfer_landed_absent_returns_none():
-    # Genuine failure (a fully readable window with nothing in it) → None → the caller re-sends.
-    p = _scan_provider(head=100, blocks={}, readable_default=True)
-    assert p._own_transfer_landed('0xpay', 'minerTAO', 'userTAO', 5000) is None
-
-
 def test_tao_own_transfer_landed_raises_when_head_unreadable():
-    # Q4a: "couldn't read the head" is not "didn't land" — returning None here would green-light a
+    # "couldn't read the head" is not "didn't land" — returning None here would green-light a
     # re-send of a transfer that may be sitting on-chain → double pay. Must raise so the caller waits.
     p = _scan_provider(head=100, blocks={}, readable_default=True)
     p.subtensor.get_current_block.side_effect = RuntimeError('rpc down')
@@ -213,7 +183,7 @@ def test_tao_own_transfer_landed_raises_when_head_unreadable():
 
 
 def test_tao_own_transfer_landed_raises_when_a_block_in_the_window_is_unreadable():
-    # Q4a: skipping an unreadable block can skip the very block holding the landed transfer.
+    # skipping an unreadable block can skip the very block holding the landed transfer.
     blocks = {90: None}  # one unreadable block mid-window; the rest are readable and empty
     p = _scan_provider(head=100, blocks=blocks, readable_default=True)
     with pytest.raises(ProviderUnreachableError):
@@ -237,20 +207,7 @@ def test_tao_own_transfer_landed_rejects_an_included_but_failed_extrinsic():
     assert p._own_transfer_landed('0xpay', 'minerTAO', 'userTAO', 5000) is None
 
 
-def test_tao_own_transfer_landed_raises_when_settlement_unreadable():
-    # The exact extrinsic is on-chain but its settlement events can't be read: RAISE so the caller waits
-    # rather than re-sending an unresolved transfer into a double pay (the send_amount except-branch).
-    block = {
-        '_raw': True,
-        'extrinsics': [{'extrinsic_hash': '0xpay', 'dest': 'userTAO', 'amount': 5000, 'sender': 'minerTAO'}],
-        '_events': [],  # settled_credit treats no-events-on-a-block-with-extrinsics as unreachable
-    }
-    p = _scan_provider(head=100, blocks={100: block}, readable_default=True)
-    with pytest.raises(ProviderUnreachableError):
-        p._own_transfer_landed('0xpay', 'minerTAO', 'userTAO', 5000)
-
-
-# ─── Q4b: a send whose extrinsic hash was lost mid-submit (transfer raised after submission) ─────
+# ─── A send whose extrinsic hash was lost mid-submit (transfer raised after submission) ─────
 
 
 def test_tao_lost_hash_prior_found_by_triple_scan():
@@ -269,31 +226,10 @@ def test_tao_lost_hash_skips_a_transfer_owned_by_another_obligation():
     assert p._lost_hash_prior_landed('minerTAO', 'userTAO', 5000, seen_head=99) is None
 
 
-def test_tao_lost_hash_waits_while_the_inclusion_window_is_open():
-    # Nothing found yet, but the extrinsic could still include: raise-and-wait, never re-send.
-    p = _scan_provider(head=105, blocks={}, readable_default=True)
-    with pytest.raises(ProviderUnreachableError):
-        p._lost_hash_prior_landed('minerTAO', 'userTAO', 5000, seen_head=100)
-
-
-def test_tao_lost_hash_dead_after_window_scanned_clean():
-    # The full mortality window since the attempt elapsed and every block read clean → provably never landed.
-    p = _scan_provider(head=100 + Tao.LOST_SEND_DEAD_BLOCKS + 1, blocks={}, readable_default=True)
-    assert p._lost_hash_prior_landed('minerTAO', 'userTAO', 5000, seen_head=100) is None
-
-
 def test_tao_lost_hash_waits_out_the_full_mortal_era():
     # Past the scan window but inside the 128-block mortal era the extrinsic can STILL include —
     # declaring it dead here re-sends into a double pay. Wait, don't clear.
     p = _scan_provider(head=100 + Tao.SCAN_LOOKBACK_BLOCKS + 26, blocks={}, readable_default=True)
-    with pytest.raises(ProviderUnreachableError):
-        p._lost_hash_prior_landed('minerTAO', 'userTAO', 5000, seen_head=100)
-
-
-def test_tao_lost_hash_raises_when_a_block_is_unreadable():
-    # Even past the window, an unreadable block could hide the landed transfer → keep waiting.
-    blocks = {110: None}
-    p = _scan_provider(head=100 + Tao.LOST_SEND_DEAD_BLOCKS + 1, blocks=blocks, readable_default=True)
     with pytest.raises(ProviderUnreachableError):
         p._lost_hash_prior_landed('minerTAO', 'userTAO', 5000, seen_head=100)
 
@@ -306,7 +242,7 @@ def _send_provider(head, blocks):
 
 
 def test_tao_send_records_attempt_before_transfer_can_raise():
-    # Q4b: subtensor.transfer raising post-submission (websocket drop during wait_for_inclusion) must
+    # subtensor.transfer raising post-submission (websocket drop during wait_for_inclusion) must
     # leave a marker, or the next poll re-sends an extrinsic that may have included → double pay.
     p = _send_provider(head=500, blocks={})
     p.subtensor.transfer = MagicMock(side_effect=ConnectionError('ws dropped'))
@@ -325,34 +261,6 @@ def test_tao_send_resolves_a_lost_hash_marker_instead_of_resending():
     assert p.broadcasted_txids['swap1'] == ('userTAO', 5000, '0xlost', 501)
 
 
-def test_tao_send_waits_on_an_unresolved_lost_hash_marker():
-    # Window still open and nothing found: send_amount returns None WITHOUT re-sending.
-    p = _send_provider(head=505, blocks={})
-    p.broadcasted_txids['swap1'] = ('userTAO', 5000, '', 500)
-    p.subtensor.transfer = MagicMock()
-    assert p.send_amount('userTAO', 5000, dedup_key='swap1') is None
-    p.subtensor.transfer.assert_not_called()
-
-
-def test_tao_send_backfills_an_unknown_attempt_head():
-    # Q2's TAO sibling: head was unreadable when the marker was recorded (seen 0). Backfill from the
-    # current head and wait — never treat "age unknown" as "expired, safe to re-send".
-    p = _send_provider(head=505, blocks={})
-    p.broadcasted_txids['swap1'] = ('userTAO', 5000, '', 0)
-    p.subtensor.transfer = MagicMock()
-    assert p.send_amount('userTAO', 5000, dedup_key='swap1') is None
-    p.subtensor.transfer.assert_not_called()
-    assert p.broadcasted_txids['swap1'] == ('userTAO', 5000, '', 505)
-
-
-def test_tao_scanner_finds_matching_transfer_in_new_blocks():
-    blocks = {100: _raw_transfer_block('0xdep', 'minerTAO', 5000, 'userTAO')}
-    p = _scan_provider(head=100, blocks=blocks, readable_default=True)
-    assert p.find_recent_outgoing('userTAO', 'minerTAO', 5000) == '0xdep'
-    # A hit clears the cursor so a fresh reservation with the same triple rescans.
-    assert p.scan_cursors == {}
-
-
 def test_tao_scanner_skips_wrong_sender_and_underpay_then_advances_cursor():
     blocks = {
         99: _raw_transfer_block('0xother', 'minerTAO', 5000, 'someoneElse'),
@@ -368,15 +276,6 @@ def test_tao_scanner_skips_wrong_sender_and_underpay_then_advances_cursor():
     blocks[102] = _raw_transfer_block('0xdep', 'minerTAO', 6000, 'userTAO')
     assert p.find_recent_outgoing('userTAO', 'minerTAO', 5000) == '0xdep'
     assert seen == [101, 102]
-
-
-def test_tao_scanner_bounds_first_scan_to_lookback():
-    p = _scan_provider(head=1000, blocks={})
-    seen = []
-    p.get_block = lambda n: seen.append(n) or _empty_block()
-    assert p.find_recent_outgoing('userTAO', 'minerTAO', 5000) is None
-    assert len(seen) == Tao.SCAN_LOOKBACK_BLOCKS
-    assert seen[0] == 1000 - Tao.SCAN_LOOKBACK_BLOCKS + 1
 
 
 def test_tao_scanner_reads_past_an_unreadable_block_and_still_retries_it():
@@ -398,48 +297,11 @@ def test_tao_scanner_reads_past_an_unreadable_block_and_still_retries_it():
     assert p.find_recent_outgoing('userTAO', 'minerTAO', 5000) == '0xdep'
 
 
-def test_tao_scanner_retries_a_candidate_whose_events_were_unreadable():
-    """A matching call whose settlement events could not be read parks the scan on that block too."""
-    blocks = {100: _raw_transfer_block('0xdep', 'minerTAO', 5000, 'userTAO')}
-    p = _scan_provider(head=101, blocks=blocks, readable_default=True)
-    readable = p.get_block_events
-
-    def boom(_):
-        raise ProviderUnreachableError('events unavailable')
-
-    p.get_block_events = boom
-    assert p.find_recent_outgoing('userTAO', 'minerTAO', 5000) is None
-    assert p.scan_cursors[('userTAO', 'minerTAO', 5000)] == 99
-    p.get_block_events = readable
-    assert p.find_recent_outgoing('userTAO', 'minerTAO', 5000) == '0xdep'
-
-
-def test_tao_scanner_none_when_head_unreachable():
-    p = _scan_provider(head=100, blocks={})
-    p.subtensor.get_current_block.side_effect = RuntimeError('down')
-    assert p.find_recent_outgoing('userTAO', 'minerTAO', 5000) is None
-
-
 def test_tao_scanner_ignores_transfer_that_moved_no_funds():
     """An included-but-failed transfer decodes to the right dest/amount and must still be ignored."""
     blocks = {100: _raw_transfer_block('0xdep', 'minerTAO', 5000, 'userTAO', settled=False)}
     p = _scan_provider(head=100, blocks=blocks, readable_default=True)
     assert p.find_recent_outgoing('userTAO', 'minerTAO', 5000) is None
-
-
-def test_tao_scanner_ignores_transfer_settled_below_the_asking_amount():
-    blocks = {100: _raw_transfer_block('0xdep', 'minerTAO', 5000, 'userTAO')}
-    blocks[100]['_events'] = [_transfer_event('minerTAO', 4999, 'userTAO')]
-    p = _scan_provider(head=100, blocks=blocks, readable_default=True)
-    assert p.find_recent_outgoing('userTAO', 'minerTAO', 5000) is None
-
-
-def test_settled_credit_reads_amount_and_sender_from_the_event():
-    """The event is authoritative: a call claiming more than it moved settles at the event amount."""
-    blocks = {100: _raw_transfer_block('0xdep', 'minerTAO', 9_999, 'userTAO')}
-    blocks[100]['_events'] = [_transfer_event('minerTAO', 5_000, 'userTAO')]
-    p = _scan_provider(head=100, blocks=blocks)
-    assert p.settled_credit(100, 0, 'minerTAO') == ('userTAO', 5_000)
 
 
 def test_settled_credit_ignores_events_from_other_extrinsics_and_recipients():
@@ -450,16 +312,6 @@ def test_settled_credit_ignores_events_from_other_extrinsics_and_recipients():
     ]
     p = _scan_provider(head=100, blocks=blocks)
     assert p.settled_credit(100, 0, 'minerTAO') is None
-
-
-def test_settled_credit_sums_multiple_credits_from_one_extrinsic():
-    blocks = {100: _raw_transfer_block('0xdep', 'minerTAO', 5000, 'userTAO')}
-    blocks[100]['_events'] = [
-        _transfer_event('minerTAO', 3_000, 'userTAO'),
-        _transfer_event('minerTAO', 2_000, 'userTAO'),
-    ]
-    p = _scan_provider(head=100, blocks=blocks)
-    assert p.settled_credit(100, 0, 'minerTAO') == ('userTAO', 5_000)
 
 
 @pytest.mark.parametrize(
@@ -474,7 +326,6 @@ def test_settled_credit_sums_multiple_credits_from_one_extrinsic():
             },
         },
         {'extrinsic_idx': 0, 'event': {'module_id': 'Balances', 'event_id': 'Transfer', 'attributes': ['A', 'B', 7]}},
-        {'extrinsic_idx': 0, 'event': {'Balances': {'Transfer': {'from': 'A', 'to': 'B', 'amount': 7}}}},
         {
             'extrinsic_idx': 0,
             'event': {

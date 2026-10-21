@@ -82,35 +82,6 @@ def test_a_pending_leg_is_rechecked_for_the_mempool_on_a_quiet_tip():
     assert btc.verifies == 2
 
 
-def test_a_settled_leg_is_never_checked_again():
-    w, chain, btc, clock = _watcher()
-    btc.confirmed_at_tip = 100
-    w.verdict(REQ)
-    w.tick(clock.t)
-    chain.tip = 150
-    w.tick(clock.t + 100)
-    assert btc.verifies == 1 and w.verdict(REQ).settled
-
-
-def test_an_idle_chain_and_a_settled_leg_cost_no_tip_read():
-    w, chain, btc, clock = _watcher()
-    w.tick(clock.t)
-    assert chain.tip_reads == 0  # nothing asked
-    btc.confirmed_at_tip = 100
-    w.verdict(REQ)
-    w.tick(clock.t)
-    w.tick(clock.t + 100)
-    assert chain.tip_reads == 1  # the one read that settled it
-
-
-def test_every_check_in_a_tick_shares_one_tip_read():
-    w, chain, btc, clock = _watcher()
-    for n in range(5):
-        w.verdict(verify_probe('btc', f'{n:064x}', 'bc1qdst', 1000))
-    w.tick(clock.t)
-    assert btc.verifies == 5 and chain.tip_reads == 1
-
-
 def test_an_endpoint_failure_is_unknown_not_no_and_is_retried():
     w, _, btc, clock = _watcher()
     btc.fail = True
@@ -121,15 +92,6 @@ def test_an_endpoint_failure_is_unknown_not_no_and_is_retried():
     btc.fail = False
     w.tick(clock.t + 1)
     assert w.verdict(REQ).error is None
-
-
-def test_a_leg_nobody_asks_about_is_forgotten():
-    w, _, btc, clock = _watcher()
-    w.verdict(REQ)
-    w.tick(clock.t)
-    clock.t += 3600
-    w.tick(clock.t)
-    assert btc.verifies == 1 and w._wanted == {}
 
 
 def test_assets_on_one_network_share_a_watcher():

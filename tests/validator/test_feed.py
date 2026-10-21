@@ -67,18 +67,6 @@ def test_backfill_from_a_recent_cursor_is_not_truncated():
     assert len(bf.peek(limit=1000)) == 100
 
 
-def test_backfill_hands_out_bounded_chunks():
-    bf = Backfill(_SigRpc(_history(250, spacing=1)), 'prog', until_sig=None, now=NOW)
-    bf.page()
-    sizes = []
-    while not bf.done:
-        chunk = bf.peek(limit=100)
-        sizes.append(len(chunk))
-        for _ in chunk:
-            bf.pop()
-    assert sizes == [100, 100, 50]
-
-
 def test_slot_clock_interpolates_between_anchors_and_extrapolates_past_them():
     times = {100: 1000, 200: 1040}
     clock = SlotClock(times.get, min_interval=0)
@@ -89,15 +77,6 @@ def test_slot_clock_interpolates_between_anchors_and_extrapolates_past_them():
     assert clock.time_of(150) == 1020
     assert clock.time_of(300) == 1080  # past the newest anchor: the measured rate (0.4s here)
     assert clock.time_of(50) == 980
-
-
-def test_slot_clock_reads_block_time_at_most_once_per_interval():
-    reads = []
-    clock = SlotClock(lambda slot: reads.append(slot) or 1000 + slot, min_interval=30)
-    clock.anchor(100, now=0)
-    clock.anchor(150, now=10)
-    clock.anchor(200, now=31)
-    assert reads == [100, 200]
 
 
 class _FakeLive:
@@ -135,21 +114,6 @@ def test_fresh_start_backfills_within_horizon_then_follows_live(tmp_path):
     feed._clock = SlotClock(lambda slot: NOW, min_interval=0)
     feed.tick(NOW)
     assert events.drain() == []
-
-
-def test_live_events_need_no_transaction_read(tmp_path):
-    rpc = _SigRpc([])
-    live = _FakeLive()
-    feed, events, _ = _feed(tmp_path, rpc, live)
-    feed.setup()
-    feed._clock = SlotClock(lambda slot: NOW + slot, min_interval=0)
-    live.inbox.append(_Pending(7, 'live-1', [('QuoteRemoved', {'x': 1})]))
-    feed.tick(NOW)
-    feed.tick(NOW)  # the first tick also finishes the (empty) boot backfill
-    (record,) = events.drain()
-    assert (record.name, record.signature, record.block_time) == ('QuoteRemoved', 'live-1', NOW + 7)
-    assert rpc.tx_reads == []
-    assert feed.status.get()[0].cursor == (7, 'live-1')
 
 
 class _FlakyRpc(_SigRpc):

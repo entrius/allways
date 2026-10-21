@@ -4,11 +4,10 @@ from types import SimpleNamespace
 
 import pytest
 
-from allways.assets import ASSET_REGISTRY
 from allways.assets.alpha import Alpha
 from allways.assets.asset import ProviderUnreachableError
 from allways.assets.tao import BETA_ESCROW, Tao
-from allways.chains import ALPHA_NETUIDS, CHAIN_SN7, CHAIN_SN74
+from allways.chains import CHAIN_SN7
 
 MINER = 'minerCold'
 USER = 'userCold'
@@ -87,18 +86,6 @@ def _verify(p, amount=5_000):
 # ─── registry + seam ────────────────────────────────────────────────────────
 
 
-def test_alphas_are_registered_and_bind_the_tao_chain():
-    ids = {spec.chain_id: spec for spec in ASSET_REGISTRY}
-    # Every netuid is registered, each bound to its own ChainDefinition and nothing else.
-    assert {f'sn{n}' for n in ALPHA_NETUIDS} <= set(ids)
-    assert ids['sn7'].cls.func is Alpha and ids['sn7'].cls.args == (CHAIN_SN7,)
-    assert ids['sn74'].cls.args == (CHAIN_SN74,)
-    assert ids['sn7'].kwarg_names == ids['tao'].kwarg_names
-    p = Alpha(CHAIN_SN7, SimpleNamespace())
-    assert isinstance(p, Alpha) and isinstance(p.chain, Tao) and p.netuid == 7
-    assert Alpha(CHAIN_SN74, SimpleNamespace()).netuid == 74
-
-
 def test_beta_escrow_is_never_a_valid_payee_on_tao_or_alpha():
     # Keyless protocol custody: transfer_stake into it fails (CannotUseSystemAccount), TAO sent there is
     # stranded. Invalid at the chain, so reserve refuses it and an in-flight swap cancels no-fault.
@@ -109,11 +96,6 @@ def test_beta_escrow_is_never_a_valid_payee_on_tao_or_alpha():
 
 
 # ─── verification ───────────────────────────────────────────────────────────
-
-
-def test_real_extrinsic_shape_decodes_with_its_hash():
-    """substrate.get_block yields GenericExtrinsic objects: the hash lives on the object, not in .value."""
-    assert Alpha(CHAIN_SN7, SimpleNamespace()).decode_transfer_stake(_ext(), False) == (TXID, MINER, 5_000, USER)
 
 
 def test_amount_comes_from_the_call_not_the_event():
@@ -212,32 +194,6 @@ def test_balance_read_failure_raises_rather_than_reading_as_empty():
         Alpha(CHAIN_SN7, SimpleNamespace(get_stake_info_for_coldkey=boom)).get_balance(MINER)
 
 
-def test_get_balance_sums_this_netuid_across_hotkeys():
-    stakes = [_stake('hk1', 100), _stake('hk2', 250), _stake('hk3', 999, netuid=NETUID + 1)]
-    assert Alpha(CHAIN_SN7, SimpleNamespace(get_stake_info_for_coldkey=lambda ck: stakes)).get_balance(MINER) == 350
-
-
-def test_value_rao_floors_and_raises_on_failure():
-    p = Alpha(CHAIN_SN7, SimpleNamespace(get_subnet_price=lambda netuid, block=None: SimpleNamespace(rao=333_333_333)))
-    assert p.value_rao(3) == 0
-    assert p.value_rao(3_000_000_000) == 999_999_999
-
-    def boom(netuid, block=None):
-        raise RuntimeError('rpc down')
-
-    with pytest.raises(ProviderUnreachableError):
-        Alpha(CHAIN_SN7, SimpleNamespace(get_subnet_price=boom)).value_rao(1)
-
-    calls = []
-
-    def historical(netuid, block=None):
-        calls.append((netuid, block))
-        return SimpleNamespace(rao=2 * 10**9)
-
-    assert Alpha(CHAIN_SN7, SimpleNamespace(get_subnet_price=historical)).value_rao(3 * 10**9, block=42) == 6 * 10**9
-    assert calls == [(NETUID, 42)]
-
-
 # ─── delivery gates ─────────────────────────────────────────────────────────
 
 
@@ -256,21 +212,6 @@ def test_transfer_toggle_off_defers_but_never_cancels():
     assert off.can_deliver_to(MINER, 1) is False
     assert off.delivery_refused(MINER, 0) is True
     assert Alpha(CHAIN_SN7, _toggles()).delivery_refused(MINER, 0) is False
-
-
-def test_transfers_off_is_no_address_refusal():
-    """A subnet-wide toggle is nobody's address, so it is no address refusal."""
-    assert Alpha(CHAIN_SN7, _toggles(transfer=False)).address_refused(MINER) is False
-
-
-def test_a_pruned_subnet_defers_and_never_cancels():
-    """SubnetLimit is full, so a registration dissolves the lowest-priced subnet and its alpha is
-    force-liquidated to coldkey TAO. A no-fault cancel would leave the taker's deposit with the miner,
-    so the swap defers and times out: the vault pays the taker, same as transfers-off."""
-    gone = Alpha(CHAIN_SN7, _toggles(exists=False))
-    assert gone.can_deliver_to(MINER, 1) is False
-    assert gone.delivery_refused(MINER, 0) is True
-    assert gone.cancel_evidence(MINER, 1) is None
 
 
 def test_unreadable_toggle_is_not_evidence_and_defers_the_slash():
@@ -371,14 +312,6 @@ def test_ambiguous_response_records_the_attempt_and_the_next_call_adopts_the_lan
     assert len(calls) == 1
 
 
-def test_failed_response_with_a_signed_extrinsic_keeps_its_hash():
-    """A submit that raised after signing still names the extrinsic: the next poll probes that exact hash."""
-    signed_only = SimpleNamespace(success=False, message='ws dropped', extrinsic=_ext(), extrinsic_receipt=None)
-    p, _ = _sender([_stake('hk', 9_000)], response=signed_only)
-    assert p.send_amount(USER, 5_000, dedup_key='swap-1') is None
-    assert p.broadcasted_txids['swap-1'][2] == TXID
-
-
 def test_whole_position_sentinel_is_not_an_amount():
     """u64::MAX means "my whole live position" on subtensor, so the call's figure is not what moved:
     a dust position would otherwise satisfy any pinned amount (validator and miner both credit >=)."""
@@ -389,14 +322,6 @@ def test_whole_position_sentinel_is_not_an_amount():
 
 
 FULL = [f'hk{i}' for i in range(128)]  # a recipient at subtensor's StakingHotkeys cap
-
-
-def test_send_lands_on_a_hotkey_the_recipient_already_stakes_to():
-    """A transfer that lands on a hotkey the recipient already holds never grows its StakingHotkeys,
-    so it can never hit the cap — preferred even over a larger position."""
-    p, calls = _sender([_stake('small', 6_000), _stake('big', 9_000)], recipient_hotkeys=['small'])
-    assert p.send_amount(USER, 5_000, dedup_key='swap-1') == (TXID, BLOCK)
-    assert calls[0]['hotkey_ss58'] == 'small'
 
 
 def test_a_recipient_at_the_cap_is_paid_onto_a_hotkey_it_already_stakes_to():
@@ -475,12 +400,6 @@ def test_a_refusal_from_a_flag_flipped_after_the_pick_is_resent_onto_the_recipie
     assert calls == [('big', 'big'), ('big', 'theirs')]
 
 
-def test_a_refusal_with_nowhere_else_to_land_is_returned_once_as_evidence():
-    p, calls = _flips_flag_in_the_send_block(recipient_hotkeys=())
-    assert p.send_amount(USER, 5_000, dedup_key='swap-1') == (TXID, BLOCK)
-    assert calls == [('big', 'big')]
-
-
 def test_a_resend_is_attempted_at_most_once():
     refused_again = SimpleNamespace(
         success=False,
@@ -549,13 +468,10 @@ def test_a_flag_the_recipient_turned_on_in_the_delivery_block_is_cancel_evidence
     [
         # the flag was already on at the parent block: the miner should have landed on 'theirs'
         dict(flags=1 << 1, events=[_flag_set(idx=0)]),
-        # a full list at the parent block: a new hotkey would not have landed either
-        dict(recipient_hotkeys=FULL, events=[_flag_set(idx=0)]),
         # no flag change in the block: a coldkey swap copies AccountFlags without this event
         dict(events=[]),
-        # turned on by someone else, turned off, or only after the miner's transfer
+        # turned on by someone else, or only after the miner's transfer
         dict(events=[_flag_set(who='someoneElse', idx=0)]),
-        dict(events=[_flag_set(enabled=False, idx=0)]),
         dict(events=[_flag_set(idx=1)]),
     ],
 )

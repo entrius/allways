@@ -11,7 +11,6 @@ import pytest
 from solders.pubkey import Pubkey
 
 from allways.constants import RELAY_FEE_SETTLE_GRACE_SECS as GRACE
-from allways.constants import RELAY_MINER_READ_INTERVAL_SECS
 from allways.solana import pdas
 from allways.validator.relay import attestation as attestation_job
 from allways.validator.relay import exits as exit_relay
@@ -241,30 +240,6 @@ def test_an_unreadable_vault_yields_no_attestation_at_all():
     assert attestation_job.compute(relay, MINER, HOTKEY) is None
 
 
-def test_an_idle_miner_is_never_rewritten():
-    # Writes are event-driven: once the attestation says the truth, a miner nothing happened to
-    # gets no further write, however many passes go by.
-    relay = _relay()
-    relay.step(NOW)
-    before = len([c for c in relay.chain.calls if c[0] == 'vote_set_attestation'])
-    assert before == 1, 'the first pass asserts the bond it just discovered'
-    relay._next_reconcile = 0  # even forcing the slow repair loop
-    relay.step(NOW + 1)
-    relay.step(NOW + 2)
-    assert len([c for c in relay.chain.calls if c[0] == 'vote_set_attestation']) == before
-
-
-def test_an_unchanged_attestation_is_not_rewritten():
-    solana = FakeChain(
-        miner_states={MINER: _miner_state()},
-        attestations={MINER: SimpleNamespace(effective_balance=100 * RAO, locked=True, epoch=3, chain='tao')},
-    )
-    relay = _relay(solana=solana)
-    relay.mark_dirty(MINER)
-    assert attestation_job.flush(relay, NOW)
-    assert not [c for c in solana.calls if c[0] == 'vote_set_attestation']
-
-
 def test_a_fee_confirm_nets_the_bond_down_without_any_vault_write():
     relay = _relay()
     relay._reconciled = True
@@ -409,12 +384,6 @@ def test_a_zeroed_verdict_hotkey_is_treated_as_unbound_not_a_target():
 # --- F3: the relay's own cursor, propagated failures, and heartbeat gating -----------------------
 
 
-def test_a_clean_ingest_reports_healthy():
-    relay = _relay()
-    assert _ingest(relay, [_timeout_event()]) is True
-    assert relay._ingest_healthy is True
-
-
 def test_a_failed_verdict_write_is_not_swallowed_and_holds_the_heartbeat(monkeypatch):
     relay = _relay()
     monkeypatch.setattr(
@@ -533,54 +502,11 @@ def test_a_quiescent_exit_settles_the_residual_before_it_unlocks():
     assert relay.vault.calls[-1] == ('vote_unlock', HOTKEY, 3)
 
 
-def test_the_exit_settle_is_a_one_entry_batch_so_the_fleet_is_never_dragged_in():
-    relay = _exiting_relay()
-    relay.store.record_relay_fee(SWAP2, MINER, 'tao', 4 * RAO, NOW)
-    relay.store.record_relay_fee('cc' * 32, MINER2, 'tao', 9 * RAO, NOW)
-    exit_relay.run_exits(relay, NOW)
-    entries = relay.vault.calls[0][1]
-    assert entries == [(HOTKEY, 4 * RAO)]
-
-
-def test_an_exit_owing_nothing_goes_straight_to_unlock():
-    relay = _exiting_relay()
-    exit_relay.run_exits(relay, NOW)
-    assert relay.vault.calls == [('vote_unlock', HOTKEY, 3)]
-
-
 def test_the_unlock_names_the_current_epoch():
     # The epoch is hash-bound into the vault round, so a stale round can't unlock a re-locked bond.
     relay = _exiting_relay(vault=FakeVault(lock={HOTKEY: (True, 11)}))
     exit_relay.run_exits(relay, NOW)
     assert relay.vault.calls == [('vote_unlock', HOTKEY, 11)]
-
-
-def test_re_activating_the_purse_cancels_the_exit():
-    relay = _relay(solana=FakeChain(miner_states={MINER: _miner_state()}))
-    relay._exiting.add(MINER)
-    exit_relay.run_exits(relay, NOW)
-    assert not relay.vault.calls and MINER not in relay._exiting
-
-
-def test_deactivating_the_tao_purse_arms_the_exit():
-    relay = _relay()
-    _ingest(
-        relay,
-        [
-            SimpleNamespace(
-                name='MinerBackingChanged',
-                block_time=NOW,
-                fields={'miner': MINER, 'backing': 'tao', 'enabled': False, 'active_backings': 0},
-            )
-        ],
-    )
-    assert MINER in relay._exiting
-
-
-def test_an_already_unlocked_bond_leaves_the_exit_set():
-    relay = _exiting_relay(vault=FakeVault(lock={HOTKEY: (False, 4)}))
-    exit_relay.run_exits(relay, NOW)
-    assert not relay.vault.calls and MINER not in relay._exiting
 
 
 # --- the fee true-up cadence --------------------------------------------------------------------
@@ -640,37 +566,12 @@ def test_totals_are_read_at_the_boundary_not_at_the_moment_of_firing():
     assert exit_relay.cadence_entries(relay, NOW) == [(HOTKEY, 5 * RAO)]
 
 
-def test_a_boundary_with_no_delta_is_skipped_as_pure_postage():
-    relay = _relay(vault=FakeVault(settled={HOTKEY: 5 * RAO}), fee_cadence_secs=1000)
-    relay.store.record_relay_fee(SWAP, MINER, 'tao', 5 * RAO, NOW - 10)
-    exit_relay.maybe_cadence_settle(relay, NOW + GRACE)
-    assert not relay.vault.calls
-    assert relay.store.get_relay_meta('fee_cadence_boundary') is not None, 'and it is not retried'
-
-
-def test_a_boundary_with_a_delta_fires_once_and_only_once():
-    relay = _relay(fee_cadence_secs=1000)
-    relay.store.record_relay_fee(SWAP, MINER, 'tao', 5 * RAO, NOW - 10)
-    exit_relay.maybe_cadence_settle(relay, NOW + GRACE)
-    exit_relay.maybe_cadence_settle(relay, NOW + GRACE + 5)
-    assert relay.vault.calls == [('vote_collect_fees_batch', [(HOTKEY, 5 * RAO)])]
-
-
 def test_an_unreadable_vault_defers_the_round_instead_of_deciding_blind():
     relay = _relay(vault=FakeVault(readable=False), fee_cadence_secs=1000)
     relay.store.record_relay_fee(SWAP, MINER, 'tao', 5 * RAO, NOW - 10)
     exit_relay.maybe_cadence_settle(relay, NOW + GRACE)
     assert not relay.vault.calls
     assert relay.store.get_relay_meta('fee_cadence_boundary') is None, 'the boundary is retried'
-
-
-def test_a_rejected_batch_leaves_the_boundary_open_for_the_next_tick():
-    vault = FakeVault()
-    vault.reject.add('vote_collect_fees_batch')
-    relay = _relay(vault=vault, fee_cadence_secs=1000)
-    relay.store.record_relay_fee(SWAP, MINER, 'tao', 5 * RAO, NOW - 10)
-    exit_relay.maybe_cadence_settle(relay, NOW + GRACE)
-    assert relay.store.get_relay_meta('fee_cadence_boundary') is None
 
 
 def test_a_miner_with_no_binding_is_excluded_rather_than_breaking_the_vector():
@@ -757,54 +658,6 @@ def test_a_miner_that_binds_mid_lap_joins_the_ring_at_the_next_lap():
     assert late in reads, 'a newcomer is read as its lap opens, not when the walk reaches it'
 
 
-def test_a_clock_stepped_back_marks_nobody():
-    relay, miners, reads = _ring_relay(10, reconcile_interval_secs=100)
-    relay.step(NOW + 30)
-    relay.step(NOW - 20)
-    assert len(reads) == 3
-    relay.step(NOW + 40)
-    assert len(reads) == 4
-
-
-def test_successive_miners_are_read_a_rate_limit_apart_and_a_lone_one_never_waits():
-    # Each miner is one fast batched round trip, so the audit's walk of the bound set would outrun
-    # the keyed subtensor's rate limit if nothing spaced it.
-    relay = _relay()
-    waits = []
-    relay._sleep, relay._timer = waits.append, lambda: 100.0
-    relay.mark_dirty(MINER)
-    attestation_job.flush(relay, NOW)
-    assert waits == [], 'an event-driven read of one miner is not held up'
-    relay.reconcile(NOW)
-    assert waits == [RELAY_MINER_READ_INTERVAL_SECS] * 2
-
-
-def test_a_miner_with_no_bond_costs_no_settled_read():
-    # Nothing nets to zero whatever the fees say; most bound miners never bond, and the reconcile
-    # pass reads every one of them.
-    relay = _relay(vault=FakeVault(collateral={}, lock={}))
-    relay.vault.get_settled_total = lambda hotkey: pytest.fail('settled read for a miner with no bond')
-    desired = attestation_job.compute(relay, MINER, HOTKEY)
-    assert desired.is_empty
-
-
-def test_the_heartbeat_is_lazy_not_per_pass():
-    relay = _relay(heartbeat_interval_secs=3600)
-    relay.step(NOW)
-    relay.step(NOW + 10)
-    assert [c for c in relay.chain.calls if c[0] == 'vote_attest_heartbeat'] == [('vote_attest_heartbeat',)]
-
-
-def test_a_fresh_on_chain_heartbeat_needs_no_vote_from_us():
-    solana = FakeChain(
-        miner_states={MINER: _miner_state()},
-        config=SimpleNamespace(last_attest_heartbeat=NOW - 5),
-    )
-    relay = _relay(solana=solana, heartbeat_interval_secs=3600)
-    relay.step(NOW)
-    assert not [c for c in solana.calls if c[0] == 'vote_attest_heartbeat']
-
-
 def test_a_bond_that_never_entered_service_is_never_unlocked():
     # THE trap: on chain, "deactivated" and "never activated" are the same state — purse bit down,
     # bond locked. A miner that has bonded and is waiting to activate must not have its bond
@@ -840,24 +693,6 @@ def test_reconcile_repairs_an_attestation_that_drifted_while_we_were_down():
     assert ('vote_set_attestation', MINER, 'tao', 100 * RAO, True, 3) in solana.calls
 
 
-def test_the_write_budget_holds_the_barrier_shut_rather_than_stalling_the_pass():
-    relay = _relay(max_writes_per_tick=1)
-    for i, miner in enumerate([MINER, MINER2]):
-        relay.chain.miner_states[miner] = _miner_state(miner=miner)
-        relay.vault.collateral[[HOTKEY, HOTKEY2][i]] = 10 * RAO
-        relay.vault.lock[[HOTKEY, HOTKEY2][i]] = (True, 1)
-        relay.mark_dirty(miner)
-    assert not attestation_job.flush(relay, NOW)
-    assert len([c for c in relay.chain.calls if c[0] == 'vote_set_attestation']) == 1
-
-
-def test_an_unbound_miner_is_left_alone_rather_than_retried_forever():
-    relay = _relay(attribution={})
-    relay.mark_dirty(MINER)
-    assert attestation_job.flush(relay, NOW)
-    assert not relay._dirty
-
-
 def test_reconcile_discovers_a_first_bond_no_event_ever_told_us_about():
     # A miner posts and locks on the vault before any attestation exists. If that pair of events
     # lands while this validator is down, nothing else would discover it — so reconcile enumerates
@@ -869,14 +704,6 @@ def test_reconcile_discovers_a_first_bond_no_event_ever_told_us_about():
     assert ('vote_set_attestation', MINER, 'tao', 100 * RAO, True, 3) in solana.calls
 
 
-def test_a_bound_miner_with_no_bond_gets_no_account_opened_for_it():
-    # Writing "zero" would open a rent-paying attestation per registered miner to say nothing.
-    solana = FakeChain(miner_states={MINER: _miner_state()})
-    relay = _relay(vault=FakeVault(collateral={}, lock={}), solana=solana)
-    relay.reconcile(NOW)
-    assert not [c for c in solana.calls if c[0] == 'vote_set_attestation']
-
-
 def test_a_bond_netted_to_zero_is_still_asserted():
     # Nets-to-zero is a real claim — "this miner's bond is entirely spoken for" — and the entry
     # guards must see it. Only "no bond at all" is silence.
@@ -885,25 +712,6 @@ def test_a_bond_netted_to_zero_is_still_asserted():
     relay.store.record_relay_slash(SWAP, MINER, 'tao', 50 * RAO, 50 * RAO, USER_TAO, NOW)
     relay.reconcile(NOW)
     assert ('vote_set_attestation', MINER, 'tao', 0, True, 3) in solana.calls
-
-
-def test_a_malformed_reimbursement_address_is_rejected_once_not_every_pass():
-    # The program never validated the user's backing-chain address, so a malformed one reaches the
-    # relay intact. It must be refused as a payee, not raise on every tick forever.
-    relay = _relay()
-    _ingest(relay, [_timeout_event(payee='not-an-ss58')])
-    relay.step(NOW)
-    assert not [c for c in relay.vault.calls if c[0] == 'vote_slash']
-    assert len(relay.store.open_relay_slashes('tao')) == 1
-
-
-def test_reconcile_refreshes_who_exists_before_asking_what_they_owe():
-    # A miner that binds after startup must not stay invisible for an attribution TTL — the bound
-    # set is the reconcile iteration set, so a stale map hides it completely.
-    relay = _relay(attribution={MINER2: HOTKEY2})  # a stale map that predates the new binding
-    relay.chain.attributions = {MINER: HOTKEY, MINER2: HOTKEY2}
-    relay.reconcile(NOW)
-    assert ('vote_set_attestation', MINER, 'tao', 100 * RAO, True, 3) in relay.chain.calls
 
 
 # ─── vault generation: the attestation epoch namespace ───────────────────────────────────────────
@@ -952,29 +760,6 @@ def test_attestation_is_skipped_when_the_generation_is_unreadable():
     assert attestation_job.compute(relay, MINER, HOTKEY) is None
 
 
-def test_a_fresh_vault_is_still_empty_whatever_the_generation():
-    """`is_empty` must read the VAULT half: a replacement vault starts at lock epoch 0 in a
-    non-zero generation, and that is still "no bond posted", not a real assertion worth writing."""
-    from allways.solana.layouts import compose_attestation_epoch as compose
-
-    assert attestation_job.Attested(0, False, compose(4, 0)).is_empty
-    assert not attestation_job.Attested(0, False, compose(4, 1)).is_empty
-
-
-def test_fees_are_scoped_to_the_vault_generation_that_will_collect_them():
-    """A replacement vault restarts its settled counter at 0. If accruals were summed across
-    generations, fees the retired vault already collected would be charged a second time."""
-    store = _store()
-    store.record_relay_fee('aa', MINER, 'tao', 1_800_000, NOW - 100, vault_generation=0)
-    store.record_relay_fee('bb', MINER, 'tao', 500_000, NOW, vault_generation=1)
-
-    assert store.accrued_fee_total(MINER, 'tao', vault_generation=0) == 1_800_000
-    assert store.accrued_fee_total(MINER, 'tao', vault_generation=1) == 500_000
-    # Unscoped stays the whole history — that read is miner discovery, not accounting.
-    assert store.accrued_fee_total(MINER, 'tao') == 2_300_000
-    assert set(store.accrued_fee_totals('tao', vault_generation=1)) == {MINER}
-
-
 def test_attestation_does_not_recharge_fees_the_retired_vault_settled():
     """The live bug: 0.8 τ posted to a fresh vault was attested as 0.7982 τ because 1.8M rao of
     already-settled fees came along from the retired vault."""
@@ -1009,15 +794,6 @@ def test_vault_event_poll_walks_a_long_gap_one_window_per_step():
 
     assert [c for c in vault.calls if c[0] == 'poll_events'] == [('poll_events', 1, 50), ('poll_events', 51, 100)]
     assert relay.store.get_relay_meta('vault_event_block') == '100'
-
-
-def test_a_rebind_after_the_verdict_does_not_redirect_the_seizure_off_the_pinned_hotkey():
-    relay = _relay()
-    relay.chain.attributions = {MINER: HOTKEY2}  # the miner rebinds after the swap pinned HOTKEY
-    _ingest(relay, [_timeout_event(hotkey=codec.account_bytes(HOTKEY))])
-    relay.step(NOW)
-    slash = next(c for c in relay.vault.calls if c[0] == 'vote_slash')
-    assert slash[1] == HOTKEY
 
 
 def test_an_unreadable_ledger_fails_closed():

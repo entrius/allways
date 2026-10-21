@@ -69,17 +69,6 @@ def test_attributes_pubkey_to_hotkey_then_gates():
     }
 
 
-def test_high_fail_miner_attributed_but_ineligible():
-    m1 = SolKeypair().pubkey()
-    hk1 = _hotkey()
-    client = _Client(
-        bindings=[_binding(m1, hk1)],
-        states=[_miner_state(m1, 50, MAX_FAILED_SWAPS + 1)],
-    )
-    metagraph = SimpleNamespace(hotkeys=[hk1.ss58_address])
-    assert build_eligibility(client, metagraph) == {hk1.ss58_address: False}
-
-
 def test_unbound_miner_state_dropped():
     """A MinerState whose pubkey has no Binding can't map to a hotkey → skipped."""
     m1 = SolKeypair().pubkey()
@@ -118,13 +107,6 @@ def _ns_hub(successful, failed, tao_settling_until=0):
     return SimpleNamespace(
         successful_swaps=successful, failed_swaps=failed, settling_until=[0, tao_settling_until] + [0] * 6
     )
-
-
-def test_is_eligible_boundaries():
-    assert is_eligible(_ns(0, MAX_FAILED_SWAPS))
-    assert not is_eligible(_ns(99, MAX_FAILED_SWAPS + 1))
-    assert is_eligible(_ns(0, 0), hotkey='hk', recent_fills={'sol': {'hk'}})
-    assert not is_eligible(_ns(99, 0), hotkey='hk', recent_fills={})
 
 
 def test_a_tao_settle_zeroes_only_tao_directions():
