@@ -192,8 +192,25 @@ def test_a_rate_limited_first_request_at_construction_builds_on_the_next_endpoin
     assert fake_subtensor.call_args.kwargs['network'] == FINNEY
 
 
-def test_a_non_rate_limit_construction_error_is_raised_as_before(fake_subtensor, monkeypatch):
+@pytest.mark.parametrize('status', [403, 503])
+def test_a_refused_handshake_at_construction_builds_on_the_next_endpoint(fake_subtensor, monkeypatch, status):
+    """A primary answering 403 (revoked or blocked key) used to crash-loop the validator with a fallback configured."""
     monkeypatch.setenv(st.FALLBACK_ENDPOINTS_ENV, FINNEY)
+    fake_subtensor.side_effect = [_http(status), MagicMock()]
+    build_subtensor(network=KEYED)
+    assert fake_subtensor.call_args.kwargs['network'] == FINNEY
+
+
+def test_a_non_http_construction_error_is_raised_as_before(fake_subtensor, monkeypatch):
+    monkeypatch.setenv(st.FALLBACK_ENDPOINTS_ENV, FINNEY)
+    fake_subtensor.side_effect = [SubstrateRequestException('Verification Error')]
+    with pytest.raises(SubstrateRequestException):
+        build_subtensor(network=KEYED)
+    assert fake_subtensor.call_count == 1
+
+
+def test_a_refused_handshake_with_no_fallback_is_raised_as_before(fake_subtensor, monkeypatch):
+    monkeypatch.setenv(st.ARCHIVE_ENDPOINTS_ENV, ARCHIVE)
     fake_subtensor.side_effect = [_http(403)]
     with pytest.raises(InvalidStatus):
         build_subtensor(network=KEYED)
@@ -366,14 +383,13 @@ def test_a_non_rate_limit_rpc_error_stays_on_the_primary_as_before(net, logs):
     assert substrate.url == KEYED and net.dials == [KEYED] and logs['warning'] == []
 
 
-def test_a_non_rate_limit_handshake_refusal_is_raised_as_before(net, logs):
+def test_a_refused_handshake_mid_run_fails_over(net, logs):
     net.set(FALLBACK, _ok)
     substrate, _ = _substrate(net)
-    substrate.ws.close_code = 1006
+    substrate.ws.close_code = 1006  # the primary socket dropped; its reconnect is refused (revoked key)
     net.set(KEYED, _http(403))
-    with pytest.raises(InvalidStatus):
-        substrate.rpc_request('chain_getHead', [])
-    assert substrate.url == KEYED and FALLBACK not in net.dials
+    assert substrate.rpc_request('chain_getHead', [])['result'] == 'chain_getHead@ok'
+    assert substrate.url == FALLBACK and len(logs['warning']) == 1 and 'handshake refused' in logs['warning'][0]
 
 
 def test_rate_limits_are_left_alone_with_no_fallback(net, logs):

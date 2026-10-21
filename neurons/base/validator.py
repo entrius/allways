@@ -317,6 +317,18 @@ class BaseValidatorNeuron(BaseNeuron):
             hotkeys=self.hotkeys,
         )
 
+    def _fit_to_metagraph(self, scores, hotkeys):
+        """Saved ``scores``/``hotkeys`` laid onto the current metagraph: a uid keeps its score only while the same hotkey
+        holds it, every other uid starts at 0. resync_metagraph only reconciles when the axons change, so a state saved
+        under a smaller (or reshuffled) metagraph would otherwise index past the end of the score vector."""
+        fitted = np.zeros(self.metagraph.n, dtype=np.float32)
+        for uid, hotkey in enumerate(self.metagraph.hotkeys):
+            if uid < len(hotkeys) and uid < len(scores) and hotkeys[uid] == hotkey:
+                fitted[uid] = scores[uid]
+        if len(scores) != len(fitted) or hotkeys != list(self.metagraph.hotkeys):
+            bt.logging.info(f'Fitted saved scores ({len(scores)} uids) to the metagraph ({len(fitted)} uids)')
+        return fitted, copy.deepcopy(self.metagraph.hotkeys)
+
     def load_state(self):
         """Loads the state of the validator from a file."""
         bt.logging.info('Loading validator state.')
@@ -325,8 +337,7 @@ class BaseValidatorNeuron(BaseNeuron):
         try:
             state = np.load(state_path)
             self.step = int(state['step'])
-            self.scores = state['scores']
-            self.hotkeys = list(state['hotkeys'])
+            self.scores, self.hotkeys = self._fit_to_metagraph(state['scores'], list(state['hotkeys']))
             bt.logging.success(f'Successfully loaded validator state from {state_path}')
         except FileNotFoundError:
             bt.logging.warning(f'No state file found at {state_path}, starting with fresh state')
