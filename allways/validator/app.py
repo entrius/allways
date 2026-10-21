@@ -80,10 +80,7 @@ def build(
 ) -> App:
     store = Store(os.path.join(cfg.state_dir, 'validator.db'))
     meter = Meter(list(cfg.endpoints))
-    for asset in assets.values():
-        session = getattr(asset, 'http', None) or getattr(getattr(asset, 'rpc', None), '_session', None)
-        if session is not None:
-            meter.attach(session)
+    meter.attach_chains(assets.values())
     world = Latest()
     rounds = Latest()
     events = Topic('events')

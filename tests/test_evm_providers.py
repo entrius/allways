@@ -24,6 +24,7 @@ from allways.assets.hype import Hype
 from allways.assets.pol import Pol
 from allways.chains import CHAIN_PAXG, SUPPORTED_CHAINS, get_chain_def
 from allways.utils.rate import is_executable_rate
+from allways.validator.chain.gateway import Meter, MeteredAdapter
 
 TEST_KEY = '0xac0974bec39a17e36ba4a6b4d238ff944bacb478cbed5efcae784d7bf4f2ff80'  # hardhat account #0
 TEST_ADDR = '0xf39Fd6e51aad88F6F4ce6aB8827279cffFb92266'  # the key's address, EIP-55 form
@@ -497,3 +498,11 @@ def test_sub_second_chain_scan_is_bounded_and_parks_below_an_unreadable_block():
     assert provider.find_recent_outgoing(RECIPIENT, RECIPIENT, 1) is None
     # Never leap a block the scan could not read — the deposit in it must stay reachable.
     assert provider.scan_cursors[(RECIPIENT.lower(), RECIPIENT.lower(), 1)] == 10_000 - MAX_WALK_BLOCKS
+
+
+def test_every_evm_chain_session_is_metered():
+    """EVM traffic goes through the chain's session, not the asset's, so the meter must find it there."""
+    providers = [spec.cls() for spec in EVM_SPECS]
+    Meter([]).attach_chains(providers)
+    for provider in providers:
+        assert isinstance(provider.chain.http.get_adapter('https://rpc.example'), MeteredAdapter)

@@ -1,7 +1,7 @@
 import os
 import threading
 import time
-from typing import Any, Optional, Tuple
+from typing import Any, List, Optional, Tuple
 from urllib.parse import urlparse
 
 import base58
@@ -402,6 +402,9 @@ class Bitcoin(Asset, Chain):
         except Exception as e:
             bt.logging.error(f'Esplora tx lookup failed for {tx_hash}: {e}')
             return None
+
+    def http_sessions(self) -> List[Any]:
+        return [self.http]
 
     def get_current_block_height(self) -> Optional[int]:
         """Bitcoin chain tip via the Esplora API. None on failure."""

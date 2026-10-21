@@ -1,7 +1,7 @@
 import re
 import time
 from abc import ABC, abstractmethod
-from typing import Any, Optional
+from typing import Any, List, Optional
 
 _HEX64 = re.compile(r'[0-9a-fA-F]{64}')
 
@@ -63,6 +63,11 @@ class Chain(ABC):
     def clear_pass_tip(self) -> None:
         """Expire the cached tip — the validator calls this once per pass for a fresh start-of-pass tip."""
         self._pass_tip = None
+
+    def http_sessions(self) -> List[Any]:
+        """The ``requests`` sessions this chain's endpoint traffic goes through, so the validator can meter
+        them. Empty for a websocket-only chain (subtensor)."""
+        return []
 
     @abstractmethod
     def is_valid_address(self, address: str) -> bool: ...

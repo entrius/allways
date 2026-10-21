@@ -151,6 +151,9 @@ class SolanaChain(Chain):
             return 0
         return max(0, tip - int(slot) + 1)
 
+    def http_sessions(self) -> List[Any]:
+        return [self.rpc._session]
+
     def get_current_block_height(self) -> Optional[int]:
         """Current confirmed slot. None on transient backend failure."""
         try:

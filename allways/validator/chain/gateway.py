@@ -13,7 +13,7 @@ import threading
 import time
 from collections import Counter
 from dataclasses import dataclass
-from typing import Any, Callable, Dict, List, Optional, Tuple
+from typing import Any, Callable, Dict, Iterable, List, Optional, Tuple
 from urllib.parse import urlsplit
 
 import bittensor as bt
@@ -153,6 +153,12 @@ class Meter:
         session.mount('https://', adapter)
         session.mount('http://', adapter)
         return session
+
+    def attach_chains(self, assets: Iterable[Any]) -> None:
+        """Meter every HTTP session the assets' chains talk through, each once (assets can share a chain)."""
+        sessions = {id(s): s for asset in assets for s in asset.chain.http_sessions()}
+        for session in sessions.values():
+            self.attach(session)
 
     def solana_client(self, url: str, program_id=None, keypair=None, cls=AllwaysSolanaClient) -> AllwaysSolanaClient:
         """A program client whose requests are metered. One per component: sessions aren't thread-safe."""
