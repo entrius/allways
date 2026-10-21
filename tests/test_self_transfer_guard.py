@@ -35,6 +35,9 @@ class FakeProvider(Asset, Chain):
     def get_current_block_height(self) -> Optional[int]:
         return 100
 
+    def find_recent_outgoing(self, from_addr: str, to_addr: str, amount: int) -> Optional[str]:
+        return None
+
     def get_balance(self, address: str) -> int:
         return 0
 

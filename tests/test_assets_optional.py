@@ -26,7 +26,7 @@ class _Ok:
     def chain(self):
         return self
 
-    def check_connection(self, require_send=True):
+    def check_connection(self, require_send=True, checked=None):
         pass
 
     def share_chain(self, shared):
@@ -215,7 +215,7 @@ def test_a_failed_shared_probe_fails_every_asset_on_that_network_without_re_aski
 def lanes(count, check):
     """``count`` provider classes whose check is ``check(provider)``. A lane is a chain class, so ``count`` lanes."""
     return [
-        type(f'_Lane{i}', (_Ok,), {'check_connection': lambda self, require_send=True: check(self)})
+        type(f'_Lane{i}', (_Ok,), {'check_connection': lambda self, require_send=True, checked=None: check(self)})
         for i in range(count)
     ]
 

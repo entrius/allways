@@ -629,10 +629,11 @@ def scan_deposit(ctx, miner_hotkey: str) -> Optional[str]:
     # confirm_deposit stays the sole verifier, so a loose per-hub scan can never mis-claim.
     for reservation, _backing in slots:
         provider = ctx.providers.get(reservation.from_chain)
-        scan = getattr(provider, 'find_recent_outgoing', None)
-        if scan is None:
+        if provider is None:
             continue
-        found = scan(reservation.from_addr, reservation.miner_from_addr, int(reservation.from_amount))
+        found = provider.find_recent_outgoing(
+            reservation.from_addr, reservation.miner_from_addr, int(reservation.from_amount)
+        )
         if found:
             return found
     return None

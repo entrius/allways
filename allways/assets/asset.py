@@ -53,6 +53,8 @@ class Asset(ABC):
 
     # Non-fused assets (tokens on a multi-asset chain) set this at construction.
     _chain: Optional[Chain] = None
+    # Why the last ``send_amount`` returned None, so callers can surface it without scraping logs.
+    last_send_error: Optional[str] = None
 
     @property
     @abstractmethod
@@ -88,12 +90,22 @@ class Asset(ABC):
         prove it); each provider overrides with a real check."""
         return False
 
+    def _send_error(self, msg: str) -> None:
+        self.last_send_error = msg
+        bt.logging.error(msg)
+
     @abstractmethod
-    def check_connection(self, **kwargs) -> None:
+    def check_connection(
+        self, require_send: bool = True, checked: Optional[Dict[Hashable, Optional[Exception]]] = None
+    ) -> None:
         """Verify the chain provider can reach its backend (RPC node, subtensor, etc).
 
         Raises ConnectionError with a descriptive message on failure.
         Called during startup to fail fast if a provider is misconfigured.
+
+        ``require_send`` also checks the signing credentials. ``checked`` (a backend's key → its probe's
+        error, None = passed) lets every asset on one backend share one probe; an asset whose probe is cheap
+        may ignore it.
         """
         ...
 
@@ -194,6 +206,13 @@ class Asset(ABC):
             return None
 
         return tx_info
+
+    @abstractmethod
+    def find_recent_outgoing(self, from_addr: str, to_addr: str, amount: int) -> Optional[str]:
+        """Hash of a recent tx from ``from_addr`` paying ``to_addr`` >= ``amount``, else None. A hash-finder for
+        deposit detection only: ``verify_transaction`` stays the sole verifier, so a miss just means the manual
+        rescue paths."""
+        ...
 
     @abstractmethod
     def get_balance(self, address: str) -> int: ...

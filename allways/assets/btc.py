@@ -1,7 +1,7 @@
 import os
 import threading
 import time
-from typing import Any, List, Optional, Tuple
+from typing import Any, Dict, Hashable, List, Optional, Tuple
 from urllib.parse import urlparse
 
 import base58
@@ -201,10 +201,6 @@ class Bitcoin(Asset, Chain):
         self.http = requests.Session()
         self.http.headers['Connection'] = 'close'
 
-        # Last failure reason from send_amount / send_amount_lightweight, so
-        # callers can surface a useful message without scraping logs.
-        self.last_send_error: Optional[str] = None
-
         # Scopes find_recent_outgoing reuse to this process AND (v3.1) to one obligation each:
         # txid → dedup scope (the swap key). A fresh `alw swap`
         # run can't return a tx hash already consumed by an earlier swap.
@@ -219,10 +215,6 @@ class Bitcoin(Asset, Chain):
             os.environ.get('BTC_ESPLORA_URLS', ''),
             os.environ.get('BTC_ESPLORA_API_KEY_HEADER', 'Authorization'),
         )
-
-    def _send_error(self, msg: str) -> None:
-        self.last_send_error = msg
-        bt.logging.error(msg)
 
     @property
     def chain_def(self) -> ChainDefinition:
@@ -270,7 +262,9 @@ class Bitcoin(Asset, Chain):
         except Exception:
             return False
 
-    def check_connection(self, require_send: bool = True) -> None:
+    def check_connection(
+        self, require_send: bool = True, checked: Optional[Dict[Hashable, Optional[Exception]]] = None
+    ) -> None:
         if require_send and not os.environ.get('BTC_PRIVATE_KEY'):
             raise ConnectionError('BTC signing requires the BTC_PRIVATE_KEY env var')
         try:

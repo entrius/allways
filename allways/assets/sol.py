@@ -1,6 +1,6 @@
 import base64
 import time
-from typing import Any, Dict, Hashable, List, Optional, Tuple
+from typing import Any, Callable, Dict, Hashable, List, Optional, Tuple
 
 import base58
 import bittensor as bt
@@ -202,10 +202,18 @@ class SolanaChain(Chain):
 
     # --- own-broadcast dedup + send loop (shared by every asset that signs with this keypair) ---
 
-    def broadcast(self, broadcasted: Broadcasts, instructions: list, want: tuple, what: str) -> SendResult:
+    def broadcast(
+        self,
+        broadcasted: Broadcasts,
+        instructions: list,
+        want: tuple,
+        what: str,
+        fail: Callable[[str], None] = bt.logging.error,
+    ) -> SendResult:
         """Sign ``instructions`` with the chain keypair and send, retrying a stale blockhash. ``want``
         is the (to, amount, dedup) obligation recorded BEFORE confirm so a confirm() timeout on a tx
-        that landed is reused by ``prior_broadcast`` next pass instead of paid twice."""
+        that landed is reused by ``prior_broadcast`` next pass instead of paid twice. A failure is
+        reported through ``fail`` (the asset's ``_send_error``)."""
         from solders.hash import Hash
         from solders.transaction import Transaction
 
@@ -222,11 +230,11 @@ class SolanaChain(Chain):
                 return (sig, slot)
             except Exception as e:  # transient stale-blockhash on a fresh/lagging RPC → re-fetch + resend
                 if 'blockhash' not in str(e).lower():
-                    bt.logging.error(f'{LOG_SOL} send failed: {e}')
+                    fail(f'{LOG_SOL} send failed: {e}')
                     return None
                 last_err = e
                 time.sleep(0.5)
-        bt.logging.error(f'{LOG_SOL} send failed after blockhash retries: {last_err}')
+        fail(f'{LOG_SOL} send failed after blockhash retries: {last_err}')
         return None
 
     def record_broadcast(self, broadcasted: Broadcasts, sig: str, want: tuple) -> None:
@@ -272,13 +280,15 @@ class SolanaChain(Chain):
             raise SolanaRpcError(f'prior send {sig[:16]}... not on-chain yet and not expired — waiting a pass')
         return None
 
-    def resolve_prior_send(self, broadcasted: Broadcasts, want: tuple, what: str) -> tuple[bool, SendResult]:
+    def resolve_prior_send(
+        self, broadcasted: Broadcasts, want: tuple, what: str, fail: Callable[[str], None] = bt.logging.error
+    ) -> tuple[bool, SendResult]:
         """``(decided, result)``: decided=True means the caller must return ``result`` as-is — a reused
         prior tx, or None because a prior send is still unresolved (re-sending would risk a double pay)."""
         try:
             prior = self.prior_broadcast(broadcasted, want)
         except Exception as e:
-            bt.logging.error(f'{LOG_SOL} prior send unresolved ({e}) — not re-sending, would risk a double pay')
+            fail(f'{LOG_SOL} prior send unresolved ({e}) — not re-sending, would risk a double pay')
             return True, None
         if prior is not None:
             bt.logging.info(f'{LOG_SOL} reusing prior tx {prior[0]} for {what}')
@@ -286,28 +296,20 @@ class SolanaChain(Chain):
         return False, None
 
 
-class Sol(Asset):
-    """Solana swap-leg provider for native SOL transfers.
+class SolanaAsset(Asset):
+    """Base for assets on Solana: the shared ``SolanaChain``, this asset's own broadcast records, the
+    by-signature read, the deposit scanner and the send preflight. Subclasses supply the credit — how
+    much of THIS asset reached the recipient, and from whom — and the instructions that pay it.
 
-    The SOL leg of a launch pair (sol↔btc, sol↔tao) is a peer-to-peer user↔miner
-    transfer — the swap-manager program never custodies it. It's verified like a BTC
-    deposit: look the signature up by hash via getTransaction and confirm a >= lamport
-    credit to the expected address, counted from System Program transfers (top-level or CPI)
-    and attributed to the wallet they debit, never to whoever paid the fee.
-
-    Composes ``SolanaChain`` (transport, tip, crypto, broadcast dedup); this class is only
-    the native-lamport semantics — ``_match_native_credit`` and the SystemProgram transfer.
-    An SPL-token asset is its sibling on the same chain object, not a branch in here.
-
-    Read path needs only an RPC URL; ``send_amount`` (the miner's dest leg) needs a keypair.
-    """
+    Read path needs only an RPC URL; ``send_amount`` (the miner's dest leg) needs a keypair."""
 
     def __init__(
         self, solana_rpc_url: Optional[str] = None, solana_keypair: Optional[Keypair] = None, timeout: int = 30
     ):
         self._chain = SolanaChain(solana_rpc_url, solana_keypair, timeout=timeout)
         # Own-broadcast dedup: sig -> (to, amount, dedup_scope, seen_slot). A confirm() timeout returns
-        # None even when the transfer landed; without this the next poll re-signs and double-pays.
+        # None even when the transfer landed; without this the next poll re-signs and double-pays. Per
+        # asset, so SOL and a token on one shared chain never reuse each other's payout.
         self.broadcasted_txids: Broadcasts = {}
 
     # Transport + signer live on the chain; exposed here because callers and tests address the asset.
@@ -327,21 +329,19 @@ class Sol(Asset):
     def keypair(self) -> Optional[Keypair]:
         return self.chain.keypair
 
-    @property
-    def chain_def(self) -> ChainDefinition:
-        return CHAIN_SOL
-
-    def describe(self) -> str:
-        return self.chain.describe()
-
     def can_send_from(self, address: str) -> bool:
         return self.chain.can_send_from(address)
 
-    def check_connection(self, require_send: bool = True, **kwargs) -> None:
-        if require_send and self.keypair is None:
-            raise ConnectionError('SOL send requires a Solana keypair (pass solana_keypair)')
-        slot = self.chain.check_rpc()
-        bt.logging.success(f'{LOG_SOL} connected: slot={slot}')
+    # --- verification ---
+
+    def _credit(self, keys: List[str], tx: dict, meta: dict, recipient: str) -> Tuple[Optional[int], str]:
+        """(amount of this asset credited to ``recipient``, the one wallet it came from) — (None, '') when
+        nothing reached it. Raises ProviderUnreachableError when the tx can't be judged."""
+        raise NotImplementedError
+
+    def _scan_address(self, owner: str) -> str:
+        """The account whose signature history shows a credit to ``owner``."""
+        return owner
 
     def fetch_matching_tx(
         self,
@@ -351,7 +351,7 @@ class Sol(Asset):
         block_hint: int = 0,  # unused — Solana indexes by signature
         max_scan_blocks: int = 150,  # unused — native by-signature lookup, no scan
     ) -> Optional[TransactionInfo]:
-        """Look up a SOL transfer by its signature (``tx_hash``) and match the credit.
+        """Look up a transfer by its signature (``tx_hash``) and match the credit.
 
         Solana resolves transactions by signature natively, so — like Bitcoin's
         getrawtransaction — this is an O(1) lookup, not a block scan. Raises
@@ -381,18 +381,15 @@ class Sol(Asset):
         if meta.get('err') is not None:
             bt.logging.debug(f'{LOG_SOL} tx {tx_hash[:16]}... failed on-chain (err={meta.get("err")})')
             return None
-
         keys = self.chain.account_keys(tx, meta)
-        credit, sender = self._match_native_credit(keys, tx, meta, expected_recipient)
+        credit, sender = self._credit(keys, tx, meta, expected_recipient)
         if credit is None or credit < expected_amount:
             bt.logging.warning(
-                f'{LOG_SOL} tx {tx_hash[:16]}... credits {expected_recipient} {credit} lamports '
+                f'{LOG_SOL} tx {tx_hash[:16]}... credits {expected_recipient} {credit} {self.chain_def.native_unit} '
                 f'(< {expected_amount} required)'
             )
             return None
-
         slot = tx.get('slot')
-        block_time = tx.get('blockTime')  # unix seconds, the replay-freshness floor (B2)
         confirmations = self.chain.confirmations(slot)
         return TransactionInfo(
             tx_hash=tx_hash,
@@ -402,28 +399,15 @@ class Sol(Asset):
             amount=credit,
             block_number=slot,
             confirmations=confirmations,
-            block_time=block_time,
+            block_time=tx.get('blockTime'),  # unix seconds, the replay-freshness floor (B2)
         )
 
-    @staticmethod
-    def _match_native_credit(keys: List[str], tx: dict, meta: dict, recipient: str) -> Tuple[Optional[int], str]:
-        """(lamports System-transferred to ``recipient``, the one wallet they came from), or (None, '')
-        when nothing was transferred to it or several wallets paid it (no single sender to pin)."""
-        paid: Dict[str, int] = {}
-        for source, payee, lamports in system_transfers(keys, tx, meta):
-            if payee == recipient:
-                paid[source] = paid.get(source, 0) + lamports
-        if len(paid) != 1:
-            return None, ''
-        ((sender, credit),) = paid.items()
-        return credit, sender
-
     def find_recent_outgoing(self, from_addr: str, to_addr: str, amount: int) -> Optional[str]:
-        """Signature of a recent tx from ``from_addr`` crediting ``to_addr`` >= ``amount`` lamports,
-        else None. The Solana sibling of the Bitcoin scanner: a hash-finder for deposit detection —
+        """Signature of a recent tx from ``from_addr`` crediting ``to_addr`` >= ``amount``, else None. The
+        Solana sibling of the Bitcoin scanner: a hash-finder for deposit detection —
         ``fetch_matching_tx``/``verify_transaction`` stay the sole verifiers."""
         try:
-            sigs = self.rpc.get_signatures_for_address(to_addr, limit=20)
+            sigs = self.rpc.get_signatures_for_address(self._scan_address(to_addr), limit=20)
         except Exception as e:
             bt.logging.debug(f'{LOG_SOL} find_recent_outgoing signature scan failed: {e}')
             return None
@@ -440,10 +424,79 @@ class Sol(Asset):
             meta = tx.get('meta') or {}
             if meta.get('err') is not None:
                 continue
-            credit, sender = self._match_native_credit(self.chain.account_keys(tx, meta), tx, meta, to_addr)
+            try:
+                credit, sender = self._credit(self.chain.account_keys(tx, meta), tx, meta, to_addr)
+            except ProviderUnreachableError:
+                continue
             if sender == from_addr and credit is not None and credit >= amount:
                 return sig
         return None
+
+    # --- send ---
+
+    def _start_send(
+        self, to_address: str, amount: int, from_address: Optional[str], dedup_key: Optional[str], what: str
+    ) -> Tuple[bool, SendResult, tuple]:
+        """The checks every Solana send runs before building its instructions: a signer, the sender pin,
+        and no unresolved prior send for this obligation. ``(decided, result, want)`` — decided=True
+        means return ``result`` as-is."""
+        self.last_send_error = None
+        want = (str(to_address), int(amount), dedup_key or '')
+        if self.keypair is None:
+            self._send_error(f'{self.chain_def.id} send_amount called on a read-only provider (no keypair)')
+            return True, None, want
+        # Never send from a key that can't satisfy the validator's sender pin: the leg would be rejected
+        # and the funds wasted. Refuse before broadcasting (mirrors the EVM/BTC providers).
+        me = self.keypair.pubkey()
+        if from_address is not None and str(me) != str(from_address):
+            self._send_error(f'{LOG_SOL} committed sender {from_address} != wallet {me} — not sending')
+            return True, None, want
+        decided, result = self.chain.resolve_prior_send(self.broadcasted_txids, want, what, fail=self._send_error)
+        return decided, result, want
+
+    def _broadcast(self, instructions: list, want: tuple, what: str) -> SendResult:
+        return self.chain.broadcast(self.broadcasted_txids, instructions, want, what, fail=self._send_error)
+
+
+class Sol(SolanaAsset):
+    """Solana swap-leg provider for native SOL transfers.
+
+    The SOL leg of a launch pair (sol↔btc, sol↔tao) is a peer-to-peer user↔miner
+    transfer — the swap-manager program never custodies it. It's verified like a BTC
+    deposit: look the signature up by hash via getTransaction and confirm a >= lamport
+    credit to the expected address, counted from System Program transfers (top-level or CPI)
+    and attributed to the wallet they debit, never to whoever paid the fee.
+
+    Only the native-lamport semantics live here — ``_credit`` and the SystemProgram transfer.
+    An SPL-token asset is its sibling on the same chain object, not a branch in here.
+    """
+
+    @property
+    def chain_def(self) -> ChainDefinition:
+        return CHAIN_SOL
+
+    def describe(self) -> str:
+        return self.chain.describe()
+
+    def check_connection(
+        self, require_send: bool = True, checked: Optional[Dict[Hashable, Optional[Exception]]] = None
+    ) -> None:
+        if require_send and self.keypair is None:
+            raise ConnectionError('SOL send requires a Solana keypair (pass solana_keypair)')
+        slot = self.chain.check_rpc()
+        bt.logging.success(f'{LOG_SOL} connected: slot={slot}')
+
+    def _credit(self, keys: List[str], tx: dict, meta: dict, recipient: str) -> Tuple[Optional[int], str]:
+        """(lamports System-transferred to ``recipient``, the one wallet they came from), or (None, '')
+        when nothing was transferred to it or several wallets paid it (no single sender to pin)."""
+        paid: Dict[str, int] = {}
+        for source, payee, lamports in system_transfers(keys, tx, meta):
+            if payee == recipient:
+                paid[source] = paid.get(source, 0) + lamports
+        if len(paid) != 1:
+            return None, ''
+        ((sender, credit),) = paid.items()
+        return credit, sender
 
     def get_balance(self, address: str) -> int:
         """Account balance in lamports (0 for a never-funded address)."""
@@ -484,23 +537,10 @@ class Sol(Asset):
 
         Signs with the chain's keypair (callers pass no key material). Returns (signature, slot)
         or None. The broadcast loop and double-send guard are the chain's."""
-        if self.keypair is None:
-            bt.logging.error('SOL send_amount called on a read-only Sol (no keypair)')
-            return None
-        # Never send from a key that can't satisfy the validator's sender pin: the leg would be rejected
-        # and the funds wasted. Refuse before broadcasting (mirrors the EVM/BTC providers).
-        if from_address is not None and str(self.keypair.pubkey()) != str(from_address):
-            bt.logging.error(
-                f'{LOG_SOL} committed sender {from_address} != wallet {self.keypair.pubkey()} — not sending'
-            )
-            return None
-
-        want = (str(to_address), int(amount), dedup_key or '')
         what = f'{amount} lamports to {to_address}'
-        decided, result = self.chain.resolve_prior_send(self.broadcasted_txids, want, what)
+        decided, result, want = self._start_send(to_address, amount, from_address, dedup_key, what)
         if decided:
             return result
-
         try:
             from solders.system_program import TransferParams, transfer
 
@@ -510,6 +550,6 @@ class Sol(Asset):
                 )
             )
         except Exception as e:
-            bt.logging.error(f'{LOG_SOL} send_amount build failed: {e}')
+            self._send_error(f'{LOG_SOL} send_amount build failed: {e}')
             return None
-        return self.chain.broadcast(self.broadcasted_txids, [ix], want, what)
+        return self._broadcast([ix], want, what)

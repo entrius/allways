@@ -137,10 +137,7 @@ def run_checks(pending: List[Tuple[int, Asset]], require_send: bool) -> Dict[int
         failed: Dict[int, Exception] = {}
         for position, provider in lane:
             try:
-                if isinstance(provider.chain, (TaoChain, EvmChain)):
-                    provider.check_connection(require_send=require_send, checked=checked)
-                else:
-                    provider.check_connection(require_send=require_send)
+                provider.check_connection(require_send=require_send, checked=checked)
             except Exception as e:
                 failed[position] = e
         return failed

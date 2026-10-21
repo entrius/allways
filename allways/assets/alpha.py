@@ -1,4 +1,4 @@
-from typing import Any, Dict, List, Optional, Tuple
+from typing import Any, Dict, Hashable, List, Optional, Tuple
 
 import bittensor as bt
 
@@ -88,8 +88,10 @@ class Alpha(Asset):
     def can_send_from(self, address: str) -> bool:
         return self.chain.can_send_from(address)
 
-    def check_connection(self, require_send: bool = True, **kwargs) -> None:
-        self.chain.check_connection(**kwargs)
+    def check_connection(
+        self, require_send: bool = True, checked: Optional[Dict[Hashable, Optional[Exception]]] = None
+    ) -> None:
+        self.chain.check_connection(checked=checked)
         if require_send and self.wallet is None:
             raise ConnectionError(f'{self.chain_def.id} send requires a wallet')
 

@@ -71,7 +71,7 @@ class TaoChain(Chain):
     def can_send_from(self, address: str) -> bool:
         return self.wallet is not None and self.wallet.coldkeypub.ss58_address == address
 
-    def check_connection(self, checked: Optional[Dict[int, Optional[Exception]]] = None, **kwargs) -> None:
+    def check_connection(self, checked: Optional[Dict[Hashable, Optional[Exception]]] = None) -> None:
         """``checked`` (id(subtensor) → its check's error, None = passed) lets every provider on one subtensor share
         one check: the TAO provider and each alpha all ride the neuron's subtensor."""
         if checked is not None and id(self.subtensor) in checked:
@@ -951,7 +951,9 @@ class Tao(Asset):
     def can_send_from(self, address: str) -> bool:
         return self.chain.can_send_from(address)
 
-    def check_connection(self, checked: Optional[Dict[int, Optional[Exception]]] = None, **kwargs) -> None:
+    def check_connection(
+        self, require_send: bool = True, checked: Optional[Dict[Hashable, Optional[Exception]]] = None
+    ) -> None:
         self.chain.check_connection(checked=checked)
 
     def fetch_matching_tx(

@@ -143,6 +143,23 @@ class TestSendGuard:
         p = provider_with(FakeRpc(), keypair=Keypair())
         assert p.send_amount('RECIPIENT', 1000, from_address='someOtherWallet') is None
 
+    def test_a_failed_send_says_why_and_the_next_send_clears_it(self):
+        """The miner reports ``last_send_error`` when a payout fails, so every refusal must fill it."""
+        p = provider_with(FakeRpc(), keypair=Keypair())
+        assert p.send_amount('RECIPIENT', 1000, from_address='someOtherWallet') is None
+        assert 'committed sender someOtherWallet' in p.last_send_error
+
+        class Rejecting(SendRpc):
+            def send_transaction(self, raw_tx_b64, **kw):
+                raise SolanaRpcError('insufficient funds for rent')
+
+        p = provider_with(Rejecting(), keypair=Keypair())
+        assert p.send_amount(str(Keypair().pubkey()), 2_500_000) is None
+        assert 'insufficient funds for rent' in p.last_send_error
+        p.rpc = SendRpc()
+        assert p.send_amount(str(Keypair().pubkey()), 2_500_000) == ('SIG123', 321)
+        assert p.last_send_error is None
+
 
 class TestFetchAndVerify:
     def test_match_returns_info(self):
