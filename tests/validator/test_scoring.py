@@ -227,6 +227,18 @@ def test_the_moving_average_restarts_a_uid_whose_hotkey_changed_and_survives_a_r
     assert again.hotkeys == ['a', 'c'] and again.scores.tolist() == [0.25, 0.5]
 
 
+def test_the_moving_average_fits_a_shrunk_metagraph_and_survives_a_restart(tmp_path, monkeypatch):
+    monkeypatch.setattr(
+        'allways.validator.scoring.component.process_weights_for_netuid', lambda **k: (k['uids'], k['weights'])
+    )
+    setter, *_ = _setter(tmp_path)
+    setter.fold(_round(['a', 'b', 'c'], [1.0, 0.0, 1.0]))
+    setter.fold(_round(['a', 'd'], [0.0, 1.0]))
+    assert setter.hotkeys == ['a', 'd'] and setter.scores.tolist() == [0.25, 0.5]  # 'c' dropped, 'd' from zero
+    again, *_ = _setter(tmp_path)
+    assert again.hotkeys == ['a', 'd'] and again.scores.tolist() == [0.25, 0.5]
+
+
 def test_weights_are_set_once_per_epoch(tmp_path, monkeypatch):
     monkeypatch.setattr(
         'allways.validator.scoring.component.process_weights_for_netuid', lambda **k: (k['uids'], k['weights'])
