@@ -135,6 +135,9 @@ class ChainWatcher(Component):
             return any(not getattr(self._verdicts.get(r), 'settled', False) for r in self._wanted)
 
     def _due(self, now: float, tip: Optional[int]) -> list:
+        """Up to ``CHECKS_PER_TICK`` due requests: never-checked ones first, then the longest since checked.
+        Not by when they were last asked: every live swap is re-asked each tick in the same order, so asking
+        order would hand the whole cap to the same probes and the newest swap's check would never run."""
         with self._lock:
             due = []
             for request in self._wanted:
@@ -142,8 +145,9 @@ class ChainWatcher(Component):
                 if v is None or (
                     not v.settled and (v.tip != tip or v.error or now - v.checked_at >= MEMPOOL_RECHECK_SECS)
                 ):
-                    due.append(request)
-            return due[:CHECKS_PER_TICK]
+                    due.append((v is not None, v.checked_at if v is not None else 0.0, request))
+            due.sort(key=lambda d: d[:2])  # stable: ties keep asking order
+            return [request for _, _, request in due[:CHECKS_PER_TICK]]
 
     def _check(self, request: Probe, tip: Optional[int], now: float) -> None:
         asset = self.assets.get(request.asset)

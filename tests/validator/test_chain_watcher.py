@@ -1,7 +1,13 @@
 from types import SimpleNamespace
 
 from allways.validator.app import chain_watchers
-from allways.validator.chains.watcher import MEMPOOL_RECHECK_SECS, STALE_TIP_BLOCKS, ChainWatcher, verify_probe
+from allways.validator.chains.watcher import (
+    CHECKS_PER_TICK,
+    MEMPOOL_RECHECK_SECS,
+    STALE_TIP_BLOCKS,
+    ChainWatcher,
+    verify_probe,
+)
 
 
 class _Chain:
@@ -145,3 +151,26 @@ def test_a_reconnect_hands_every_tao_provider_the_new_subtensor_and_closes_the_o
     tao.subtensor = alpha.subtensor = old
     SubtensorSwap({'tao': _Asset(tao), 'sn3': _Asset(alpha), 'btc': _Asset(_Chain())}, lambda: new)()
     assert tao.subtensor is new and alpha.subtensor is new and old.closed == 1
+
+
+def test_a_newly_asked_check_runs_next_tick_however_many_recurring_checks_are_due():
+    """More never-settling checks than one tick's cap, all re-asked every tick ahead of the newest swap's: the new
+    swap's first check still runs on the next tick, and every recurring check takes its turn."""
+    w, chain, btc, clock = _watcher()
+    busy = [verify_probe('btc', f'{i:064x}', 'bc1qdst', 1000) for i in range(CHECKS_PER_TICK + 5)]
+    victim = verify_probe('btc', 'ff' * 32, 'bc1qdst', 1000)
+    checked_at = {}
+    for tick in range(6):
+        for request in busy:
+            w.verdict(request)  # pending forever: due again on every new tip
+        if tick == 3:
+            assert w.verdict(victim) is None  # asked last, never asked before
+        if tick == 4:
+            assert w.verdict(victim) is not None  # answered on the first tick after it was asked
+        chain.tip += 1
+        clock.t += 30
+        w.tick(clock())
+        for request in busy:
+            v = w._verdicts.get(request)
+            checked_at.setdefault(request, set()).add(v.checked_at if v else None)
+    assert all(len(times - {None}) >= 2 for times in checked_at.values())  # no recurring check starved either
