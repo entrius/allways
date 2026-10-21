@@ -196,6 +196,41 @@ def test_a_round_leaves_a_lane_whose_quote_waits_on_its_check_uncredited(tmp_pat
     assert scoring.ledger.get_latest_rates_before('btc', 'sol', NOW) == {}
 
 
+def _quoted(address='bc1qminer'):
+    quote = _quote('pk_a')
+    quote.miner_from_addr = address
+    return quote
+
+
+def test_a_live_quote_whose_address_starts_refusing_loses_its_crown_and_bans_the_miner(tmp_path):
+    """Judged usable when quoted, refusing later (say a delegation set afterwards): the re-check catches it."""
+    watcher = _Watcher(Verdict(1, NOW, info=False, settled=True))
+    scoring, _, rounds, *_ = _scoring(tmp_path, _world(quotes=[_quoted()]), watchers={'btc': watcher})
+    scoring.tick(NOW)
+    scoring.tick(NOW + SCORING_WINDOW_SECS)
+    assert rounds.get()[0].rewards[0] > 0
+    watcher.answer = Verdict(1, NOW + SCORING_WINDOW_SECS, info=True, settled=True)  # the re-check: now refusing
+    scoring.tick(NOW + 2 * SCORING_WINDOW_SECS)
+    result = rounds.get()[0]
+    assert result.rewards[0] == 0
+    assert scoring.ledger.address_banned_hotkeys(NOW, NOW + 2 * SCORING_WINDOW_SECS) == {'hk_a'}
+    assert scoring.ledger.get_latest_rates_before('btc', 'sol', NOW + 2 * SCORING_WINDOW_SECS) == {
+        'hk_a': (0.0, NOW + 2 * SCORING_WINDOW_SECS)
+    }
+
+
+def test_the_quote_book_adds_a_lane_only_once_its_address_is_judged_usable(tmp_path):
+    watcher = _Watcher()  # not answered yet
+    scoring, _, rounds, *_ = _scoring(tmp_path, _world(quotes=[_quoted()]), watchers={'btc': watcher})
+    scoring.tick(NOW)
+    assert rounds.get()[0] is not None
+    assert scoring.ledger.get_latest_rates_before('btc', 'sol', NOW) == {}  # not credited unjudged
+    assert ('bc1qminer',) in watcher.asked
+    watcher.answer = Verdict(1, NOW, info=False, settled=True)
+    scoring.tick(NOW + SCORING_WINDOW_SECS)
+    assert set(scoring.ledger.get_latest_rates_before('btc', 'sol', NOW + SCORING_WINDOW_SECS)) == {'hk_a'}
+
+
 def test_a_halted_program_recycles_the_whole_pool(tmp_path):
     scoring, _, rounds, *_ = _scoring(tmp_path, _world(quotes=[_quote('pk_a')], halted=True))
     scoring.tick(NOW)

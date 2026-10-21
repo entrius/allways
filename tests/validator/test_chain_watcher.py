@@ -6,6 +6,7 @@ from allways.validator.chains.watcher import (
     MEMPOOL_RECHECK_SECS,
     STALE_TIP_BLOCKS,
     ChainWatcher,
+    Probe,
     verify_probe,
 )
 
@@ -174,3 +175,19 @@ def test_a_newly_asked_check_runs_next_tick_however_many_recurring_checks_are_du
             v = w._verdicts.get(request)
             checked_at.setdefault(request, set()).add(v.checked_at if v else None)
     assert all(len(times - {None}) >= 2 for times in checked_at.values())  # no recurring check starved either
+
+
+def test_a_final_answer_with_a_ttl_is_rechecked_once_stale_and_served_meanwhile():
+    w, chain, btc, clock = _watcher()
+    answers = iter([False, True])
+    probe = Probe('btc', 'address_refused', ('bc1q',), run=lambda a: next(answers), final=lambda _: True, ttl=600)
+    w.verdict(probe)
+    w.tick(clock())
+    assert w.verdict(probe).info is False and w.verdict(probe).settled
+    clock.t += 599
+    w.tick(clock())
+    assert w.verdict(probe).info is False  # settled and fresh: not asked again
+    clock.t += 1
+    w.verdict(probe)
+    w.tick(clock())
+    assert w.verdict(probe).info is True  # stale: re-checked, and the new answer replaces the old

@@ -27,13 +27,18 @@ CHECKS_PER_TICK = 20
 class Probe:
     """One question for a chain's endpoint, asked on the watcher's thread. ``name`` and ``args`` are the
     cache key; ``run(asset)`` asks it; ``final(result)`` says the answer can never change (a confirmed leg,
-    a price pinned to a block), so it is never asked again."""
+    a price pinned to a block), so it is never asked again. ``ttl`` makes a final answer one that can go stale: it
+    is re-checked once older than that (still served meanwhile), for facts that hold until something changes them."""
 
     asset: str  # chain id of the asset to ask (e.g. 'btc', 'ethusdc')
     name: str
     args: Tuple[Any, ...]
     run: Callable[[Any], Any] = field(compare=False, repr=False)
     final: Callable[[Any], bool] = field(default=lambda result: False, compare=False, repr=False)
+    ttl: Optional[float] = field(default=None, compare=False)
+
+    def expired(self, verdict: 'Verdict', now: float) -> bool:
+        return verdict.settled and self.ttl is not None and now - verdict.checked_at >= self.ttl
 
 
 def verify_probe(
@@ -132,7 +137,7 @@ class ChainWatcher(Component):
             for request in [r for r, asked in self._wanted.items() if now - asked > REQUEST_IDLE_SECS]:
                 del self._wanted[request]
                 self._verdicts.pop(request, None)
-            return any(not getattr(self._verdicts.get(r), 'settled', False) for r in self._wanted)
+            return any((v := self._verdicts.get(r)) is None or not v.settled or r.expired(v, now) for r in self._wanted)
 
     def _due(self, now: float, tip: Optional[int]) -> list:
         """Up to ``CHECKS_PER_TICK`` due requests: never-checked ones first, then the longest since checked.
@@ -142,8 +147,10 @@ class ChainWatcher(Component):
             due = []
             for request in self._wanted:
                 v = self._verdicts.get(request)
-                if v is None or (
-                    not v.settled and (v.tip != tip or v.error or now - v.checked_at >= MEMPOOL_RECHECK_SECS)
+                if (
+                    v is None
+                    or (not v.settled and (v.tip != tip or v.error or now - v.checked_at >= MEMPOOL_RECHECK_SECS))
+                    or request.expired(v, now)
                 ):
                     due.append((v is not None, v.checked_at if v is not None else 0.0, request))
             due.sort(key=lambda d: d[:2])  # stable: ties keep asking order

@@ -35,6 +35,12 @@ from neurons.base.utils.weight_utils import convert_weights_and_uids_for_emit, p
 
 LAST_SCORED = 'scoring.last_scored_time'
 JUDGE_WAIT_SECS = 60.0  # a quote whose address check hasn't come back by then ingests unjudged
+# A live quote's addresses are judged again this often: a destination can start refusing after it was quoted (an
+# EIP-7702 delegation to a contract that reverts on receive), and it must not keep its crown.
+ADDRESS_REJUDGE_SECS = float(SCORING_WINDOW_SECS)
+# The live book's address checks are re-asked this often, well inside the watcher's idle horizon, so their
+# verdicts stay cached between rounds.
+BOOK_JUDGE_SECS = 60.0
 CROWN_NOW_SECS = 30.0  # how often the live crown is replayed for the dashboard
 
 
@@ -72,6 +78,7 @@ class Scoring(Component):
         self._acked_slot = int(row['slot']) if row else 0  # the feed may replay from an older consumer's ack
         self.crown: Latest[Dict] = Latest()  # who holds each quoted lane's crown right now (crown_now rows)
         self._crown_at = 0.0
+        self._book_judged_at = 0.0
 
     def tick(self, now: float) -> None:
         world, _ = self.world.get()
@@ -85,6 +92,9 @@ class Scoring(Component):
             self._dropped = self.events.dropped
             self.ledger.mark_gap(int(now))
         self._ingest(self.events.drain(), world, head, now, status)
+        if now - self._book_judged_at >= BOOK_JUDGE_SECS:
+            self._book_judged_at = now
+            self._judge_book(world)  # keeps every live quote's address checks asked, so a round reads them cached
         # A QuoteSet waiting on its address check holds back only its own lane (the round's reconcile skips it),
         # never the whole round: otherwise a stream of fresh quotes would keep any round from running.
         caught_up = world.complete and status is not None and not status.catching_up
@@ -131,12 +141,28 @@ class Scoring(Component):
         if chain not in self.watchers:
             return False  # no provider here: unjudged
         probe = Probe(
-            chain, 'address_refused', (address,), run=lambda a: a.address_refused(address), final=lambda _: True
+            chain,
+            'address_refused',
+            (address,),
+            run=lambda a: a.address_refused(address),
+            final=lambda _: True,
+            ttl=ADDRESS_REJUDGE_SECS,
         )
         verdict = self.watchers[chain].verdict(probe)
         if verdict is None:
             return None
         return verdict.error is None and bool(verdict.info)  # a failed check judges nothing
+
+    def _judge_book(self, world: World) -> Dict[Tuple[str, str, str, str], Optional[bool]]:
+        """Every live quote's lane → whether its addresses are usable (None = not judged yet)."""
+        out: Dict[Tuple[str, str, str, str], Optional[bool]] = {}
+        for _, q in world.all('MinerQuote'):
+            hotkey = world.hotkey_for(q.miner)
+            if hotkey is None:
+                continue
+            lane = (hotkey, str(q.from_chain).lower(), str(q.to_chain).lower(), str(q.collateral_chain).lower())
+            out[lane] = quote_usable(q, self.assets, self._refused)
+        return out
 
     def _round(self, world: World, head: Head, now: int, last: int) -> None:
         hotkeys = tuple(head.metagraph.hotkeys)
@@ -145,8 +171,21 @@ class Scoring(Component):
         else:
             fees = self.ledger.swap_fees(now - POOL_VOLUME_WINDOW_SECS, now)
             share = self.fee_pool.round(fees, head.subnet, now)
-            unjudged = {_quote_lane(record, hotkey) for record, hotkey, _ in self._held if record.name == 'QuoteSet'}
-            result = score_round(world, hotkeys, self.ledger, self.assets, self.prices, last, now, share, unjudged)
+            book = self._judge_book(world)
+            refused = {lane for lane, usable in book.items() if usable is False}
+            for hotkey in sorted({lane[0] for lane in refused}):
+                # The same rule as a QuoteSet naming an unusable address at ingest: no crown, no pay, on any lane.
+                with self.store.tx():
+                    self.ledger.ban(hotkey, now)
+                bt.logging.warning(
+                    f'{hotkey[:8]}: a live quote now names an unusable address: rate zeroed, miner banned'
+                )
+            # Not judged yet: neither credited from the book nor zeroed, until its check answers.
+            unjudged = {lane for lane, usable in book.items() if usable is None}
+            unjudged |= {_quote_lane(record, hotkey) for record, hotkey, _ in self._held if record.name == 'QuoteSet'}
+            result = score_round(
+                world, hotkeys, self.ledger, self.assets, self.prices, last, now, share, unjudged, refused
+            )
         self.ledger.prune(now)
         with self.store.tx() as c:
             Store.set_meta(c, LAST_SCORED, str(now))
