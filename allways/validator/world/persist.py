@@ -26,11 +26,6 @@ TABLES = [
         'CREATE TABLE IF NOT EXISTS world_fulfillments (swap_key TEXT PRIMARY KEY, to_tx_hash TEXT NOT NULL, '
         'block_time INTEGER NOT NULL, miner TEXT NOT NULL, settled INTEGER NOT NULL)',
     ),
-    (
-        'world_routes',
-        'CREATE TABLE IF NOT EXISTS world_routes (swap_key TEXT PRIMARY KEY, chain TEXT NOT NULL, '
-        'sender TEXT NOT NULL, recipient TEXT NOT NULL, seen_at INTEGER NOT NULL)',
-    ),
 ]
 
 Row = Tuple  # one row's values, in table column order
@@ -41,14 +36,12 @@ _UPSERT = {
     'world_deposits': 'INSERT OR REPLACE INTO world_deposits VALUES (?, ?, ?, ?, ?)',
     'world_initiated': 'INSERT OR REPLACE INTO world_initiated VALUES (?, ?)',
     'world_fulfillments': 'INSERT OR REPLACE INTO world_fulfillments VALUES (?, ?, ?, ?, ?)',
-    'world_routes': 'INSERT OR REPLACE INTO world_routes VALUES (?, ?, ?, ?, ?)',
 }
 _KEY = {
     'world_accounts': 'pda',
     'world_deposits': 'tx_key',
     'world_initiated': 'swap_key',
     'world_fulfillments': 'swap_key',
-    'world_routes': 'swap_key',
 }
 
 

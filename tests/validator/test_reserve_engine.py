@@ -1261,15 +1261,3 @@ def test_a_halted_program_rejects_a_reservation_before_any_chain_work():
     client.get_config = lambda: SimpleNamespace(halted=True)
     r, _ = _reserve(client)
     assert not r.ok and 'halted' in r.reason and client.calls == []
-
-
-def test_a_source_that_is_a_live_payout_to_the_miners_wallet_is_refused_before_any_bid():
-    # A deposit from it would be refused at claim as that payout, stranding the user's funds; refuse up front.
-    from allways.validator.world.snapshot import PayoutRoute, World
-
-    client = FakeClient()
-    world = World(0, 1, True, None, {}, routes={'k': PayoutRoute('sol', str(USER_PK), client.quote.miner_from_addr, 0)})
-    validator = Ctx(client, store=serving_store(world=world), providers=_ALL_ASSETS())
-    result = reserve_on_behalf(validator, HOTKEY, 'sol', 'btc', USER_PK, str(USER_PK), 'userBTCaddr', 10**9)
-    assert not result.ok and 'no funds moved' in result.reason
-    assert client.calls == []

@@ -1,6 +1,6 @@
 """What serving keeps: the routed-request queue, and each swap's terminal outcome after its account closes.
 
-Facts the World already holds (claimed deposits, reported deliveries, payout routes) and the actuator
+Facts the World already holds (claimed deposits, reported deliveries) and the actuator
 already priced (collateral verdicts) are read from there, not kept twice."""
 
 from __future__ import annotations
@@ -159,13 +159,6 @@ class ServingStore:
     def record_deposit_claim(self, tx_hash: str, swap_key: str, seen_at: int) -> None:
         """Held until the SwapClaimed event reaches the World, so a second request can't race it."""
         self._claimed[tx_key(tx_hash)] = (swap_key, int(seen_at))
-
-    def is_payout_route(self, chain: str, sender: str, recipient: str) -> bool:
-        """``sender`` and ``recipient`` come normalized; the World keeps routes as posted."""
-        world, provider = self._world(), self.providers.get(chain)
-        norm = provider.chain.normalize_address if provider is not None else (lambda a: a)
-        routes = world.routes.values() if world is not None else ()
-        return any(r.chain == chain and norm(r.sender) == sender and norm(r.recipient) == recipient for r in routes)
 
     def is_recorded_payout(self, tx_hash: str) -> bool:
         """A delivery this validator verified. Not one a miner merely reported: see WorldContext.payout_reuse."""

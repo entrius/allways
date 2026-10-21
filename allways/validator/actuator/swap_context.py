@@ -181,19 +181,16 @@ class WorldContext:
         return False
 
     def payout_reuse(self, swap: Any) -> bool:
-        """The deposit is some swap's payout: it matches a payout route, or a delivery this validator verified.
-        A delivery a miner only reported is not evidence: ``to_tx_hash`` is free text, so any miner could name
-        a user's real deposit and get it refused."""
-        provider = self.providers.get(swap.from_chain)
-        if provider is None:
-            return False
-        norm = provider.chain.normalize_address
-        sender, wallet = norm(swap.user_from_addr), norm(swap.miner_from_addr)
-        for route in self.world.routes.values():
-            if route.chain == swap.from_chain and norm(route.sender) == sender and norm(route.recipient) == wallet:
-                return True
+        """The deposit is a delivery this validator verified for some swap. A payout from a posted miner wallet
+        can't be named as a taker's source at all (``finalize_reservation`` refuses it), and a delivery a miner
+        only reported is not evidence: ``to_tx_hash`` is free text, so any miner could name a user's real
+        deposit and get it refused."""
         deposit = tx_key(swap.from_tx_hash)
         return any(k == deposit for _, k in self.memory.deliveries)
+
+    def delivery_is_deposit(self, swap: Any) -> bool:
+        """Some swap claimed this swap's delivery tx as its source deposit, so it pays that swap, not this one."""
+        return tx_key(swap.to_tx_hash) in self.world.deposits
 
     def claim_delivery(self, swap: Any) -> bool:
         """This swap may use its delivery tx: no other swap of the miner completed on it, and no other swap

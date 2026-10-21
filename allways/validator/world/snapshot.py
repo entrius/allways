@@ -65,16 +65,6 @@ class Fulfillment:
 
 
 @dataclass(frozen=True)
-class PayoutRoute:
-    """A live swap's payout leg, kept past the swap's close: a deposit matching it is someone's payout."""
-
-    chain: str
-    sender: str  # the miner's delivery address, as posted
-    recipient: str  # the user's address, as posted
-    seen_at: int
-
-
-@dataclass(frozen=True)
 class World:
     taken_at: float
     slot: int  # every event at or below this slot is reflected
@@ -84,7 +74,6 @@ class World:
     attribution: Mapping[str, str] = field(default_factory=dict)  # miner pubkey → verified hotkey ss58
     deposits: Mapping[str, DepositClaim] = field(default_factory=dict)  # tx_key(source tx) → first claim
     fulfillments: Mapping[str, Fulfillment] = field(default_factory=dict)  # swap_key → reported delivery
-    routes: Mapping[str, PayoutRoute] = field(default_factory=dict)  # swap_key → payout route
 
     def all(self, name: str) -> Iterable[Tuple[str, Any]]:
         return self.accounts.get(name, {}).items()
@@ -183,7 +172,6 @@ class WorldReader(Component):
         self._deposits: Dict[str, DepositClaim] = {}
         self._initiated: Dict[str, int] = {}  # swap_key → block_time of its SwapInitiated
         self._fulfillments: Dict[str, Fulfillment] = {}
-        self._routes: Dict[str, PayoutRoute] = {}
         self._changes: persist.Changes = {}
         self._scan_slot = 0
         self._slot = 0
@@ -252,10 +240,6 @@ class WorldReader(Component):
             r['swap_key']: Fulfillment(r['to_tx_hash'], r['block_time'], r['miner'], bool(r['settled']))
             for r in persist.load(self.store, 'world_fulfillments')
         }
-        self._routes = {
-            r['swap_key']: PayoutRoute(r['chain'], r['sender'], r['recipient'], r['seen_at'])
-            for r in persist.load(self.store, 'world_routes')
-        }
         self._scan_slot = int(self.store.get_meta('world.scan_slot') or 0)
         self._slot = int(self.store.get_meta('world.slot') or 0)
         self._refresh_attribution()
@@ -308,8 +292,6 @@ class WorldReader(Component):
             self._accounts[name][pda] = decoded
         if name == 'Swap':
             self._note_initiated(decoded, slot)
-            if record:
-                self._note_route(decoded)
         self._slot_of[(name, pda)] = slot
         if record:
             self._changes.setdefault('world_accounts', {})[pda] = (pda, name, slot, raw)
@@ -325,14 +307,6 @@ class WorldReader(Component):
             self._set_deposit(key, DepositClaim(swap_key, slot, int(self.clock()), True))
         elif not held.initiated:
             self._set_deposit(key, DepositClaim(held.swap_key, held.slot, held.seen_at, True))
-
-    def _note_route(self, swap: Any) -> None:
-        key = swap_key_from_tx_hash(swap.from_tx_hash).hex()
-        if key not in self._routes:
-            route = PayoutRoute(str(swap.to_chain), str(swap.miner_to_addr), str(swap.user_to_addr), int(self.clock()))
-            self._routes[key] = route
-            row = (key, route.chain, route.sender, route.recipient, route.seen_at)
-            self._changes.setdefault('world_routes', {})[key] = row
 
     def _drop(self, name: str, pda: str, slot: int) -> None:
         self._accounts.get(name, {}).pop(pda, None)
@@ -438,7 +412,6 @@ class WorldReader(Component):
         for table, ledger, when in (
             ('world_deposits', self._deposits, lambda c: c.seen_at),
             ('world_fulfillments', self._fulfillments, lambda v: v.block_time),
-            ('world_routes', self._routes, lambda r: r.seen_at),
             ('world_initiated', self._initiated, lambda t: t),
         ):
             for key in [k for k, v in ledger.items() if 0 < when(v) < floor]:
@@ -456,6 +429,5 @@ class WorldReader(Component):
                 attribution=dict(self._attribution),
                 deposits=dict(self._deposits),
                 fulfillments=dict(self._fulfillments),
-                routes=dict(self._routes),
             )
         )

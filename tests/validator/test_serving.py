@@ -21,7 +21,7 @@ from allways.validator.serving import requests
 from allways.validator.serving.component import Serving
 from allways.validator.serving.store import ServingStore
 from allways.validator.store.db import Store
-from allways.validator.world.snapshot import Accounts, DepositClaim, PayoutRoute, World, tx_key
+from allways.validator.world.snapshot import Accounts, DepositClaim, World, tx_key
 
 NOW = 1_000_000
 MINER = Keypair().pubkey()
@@ -101,16 +101,12 @@ def test_outcomes_and_deliveries_are_kept_from_events_after_the_swap_closes(tmp_
     assert serving.get_swap_outcome(key.hex()) is None
 
 
-def test_deposit_and_payout_facts_come_from_the_world(tmp_path):
-    world = _world(
-        deposits={tx_key('AB' * 32): DepositClaim('ff' * 32, 1, NOW, initiated=True)},
-        routes={'k': PayoutRoute('btc', 'Sender', 'Wallet', NOW)},
-    )
+def test_deposit_facts_come_from_the_world(tmp_path):
+    world = _world(deposits={tx_key('AB' * 32): DepositClaim('ff' * 32, 1, NOW, initiated=True)})
     serving, _ = _store(tmp_path, world)
     assert serving.deposit_claim('ab' * 32) == ('ff' * 32, True)
     serving.record_deposit_claim('def', 'ee' * 32, NOW)  # this validator's own claim, until the World has it
     assert serving.deposit_claim('def') == ('ee' * 32, False)
-    assert serving.is_payout_route('btc', 'Sender', 'Wallet')
 
 
 def _free_port():

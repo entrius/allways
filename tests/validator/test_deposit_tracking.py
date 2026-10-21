@@ -25,7 +25,7 @@ from allways.validator.actuator.swaps import Decision, attest_reject_reason, dec
 from allways.validator.serving.requests import confirm_deposit
 from allways.validator.serving.store import ServingStore
 from allways.validator.store.db import Store
-from allways.validator.world.snapshot import DepositClaim, Fulfillment, PayoutRoute, World, tx_key
+from allways.validator.world.snapshot import DepositClaim, Fulfillment, World, tx_key
 from tests.validator.fakes import Ctx
 from tests.validator.test_reserve_engine import HOTKEY, _confirm_reservation, _ConfirmClient
 from tests.validator.test_swap_rules import RecordingProvider, Rules, _Context, make_reservation, make_swap
@@ -317,13 +317,6 @@ def _payout_relay(tmp_path):
     return _Relay(ETH_SPEC, {'sol': resv}, tmp_path)
 
 
-def test_a_live_swaps_payout_cannot_be_claimed_as_a_deposit(tmp_path):
-    relay = _payout_relay(tmp_path)
-    relay.world = replace(relay.world, routes={'aa' * 32: PayoutRoute('eth', PAYER, DEPOSIT_WALLET, CREATED_AT)})
-    r = relay.confirm('0x' + HEX)
-    assert not r.ok and 'payout' in r.reason and not relay.client.claims
-
-
 def test_a_delivery_this_validator_verified_cannot_be_claimed(tmp_path):
     relay = _payout_relay(tmp_path)
     relay.memory.claim_delivery('payingMiner', tx_key('0X' + HEX.upper()), 'aa' * 32, CREATED_AT)
@@ -338,15 +331,8 @@ def test_a_delivery_a_miner_only_reported_does_not_veto_the_claim(tmp_path):
     assert relay.confirm('0x' + HEX).ok
 
 
-def test_an_honest_deposit_is_unaffected_by_other_routes(tmp_path):
+def test_an_honest_deposit_is_unaffected_by_other_deliveries(tmp_path):
     relay = _payout_relay(tmp_path)
-    relay.world = replace(
-        relay.world,
-        routes={
-            'aa' * 32: PayoutRoute('eth', PAYER, '0x' + 'ee' * 20, CREATED_AT),  # pays someone else
-            'bb' * 32: PayoutRoute('base', PAYER, DEPOSIT_WALLET, CREATED_AT),  # another chain
-        },
-    )
     relay.memory.claim_delivery('payingMiner', tx_key('0x' + 'f' * 64), 'cc' * 32, CREATED_AT)
     assert relay.confirm('0x' + HEX).ok and len(relay.client.claims) == 1
 
@@ -461,16 +447,15 @@ def test_attest_gate_refuses_a_deposit_this_validator_verified_as_a_delivery():
     assert action.decision == Decision.REJECT and 'payout' in action.reason
 
 
-def test_attest_gate_refuses_a_claim_matching_a_live_payout_route():
-    # Addresses compare through the chain's own normalizer: a checksum-cased route still matches.
+def test_a_live_swap_paying_the_same_wallets_does_not_block_a_claim():
+    # A payout from a posted miner wallet can't be a taker's source (finalize_reservation refuses it), so a
+    # live swap paying from the claim's source to its deposit wallet is no reason to refuse it.
     rules, swap = _claim(ETH_SPEC, _canonical(ETH_SPEC))
     swap.user_from_addr, swap.miner_from_addr = PAYER.lower(), DEPOSIT_WALLET.lower()
-    assert rules.decide(swap, now=1500).decision == Decision.ATTEST  # no route known yet
-    rules.world = replace(rules.world, routes={'aa' * 32: PayoutRoute('eth', PAYER, DEPOSIT_WALLET, 1400)})
-    action = rules.decide(swap, now=1501)
-    assert action.decision == Decision.REJECT and 'payout' in action.reason
-    rules.world = replace(rules.world, routes={'aa' * 32: PayoutRoute('base', PAYER, DEPOSIT_WALLET, 1400)})
-    assert rules.decide(swap, now=1502).decision == Decision.ATTEST  # a route on another chain is not this one
+    payout = make_swap(status='Active', from_chain='sol', to_chain='eth', key=b'\xaa' * 32)
+    payout.miner_to_addr, payout.user_to_addr = PAYER, DEPOSIT_WALLET
+    rules.world = replace(rules.world, accounts={'Swap': {'payout': payout}})
+    assert rules.decide(swap, now=1500).decision == Decision.ATTEST
 
 
 def test_attest_gate_ignores_a_delivery_a_miner_only_reported_in_any_spelling():
@@ -520,6 +505,15 @@ def test_one_delivery_confirms_one_swap_whatever_the_second_spelling(spec, spell
     assert rules.decide(second, now=1500).decision == Decision.WAIT
     assert rules.decide(second, now=2500).decision == Decision.TIMEOUT
     assert rules.decide(first, now=1501).decision == Decision.CONFIRM  # the second never blocks the first
+
+
+@pytest.mark.parametrize('spec', FAMILY_SPECS, ids=lambda s: s.chain_id)
+def test_a_claimed_source_deposit_never_confirms_a_delivery(spec):
+    rules, _ = _deliveries(spec)
+    rules.world = replace(rules.world, deposits={tx_key(_canonical(spec)): DepositClaim('ee' * 32, 1, 1400)})
+    swap = _delivery(spec, _canonical(spec).upper() if spec is BTC_SPEC else _canonical(spec))
+    assert rules.decide(swap, now=1500).decision == Decision.WAIT
+    assert rules.decide(swap, now=2500).decision == Decision.TIMEOUT
 
 
 def test_solana_delivery_signature_is_verified_as_given():

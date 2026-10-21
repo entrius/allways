@@ -2,6 +2,7 @@
 
 from types import SimpleNamespace
 
+import pytest
 from solders.keypair import Keypair
 
 from allways.chains import get_chain_def
@@ -12,7 +13,7 @@ from allways.validator.actuator.swap_context import SwapMemory
 from allways.validator.chains.watcher import Verdict
 from allways.validator.runtime.deadline_queue import Urgency
 from allways.validator.store.db import Store
-from allways.validator.world.snapshot import DepositClaim, Fulfillment, PayoutRoute, World, tx_key
+from allways.validator.world.snapshot import DepositClaim, Fulfillment, World, tx_key
 
 MINER, USER = Keypair().pubkey(), Keypair().pubkey()
 NOW = 10_000
@@ -95,7 +96,7 @@ def _ok(confirmed=True, block_time=NOW - 50, checked_at=NOW):
     return Verdict(1, checked_at, info=info, settled=confirmed)
 
 
-def _world(*swaps, reservation=None, deposits=None, fulfillments=None, routes=None, complete=True):
+def _world(*swaps, reservation=None, deposits=None, fulfillments=None, complete=True):
     accounts = {'Swap': {f'swap{i}': s for i, s in enumerate(swaps)}, 'Reservation': {}}
     if reservation is not None:
         accounts['Reservation'][str(pdas.reservation_pda(MINER, 'sol'))] = reservation
@@ -107,7 +108,6 @@ def _world(*swaps, reservation=None, deposits=None, fulfillments=None, routes=No
         accounts=accounts,
         deposits=deposits or {},
         fulfillments=fulfillments or {},
-        routes=routes or {},
     )
 
 
@@ -170,12 +170,16 @@ def test_a_deposit_another_swap_claimed_first_is_rejected(tmp_path):
     assert report.decision == 'reject' and 'already claimed' in report.reason and intents == []
 
 
-def test_a_deposit_that_is_a_payout_route_is_rejected(tmp_path):
-    route = PayoutRoute('btc', 'USERBTC', 'minerbtc', NOW)  # the claim's sender → deposit wallet, any casing
-    planner = _planner(tmp_path, btc=_Watcher(verify=_ok()))
-    world = _world(_swap('PendingAttestation'), reservation=_reservation(), routes={'k': route})
-    report, _ = _decision(planner, world)
-    assert report.decision == 'reject' and 'payout' in report.reason
+@pytest.mark.parametrize('initiated', [False, True])
+def test_a_delivery_some_swap_claimed_as_its_deposit_never_confirms(tmp_path, initiated):
+    # The claim's row alone decides it, initiated or not: that tx pays the claiming swap, not this one.
+    deposits = {tx_key(DST_TX): DepositClaim('ee' * 32, 1, NOW, initiated=initiated)}
+    planner = _planner(tmp_path, sol=_Watcher(verify=_ok(), cancel_evidence=Verdict(1, NOW)))
+    report, intents = _decision(planner, _world(_swap(), deposits=deposits))
+    assert report.decision == 'wait' and 'source deposit' in report.reason and intents == []
+    planner = _planner(tmp_path, sol=_Watcher(verify=_ok(), cancel_evidence=Verdict(1, NOW)), db='v2.db')
+    report, _ = _decision(planner, _world(_swap(timeout_at=NOW - 1), deposits=deposits))
+    assert report.decision == 'timeout'
 
 
 def test_a_fresh_verified_deposit_attests_against_the_reservation_deadline(tmp_path):

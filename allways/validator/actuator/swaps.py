@@ -95,6 +95,8 @@ class SwapContext(Protocol):
 
     def payout_reuse(self, swap: Any) -> bool: ...
 
+    def delivery_is_deposit(self, swap: Any) -> bool: ...
+
     def claim_delivery(self, swap: Any) -> bool: ...
 
     def owes_settlement(self, swap: Any) -> bool: ...
@@ -215,6 +217,11 @@ def _fulfilled(swap: Any, ctx: SwapContext, now: int, overdue: bool, fee_divisor
                 f'(+{target - now}s)',
             )
     elif dest.status == 'ok' and _fresh(ctx, swap.to_chain, dest.info, int(swap.initiated_at)):
+        if ctx.delivery_is_deposit(swap):
+            return Action(
+                Decision.TIMEOUT if overdue else Decision.WAIT,
+                reason="delivery tx is another swap's source deposit" + (' — slashing' if overdue else ''),
+            )
         if not ctx.claim_delivery(swap):
             return Action(
                 Decision.TIMEOUT if overdue else Decision.WAIT,
