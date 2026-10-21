@@ -236,3 +236,20 @@ def test_a_verdict_the_ledger_refused_holds_the_ack_until_it_lands(tmp_path, mon
     relay.tick(NOW)
     assert not relay._held and store.resume_point(['relay-tao']) == 'sig20'
     assert relay.has_pending_debit(MINER)
+
+
+def test_a_swap_fee_recorded_twice_counts_once(tmp_path):
+    ledger, *_ = _ledger(tmp_path, settled=0)
+    ledger.record_relay_fee('b', MINER, 'tao', 3, 10_200, vault_generation=1)
+    ledger.record_relay_fee('b', MINER, 'tao', 3, 10_200, vault_generation=1)  # the same event replayed
+    assert ledger.accrued_fee_total(MINER, 'tao', vault_generation=1) == 3
+
+
+def test_an_unreadable_debit_ledger_holds_new_swaps(tmp_path):
+    relay, *_ = _relay(tmp_path)
+
+    def boom(*_):
+        raise RuntimeError('ledger unreadable')
+
+    relay.ledger.owes_relay_debit = boom
+    assert relay.has_pending_debit(MINER) is True
