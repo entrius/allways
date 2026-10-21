@@ -221,6 +221,14 @@ FEE_POOL_MULTIPLE = 2.0
 # Miners' cut of a subnet's alpha emission: the owner takes 18%, the other 82% splits evenly between
 # miners and validators.
 MINER_EMISSION_FRACTION = 0.41
+# Lamport fees convert to TAO at sol_usd / tao_usd from CoinGecko at one fixed UTC hour: the last full
+# hour at least SOL_TAO_RATE_LAG_SECS old, so every validator asks for the same point. Read once per hour;
+# one round tries SOL_TAO_FETCH_ATTEMPTS times within SOL_TAO_FETCH_BUDGET_SECS, then keeps the last rate.
+SOL_TAO_RATE_LAG_SECS = 600
+SOL_TAO_FETCH_ATTEMPTS = 3
+SOL_TAO_FETCH_BUDGET_SECS = 10
+# A kept rate older than this logs at ERROR (it is still used).
+SOL_TAO_RATE_STALE_SECS = 24 * 3600
 FAMILY_PAIR_COUNTS: Counter = Counter(scoring_family(*pair) for pair in LAUNCH_PAIRS)
 # Direction registry and the silent-network fallback: one entry per launch direction (both ways),
 # each family an equal share split evenly over its directions. The per-round pool values are

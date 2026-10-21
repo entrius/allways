@@ -495,19 +495,6 @@ class ValidatorStateStore:
             fees[r['backing']] = fees.get(r['backing'], 0) + int(r['fee'])
         return fees
 
-    def get_clearing_legs(
-        self, from_chain: str, to_chain: str, start_time: int, end_time: int
-    ) -> List[Tuple[int, int]]:
-        """``[(from_amount, to_amount)]`` for every fill completed on one direction in ``(start_time, end_time]``."""
-        rows = self._fetchall(
-            """
-            SELECT from_amount, to_amount FROM clearing_rates
-            WHERE from_chain = ? AND to_chain = ? AND block_num > ? AND block_num <= ?
-            """,
-            (from_chain, to_chain, start_time, end_time),
-        )
-        return [(int(r['from_amount']), int(r['to_amount'])) for r in rows]
-
     def get_recent_fill_hotkeys(self, start_time: int, end_time: int) -> Dict[str, Set[str]]:
         """``{backing: {hotkey}}`` — per purse, the hotkeys that completed a fill drawing on it in
         ``(start_time, end_time]``: the activity half of the eligibility gate. Any lane, qualified
@@ -542,6 +529,7 @@ class ValidatorStateStore:
     LEDGER_SINCE_KEY = 'clearing_ledger_since'
     MINER_SHARE_KEY = 'fee_pool_miner_share'
     SOL_TAO_RATE_KEY = 'fee_pool_sol_tao_rate'
+    SOL_TAO_RATE_HOUR_KEY = 'fee_pool_sol_tao_rate_hour'
 
     def miner_share(self) -> float:
         """The last miner_share a scoring round derived; 0.0 (full recycle) before the first one."""
@@ -551,13 +539,18 @@ class ValidatorStateStore:
     def set_miner_share(self, share: float) -> None:
         self.set_relay_meta(self.MINER_SHARE_KEY, repr(float(share)))
 
-    def sol_tao_rate(self) -> Optional[float]:
-        """The last good TAO-per-SOL clearing rate the fee conversion used; None before the first."""
-        stored = self.get_relay_meta(self.SOL_TAO_RATE_KEY)
-        return float(stored) if stored is not None else None
+    def sol_tao_rate(self) -> Optional[Tuple[float, int]]:
+        """``(rate, hour)``: the last good TAO-per-SOL rate the fee conversion fetched and the UTC hour it is
+        for; None before the first."""
+        rate = self.get_relay_meta(self.SOL_TAO_RATE_KEY)
+        hour = self.get_relay_meta(self.SOL_TAO_RATE_HOUR_KEY)
+        if rate is None or hour is None:
+            return None
+        return float(rate), int(hour)
 
-    def set_sol_tao_rate(self, rate: float) -> None:
+    def set_sol_tao_rate(self, rate: float, hour: int) -> None:
         self.set_relay_meta(self.SOL_TAO_RATE_KEY, repr(float(rate)))
+        self.set_relay_meta(self.SOL_TAO_RATE_HOUR_KEY, str(int(hour)))
 
     def clearing_ledger_since(self, now: int) -> int:
         """When this database started recording fills — stamped ``now`` on first call and kept

@@ -14,7 +14,6 @@ Entry is ``score_and_reward_miners``.
 
 from __future__ import annotations
 
-import statistics
 import time
 from dataclasses import dataclass, field
 from enum import IntEnum
@@ -52,6 +51,7 @@ from allways.constants import (
     SCORING_WINDOW_BLOCKS,
     SCORING_WINDOW_SECS,
     SECONDS_PER_BLOCK,
+    SOL_TAO_RATE_STALE_SECS,
     SWAP_OUTCOME_RETENTION_SECS,
     collateral_leg,
     declarable_backings,
@@ -64,6 +64,7 @@ from allways.solana.pdas import BACKING_BITS
 from allways.utils.rate import is_executable_rate, min_executable_hub_leg, quantize_rate_fixed
 from allways.validator.binding import build_attribution
 from allways.validator.scoring_trace import WeightingTrace, log_scoring_trace
+from allways.validator.sol_tao_price import fetch_sol_tao_rate, rate_hour
 from allways.validator.state_store import ValidatorStateStore
 
 if TYPE_CHECKING:
@@ -89,16 +90,16 @@ class DirectionTrace:
 
 @dataclass
 class FeePoolShare:
-    """One round's fee-scaled pool inputs, in TAO over ``POOL_VOLUME_WINDOW_SECS``. ``fees_tao`` or
-    ``emission_tao`` is None when it could not be read; ``share`` is then the last round's."""
+    """One round's fee-scaled pool inputs, in TAO over ``POOL_VOLUME_WINDOW_SECS``. ``emission_tao`` is
+    None when it could not be read; ``share`` is then the last round's."""
 
-    fees_tao: Optional[float]
+    fees_tao: float
     emission_tao: Optional[float]
     share: float
 
     @property
     def fresh(self) -> bool:
-        return self.fees_tao is not None and self.emission_tao is not None
+        return self.emission_tao is not None
 
 
 def due_for_scoring(current_block: int, last_scored_block: int, initial_scoring_done: bool) -> bool:
@@ -534,48 +535,53 @@ def fee_pool_share(fees_tao: float, emission_tao: float) -> float:
     return min(1.0, max(0.0, FEE_POOL_MULTIPLE * fees_tao / emission_tao))
 
 
-def median_sol_tao_rate(store: ValidatorStateStore, start_time: int, end_time: int) -> Optional[float]:
-    """TAO per SOL at the median of the sol↔tao fills this validator cleared in ``(start_time, end_time]``;
-    None when none cleared."""
-    sol_unit, tao_unit = 10 ** get_chain_def('sol').decimals, 10 ** get_chain_def('tao').decimals
-    rates = [
-        (tao / tao_unit) / (sol / sol_unit)
-        for sol, tao in store.get_clearing_legs('sol', 'tao', start_time, end_time)
-        if sol > 0 and tao > 0
-    ]
-    rates += [
-        (tao / tao_unit) / (sol / sol_unit)
-        for tao, sol in store.get_clearing_legs('tao', 'sol', start_time, end_time)
-        if sol > 0 and tao > 0
-    ]
-    return float(statistics.median(rates)) if rates else None
-
-
-def window_fees_tao(store: ValidatorStateStore, start_time: int, end_time: int) -> Optional[float]:
-    """The swap fees completed in ``(start_time, end_time]``, in TAO: rao fees as-is, lamport fees at the
-    window's median sol↔tao clearing rate, else the last good one. None = a fee that cannot be priced."""
-    rate = median_sol_tao_rate(store, start_time, end_time)
+def hourly_sol_tao_rate(
+    self: Validator, now: int, fetch: Optional[Callable[[int], Optional[float]]] = None
+) -> Optional[float]:
+    """TAO per SOL for the fee conversion: the rate at ``rate_hour(now)``, fetched once per hour and kept in
+    ``relay_meta``. A failed fetch keeps the last good rate (WARNING with its hour and age, ERROR once it is
+    older than ``SOL_TAO_RATE_STALE_SECS``) and retries next round; None = no rate fetched yet."""
+    fetch = fetch or fetch_sol_tao_rate
+    store = self.state_store
+    hour = rate_hour(now)
+    last = store.sol_tao_rate()
+    if last is not None and last[1] >= hour:
+        return last[0]
+    rate = fetch(hour)
     if rate is not None:
-        store.set_sol_tao_rate(rate)
-    else:
-        rate = store.sol_tao_rate()
+        store.set_sol_tao_rate(rate, hour)
+        return rate
+    if last is None:
+        bt.logging.warning(f'sol/tao rate for hour {hour} unavailable and none stored yet')
+        return None
+    last_rate, last_hour = last
+    age = now - last_hour
+    log = bt.logging.error if age > SOL_TAO_RATE_STALE_SECS else bt.logging.warning
+    log(f'sol/tao rate for hour {hour} unavailable, keeping {last_rate:g} from hour {last_hour} ({age}s old)')
+    return last_rate
+
+
+def window_fees_tao(
+    store: ValidatorStateStore, start_time: int, end_time: int, sol_tao_rate: Callable[[], Optional[float]]
+) -> float:
+    """The swap fees completed in ``(start_time, end_time]``, in TAO: rao fees as-is, lamport fees at
+    ``sol_tao_rate()`` (TAO per SOL, read only when there are lamport fees). A backing with no conversion
+    is skipped with a warning."""
     total = 0.0
-    for backing, fee in store.get_swap_fees(start_time, end_time).items():
+    for backing, fee in sorted(store.get_swap_fees(start_time, end_time).items()):
         if fee <= 0:
             continue
-        units = fee / 10 ** get_chain_def(backing).decimals
-        if backing == 'tao':
-            total += units
-        elif backing == 'sol' and rate is not None:
-            total += units * rate
-        else:
-            return None
+        rate = 1.0 if backing == 'tao' else sol_tao_rate() if backing == 'sol' else None
+        if rate is None:
+            bt.logging.warning(f'fee pool: no {backing}→tao conversion, skipping {fee} units of {backing} fees')
+            continue
+        total += fee / 10 ** get_chain_def(backing).decimals * rate
     return total
 
 
 def miner_emission_tao(self: Validator, now: int) -> Optional[float]:
     """The miners' alpha emission over ``POOL_VOLUME_WINDOW_SECS``, valued in TAO at the subnet's
-    on-chain alpha price: per-block alpha emission × ``MINER_EMISSION_FRACTION`` × blocks in the window
+    on-chain moving alpha price: per-block alpha emission × ``MINER_EMISSION_FRACTION`` × blocks in the window
     × price. One subtensor read, at most once per ``ALPHA_PRICE_TTL_SECS``; None on a failed read."""
     read_at, value = getattr(self, 'miner_emission', None) or (None, None)
     if read_at is not None and now - read_at < ALPHA_PRICE_TTL_SECS:
@@ -583,7 +589,7 @@ def miner_emission_tao(self: Validator, now: int) -> Optional[float]:
     try:
         info = self.subtensor.subnet(int(self.config.netuid))
         alpha_per_block = float(info.alpha_out_emission.tao)
-        price = float(info.price.tao)
+        price = float(info.moving_price)
     except Exception as e:
         bt.logging.warning(f'miner emission read failed: {e}')
         return None
@@ -597,12 +603,12 @@ def miner_emission_tao(self: Validator, now: int) -> Optional[float]:
 
 def round_miner_share(self: Validator, now: int) -> FeePoolShare:
     """This round's ``miner_share`` over the trailing ``POOL_VOLUME_WINDOW_SECS``, persisted for the next
-    round and the live score tip. An input that cannot be read keeps the last share; a validator with no
+    round and the live score tip. A failed emission read keeps the last share; a validator with no
     share yet starts at 0.0 (full recycle)."""
     store = self.state_store
-    fees = window_fees_tao(store, now - POOL_VOLUME_WINDOW_SECS, now)
+    fees = window_fees_tao(store, now - POOL_VOLUME_WINDOW_SECS, now, partial(hourly_sol_tao_rate, self, now))
     emission = miner_emission_tao(self, now)
-    if fees is None or emission is None:
+    if emission is None:
         share = store.miner_share()
         bt.logging.warning(f'fee pool: input unavailable (fees={fees}, emission={emission}), keeping {share:.6f}')
         return FeePoolShare(fees_tao=fees, emission_tao=emission, share=share)
