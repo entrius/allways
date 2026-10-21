@@ -20,6 +20,7 @@ from websockets.http11 import Response
 from allways.utils import subtensor as st
 from allways.utils.subtensor import (
     PrimaryWatch,
+    archive_substrate,
     build_subtensor,
     is_rate_limited,
     redact_endpoint,
@@ -47,6 +48,13 @@ def fake_subtensor(monkeypatch):
 
 
 # ─── build_subtensor ────────────────────────────────────────────────────────
+
+
+def test_an_archive_connection_is_that_endpoint_alone_with_its_key_redacted(fake_subtensor, monkeypatch):
+    monkeypatch.setenv(st.FALLBACK_ENDPOINTS_ENV, FINNEY)  # a full node: never a stand-in for an archive read
+    assert archive_substrate(KEYED) is fake_subtensor.return_value.substrate
+    fake_subtensor.assert_called_once_with(network=KEYED)
+    assert st._redactor.secrets == {KEYED: redact_endpoint(KEYED)}
 
 
 def test_unset_env_builds_a_plain_subtensor(fake_subtensor):

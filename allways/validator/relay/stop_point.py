@@ -25,7 +25,7 @@ from typing import Any, Callable, Dict, List, Optional
 import bittensor as bt
 
 from allways.constants import TAO_HUB_VAULT_ADDRESSES
-from allways.utils.subtensor import ARCHIVE_ENDPOINTS_ENV, parse_endpoints
+from allways.utils.subtensor import ARCHIVE_ENDPOINTS_ENV, archive_substrate, parse_endpoints
 from allways.validator.feed.events import HISTORY_HORIZON_SECS
 
 BLOCK_SECS = 12
@@ -79,7 +79,7 @@ class ArchiveReader:
 
     def __init__(self, vault: Any, connect: Optional[Callable[[str], Any]] = None):
         self.vault = vault
-        self._connect = connect or (lambda url: bt.Subtensor(network=url).substrate)
+        self._connect = connect or archive_substrate
         self._substrate: Any = None
         self._blocks: Dict[int, str] = {}
 
