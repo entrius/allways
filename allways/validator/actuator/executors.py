@@ -195,10 +195,34 @@ def resolve_pool(client: Any, intent: Intent) -> Optional[str]:
         raise
 
 
+# The config field holding each hub's collateral floor.
+_FLOOR_FIELDS = {'sol': 'min_collateral', 'tao': 'tao_min_collateral'}
+
+
+def _under_floor(client: Any, miner: str, backing: str) -> None:
+    """A floor kick is cast only while the hub, read live, is still lit and its purse under the floor: the
+    local vault for SOL, a locked attested bond for a vault hub."""
+    ms, config = client.get_miner_state(miner), client.get_config()
+    floor = int(getattr(config, _FLOOR_FIELDS.get(backing, ''), 0) or 0)
+    purse = None
+    if ms is not None and ms.active and int(ms.active_backings or 0) & pdas.BACKING_BITS[backing]:
+        if backing == 'sol':
+            purse = int(ms.collateral)
+        else:
+            att = client.get_bond_attestation(miner, backing)
+            purse = int(att.effective_balance) if att is not None and att.locked else None
+    if purse is None or not floor or purse >= floor:
+        keys = {('MinerState', str(pdas.miner_state_pda(miner, client.program_id)))}
+        if backing != 'sol':
+            keys.add(('BondAttestation', str(pdas.bond_attestation_pda(miner, backing, client.program_id))))
+        raise StaleWorld(keys)
+
+
 def vote_deactivate(client: Any, intent: Intent) -> Optional[str]:
     miner, backing = intent.payload
     if client.has_voted(pdas.REQ_DEACTIVATE, miner, client.keypair.pubkey()):
         return None
+    _under_floor(client, miner, backing)
     try:
         return client.vote_deactivate(miner, backing=backing)
     except Exception as e:

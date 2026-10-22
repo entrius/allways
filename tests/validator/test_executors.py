@@ -9,8 +9,9 @@ from solders.keypair import Keypair
 from solders.transaction import Transaction
 
 from allways.constants import CANCEL_REASON_ALPHA_STAKE_REFUSED, CANCEL_REASON_OTHER
+from allways.solana import pdas
 from allways.solana.client import swap_from_solana, swap_key_from_tx_hash
-from allways.validator.actuator.executors import SWAP_EXECUTORS, SendingClient, StaleWorld
+from allways.validator.actuator.executors import EXECUTORS, SWAP_EXECUTORS, SendingClient, StaleWorld
 from allways.validator.actuator.planners import SwapIntent, intent
 
 SWAP = SimpleNamespace(
@@ -205,3 +206,48 @@ def test_a_send_the_rpc_called_stale_but_that_landed_is_reported_as_sent():
     client.keypair, client.rpc = Keypair(), _LaggingRpc()
     ix = Instruction(Keypair().pubkey(), b'', [])
     assert client._send([ix]) == client.rpc.sent[0]
+
+
+# ── a floor kick is cast only while the hub, read live, is still under its floor ──
+
+
+class _Purses(_Client):
+    """A client whose miner state, config and bond attestation answer from on-chain state."""
+
+    program_id = None
+
+    def __init__(self, collateral=50, attested=5, locked=True, backings=pdas.BACKING_BIT_SOL | pdas.BACKING_BIT_TAO):
+        super().__init__()
+        self.ms = SimpleNamespace(active=True, active_backings=backings, collateral=collateral)
+        self.att = SimpleNamespace(locked=locked, effective_balance=attested)
+
+    def get_miner_state(self, miner):
+        return self.ms
+
+    def get_config(self):
+        return SimpleNamespace(min_collateral=100, tao_min_collateral=1000)
+
+    def get_bond_attestation(self, miner, chain):
+        return self.att
+
+
+def _kick(backing):
+    miner = str(SWAP.miner)
+    return intent('vote_deactivate', (miner, backing), None, 0, payload=(miner, backing))
+
+
+def test_a_floor_kick_is_sent_while_the_live_purse_is_under_its_floor():
+    assert EXECUTORS['vote_deactivate'](_Purses(), _kick('sol')) == 'sig-vote_deactivate'
+    assert EXECUTORS['vote_deactivate'](_Purses(), _kick('tao')) == 'sig-vote_deactivate'
+
+
+def test_a_floor_kick_is_not_sent_once_the_live_purse_meets_its_floor():
+    topped_up = {
+        'sol': [_Purses(collateral=100), _Purses(backings=pdas.BACKING_BIT_TAO)],
+        'tao': [_Purses(attested=1000), _Purses(locked=False), _Purses(backings=pdas.BACKING_BIT_SOL)],
+    }
+    for backing, chains in topped_up.items():
+        for chain in chains:
+            with pytest.raises(StaleWorld) as stale:
+                EXECUTORS['vote_deactivate'](chain, _kick(backing))
+            assert chain.calls == [] and 'MinerState' in {k for k, _ in stale.value.keys}
