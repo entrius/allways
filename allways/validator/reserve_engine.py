@@ -37,6 +37,7 @@ from allways.cli.swap_commands.swap_intake import (
 from allways.constants import NUMERAIRE_CHAIN
 from allways.eligibility import direction_eligible, quote_addresses_valid
 from allways.solana.client import contract_reject_reason, swap_key_from_tx_hash
+from allways.solana.layouts import estimated_free_at
 from allways.solana.pdas import BACKING_BITS
 from allways.validator.binding import verify_binding
 from allways.validator.market import MARKET_TTL_SECS, AlphaPriceMemo, Market, QuoteMemo, memo_priced
@@ -774,6 +775,7 @@ class BestQuote:
     # The backing the winning quote declared — it is the offer's failure guarantee, so a consumer
     # that shows a rate has to be able to show which promise comes with it.
     backing: str = NUMERAIRE_CHAIN
+    estimated_free_at: int = 0
 
 
 # Depth rungs served alongside /rate — enough to show the market, few enough to stay a glance.
@@ -804,8 +806,12 @@ def rate_quote(validator, from_chain: str, to_chain: str, from_amount: int) -> R
     providers = memo_priced(getattr(validator, 'axon_assets', None) or {}, _alpha_prices)
     cands = candidate_miners(market, from_chain, to_chain, providers)
     ranked = _ranked_intakes(cands, from_chain, to_chain, from_amount, min_swap, max_swap, bounds, providers)
-    bound = list(islice(_bound_intakes(market.attribution, ranked), RATE_LEVELS_LIMIT))
-    bq = _best_quote(*bound[0]) if bound else None
+    now = int(time.time())
+    bound = list(_bound_intakes(market.attribution, ranked))
+    available = [(*intake, _candidate_free_at(market, intake[0], now)) for intake in bound]
+    available.sort(key=lambda intake: (intake[3] > 0, intake[3] or 0))
+    available = list(islice(available, RATE_LEVELS_LIMIT))
+    bq = _best_quote(*available[0]) if available else None
     reason = (
         '' if bq else unviable_reason(cands, from_chain, to_chain, from_amount, min_swap, max_swap, bounds, providers)
     )
@@ -829,8 +835,9 @@ def rate_quote(validator, from_chain: str, to_chain: str, from_amount: int) -> R
             'max_from_amount': max_intake_from_amount(
                 cand, from_chain, to_chain, min_swap, max_swap, bounds, providers
             ),
+            'estimated_free_at': free_at,
         }
-        for cand, amts, hotkey in bound
+        for cand, amts, hotkey, free_at in available
     ]
     return RateQuote(bq, reason, levels, max(depth.values(), default=0), min(floors, default=0), candidates)
 
@@ -861,7 +868,11 @@ def _bound_intakes(attribution: dict, ranked):
             yield cand, amts, hotkey
 
 
-def _best_quote(cand: MinerCandidate, amts, hotkey: str) -> BestQuote:
+def _candidate_free_at(market: Market, cand: MinerCandidate, now: int) -> int:
+    return estimated_free_at(market.get_miner_state(cand.miner), BACKING_BITS.get(cand.backing, 0), now)
+
+
+def _best_quote(cand: MinerCandidate, amts, hotkey: str, free_at: int) -> BestQuote:
     return BestQuote(
         hotkey,
         str(cand.miner),
@@ -870,6 +881,7 @@ def _best_quote(cand: MinerCandidate, amts, hotkey: str) -> BestQuote:
         amts.from_amount,
         amts.to_amount,
         cand.backing,
+        free_at,
     )
 
 

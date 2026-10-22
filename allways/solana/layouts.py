@@ -9,6 +9,8 @@ Fixed byte arrays ([u8;32]/[u8;64], incl. pubkeys) decode to Python `bytes` via 
 client converts pubkey fields to solders Pubkey when mapping to dataclasses.
 """
 
+import time
+
 from borsh_construct import I64, U8, U32, U64, U128, Bool, CStruct, Enum, Option, String, Vec
 from construct import Bytes as _Raw
 
@@ -19,6 +21,7 @@ CONFIG_VERSION = 16
 # Width of MinerState's per-hub transient arrays (constants.rs MAX_BACKING_SLOTS) — one slot per
 # `active_backings` bit, indexed by bit position.
 MAX_BACKING_SLOTS = 8
+BUSY_FALLBACK_SECS = 30
 
 
 # The attestation epoch is a two-part value: the Solana config's vault generation in the high 32
@@ -64,6 +67,15 @@ def hub_busy_until(state, bit: int) -> int:
         idx = max(bit.bit_length() - 1, 0)
         return int(arr[idx]) if idx < len(arr) else 0
     return int(arr or 0)
+
+
+def estimated_free_at(state, bit: int, now: int | None = None) -> int:
+    """Estimated unix time when one hub is free, or 0 when it is free now."""
+    now = int(time.time()) if now is None else int(now)
+    busy_until = hub_busy_until(state, bit)
+    if not hub_swap_on(state, bit) and busy_until <= now:
+        return 0
+    return max(busy_until, now + BUSY_FALLBACK_SECS)
 
 
 def hub_reserved_collateral(state, bit: int) -> int:

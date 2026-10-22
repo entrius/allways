@@ -590,7 +590,14 @@ class TestRateQuoteCandidates:
             for pk, rate in zip(miners, rates)
         ]
         live_states = {
-            hk: SimpleNamespace(miner=pk, active=True, failed_swaps=0, collateral=100 * self.SOL)
+            hk: SimpleNamespace(
+                miner=pk,
+                active=True,
+                failed_swaps=0,
+                collateral=100 * self.SOL,
+                active_swap_backings=0,
+                busy_until=[0, 0],
+            )
             for pk, hk in zip(miners, hotkeys)
             if hk
         }
@@ -616,9 +623,31 @@ class TestRateQuoteCandidates:
             'rate_display': rq.quote.rate_display,
             'to_amount': rq.quote.to_amount,
             'max_from_amount': self.MAX,
+            'estimated_free_at': 0,
         }
         assert rq.candidates[1]['to_amount'] == 55_000_000
         assert rq.min_from_amount == self.MIN  # hub source: min_swap as-is
+
+    def test_sole_busy_miner_is_still_quoted(self):
+        validator, _ = self._validator('sol', 'btc', ['0.5'])
+        state = next(iter(validator.held_states[1].values()))
+        state.busy_until[0] = int(time.time()) + 60
+
+        rq = rate_quote(validator, 'sol', 'btc', self.SOL)
+
+        assert rq.quote is not None
+        assert rq.quote.estimated_free_at == state.busy_until[0]
+        assert rq.candidates[0]['estimated_free_at'] == state.busy_until[0]
+
+    def test_free_candidate_ranks_ahead_of_better_busy_rate(self):
+        validator, hotkeys = self._validator('sol', 'btc', ['0.6', '0.5'])
+        validator.held_states[1][hotkeys[0]].busy_until[0] = int(time.time()) + 60
+
+        rq = rate_quote(validator, 'sol', 'btc', self.SOL)
+
+        assert [candidate['miner_hotkey'] for candidate in rq.candidates] == [hotkeys[1], hotkeys[0]]
+        assert rq.quote.miner_hotkey == hotkeys[1]
+        assert rq.quote.estimated_free_at == 0
 
     @pytest.mark.parametrize('bad_field', ['miner_from_addr', 'miner_to_addr'])
     def test_bad_best_address_is_absent_from_quote_levels_depth_and_candidates(self, bad_field):
