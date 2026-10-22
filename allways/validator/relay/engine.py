@@ -353,9 +353,16 @@ class BondRelay:
         writes (vault mutated, attestation refresh never sent)."""
         # Not knowing who exists (no complete World yet) is owed, not settled.
         world = self._world()
-        ok = world is not None and world.complete
-        if not ok or not self.resolve_fee_stop(now):
-            return False  # seeding fee bases now would fix a wrong starting point for good
+        if world is None or not world.complete:
+            return False
+        if not self.resolve_fee_stop(now):
+            # Seeding fee bases now would fix a wrong starting point for good, so the attestations and
+            # exits (which seed them) wait. A verdict carries its own figures and seeds nothing, so it is
+            # relayed meanwhile; this validator's entry hold covers the attestation it can't net yet.
+            slash_job.arm_verdicts(self, now)
+            slash_job.relay_verdicts(self, now)
+            return False
+        ok = True
         bonded = self.bonded_miners()
         for miner in bonded:
             self.mark_dirty(miner)

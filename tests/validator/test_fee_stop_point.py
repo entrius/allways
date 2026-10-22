@@ -8,7 +8,7 @@ from allways.validator.feed.events import HISTORY_HORIZON_SECS
 from allways.validator.relay import stop_point
 from allways.validator.relay.ledger import RelayLedger
 from allways.validator.store.db import Store
-from tests.validator.test_relay_engine import HOTKEY, MINER, NOW, RAO, SWAP, FakeVault, _relay
+from tests.validator.test_relay_engine import HOTKEY, MINER, NOW, RAO, SWAP, USER_TAO, FakeVault, _relay
 
 HOUR = 3600
 CADENCE = 6 * HOUR
@@ -151,6 +151,19 @@ def test_a_fresh_ledger_holds_the_barrier_until_the_archive_answers_and_seeds_no
     assert relay.store.get_relay_meta('fee_stop_point') is not None
     assert relay.store.has_fee_bases()
     assert relay.store.seed_as_of is None, 'the lookup only steers the boot seeding'
+
+
+def test_a_verdict_is_relayed_while_the_barrier_waits_on_the_archive():
+    # Only the fee seed needs the stop point: a slash carries its own figures and touches no fee base.
+    archive = _Archive(up=False)
+    relay = _fresh_relay(archive)
+    relay.store.record_relay_slash(SWAP, MINER, 'tao', 22 * RAO, 22 * RAO, USER_TAO, NOW, HOTKEY)
+    relay.step(NOW)
+    assert ('vote_slash', HOTKEY, SWAP, 22 * RAO, USER_TAO, 22 * RAO) in relay.vault.calls
+    assert relay.store.open_relay_slashes('tao') == []
+    assert relay.has_pending_debit(MINER), 'entry stays held until the netted attestation is on Solana'
+    assert not relay._reconciled, 'the attestations are still owed, so the heartbeat stays down'
+    assert not relay.store.has_fee_bases()
 
 
 def test_a_lone_validator_boots_without_the_archive():
