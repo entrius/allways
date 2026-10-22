@@ -38,6 +38,7 @@ class FakeClient:
             failed_swaps=0,
             has_active_swap=has_active_swap,
             active_swap_backings=1 if has_active_swap else 0,
+            busy_until=[0, 0],
             collateral=collateral,
         )
         self.quote = SimpleNamespace(
@@ -332,7 +333,28 @@ def test_struck_miner_cannot_take_joiners_on_its_open_pool():
 
 def test_busy_miner_open_rejects():
     r, _ = _reserve(FakeClient(has_active_swap=True))
-    assert not r.ok and 'busy' in r.reason
+    assert not r.ok and 'busy' in r.reason and r.retry_after > int(time.time())
+
+
+def test_busy_preflight_returns_retry_after_without_sending_a_tx():
+    client = FakeClient()
+    client.miner_state.busy_until[0] = FUTURE
+
+    r, _ = _reserve(client)
+
+    assert not r.ok and r.retry_after == FUTURE
+    assert client.calls == []
+
+
+def test_same_pair_join_is_not_blocked_by_busy_preflight():
+    pinned = SimpleNamespace(opened_at=1, closes_at=FUTURE, from_chain='sol', to_chain='btc', rate=_rate_fixed(0.0021))
+    client = FakeClient(pool=pinned)
+    client.miner_state.busy_until[0] = FUTURE
+
+    r, _ = _reserve(client)
+
+    assert r.ok and r.retry_after == 0
+    assert client.calls == [('open_or_request', 'sol', 'btc', 'sol')]
 
 
 def test_contract_rejection_returns_reject_not_raise():
@@ -350,6 +372,22 @@ def test_contract_rejection_returns_reject_not_raise():
     r, store = _reserve(client)
     assert not r.ok and 'active reservation' in r.reason.lower()
     assert store.distinct_routed_pools() == []  # a failed entry queues nothing
+
+
+def test_contract_rejection_rereads_busy_state_for_retry_after():
+    client = FakeClient()
+
+    def _raise(*_a, **_k):
+        client.miner_state.busy_until[0] = FUTURE
+        raise RuntimeError(
+            'send failed: Error Code: MinerReserved. Error Number: 6022. '
+            'Error Message: Miner already has an active reservation. custom program error: 0x1786'
+        )
+
+    client.open_or_request = _raise
+    r, _ = _reserve(client)
+
+    assert not r.ok and r.retry_after == FUTURE
 
 
 def test_contract_rejection_code_only_form_returns_reject():

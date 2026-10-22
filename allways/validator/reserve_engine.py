@@ -137,6 +137,7 @@ class ReserveResult:
     reason: str = ''
     pool_closes_at: int = 0
     sig: str = ''
+    retry_after: int = 0
 
 
 def reserve_on_behalf(
@@ -210,10 +211,9 @@ def reserve_on_behalf(
             return ReserveResult(False, why)
         quote, backing = offer
         rate_fixed = quote.rate
-        # One swap per HUB: only the chosen offer's hub has to be idle — the other hub's swap
-        # neither draws on this pot nor blocks it.
-        if int(getattr(miner_state, 'active_swap_backings', 0)) & BACKING_BITS.get(backing, 0):
-            return ReserveResult(False, 'miner is busy with another swap on that hub; try again shortly')
+        free_at = estimated_free_at(miner_state, BACKING_BITS.get(backing, 0), now)
+        if free_at:
+            return ReserveResult(False, 'miner is busy on that hub; try again shortly', retry_after=free_at)
 
     try:
         amts = compute_intake_amounts(
@@ -288,7 +288,7 @@ def reserve_on_behalf(
         reason = contract_reject_reason(e)
         if reason is None:
             raise
-        return ReserveResult(False, reason)
+        return ReserveResult(False, reason, retry_after=_free_at_after_reject(client, miner_pk, backing))
     # The entry landed — queue the user's details for `finalize_won_seats`. Persisted (not held in
     # memory) so a validator restart inside the pool/finalize window still honors the routing promise.
     validator.state_store.upsert_routed_request(
@@ -790,6 +790,15 @@ class RateQuote:
     max_from_amount: int  # largest executable source amount across ALL quotes, not just shown rungs
     min_from_amount: int  # smallest source amount a fillable quote admits; 0 = unset, unpriceable or no depth
     candidates: list  # top bound intakes for the asked size, selector order — a tolerance band in one scan
+
+
+def _free_at_after_reject(client, miner_pk, backing: str) -> int:
+    """A contract reject may be a busy race: re-read once so the caller can wait. A failed read is just a reject."""
+    try:
+        miner_state = client.get_miner_state(miner_pk)
+    except Exception:
+        return 0
+    return estimated_free_at(miner_state, BACKING_BITS.get(backing, 0), int(time.time())) if miner_state else 0
 
 
 def rate_quote(validator, from_chain: str, to_chain: str, from_amount: int) -> RateQuote:
