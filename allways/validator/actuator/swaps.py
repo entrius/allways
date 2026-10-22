@@ -193,11 +193,11 @@ def _fresh(ctx: SwapContext, chain: str, info: Any, floor: int) -> bool:
     return is_tx_fresh(info, floor, grace)
 
 
-def _extend_target(chain: str, info: Any, deadline: int, ceiling: int, now: int) -> Optional[int]:
+def _extend_target(chain: str, confirmations: int, deadline: int, ceiling: int, now: int) -> Optional[int]:
     """The deadline to extend to, or None: it must be live, near expiry, below the ceiling, and moved later."""
     if deadline <= 0 or deadline - now > EXTENSION_PADDING_SECONDS or deadline >= ceiling:
         return None
-    target = compute_extension_target_secs(chain, int(info.confirmations), now, ceiling)
+    target = compute_extension_target_secs(chain, int(confirmations), now, ceiling)
     return target if target > deadline else None
 
 
@@ -206,7 +206,7 @@ def _catching_up(chain: str, info: Any, deadline: int, ceiling: int, now: int, e
     would have met is extended on the leg's own confirmations so the swap can't lapse meanwhile."""
     field = 'reserved_until' if extend is Decision.EXTEND_RESERVATION else 'timeout_at'
     why = f'leg verified, World catching up: {vote} waits for the ledgers'
-    target = _extend_target(chain, info, deadline, ceiling, now)
+    target = _extend_target(chain, int(info.confirmations), deadline, ceiling, now)
     if target:
         return Action(extend, target, reason=f'{why} → extend {field} to {target} (+{target - now}s)')
     return Action(Decision.WAIT, reason=why)
@@ -230,7 +230,9 @@ def _fulfilled(swap: Any, ctx: SwapContext, now: int, overdue: bool, fee_divisor
             reason='dest provider unreachable past max_extend_at (src=ok) — terminal, else collateral freezes',
         )
     if dest.status == 'pending':
-        target = _extend_target(swap.to_chain, dest.info, int(swap.timeout_at), int(swap.max_extend_at), now)
+        target = _extend_target(
+            swap.to_chain, int(dest.info.confirmations), int(swap.timeout_at), int(swap.max_extend_at), now
+        )
         if target:
             return Action(
                 Decision.EXTEND_TIMEOUT,
@@ -314,6 +316,20 @@ def _pending_attestation(swap: Any, ctx: SwapContext, now: int, fee_divisor: int
         swap.user_from_addr,
     )
     if source.status == 'down':
+        # Unverifiable is not absent: the deposit may be at the miner already, and a claim that expires
+        # unattested returns nothing to the taker. Near expiry, slide the reservation so an outage can't
+        # decide the outcome before the ceiling; zero confirmations assumed (the longest bucket).
+        target = None
+        if reservation is not None:
+            target = _extend_target(
+                swap.from_chain, 0, int(reservation.reserved_until), int(reservation.max_extend_at), now
+            )
+        if target:
+            return Action(
+                Decision.EXTEND_RESERVATION,
+                target,
+                reason=f'source provider unreachable → extend reserved_until to {target} (+{target - now}s)',
+            )
         return Action(Decision.SKIP, reason='source provider unreachable')
     if source.status == 'pending':
         left = int(reservation.reserved_until) - now if reservation is not None else 0
@@ -321,7 +337,11 @@ def _pending_attestation(swap: Any, ctx: SwapContext, now: int, fee_divisor: int
         target = None
         if reservation is not None:
             target = _extend_target(
-                swap.from_chain, source.info, int(reservation.reserved_until), int(reservation.max_extend_at), now
+                swap.from_chain,
+                int(source.info.confirmations),
+                int(reservation.reserved_until),
+                int(reservation.max_extend_at),
+                now,
             )
         if target:
             return Action(

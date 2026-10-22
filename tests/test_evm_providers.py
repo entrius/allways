@@ -213,6 +213,25 @@ def test_an_unreadable_leg_is_unknown_not_absent(spec):
 
 
 @pytest.mark.parametrize('spec', EVM_SPECS, ids=by_id)
+def test_a_null_receipt_or_block_asks_every_endpoint(spec):
+    """A null receipt or block for a mined tx is one node's lag: both reads seek the same quorum as the tx
+    lookup, so a fallback endpoint is asked before the leg is called unknown."""
+    provider = spec.cls()
+    amount = amount_for(provider)
+    responses = mined(provider)
+    quorum = {}
+
+    def fake_rpc(method, params, timeout=15, **kw):
+        quorum[method] = kw.get('null_needs_quorum', False)
+        return responses[method]
+
+    provider.chain.eth_rpc = fake_rpc
+    assert provider.fetch_matching_tx(TX, WIRE_RECIPIENT, amount) is not None
+    assert quorum['eth_getTransactionReceipt'] is True
+    assert quorum['eth_getBlockByNumber'] is True
+
+
+@pytest.mark.parametrize('spec', EVM_SPECS, ids=by_id)
 @pytest.mark.parametrize('confs', [1, None], ids=['one-deep', 'at-depth'])
 def test_a_block_replaced_between_reads_is_unknown_until_the_reads_agree(spec, confs):
     """The block at the receipt's height reads as another block (a reorg between the reads, or endpoints on

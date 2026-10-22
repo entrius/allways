@@ -647,6 +647,28 @@ def test_source_pending_at_ceiling_no_extend():
     assert rules.decide(make_swap(status='PendingAttestation'), now=1500).decision == Decision.WAIT
 
 
+def test_source_unreachable_near_expiry_extends_reservation():
+    # Unreadable source near expiry: the deposit may already be at the miner, so the reservation slides on the
+    # zero-confirmation bucket (BTC: 1500 + 2*600 + 120 = 2820 → 3000) instead of lapsing unattested.
+    resv = make_reservation(reserved_until=1600, max_extend_at=10_000)
+    rules, _ = rules_with(result='unreachable', reservation=resv)
+    action = rules.decide(make_swap(status='PendingAttestation'), now=1500)
+    assert action.decision == Decision.EXTEND_RESERVATION
+    assert action.target_at == 3000
+
+
+def test_source_unreachable_with_time_left_skips():
+    resv = make_reservation(reserved_until=5000, max_extend_at=10_000)
+    rules, _ = rules_with(result='unreachable', reservation=resv)
+    assert rules.decide(make_swap(status='PendingAttestation'), now=1500).decision == Decision.SKIP
+
+
+def test_source_unreachable_at_ceiling_skips():
+    resv = make_reservation(reserved_until=1600, max_extend_at=1600)
+    rules, _ = rules_with(result='unreachable', reservation=resv)
+    assert rules.decide(make_swap(status='PendingAttestation'), now=1500).decision == Decision.SKIP
+
+
 def test_dest_pending_near_timeout_extends_timeout():
     # SOL dest pending at 0/32 confs: raw = now + 32*1 + 120 = 1652 → 600s bucket up to 1800 (<ceiling).
     rules, providers = rules_with(result=True)
