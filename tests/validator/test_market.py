@@ -59,6 +59,12 @@ class Accounts:
     def get_bond_attestation(self, miner, chain='tao'):
         return self.attestations.get((str(miner), chain))
 
+    def get_reservation(self, miner, backing='sol'):
+        return None
+
+    def get_pool(self, miner, backing='sol'):
+        return None
+
 
 def _ctx(accounts, states, providers=None):
     ctx = Ctx(StrictClient(), states=states, providers=providers)

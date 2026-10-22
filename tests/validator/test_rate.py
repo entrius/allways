@@ -1,6 +1,7 @@
 """Tests for allways.utils.rate — to_amount calculation and fee deduction math — and the
 seam's ``rate_quote`` candidates built on top of it."""
 
+import time
 from decimal import Decimal
 from types import SimpleNamespace
 
@@ -316,14 +317,28 @@ class TestRateQuoteCandidates:
             for pk, rate in zip(miners, rates)
         ]
         live_states = {
-            hk: SimpleNamespace(miner=pk, active=True, failed_swaps=0, collateral=100 * self.SOL)
+            hk: SimpleNamespace(
+                miner=pk,
+                active=True,
+                failed_swaps=0,
+                collateral=100 * self.SOL,
+                active_swap_backings=0,
+                busy_until=[0, 0],
+            )
             for pk, hk in zip(miners, hotkeys)
             if hk
         }
         accounts = {'MinerQuote': [(q.miner, q) for q in quotes]}
         cfg = SimpleNamespace(min_swap_amount=self.MIN, max_swap_amount=self.MAX)
+        reservations, pools = {}, {}  # (miner, backing) -> account, as the World holds them
         client = SimpleNamespace(
-            get_all=accounts.__getitem__, get_config=lambda: cfg, get_bond_attestation=lambda miner, chain: None
+            get_all=accounts.__getitem__,
+            get_config=lambda: cfg,
+            get_bond_attestation=lambda miner, chain: None,
+            get_reservation=lambda miner, backing='sol': reservations.get((str(miner), backing)),
+            get_pool=lambda miner, backing='sol': pools.get((str(miner), backing)),
+            reservations=reservations,
+            pools=pools,
         )
         return Ctx(client, states=live_states), hotkeys
 
@@ -340,9 +355,58 @@ class TestRateQuoteCandidates:
             'rate_display': rq.quote.rate_display,
             'to_amount': rq.quote.to_amount,
             'max_from_amount': self.MAX,
+            'estimated_free_at': 0,
         }
         assert rq.candidates[1]['to_amount'] == 55_000_000
         assert rq.min_from_amount == self.MIN  # hub source: min_swap as-is
+
+    def _open_pool(self, ctx, hotkey, from_chain, to_chain, closes_in=20):
+        """An open pool on ``hotkey``'s sol hub, with busy_until set as the contract sets it at open."""
+        state = ctx.miner_states()[hotkey]
+        now = int(time.time())
+        state.busy_until[0] = now + closes_in + 150 + 600
+        ctx.accounts().pools[(str(state.miner), 'sol')] = SimpleNamespace(
+            from_chain=from_chain, to_chain=to_chain, opened_at=now - 5, closes_at=now + closes_in
+        )
+        return state
+
+    def test_sole_busy_miner_is_still_quoted(self):
+        ctx, hotkeys = self._validator('sol', 'btc', ['0.5'])
+        state = self._open_pool(ctx, hotkeys[0], 'btc', 'sol')
+
+        rq = rate_quote(ctx, 'sol', 'btc', self.SOL)
+
+        assert rq.quote is not None
+        assert rq.quote.estimated_free_at == state.busy_until[0]
+        assert rq.candidates[0]['estimated_free_at'] == state.busy_until[0]
+
+    def test_free_candidate_ranks_ahead_of_better_busy_rate(self):
+        ctx, hotkeys = self._validator('sol', 'btc', ['0.6', '0.5'])
+        self._open_pool(ctx, hotkeys[0], 'btc', 'sol')
+
+        rq = rate_quote(ctx, 'sol', 'btc', self.SOL)
+
+        assert [c['miner_hotkey'] for c in rq.candidates] == [hotkeys[1], hotkeys[0]]
+        assert rq.quote.miner_hotkey == hotkeys[1] and rq.quote.estimated_free_at == 0
+
+    def test_open_pool_on_the_asked_pair_is_joinable_now(self):
+        ctx, hotkeys = self._validator('sol', 'btc', ['0.6', '0.5'])
+        self._open_pool(ctx, hotkeys[0], 'sol', 'btc')
+
+        rq = rate_quote(ctx, 'sol', 'btc', self.SOL)
+
+        assert rq.quote.miner_hotkey == hotkeys[0] and rq.quote.estimated_free_at == 0
+
+    def test_unfilled_seat_past_its_finalize_window_is_free(self):
+        ctx, hotkeys = self._validator('sol', 'btc', ['0.6', '0.5'])
+        state = ctx.miner_states()[hotkeys[0]]
+        now = int(time.time())
+        state.busy_until[0] = now + 500  # set at the pool open, still ahead
+        ctx.accounts().reservations[(str(state.miner), 'sol')] = SimpleNamespace(reserved_until=0, finalize_by=now - 10)
+
+        rq = rate_quote(ctx, 'sol', 'btc', self.SOL)
+
+        assert rq.quote.miner_hotkey == hotkeys[0] and rq.quote.estimated_free_at == 0
 
     @pytest.mark.parametrize('bad_field', ['miner_from_addr', 'miner_to_addr'])
     def test_bad_best_address_is_absent_from_quote_levels_depth_and_candidates(self, bad_field):

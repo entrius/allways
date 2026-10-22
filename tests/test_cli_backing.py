@@ -286,6 +286,9 @@ class _RoutingClient:
     def get_pool(self, miner, backing='sol'):
         return None
 
+    def get_reservation(self, miner, backing='sol'):
+        return None
+
 
 def _permissive(*chains):
     """Providers that verify both legs and wave every deliverability gate through."""

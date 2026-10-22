@@ -9,6 +9,8 @@ Fixed byte arrays ([u8;32]/[u8;64], incl. pubkeys) decode to Python `bytes` via 
 client converts pubkey fields to solders Pubkey when mapping to dataclasses.
 """
 
+import time
+
 from borsh_construct import I64, U8, U32, U64, U128, Bool, CStruct, Enum, Option, String, Vec
 from construct import Bytes as _Raw
 
@@ -19,6 +21,7 @@ CONFIG_VERSION = 16
 # Width of MinerState's per-hub transient arrays (constants.rs MAX_BACKING_SLOTS) — one slot per
 # `active_backings` bit, indexed by bit position.
 MAX_BACKING_SLOTS = 8
+BUSY_FALLBACK_SECS = 30
 
 
 # The attestation epoch is a two-part value: the Solana config's vault generation in the high 32
@@ -64,6 +67,35 @@ def hub_busy_until(state, bit: int) -> int:
         idx = max(bit.bit_length() - 1, 0)
         return int(arr[idx]) if idx < len(arr) else 0
     return int(arr or 0)
+
+
+def estimated_free_at(state, bit: int, reservation=None, pool=None, pair: tuple = (), now: int | None = None) -> int:
+    """Estimated unix time when one hub takes a new entry for ``pair``, or 0 when it takes one now.
+
+    Mirrors the contract's entry gates (``open_or_request``): an in-flight swap, a filled reservation
+    inside its TTL, a drawn seat inside its finalize window, or a pool that can't be joined for this
+    pair. ``busy_until`` alone never makes a hub busy: the pool open sets it to cover a reservation
+    TTL that may never start. It only stretches an estimate whose hold has no end of its own."""
+    now = int(time.time()) if now is None else int(now)
+    busy_until = hub_busy_until(state, bit)
+    holds = []
+    if hub_swap_on(state, bit):
+        holds.append(max(busy_until, now + BUSY_FALLBACK_SECS))
+    if pool is not None and int(getattr(pool, 'opened_at', 0) or 0) != 0:
+        closes_at = int(getattr(pool, 'closes_at', 0) or 0)
+        if now > closes_at:
+            holds.append(max(busy_until, now + BUSY_FALLBACK_SECS))  # closed, waiting for its draw
+        elif (str(pool.from_chain), str(pool.to_chain)) != tuple(pair):
+            holds.append(max(busy_until, closes_at))
+        # else: open on this pair, so joinable now
+    if reservation is not None:
+        reserved_until = int(getattr(reservation, 'reserved_until', 0) or 0)
+        finalize_by = int(getattr(reservation, 'finalize_by', 0) or 0)
+        if reserved_until != 0 and reserved_until >= now:
+            holds.append(reserved_until)
+        elif reserved_until == 0 and finalize_by != 0 and now <= finalize_by:
+            holds.append(max(busy_until, finalize_by))
+    return max(holds, default=0)
 
 
 def hub_reserved_collateral(state, bit: int) -> int:

@@ -1,4 +1,4 @@
-"""What /rate quotes off: the World's quotes and attestations for the bound, on-metagraph miners, and alpha
+"""What /rate quotes off: the World's quotes, attestations, reservations and pools for the bound, on-metagraph miners, and alpha
 prices memoed for a few seconds (the one read a quote can cost)."""
 
 import threading
@@ -28,6 +28,12 @@ class Market:
 
     def get_bond_attestation(self, miner, chain: str = 'tao'):
         return self._accounts.get_bond_attestation(miner, chain)
+
+    def get_reservation(self, miner, backing: str = 'sol'):
+        return self._accounts.get_reservation(miner, backing)
+
+    def get_pool(self, miner, backing: str = 'sol'):
+        return self._accounts.get_pool(miner, backing)
 
 
 class AlphaPriceMemo:

@@ -7,7 +7,6 @@ invariants before it signs; the caller is never trusted."""
 
 import time
 from dataclasses import dataclass, field
-from itertools import islice
 from typing import Optional, Tuple
 
 import bittensor as bt
@@ -38,6 +37,7 @@ from allways.cli.swap_commands.swap_intake import (
 from allways.constants import FEE_DIVISOR, NUMERAIRE_CHAIN
 from allways.eligibility import direction_eligible, quote_addresses_valid
 from allways.solana.client import contract_reject_reason, swap_key_from_tx_hash
+from allways.solana.layouts import estimated_free_at
 from allways.solana.pdas import BACKING_BITS
 from allways.validator.actuator.swaps import attest_reject_reason, is_tx_fresh
 from allways.validator.serving.market import AlphaPriceMemo, Market, memo_priced
@@ -103,6 +103,7 @@ class ReserveResult:
     reason: str = ''
     pool_closes_at: int = 0
     sig: str = ''
+    retry_after: int = 0
 
 
 def reserve_on_behalf(
@@ -158,8 +159,9 @@ def reserve_on_behalf(
     pool = None
     joining = False
     backing = NUMERAIRE_CHAIN
+    pools = {}
     for candidate_backing in BACKING_BITS:
-        p = client.get_pool(miner_pk, candidate_backing)
+        p = pools[candidate_backing] = client.get_pool(miner_pk, candidate_backing)
         if (
             p is not None
             and int(getattr(p, 'opened_at', 0) or 0) != 0
@@ -183,10 +185,17 @@ def reserve_on_behalf(
             return ReserveResult(False, why)
         quote, backing = offer
         rate_fixed = quote.rate
-        # One swap per HUB: only the chosen offer's hub has to be idle — the other hub's swap
-        # neither draws on this pot nor blocks it.
-        if int(getattr(miner_state, 'active_swap_backings', 0)) & BACKING_BITS.get(backing, 0):
-            return ReserveResult(False, 'miner is busy with another swap on that hub; try again shortly')
+        # One swap per HUB: only the chosen offer's hub has to take a new entry.
+        free_at = estimated_free_at(
+            miner_state,
+            BACKING_BITS.get(backing, 0),
+            client.get_reservation(miner_pk, backing),
+            pools.get(backing),
+            (from_chain, to_chain),
+            now,
+        )
+        if free_at:
+            return ReserveResult(False, 'miner is busy on that hub; try again shortly', retry_after=free_at)
 
     try:
         amts = compute_intake_amounts(
@@ -252,7 +261,9 @@ def reserve_on_behalf(
         reason = contract_reject_reason(e)
         if reason is None:
             raise
-        return ReserveResult(False, reason)
+        return ReserveResult(
+            False, reason, retry_after=_free_at_after_reject(ctx.client, miner_pk, backing, (from_chain, to_chain))
+        )
     # The entry landed: queue the user's details for `finalize_won_seats`. Persisted so a restart inside
     # the pool/finalize window still honors the routing promise.
     ctx.store.upsert_routed_request(
@@ -650,6 +661,7 @@ class BestQuote:
     # The backing the winning quote declared — it is the offer's failure guarantee, so a consumer
     # that shows a rate has to be able to show which promise comes with it.
     backing: str = NUMERAIRE_CHAIN
+    estimated_free_at: int = 0
 
 
 # Depth rungs served alongside /rate — enough to show the market, few enough to stay a glance.
@@ -680,7 +692,14 @@ def rate_quote(ctx, from_chain: str, to_chain: str, from_amount: int) -> RateQuo
     providers = memo_priced(ctx.providers, _alpha_prices)
     cands = candidate_miners(market, from_chain, to_chain, providers)
     ranked = _ranked_intakes(cands, from_chain, to_chain, from_amount, min_swap, max_swap, bounds, providers)
-    bound = list(islice(_bound_intakes(market.attribution, ranked), RATE_LEVELS_LIMIT))
+    # Free miners first, then the soonest free: a busy best rate still shows, behind the ones taking entries now.
+    now = int(time.time())
+    bound = [
+        (*intake, _candidate_free_at(market, intake[0], (from_chain, to_chain), now))
+        for intake in _bound_intakes(market.attribution, ranked)
+    ]
+    bound.sort(key=lambda intake: (intake[3] > 0, intake[3]))
+    bound = bound[:RATE_LEVELS_LIMIT]
     bq = _best_quote(*bound[0]) if bound else None
     reason = (
         '' if bq else unviable_reason(cands, from_chain, to_chain, from_amount, min_swap, max_swap, bounds, providers)
@@ -705,8 +724,9 @@ def rate_quote(ctx, from_chain: str, to_chain: str, from_amount: int) -> RateQuo
             'max_from_amount': max_intake_from_amount(
                 cand, from_chain, to_chain, min_swap, max_swap, bounds, providers
             ),
+            'estimated_free_at': free_at,
         }
-        for cand, amts, hotkey in bound
+        for cand, amts, hotkey, free_at in bound
     ]
     return RateQuote(bq, reason, levels, max(depth.values(), default=0), min(floors, default=0), candidates)
 
@@ -728,7 +748,31 @@ def _bound_intakes(attribution: dict, ranked):
             yield cand, amts, hotkey
 
 
-def _best_quote(cand: MinerCandidate, amts, hotkey: str) -> BestQuote:
+def _candidate_free_at(market: Market, cand: MinerCandidate, pair: tuple, now: int) -> int:
+    return estimated_free_at(
+        market.get_miner_state(cand.miner),
+        BACKING_BITS.get(cand.backing, 0),
+        market.get_reservation(cand.miner, cand.backing),
+        market.get_pool(cand.miner, cand.backing),
+        pair,
+        now,
+    )
+
+
+def _free_at_after_reject(client, miner_pk, backing: str, pair: tuple) -> int:
+    """A contract reject may be a busy race: re-read once, live, so the caller can wait. A failed read is just a reject."""
+    try:
+        miner_state = client.get_miner_state(miner_pk)
+        reservation = client.get_reservation(miner_pk, backing)
+        pool = client.get_pool(miner_pk, backing)
+    except Exception:
+        return 0
+    if miner_state is None:
+        return 0
+    return estimated_free_at(miner_state, BACKING_BITS.get(backing, 0), reservation, pool, pair, int(time.time()))
+
+
+def _best_quote(cand: MinerCandidate, amts, hotkey: str, free_at: int = 0) -> BestQuote:
     return BestQuote(
         hotkey,
         str(cand.miner),
@@ -737,6 +781,7 @@ def _best_quote(cand: MinerCandidate, amts, hotkey: str) -> BestQuote:
         amts.from_amount,
         amts.to_amount,
         cand.backing,
+        free_at,
     )
 
 
