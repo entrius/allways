@@ -359,6 +359,9 @@ class _RoutingClient:
     def get_pool(self, miner, backing='sol'):
         return None
 
+    def get_reservation(self, miner, backing='sol'):
+        return None
+
 
 def _pick(client, from_amount=10**9):
     from allways.cli.swap_commands.swap_intake import bounds_from_config
