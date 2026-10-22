@@ -54,7 +54,7 @@ class RelayLedger:
         # Unset, a seed assumes the latest boundary — right whenever this validator voted the last round.
         self.seed_as_of: Optional[int] = None
         self._t = f'relay_{hub}'
-        store.declare(self._t, 1, _tables(hub))
+        store.declare(self._t, 1, _tables(hub), consumer=f'relay-{hub}')  # the relay component's feed position
 
     def _rows(self, sql: str, params=()) -> List[Any]:
         return self.store.conn().execute(sql, params).fetchall()

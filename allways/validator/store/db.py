@@ -50,15 +50,18 @@ class Store:
             raise
         conn.execute('COMMIT')
 
-    def declare(self, owner: str, version: int, tables: List[Tuple[str, str]]) -> bool:
+    def declare(self, owner: str, version: int, tables: List[Tuple[str, str]], consumer: Optional[str] = None) -> bool:
         """Create ``owner``'s tables ((name, ddl) pairs). If their declared ``version`` changed, drop and
-        recreate them instead of migrating. Returns True when the tables were (re)created empty."""
+        recreate them instead of migrating, and drop the feed position of the ``consumer`` that fills them
+        (default ``owner``) so the feed replays history into them. Returns True when the tables were
+        (re)created empty."""
         with self.tx() as c:
             row = c.execute('SELECT version FROM shapes WHERE owner = ?', (owner,)).fetchone()
             fresh = row is None or int(row['version']) != version
             if fresh:
                 for name, _ in tables:
                     c.execute(f'DROP TABLE IF EXISTS {name}')
+                c.execute('DELETE FROM acks WHERE consumer = ?', (consumer or owner,))
                 c.execute('INSERT OR REPLACE INTO shapes (owner, version) VALUES (?, ?)', (owner, version))
             for _, ddl in tables:
                 c.execute(ddl)
