@@ -5,6 +5,7 @@ extensions for valid-but-unconfirmed legs.
 Mocks the solana client (get_swaps / get_reservation) + chain providers; no chain, no votes.
 """
 
+import time
 from types import SimpleNamespace
 
 from allways.assets.asset import ProviderUnreachableError
@@ -1129,3 +1130,65 @@ def test_published_table_is_bounded():
             SimpleNamespace(confirmations=0),
         )
     assert len(loop.leg_confs) <= CONF_CACHE_MAX
+
+
+# ─── 2026-10-22, #3901: a stall must never decide the outcome before the ceiling ───
+
+
+def test_source_provider_down_near_expiry_extends_reservation():
+    # Unverifiable is not absent: the deposit may already be at the miner, and an expired claim returns
+    # nothing to the taker. Near expiry with room below the ceiling → EXTEND (0-conf bucket: 2*600+120 → 3000).
+    resv = make_reservation(reserved_until=1600, max_extend_at=10_000)
+    loop, _ = loop_with(result='unreachable', reservation=resv)
+    action = loop.decide(make_swap(status='PendingAttestation'), now=1500)
+    assert action.decision == SwapDecision.EXTEND_RESERVATION
+    assert action.target_at == 3000
+    assert 'unreachable' in action.reason
+
+
+def test_source_provider_down_with_runway_still_skips():
+    # Plenty of time left: no premature extension, just retry next pass as before.
+    loop, _ = loop_with(result='unreachable')  # default reservation: reserved_until far ahead
+    action = loop.decide(make_swap(status='PendingAttestation'), now=1500)
+    assert action.decision == SwapDecision.SKIP
+
+
+def test_source_provider_down_at_ceiling_skips():
+    # No room below max_extend_at: the ceiling decides, as designed.
+    resv = make_reservation(reserved_until=1600, max_extend_at=1600)
+    loop, _ = loop_with(result='unreachable', reservation=resv)
+    assert loop.decide(make_swap(status='PendingAttestation'), now=1500).decision == SwapDecision.SKIP
+
+
+class RefusingAttestClient(ExtendRecordingClient):
+    """vote_initiate refused by the chain (preflight), reservation near real-clock expiry."""
+
+    def __init__(self, reservation, **kw):
+        super().__init__(**kw)
+        self.reservation = reservation
+
+    def has_voted(self, req, swap_key, voter):
+        return False
+
+    def vote_initiate(self, *a, **kw):
+        raise RuntimeError('custom program error: 0x1773 InsufficientCollateral')
+
+    def get_reservation(self, miner, backing='sol'):
+        return self.reservation
+
+
+def test_refused_attest_near_expiry_extends_reservation():
+    now = int(time.time())
+    resv = make_reservation(reserved_until=now + 60, max_extend_at=now + 10_000)
+    client = RefusingAttestClient(resv)
+    loop = SolanaSwapLoop(client, {}, fee_divisor=100)
+    assert loop._cast_vote(make_swap(status='PendingAttestation'), SwapAction(SwapDecision.ATTEST)) is False
+    assert client.calls and client.calls[0][0] == 'extend_reservation' and client.calls[0][2] > now + 60
+
+
+def test_refused_attest_with_runway_does_not_extend():
+    now = int(time.time())
+    client = RefusingAttestClient(make_reservation(reserved_until=now + 5000, max_extend_at=now + 10_000))
+    loop = SolanaSwapLoop(client, {}, fee_divisor=100)
+    assert loop._cast_vote(make_swap(status='PendingAttestation'), SwapAction(SwapDecision.ATTEST)) is False
+    assert client.calls == []

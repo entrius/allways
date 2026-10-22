@@ -116,8 +116,11 @@ class EvmCoin(EvmAsset):
             confirmations = max(0, tip - block_number + 1) if tip is not None else 0
             is_confirmed = confirmations >= self.chain_def.min_confirmations
         else:
+            # A null receipt for a tx the ladder just said is mined is one node's lag, not a fact: ask the
+            # remaining endpoints before concluding "unavailable" (one lagging node in the first rung's
+            # pool would otherwise stall the leg for as long as it lagged, fallbacks never consulted).
             try:
-                receipt = self.chain.eth_rpc('eth_getTransactionReceipt', [tx_hash])
+                receipt = self.chain.eth_rpc('eth_getTransactionReceipt', [tx_hash], null_needs_quorum=True)
             except Exception as e:
                 raise ProviderUnreachableError(f'{prefix} receipt fetch failed for {tx_hash[:16]}...: {e}') from e
             if receipt is None:
@@ -134,7 +137,7 @@ class EvmCoin(EvmAsset):
             # The freshness gate fails closed on a missing block_time, so an unreadable
             # timestamp must be 'unknown' (raise), never a verdict — same as the receipt above.
             try:
-                block = self.chain.eth_rpc('eth_getBlockByNumber', [hex(block_number), False])
+                block = self.chain.eth_rpc('eth_getBlockByNumber', [hex(block_number), False], null_needs_quorum=True)
             except Exception as e:
                 raise ProviderUnreachableError(f'{prefix} block fetch failed for {tx_hash[:16]}...: {e}') from e
             block_time = int((block or {}).get('timestamp') or '0x0', 16) or None

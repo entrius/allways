@@ -334,7 +334,7 @@ class SolanaSwapLoop:
             bt.logging.warning(f'reservation read failed for miner: {e}')
             return None
 
-    def _extend_target(self, chain: str, info: Any, deadline: int, ceiling: int, now: int) -> Optional[int]:
+    def _extend_target(self, chain: str, confirmations: int, deadline: int, ceiling: int, now: int) -> Optional[int]:
         """Unix-seconds target to extend `deadline` to, or None when no extension is warranted. Gates
         (shared by reservation + timeout): the deadline must be live, near expiry (within
         EXTENSION_PADDING_SECONDS), below the contract ceiling, and the bucketed target strictly later."""
@@ -344,7 +344,7 @@ class SolanaSwapLoop:
             return None  # plenty of runway — don't extend prematurely
         if deadline >= ceiling:
             return None  # no room below the contract ceiling (max_extend_at)
-        target = compute_extension_target_secs(chain, int(info.confirmations), now, ceiling)
+        target = compute_extension_target_secs(chain, int(confirmations), now, ceiling)
         return target if target > deadline else None
 
     def _extend_reservation_action(self, swap: Any, info: Any, now: int) -> SwapAction:
@@ -353,13 +353,37 @@ class SolanaSwapLoop:
         if reservation is None:
             return SwapAction(SwapDecision.WAIT)
         target = self._extend_target(
-            swap.from_chain, info, int(reservation.reserved_until), int(reservation.max_extend_at), now
+            swap.from_chain,
+            int(info.confirmations),
+            int(reservation.reserved_until),
+            int(reservation.max_extend_at),
+            now,
         )
         return SwapAction(SwapDecision.EXTEND_RESERVATION, target) if target else SwapAction(SwapDecision.WAIT)
 
+    def _stall_extension_action(self, swap: Any, now: int) -> Optional[SwapAction]:
+        """EXTEND_RESERVATION for a claim this validator cannot carry to attestation right now (source
+        provider unreachable, or the attest write refused by the chain), when the reservation is near
+        expiry and the contract still has extension room; None otherwise.
+
+        The deposit may already be sitting at the miner: a claim that expires unattested returns nothing
+        to the taker (2026-10-22, #3901: a confirmed Polygon deposit expired unattested after ten minutes).
+        Extending costs the miner locked collateral until `max_extend_at`; expiring costs the taker the
+        deposit. So a stall never decides the outcome before the ceiling — only the ceiling does. The
+        target assumes zero confirmations (the longest bucket) since the leg could not be read."""
+        reservation = self._get_reservation(swap.miner, str(swap.collateral_chain))
+        if reservation is None:
+            return None
+        target = self._extend_target(
+            swap.from_chain, 0, int(reservation.reserved_until), int(reservation.max_extend_at), now
+        )
+        return SwapAction(SwapDecision.EXTEND_RESERVATION, target) if target else None
+
     def _extend_timeout_action(self, swap: Any, info: Any, now: int) -> SwapAction:
         """Dest leg valid-but-unconfirmed near swap timeout → slide timeout_at, else WAIT."""
-        target = self._extend_target(swap.to_chain, info, int(swap.timeout_at), int(swap.max_extend_at), now)
+        target = self._extend_target(
+            swap.to_chain, int(info.confirmations), int(swap.timeout_at), int(swap.max_extend_at), now
+        )
         return SwapAction(SwapDecision.EXTEND_TIMEOUT, target) if target else SwapAction(SwapDecision.WAIT)
 
     def _decide_fulfilled(self, swap: Any, now: int, overdue: bool) -> SwapAction:
@@ -535,6 +559,14 @@ class SolanaSwapLoop:
         )
         self._publish_confs(swap, 'source', swap.from_chain, info)
         if s_status == 'down':
+            # Unverifiable is not absent: the deposit may be at the miner already. Near expiry, slide the
+            # reservation so an RPC outage cannot expire a live claim; otherwise just retry next pass.
+            stall = self._stall_extension_action(swap, now)
+            if stall is not None:
+                return stall._replace(
+                    reason=f'source provider unreachable → extend reserved_until to {stall.target_at} '
+                    f'(+{stall.target_at - now}s) so the outage cannot expire a live claim'
+                )
             return SwapAction(SwapDecision.SKIP, reason='source provider unreachable')
         if s_status == 'pending':
             # Valid-but-unconfirmed deposit near reservation expiry → extend so the honest miner isn't slashed.
@@ -691,10 +723,34 @@ class SolanaSwapLoop:
                 bt.logging.debug(f'{label}: {decision.value} no-op ({m})')
                 return False
             bt.logging.error(f'{label}: {decision.value} failed: {e}')
+            if decision == SwapDecision.ATTEST:
+                self._extend_after_refused_attest(swap, label)
             return False
         bt.logging.success(f'{label}: {decision.value} submitted')
         dev_signal.emit('vote_cast', swap_key=_swap_key_hex(swap.swap_key), decision=decision.value, sig=sig)
         return True
+
+    def _extend_after_refused_attest(self, swap: Any, label: str) -> None:
+        """An attest write the chain refused leaves a verified deposit at the miner with the clock running.
+        Near expiry, slide the reservation so the next pass retries instead of the claim being reaped.
+        Never raises — the refusal is already logged and the pass must go on."""
+        stall = self._stall_extension_action(swap, int(time.time()))
+        if stall is None:
+            return
+        try:
+            self.client.extend_reservation(
+                swap.miner,
+                stall.target_at,
+                str(swap.collateral_chain),
+                from_chain=swap.from_chain,
+                from_addr=swap.user_from_addr,
+                miner_from_addr=swap.miner_from_addr,
+            )
+            bt.logging.warning(f'{label}: attest refused near expiry — extended reserved_until to {stall.target_at}')
+        except Exception as e:
+            if benign_marker(e, _BENIGN_EXTEND_MARKERS):
+                return
+            bt.logging.error(f'{label}: extension after a refused attest failed: {e}')
 
     def resolve_pools_once(self, now: int) -> List[str]:
         """Permissionless crank: resolve every closed, non-empty, unresolved pool into a winner

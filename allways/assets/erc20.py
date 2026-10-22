@@ -243,8 +243,10 @@ class Erc20(EvmAsset):
             block_number = cached['block_number']
             block_time = cached['block_time']
         else:
+            # A null receipt for a mined tx is one node's lag, not a fact: ask the remaining endpoints
+            # before concluding "unavailable" (same quorum rule as the tx lookup; see evm_coin).
             try:
-                receipt = self.chain.eth_rpc('eth_getTransactionReceipt', [tx_hash])
+                receipt = self.chain.eth_rpc('eth_getTransactionReceipt', [tx_hash], null_needs_quorum=True)
             except Exception as e:
                 raise ProviderUnreachableError(f'{prefix} receipt fetch failed for {tx_hash[:16]}...: {e}') from e
             if receipt is None:
@@ -266,7 +268,7 @@ class Erc20(EvmAsset):
             # The freshness gate fails closed on a missing block_time, so an unreadable
             # timestamp must be 'unknown' (raise), never a verdict — same as the receipt above.
             try:
-                block = self.chain.eth_rpc('eth_getBlockByNumber', [hex(block_number), False])
+                block = self.chain.eth_rpc('eth_getBlockByNumber', [hex(block_number), False], null_needs_quorum=True)
             except Exception as e:
                 raise ProviderUnreachableError(f'{prefix} block fetch failed for {tx_hash[:16]}...: {e}') from e
             block_time = int((block or {}).get('timestamp') or '0x0', 16) or None
