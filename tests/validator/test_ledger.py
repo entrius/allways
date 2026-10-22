@@ -2,8 +2,10 @@
 
 from types import SimpleNamespace
 
+from allways.classes import ActivityTransition
 from allways.constants import EVENT_RETENTION_SECS
-from allways.validator.scoring.ledger import ACTIVE, COLLATERAL, RATE, Ledger
+from allways.validator.scoring.ledger import ACTIVE, ACTIVITY, COLLATERAL, LEDGER_SINCE, RATE, Ledger
+from allways.validator.scoring.rewards import recent_fill_hotkeys
 from allways.validator.store.db import Store
 
 LANE = ('btc', 'sol', 'sol')
@@ -72,3 +74,27 @@ def test_prune_keeps_each_keys_latest_state_by_time_not_by_arrival():
     assert _rate(ledger, at=later) == 0.0
     assert ledger.get_miner_collaterals_at(later, backing='sol') == {'hk': 0}
     assert 'hk' not in ledger.get_active_miners_at(later)
+
+
+def test_a_fill_judged_inside_the_ingest_transaction_reads_the_ledger_age_without_writing():
+    # Fill qualification asks the ledger's age from inside the ingest's own transaction.
+    ledger = _ledger()
+    ledger.put(EARLY, 'hk', ACTIVITY, int(ActivityTransition.RESERVE_START), hub='sol')
+    fields = {
+        'from_chain': 'btc',
+        'to_chain': 'sol',
+        'collateral_chain': 'sol',
+        'swap_key': b'\x01' * 32,
+        'from_amount': 1,
+        'to_amount': 2,
+        'collateral_amount': 3,
+    }
+
+    def held(hotkey, *_lane_and_size):
+        assert recent_fill_hotkeys(ledger, NOW) is None  # a fresh ledger reads strikes-only
+        return True
+
+    with ledger.store.tx():
+        ledger.ingest(SimpleNamespace(name='SwapCompleted', block_time=NOW, fields=fields), 'hk', 600, None, held)
+    assert ledger.get_qualified_lane_volumes(0, NOW) != {}
+    assert ledger.store.get_meta(LEDGER_SINCE) is None

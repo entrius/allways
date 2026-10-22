@@ -141,6 +141,12 @@ class Ledger:
         with self.store.tx() as c:
             Store.set_meta(c, LEDGER_SINCE, str(since))
 
+    def stamp_since(self, now: int) -> None:
+        """Record when this ledger started recording fills, once."""
+        if self.store.get_meta(LEDGER_SINCE) is None:
+            with self.store.tx() as c:
+                Store.set_meta(c, LEDGER_SINCE, str(int(now)))
+
     def prune(self, now: int) -> None:
         """Older than retention, except each key's latest row (its anchor) and the whole busy timeline of
         a miner still busy (a later close must not be orphaned)."""
@@ -424,13 +430,10 @@ class Ledger:
         }
 
     def clearing_ledger_since(self, now: int) -> int:
-        """When this ledger started recording fills: stamped on first ask."""
+        """When this ledger started recording fills (``now`` until ``stamp_since``). A pure read: fill
+        qualification asks it inside the ingest's transaction."""
         stored = self.store.get_meta(LEDGER_SINCE)
-        if stored is not None:
-            return int(stored)
-        with self.store.tx() as c:
-            Store.set_meta(c, LEDGER_SINCE, str(int(now)))
-        return int(now)
+        return int(now) if stored is None else int(stored)
 
 
 def _by_id(row: Any) -> Tuple[int, int]:

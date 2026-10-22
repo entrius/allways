@@ -91,6 +91,7 @@ class Scoring(Component):
         if self.events.dropped != self._dropped:  # fell behind the feed: what it dropped is a gap
             self._dropped = self.events.dropped
             self.ledger.mark_gap(int(now))
+        self.ledger.stamp_since(int(now))  # after any gap, which stamps its own (earlier) start
         self._ingest(self.events.drain(), world, head, now, status)
         if now - self._book_judged_at >= BOOK_JUDGE_SECS:
             self._book_judged_at = now

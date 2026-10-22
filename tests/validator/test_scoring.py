@@ -9,11 +9,11 @@ from allways.solana import pdas
 from allways.solana.events import EventRecord
 from allways.validator.chains.subtensor_view import Head
 from allways.validator.chains.watcher import Verdict
-from allways.validator.feed.events import FeedStatus
+from allways.validator.feed.events import FeedStatus, HistoryGap
 from allways.validator.runtime.bus import Latest, Topic
 from allways.validator.scoring.component import LAST_SCORED, RoundResult, Scoring, WeightSetter
 from allways.validator.scoring.fee_pool import MINER_SHARE
-from allways.validator.scoring.ledger import RATE
+from allways.validator.scoring.ledger import LEDGER_SINCE, RATE
 from allways.validator.store.db import Store
 from allways.validator.world.snapshot import World
 
@@ -369,3 +369,16 @@ def test_a_fill_is_judged_only_once_the_feed_has_caught_up(tmp_path):
     status.set(FeedStatus(False, 1, NOW, (6, 'sig6')))
     scoring.tick(NOW + 5)
     assert fills() == 1
+
+
+def test_the_ledger_start_is_stamped_by_the_tick_and_a_gap_keeps_its_earlier_start(tmp_path):
+    scoring, *_ = _scoring(tmp_path, _world())
+    scoring.tick(NOW)
+    assert scoring.ledger.store.get_meta(LEDGER_SINCE) == str(NOW)
+    scoring.tick(NOW + 60)
+    assert scoring.ledger.store.get_meta(LEDGER_SINCE) == str(NOW)  # stamped once
+
+    gapped, *_ = _scoring(tmp_path, _world(), db='gap.db')
+    gapped.gaps._put(HistoryGap(NOW - 3600))  # the feed found history cut short at boot
+    gapped.tick(NOW)
+    assert gapped.ledger.store.get_meta(LEDGER_SINCE) == str(NOW - 3600)
