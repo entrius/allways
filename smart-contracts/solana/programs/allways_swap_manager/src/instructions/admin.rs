@@ -1,9 +1,9 @@
 use anchor_lang::prelude::*;
 
-use crate::constants::{CONFIG_SEED, MAX_VALIDATORS};
+use crate::constants::{CONFIG_SEED, MAX_VALIDATORS, MINER_SEED};
 use crate::error::ErrorCode;
 use crate::events::{ConfigChanged, HaltSet};
-use crate::state::{Config, ValidatorInfo};
+use crate::state::{Config, MinerState, ValidatorInfo};
 
 /// Admin-only config mutations (validator set + consensus threshold).
 #[derive(Accounts)]
@@ -206,4 +206,39 @@ pub fn set_max_total_extension(ctx: Context<AdminConfig>, secs: i64) -> Result<(
     msg!("max_total_extension_secs = {}", secs);
     emit!(ConfigChanged { setting: "max_total_extension".to_string() });
     Ok(())
+}
+
+// --- Devnet operator levers (`devnet-admin` feature) ---
+
+/// Admin + one miner's state. The accounts shape is the same in every build so the IDL does not
+/// fork between devnet and mainnet; only the handler body is feature-gated.
+#[derive(Accounts)]
+#[instruction(miner: Pubkey)]
+pub struct ResetMinerStrikes<'info> {
+    pub admin: Signer<'info>,
+
+    #[account(seeds = [CONFIG_SEED], bump = config.bump, has_one = admin)]
+    pub config: Account<'info, Config>,
+
+    #[account(mut, seeds = [MINER_SEED, miner.as_ref()], bump = miner_state.bump)]
+    pub miner_state: Account<'info, MinerState>,
+}
+
+/// Zero a miner's lifetime strike count (`failed_swaps`), nothing else. The testnet suite strikes the
+/// same sacrificial miners on purpose and the off-chain cap is lifetime, so without this a testnet
+/// miner is spent after two slash runs. Compiled in only with `devnet-admin`; a mainnet build keeps
+/// the instruction in its interface but refuses it with `DevnetOnly`, so strikes stay monotonic there.
+#[cfg(feature = "devnet-admin")]
+pub fn reset_miner_strikes(ctx: Context<ResetMinerStrikes>, miner: Pubkey) -> Result<()> {
+    let ms = &mut ctx.accounts.miner_state;
+    let before = ms.failed_swaps;
+    ms.failed_swaps = 0;
+    msg!("devnet: miner {} failed_swaps {} -> 0", miner, before);
+    emit!(ConfigChanged { setting: "reset_miner_strikes".to_string() });
+    Ok(())
+}
+
+#[cfg(not(feature = "devnet-admin"))]
+pub fn reset_miner_strikes(_ctx: Context<ResetMinerStrikes>, _miner: Pubkey) -> Result<()> {
+    err!(ErrorCode::DevnetOnly)
 }

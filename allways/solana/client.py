@@ -401,6 +401,19 @@ class AllwaysSolanaClient:
             'remove_validator', layouts.IX_PUBKEY_ARGS.build({'value': bytes(_as_pubkey(validator))})
         )
 
+    def reset_miner_strikes(self, miner) -> str:
+        """Devnet operator lever: zero a miner's lifetime `failed_swaps`. The admin keypair signs.
+        A program built without the `devnet-admin` feature (every mainnet build) refuses with DevnetOnly."""
+        miner_pk = _as_pubkey(miner)
+        metas = [
+            AccountMeta(self.keypair.pubkey(), True, False),
+            AccountMeta(pdas.config_pda(self.program_id), False, False),
+            AccountMeta(pdas.miner_state_pda(miner_pk, self.program_id), False, True),
+        ]
+        return self._send(
+            [self._ix('reset_miner_strikes', layouts.IX_PUBKEY_ARGS.build({'value': bytes(miner_pk)}), metas)]
+        )
+
     def set_consensus_threshold(self, percent: int) -> str:
         return self._admin_config('set_consensus_threshold', layouts.IX_U8_ARGS.build({'value': percent}))
 

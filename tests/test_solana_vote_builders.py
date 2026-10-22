@@ -325,3 +325,18 @@ def test_source_lock_shared_across_miners_on_one_wallet():
     assert a == pdas.source_lock_pda('eth', pdas.source_lock_key('0xwallet', '0xuser'), PID)
     assert a != pdas.source_lock_pda('eth', pdas.source_lock_key('0xOtherWallet', '0xUser'), PID)
     assert a != pdas.source_lock_pda('btc', pdas.source_lock_key('0xWallet', '0xUser'), PID)
+
+
+def test_reset_miner_strikes_ix(client):
+    # Devnet operator lever: admin signer, config read-only, the miner's state writable, pubkey arg.
+    miner = Keypair().pubkey()
+    client.reset_miner_strikes(miner)
+    ix = _ix(client)
+    assert layouts.IX_DISCRIMINATORS['reset_miner_strikes'] == _global_disc('reset_miner_strikes')
+    assert ix.data[:8] == layouts.IX_DISCRIMINATORS['reset_miner_strikes']
+    assert ix.data[8:] == bytes(miner)
+    assert _metas(ix) == [
+        (client.keypair.pubkey(), True, False),
+        (pdas.config_pda(PID), False, False),
+        (pdas.miner_state_pda(miner, PID), False, True),
+    ]

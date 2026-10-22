@@ -191,4 +191,6 @@ pub enum ErrorCode {
     QuoteLocked,
     #[msg("Wallet lock key or account does not match the wallet")]
     AddrLockKeyMismatch,
+    #[msg("Devnet-only instruction: this build was compiled without the devnet-admin feature")]
+    DevnetOnly,
 }

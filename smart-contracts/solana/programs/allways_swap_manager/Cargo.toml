@@ -18,6 +18,9 @@ idl-build = ["anchor-lang/idl-build"]
 anchor-debug = []
 custom-heap = []
 custom-panic = []
+# Devnet operator levers (`reset_miner_strikes`). Off by default: a mainnet build refuses the
+# instruction with DevnetOnly. The devnet build enables it: `anchor build -- --features devnet-admin`.
+devnet-admin = []
 
 
 [dependencies]

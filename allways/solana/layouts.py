@@ -596,6 +596,9 @@ IX_DISCRIMINATORS = {
     'set_consensus_threshold': bytes([183, 186, 216, 249, 16, 231, 243, 244]),
     'set_fulfillment_timeout': bytes([73, 250, 230, 231, 192, 14, 146, 215]),
     'set_halted': bytes([153, 114, 136, 116, 7, 134, 47, 12]),
+    # Devnet operator lever (Context<ResetMinerStrikes>: admin signer + config + miner_state mut).
+    # A mainnet build answers DevnetOnly; sha256('global:reset_miner_strikes')[:8].
+    'reset_miner_strikes': bytes([131, 113, 3, 67, 89, 145, 134, 124]),
     'set_max_collateral': bytes([18, 180, 73, 244, 52, 74, 176, 110]),
     'set_max_swap_amount': bytes([7, 177, 215, 146, 45, 7, 220, 199]),
     'set_min_collateral': bytes([128, 193, 225, 225, 249, 133, 38, 70]),

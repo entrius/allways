@@ -71,6 +71,11 @@ pub mod allways_swap_manager {
     pub fn set_halted(ctx: Context<AdminConfig>, halted: bool) -> Result<()> {
         admin::set_halted(ctx, halted)
     }
+    /// Devnet operator lever: zero one miner's strike count. Real only in a build with the
+    /// `devnet-admin` feature; every other build answers `DevnetOnly`.
+    pub fn reset_miner_strikes(ctx: Context<ResetMinerStrikes>, miner: Pubkey) -> Result<()> {
+        admin::reset_miner_strikes(ctx, miner)
+    }
 
     // --- Runtime config setters (admin) ---
     pub fn set_min_collateral(ctx: Context<AdminConfig>, amount: u64) -> Result<()> {
