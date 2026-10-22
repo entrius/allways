@@ -13,6 +13,7 @@ from solders.keypair import Keypair as SolKeypair
 from allways.chains import get_chain_def
 from allways.cli.swap_commands.swap_intake import compute_intake_amounts
 from allways.constants import BTC_TO_SAT, RATE_PRECISION, TAO_TO_RAO
+from allways.solana.pdas import pool_pda, reservation_pda
 from allways.utils.rate import (
     apply_fee_deduction,
     calculate_to_amount,
@@ -601,10 +602,15 @@ class TestRateQuoteCandidates:
             for pk, hk in zip(miners, hotkeys)
             if hk
         }
-        accounts = {'MinerQuote': [(q.miner, q) for q in quotes], 'BondAttestation': []}
+        accounts = {
+            'MinerQuote': [(q.miner, q) for q in quotes],
+            'BondAttestation': [],
+            'Reservation': [],
+            'Pool': [],
+        }
         cfg = SimpleNamespace(min_swap_amount=self.MIN, max_swap_amount=self.MAX)
         validator = SimpleNamespace(
-            solana_client=SimpleNamespace(get_all=accounts.__getitem__),
+            solana_client=SimpleNamespace(get_all=accounts.__getitem__, program_id=None),
             held_states=(time.time(), live_states),
             solana_config_cache=SimpleNamespace(config=lambda: cfg),
         )
@@ -629,9 +635,8 @@ class TestRateQuoteCandidates:
         assert rq.min_from_amount == self.MIN  # hub source: min_swap as-is
 
     def test_sole_busy_miner_is_still_quoted(self):
-        validator, _ = self._validator('sol', 'btc', ['0.5'])
-        state = next(iter(validator.held_states[1].values()))
-        state.busy_until[0] = int(time.time()) + 60
+        validator, hotkeys = self._validator('sol', 'btc', ['0.5'])
+        state = self._open_pool(validator, hotkeys[0], 'btc', 'sol')
 
         rq = rate_quote(validator, 'sol', 'btc', self.SOL)
 
@@ -641,12 +646,61 @@ class TestRateQuoteCandidates:
 
     def test_free_candidate_ranks_ahead_of_better_busy_rate(self):
         validator, hotkeys = self._validator('sol', 'btc', ['0.6', '0.5'])
-        validator.held_states[1][hotkeys[0]].busy_until[0] = int(time.time()) + 60
+        self._open_pool(validator, hotkeys[0], 'btc', 'sol')
 
         rq = rate_quote(validator, 'sol', 'btc', self.SOL)
 
         assert [candidate['miner_hotkey'] for candidate in rq.candidates] == [hotkeys[1], hotkeys[0]]
         assert rq.quote.miner_hotkey == hotkeys[1]
+        assert rq.quote.estimated_free_at == 0
+
+    def _open_pool(self, validator, hotkey, from_chain, to_chain, closes_in=20):
+        """An open pool on ``hotkey``'s sol hub, with busy_until set as the contract sets it at open."""
+        state = validator.held_states[1][hotkey]
+        now = int(time.time())
+        state.busy_until[0] = now + closes_in + 150 + 600
+        pool = SimpleNamespace(
+            miner=state.miner,
+            collateral_chain='sol',
+            from_chain=from_chain,
+            to_chain=to_chain,
+            opened_at=now - 5,
+            closes_at=now + closes_in,
+        )
+        validator.solana_client.get_all('Pool').append((pool_pda(state.miner, 'sol'), pool))
+        return state
+
+    def test_open_pool_on_the_asked_pair_is_joinable_now(self):
+        validator, hotkeys = self._validator('sol', 'btc', ['0.6', '0.5'])
+        self._open_pool(validator, hotkeys[0], 'sol', 'btc')
+
+        rq = rate_quote(validator, 'sol', 'btc', self.SOL)
+
+        assert rq.quote.miner_hotkey == hotkeys[0]
+        assert rq.quote.estimated_free_at == 0
+
+    def test_open_pool_on_another_pair_is_busy(self):
+        validator, hotkeys = self._validator('sol', 'btc', ['0.6', '0.5'])
+        state = self._open_pool(validator, hotkeys[0], 'btc', 'sol')
+
+        rq = rate_quote(validator, 'sol', 'btc', self.SOL)
+
+        assert rq.quote.miner_hotkey == hotkeys[1]
+        assert rq.candidates[1]['estimated_free_at'] == state.busy_until[0]
+
+    def test_unfilled_seat_past_its_finalize_window_is_free(self):
+        validator, hotkeys = self._validator('sol', 'btc', ['0.6', '0.5'])
+        state = validator.held_states[1][hotkeys[0]]
+        now = int(time.time())
+        state.busy_until[0] = now + 500  # set at the pool open, still ahead
+        pool = SimpleNamespace(miner=state.miner, collateral_chain='sol', from_chain='sol', to_chain='btc', opened_at=0)
+        seat = SimpleNamespace(reserved_until=0, finalize_by=now - 10)
+        validator.solana_client.get_all('Pool').append((pool_pda(state.miner, 'sol'), pool))
+        validator.solana_client.get_all('Reservation').append((reservation_pda(state.miner, 'sol'), seat))
+
+        rq = rate_quote(validator, 'sol', 'btc', self.SOL)
+
+        assert rq.quote.miner_hotkey == hotkeys[0]
         assert rq.quote.estimated_free_at == 0
 
     @pytest.mark.parametrize('bad_field', ['miner_from_addr', 'miner_to_addr'])

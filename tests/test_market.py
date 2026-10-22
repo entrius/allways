@@ -52,8 +52,16 @@ class StrictClient:
 
 
 class RecordingClient:
+    program_id = None
+
     def __init__(self, quotes, attestations=(), states=()):
-        self.accounts = {'MinerQuote': quotes, 'BondAttestation': list(attestations), 'MinerState': list(states)}
+        self.accounts = {
+            'MinerQuote': quotes,
+            'BondAttestation': list(attestations),
+            'MinerState': list(states),
+            'Reservation': [],
+            'Pool': [],
+        }
         self.reads: list = []
 
     def get_all(self, name):
@@ -98,14 +106,15 @@ def test_the_quote_memo_reads_once_per_ttl_across_threads():
         t.start()
     for t in threads:
         t.join()
-    assert client.reads == ['MinerQuote', 'BondAttestation']
+    assert client.reads == ['MinerQuote', 'BondAttestation', 'Reservation', 'Pool']
     assert all(
-        quotes == client.accounts['MinerQuote'] and atts[(str(MINER), 'tao')] is bond for quotes, atts in results
+        quotes == client.accounts['MinerQuote'] and atts[(str(MINER), 'tao')] is bond
+        for quotes, atts, *_holds in results
     )
 
     clock[0] += MARKET_TTL_SECS
     memo.accounts(client)
-    assert client.reads == ['MinerQuote', 'BondAttestation'] * 2
+    assert client.reads == ['MinerQuote', 'BondAttestation', 'Reservation', 'Pool'] * 2
 
 
 def test_stale_held_states_are_read_live_with_forwards_own_filter(quote_memo, monkeypatch):

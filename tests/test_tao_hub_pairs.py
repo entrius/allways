@@ -304,6 +304,9 @@ class TaoHubClient:
         # Per-(miner, hub) contest slots since v3.1 — no open pool on either purse here.
         return None
 
+    def get_reservation(self, miner, backing='sol'):
+        return None
+
     def get_quote(self, miner, from_chain, to_chain, backing='sol'):
         return self.quote if backing == 'tao' else None
 

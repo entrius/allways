@@ -69,13 +69,33 @@ def hub_busy_until(state, bit: int) -> int:
     return int(arr or 0)
 
 
-def estimated_free_at(state, bit: int, now: int | None = None) -> int:
-    """Estimated unix time when one hub is free, or 0 when it is free now."""
+def estimated_free_at(state, bit: int, reservation=None, pool=None, pair: tuple = (), now: int | None = None) -> int:
+    """Estimated unix time when one hub takes a new entry for ``pair``, or 0 when it takes one now.
+
+    Mirrors the contract's entry gates (``open_or_request``): an in-flight swap, a filled reservation
+    inside its TTL, a drawn seat inside its finalize window, or a pool that can't be joined for this
+    pair. ``busy_until`` alone never makes a hub busy: the pool open sets it to cover a reservation
+    TTL that may never start. It only stretches an estimate whose hold has no end of its own."""
     now = int(time.time()) if now is None else int(now)
     busy_until = hub_busy_until(state, bit)
-    if not hub_swap_on(state, bit) and busy_until <= now:
-        return 0
-    return max(busy_until, now + BUSY_FALLBACK_SECS)
+    holds = []
+    if hub_swap_on(state, bit):
+        holds.append(max(busy_until, now + BUSY_FALLBACK_SECS))
+    if pool is not None and int(getattr(pool, 'opened_at', 0) or 0) != 0:
+        closes_at = int(getattr(pool, 'closes_at', 0) or 0)
+        if now > closes_at:
+            holds.append(max(busy_until, now + BUSY_FALLBACK_SECS))  # closed, waiting for its draw
+        elif (str(pool.from_chain), str(pool.to_chain)) != tuple(pair):
+            holds.append(max(busy_until, closes_at))
+        # else: open on this pair, so joinable now
+    if reservation is not None:
+        reserved_until = int(getattr(reservation, 'reserved_until', 0) or 0)
+        finalize_by = int(getattr(reservation, 'finalize_by', 0) or 0)
+        if reserved_until != 0 and reserved_until >= now:
+            holds.append(reserved_until)
+        elif reserved_until == 0 and finalize_by != 0 and now <= finalize_by:
+            holds.append(max(busy_until, finalize_by))
+    return max(holds, default=0)
 
 
 def hub_reserved_collateral(state, bit: int) -> int:

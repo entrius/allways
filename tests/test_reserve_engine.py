@@ -32,7 +32,9 @@ def _rate_fixed(display: float) -> int:
 
 
 class FakeClient:
-    def __init__(self, *, active=True, has_active_swap=False, quote_rate=0.0021, pool=None, collateral=10**12):
+    def __init__(
+        self, *, active=True, has_active_swap=False, quote_rate=0.0021, pool=None, reservation=None, collateral=10**12
+    ):
         self.miner_state = SimpleNamespace(
             active=active,
             failed_swaps=0,
@@ -50,6 +52,7 @@ class FakeClient:
             miner_to_addr='minerBTCdeliver',
         )
         self._pool = pool
+        self.reservation = reservation
         self.collateral = collateral
         self.calls = []
 
@@ -65,6 +68,9 @@ class FakeClient:
 
     def get_pool(self, miner, backing='sol'):
         return self._pool
+
+    def get_reservation(self, miner, backing='sol'):
+        return self.reservation
 
     def get_quote(self, miner, from_chain, to_chain, backing='sol'):
         return self.quote if backing == self.quote.collateral_chain else None
@@ -337,7 +343,7 @@ def test_busy_miner_open_rejects():
 
 
 def test_busy_preflight_returns_retry_after_without_sending_a_tx():
-    client = FakeClient()
+    client = FakeClient(reservation=SimpleNamespace(reserved_until=FUTURE, finalize_by=0))
     client.miner_state.busy_until[0] = FUTURE
 
     r, _ = _reserve(client)
@@ -355,6 +361,34 @@ def test_same_pair_join_is_not_blocked_by_busy_preflight():
 
     assert r.ok and r.retry_after == 0
     assert client.calls == [('open_or_request', 'sol', 'btc', 'sol')]
+
+
+def test_unfilled_seat_past_its_finalize_window_does_not_block_a_new_pool():
+    # The pool open left busy_until ahead; the contract takes a new pool once finalize_by has passed.
+    client = FakeClient(reservation=SimpleNamespace(reserved_until=0, finalize_by=int(time.time()) - 10))
+    client.miner_state.busy_until[0] = FUTURE
+
+    r, _ = _reserve(client)
+
+    assert r.ok and r.retry_after == 0
+    assert client.calls == [('open_or_request', 'sol', 'btc', 'sol')]
+
+
+@pytest.mark.parametrize(
+    'seat',
+    [
+        SimpleNamespace(reserved_until=0, finalize_by=FUTURE),  # drawn, inside its finalize window
+        SimpleNamespace(reserved_until=FUTURE, finalize_by=FUTURE),  # filled, inside its TTL
+    ],
+)
+def test_a_held_seat_returns_retry_after_without_sending_a_tx(seat):
+    client = FakeClient(reservation=seat)
+    client.miner_state.busy_until[0] = FUTURE
+
+    r, _ = _reserve(client)
+
+    assert not r.ok and r.retry_after == FUTURE
+    assert client.calls == []
 
 
 def test_contract_rejection_returns_reject_not_raise():
@@ -379,6 +413,7 @@ def test_contract_rejection_rereads_busy_state_for_retry_after():
 
     def _raise(*_a, **_k):
         client.miner_state.busy_until[0] = FUTURE
+        client.reservation = SimpleNamespace(reserved_until=0, finalize_by=FUTURE)
         raise RuntimeError(
             'send failed: Error Code: MinerReserved. Error Number: 6022. '
             'Error Message: Miner already has an active reservation. custom program error: 0x1786'
