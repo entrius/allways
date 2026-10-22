@@ -317,6 +317,8 @@ RELAY_FEE_SETTLE_GRACE_SECS = 120
 # per call; below this the relay warns, hourly.
 RELAY_LOW_BALANCE_RAO = 500_000_000
 RELAY_BALANCE_CHECK_SECS = 3600
+# How often the relay re-reads whether its hotkey is in the vault's validator set (one contract read).
+VAULT_MEMBERSHIP_CHECK_SECS = 600
 # The Solana key every program vote is signed with. A vote costs ~5,000 lamports, and the first voter of a
 # round also fronts its rent until the last voter's close refunds it, so this covers many rounds.
 VOTER_LOW_BALANCE_LAMPORTS = 100_000_000

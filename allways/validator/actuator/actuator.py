@@ -18,7 +18,7 @@ from allways.validator.chain.confirm import ConfirmTracker
 from allways.validator.runtime.bus import Latest
 from allways.validator.runtime.component import Component
 from allways.validator.runtime.deadline_queue import DeadlineQueue, Intent
-from allways.validator.runtime.logs import Episodes, LowBalance
+from allways.validator.runtime.logs import Episodes, LowBalance, vote_line
 from allways.validator.world.snapshot import World
 
 # A World older than this is too stale to decide deadline-bound actions on; the actuator waits instead.
@@ -164,6 +164,8 @@ class Actuator(Component):
             return FAILED  # the planner re-plans it next tick if still due
         if not signature:
             return NOOP
+        if intent.key[0] in QUORUM_VOTES:
+            vote_line('solana', intent.key[0], intent.key[1], _vote_values(intent))
         self.confirms.track(signature, intent, now)
         self._in_flight.add(intent.key)
         return SENT
@@ -227,3 +229,30 @@ def _out_of_funds(err: Any) -> bool:
     """A send or landed tx refused for want of lamports (not a program error such as InsufficientCollateral)."""
     text = str(err).lower()
     return any(m in text for m in ('insufficient funds', 'insufficient lamports', 'no record of a prior credit'))
+
+
+# The program's quorum rounds. Every other send (extensions, cranks, reaps) is single-signer.
+QUORUM_VOTES = {
+    'vote_initiate',
+    'confirm_swap',
+    'timeout_swap',
+    'cancel_swap',
+    'vote_deactivate',
+    'vote_set_weights',
+    'vote_set_attestation',
+    'vote_attest_heartbeat',
+}
+
+
+def _vote_values(intent: Intent) -> Any:
+    """What the round binds beyond its subject: the weights vector or the attestation figures. Swap rounds
+    bind only the swap key, already in the subject."""
+    kind, payload = intent.key[0], intent.payload
+    if payload is None:
+        return None
+    if kind == 'vote_set_weights':
+        vector, keys = payload
+        return [(k, w) for k, w in zip(keys, vector)]
+    if kind == 'vote_set_attestation':
+        return payload[2:]  # balance, locked, epoch
+    return None

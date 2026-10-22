@@ -817,3 +817,64 @@ def test_a_step_never_raises():
     relay.chain.world = lambda: (_ for _ in ()).throw(RuntimeError('no world'))
     relay._world = relay.chain.world
     relay.step(NOW)  # must not raise
+
+
+# --- two validators: what each one sends must meet the other's in the same round -----------------------
+
+
+def test_a_fee_batch_the_vault_refused_is_not_resent_every_tick_but_a_changed_batch_is():
+    relay = _relay(fee_cadence_secs=1000)
+    relay.vault.reject.add('vote_collect_fees_batch')  # e.g. this exact batch already voted, round still open
+    relay.store.record_relay_fee(SWAP, MINER, 'tao', 5 * RAO, NOW - 10)
+    for tick in range(10):
+        exit_relay.maybe_cadence_settle(relay, NOW + GRACE + 12 * tick)
+    assert relay.vault.calls == [('vote_collect_fees_batch', [(HOTKEY, 5 * RAO)])]
+    assert relay.store.get_relay_meta('fee_cadence_boundary') is None, 'the boundary is still owed'
+    relay.store.record_relay_fee(SWAP2, MINER, 'tao', 6 * RAO, NOW - 5)  # a new fee: a different round
+    exit_relay.maybe_cadence_settle(relay, NOW + GRACE + 200)
+    assert relay.vault.calls[-1] == ('vote_collect_fees_batch', [(HOTKEY, 11 * RAO)])
+
+
+def test_a_validator_outside_the_vault_set_holds_its_vault_votes_until_admitted():
+    vault = FakeVault()
+    vault.keypair = SimpleNamespace(ss58_address='beta')  # the set is ['us']
+    relay = _relay(vault=vault, fee_cadence_secs=1000)
+    relay.store.record_relay_fee(SWAP, MINER, 'tao', 5 * RAO, NOW - 10)
+    relay.step(NOW + GRACE)
+    assert relay._reconciled, 'a non-member owes the vault nothing, so the barrier opens'
+    assert not [c for c in vault.calls if c[0].startswith('vote_')]
+    vault.validators.append('beta')
+    relay.step(NOW + GRACE + 600)  # membership is re-read on its interval
+    assert ('vote_collect_fees_batch', [(HOTKEY, 5 * RAO)]) in vault.calls
+
+
+def test_after_an_unmet_round_two_validators_out_of_phase_still_meet_in_one_round():
+    # The heartbeat is overdue (the last round never reached quorum) and the two validators came back two
+    # hours apart. Each must keep voting while it is overdue, so their votes share a live round (1800s).
+    interval = 12 * 3600
+    config = SimpleNamespace(last_attest_heartbeat=NOW - 2 * interval)
+    a, b = (_relay(solana=FakeChain(config=config), heartbeat_interval_secs=interval) for _ in range(2))
+    voted = {id(a): [], id(b): []}
+    for t in range(0, 4 * 3600, 12):
+        for relay, joined in ((a, 0), (b, 2 * 3600)):
+            if t < joined:
+                continue
+            before = len(relay.chain.calls)
+            relay.maybe_heartbeat(NOW + t)
+            if len(relay.chain.calls) > before:
+                voted[id(relay)].append(t)
+    assert any(abs(x - y) < 1800 for x in voted[id(a)] for y in voted[id(b)])
+
+
+def test_an_unmet_heartbeat_round_is_revoted_once_per_round_lifetime_until_it_lands():
+    interval = 12 * 3600
+    boundary = (NOW // interval + 1) * interval
+    config = SimpleNamespace(last_attest_heartbeat=boundary - interval)
+    relay = _relay(solana=FakeChain(config=config), heartbeat_interval_secs=interval)
+    relay._reconciled = True
+    for t in range(0, 3600, 12):
+        relay.maybe_heartbeat(boundary + t)
+    assert len(relay.chain.calls) == 2  # at the boundary and once more when the first round lapsed
+    config.last_attest_heartbeat = boundary + 3600  # quorum landed
+    relay.maybe_heartbeat(boundary + 7200)
+    assert len(relay.chain.calls) == 2

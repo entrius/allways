@@ -120,3 +120,20 @@ def test_collateral_verdicts_older_than_the_horizon_are_pruned(tmp_path):
     memory.prune(now)
     assert list(memory.collateral) == [('m', 'tao', now - 60, 5)]
     assert list(SwapMemory(store).collateral) == [('m', 'tao', now - 60, 5)]  # gone from disk too
+
+
+def test_each_quorum_vote_logs_one_comparable_line_and_single_signer_sends_do_not(monkeypatch):
+    out = _capture(monkeypatch, logs_mod)
+    world = Latest()
+    world.set(_world(True))
+    rpc = SimpleNamespace(get_signature_statuses=lambda sigs: [None] * len(sigs), get_balance=lambda pk: 10**9)
+    client = SimpleNamespace(rpc=rpc, keypair=SimpleNamespace(pubkey=lambda: 'me'))
+    act = Actuator(world, [], {k: (lambda c, i: 'sig') for k in ACTIONS}, lambda: client)
+    act.setup()
+    keys = ['9ns2Fb1K1qA2pAsSBMEKvmT8HjhBNNayXJYe7J9bUZpa', 'AuRf6YidDGjB8kAH7BH6mSkexmGCt7aHmaHtUrQo6KxC']
+    weights = SimpleNamespace(key=('vote_set_weights', 12), payload=([1, 17], keys))
+    extend = SimpleNamespace(key=('extend_reservation', 'swap'), payload=None)
+    act._send(weights, NOW)
+    act._send(extend, NOW)
+    votes = [m for k, m in out if m.startswith('vote ')]
+    assert votes == ['vote solana:vote_set_weights 12 values=[[9ns2Fb1K,1],[AuRf6Yid,17]]']

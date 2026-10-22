@@ -11,6 +11,7 @@ import bittensor as bt
 from allways.solana import pdas
 from allways.synapses import MinerActivateSynapse, SwapConfirmSynapse, SwapReserveSynapse
 from allways.utils.logging import miner_label as _miner_label
+from allways.validator.runtime.logs import vote_line
 from allways.validator.serving import activation
 from allways.validator.serving.requests import confirm_deposit, reserve_on_behalf, resolve_miner_pubkey
 
@@ -100,6 +101,7 @@ async def handle_miner_activate(
             return synapse
 
         ctx.client.vote_activate(miner_pk, backing=backing)
+        vote_line('solana', 'vote_activate', miner_pk, backing)
         synapse.accepted = True
         bt.logging.success(f'{tag}: activated')
 

@@ -24,6 +24,7 @@ owed is skipped: a no-op round is pure postage.
 
 from __future__ import annotations
 
+import hashlib
 from typing import Dict, List, Optional, Tuple
 
 import bittensor as bt
@@ -31,6 +32,7 @@ import bittensor as bt
 from allways import dev_signal
 from allways.constants import RELAY_FEE_SETTLE_GRACE_SECS
 from allways.solana.layouts import lock_max
+from allways.validator.runtime.logs import vote_line
 from allways.vault import codec
 
 # Mirrors the vault's MAX_BATCH. Chunking is deterministic (sorted, fixed size), so a fleet that
@@ -115,6 +117,7 @@ def _settle_residual(relay, miner: str, hotkey: str, total: int, now: int) -> bo
     if not relay.can_write():
         return False
     relay.note_write()
+    vote_line('vault', 'collect_fees_batch', 'residual', [(hotkey, total)])
     result = relay.collect_fees([(hotkey, total)])
     relay.note_vote(key, now)
     if not result.ok:
@@ -132,6 +135,7 @@ def _unlock(relay, miner: str, hotkey: str, epoch: int, now: int) -> bool:
     if not relay.can_write():
         return False
     relay.note_write()
+    vote_line('vault', 'unlock', hotkey, epoch)
     result = relay.vault.vote_unlock(hotkey, epoch)
     relay.note_vote(key, now)
     if not result.ok:
@@ -169,7 +173,14 @@ def maybe_cadence_settle(relay, now: int) -> None:
         return
 
     for chunk in _chunks(entries, MAX_BATCH):
+        # The round is keyed by the batch's contents: this exact batch already voted is waiting on its
+        # round (a re-vote would revert as already voted, and still cost its fee). A new fee changes it.
+        key = 'fees:' + hashlib.sha256(repr(chunk).encode()).hexdigest()[:16]
+        if relay.throttled(key, now):
+            return
+        vote_line('vault', 'collect_fees_batch', boundary, chunk)
         result = relay.collect_fees(chunk)
+        relay.note_vote(key, now)
         if not result.ok:
             bt.logging.warning(f'relay: fee cadence batch rejected ({result.error or "reverted"})')
             return  # boundary stays unmarked so the next tick retries the whole round

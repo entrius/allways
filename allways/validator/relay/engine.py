@@ -37,6 +37,7 @@ from allways.constants import (
     RELAY_QUIESCENCE_GRACE_SECS,
     RELAY_RECONCILE_INTERVAL_SECS,
     RELAY_SWAP_RETENTION_SECS,
+    VAULT_MEMBERSHIP_CHECK_SECS,
     VOTE_ROUND_TTL_SECS,
 )
 from allways.solana import pdas
@@ -139,10 +140,13 @@ class BondRelay:
         self._ring: List[str] = []
         self._ring_pos = 0
         self._next_reconcile = 0.0
-        self._last_heartbeat_attempt = 0.0
         # Per-subject re-vote throttles, so an unlanded round isn't re-submitted every 12s pass.
         self._voted_at: Dict[str, float] = {}
         self._writes = 0
+        # Whether this validator's hotkey is in the vault's validator set, re-read every
+        # VAULT_MEMBERSHIP_CHECK_SECS. None until first read (writes go ahead, as before membership was checked).
+        self._vault_member: Optional[bool] = None
+        self._membership_read_at = -VAULT_MEMBERSHIP_CHECK_SECS
         # F3: cleared when a verdict ingest write fails, so the liveness heartbeat is held down
         # until the relay has caught up — the fuse must not report "live" over a lost verdict.
         self._ingest_healthy = True
@@ -304,9 +308,10 @@ class BondRelay:
             self.audit_ring(now)
             slash_job.arm_verdicts(self, now)
             attestation_job.flush(self, now)
-            slash_job.relay_verdicts(self, now)
-            exits.run_exits(self, now)
-            exits.maybe_cadence_settle(self, now)
+            if self.is_vault_member(now):
+                slash_job.relay_verdicts(self, now)
+                exits.run_exits(self, now)
+                exits.maybe_cadence_settle(self, now)
             self.maybe_heartbeat(now)
             self.maybe_check_balance(now)
         except Exception as e:
@@ -364,7 +369,8 @@ class BondRelay:
             # exits (which seed them) wait. A verdict carries its own figures and seeds nothing, so it is
             # relayed meanwhile; this validator's entry hold covers the attestation it can't net yet.
             slash_job.arm_verdicts(self, now)
-            slash_job.relay_verdicts(self, now)
+            if self.is_vault_member(now):
+                slash_job.relay_verdicts(self, now)
             return False
         ok = True
         bonded = self.bonded_miners()
@@ -375,9 +381,12 @@ class BondRelay:
         self._open_lap(now, bonded)
         ok = attestation_job.flush(self, now, reconciling=True) and ok
         slash_job.arm_verdicts(self, now)
-        ok = slash_job.relay_verdicts(self, now) and ok
+        member = self.is_vault_member(now)  # a validator outside the vault's set has no vault writes to owe
+        if member:
+            ok = slash_job.relay_verdicts(self, now) and ok
         self._refresh_exiting(bonded)
-        ok = exits.run_exits(self, now) and ok
+        if member:
+            ok = exits.run_exits(self, now) and ok
         self._prune(now)
         return ok
 
@@ -417,6 +426,24 @@ class BondRelay:
             f'relay: fresh fee ledger — the vault last settled fees at boundary {settled} '
             f'({len(validators or [])} validator(s), {len(hotkeys)} bound miner(s) checked)'
         )
+        return True
+
+    def is_vault_member(self, now: int) -> bool:
+        """Whether this validator may vote on the vault. Outside its set every vault vote reverts (and still
+        costs its fee), so slashes, exits and fee true-ups wait until it is admitted; Solana-side work goes on.
+        An unreadable set keeps the last answer."""
+        if now - self._membership_read_at >= VAULT_MEMBERSHIP_CHECK_SECS:
+            self._membership_read_at = now
+            members = self.vault.get_validators()
+            signer = getattr(getattr(self.vault, 'keypair', None), 'ss58_address', None)
+            if members is not None and signer is not None:
+                self._vault_member = signer in members
+        if self._vault_member is False:
+            self._episodes.start(
+                'vault-member', 'relay: this hotkey is not in the vault validator set — vault votes held'
+            )
+            return False
+        self._episodes.end('vault-member', 'relay: this hotkey is in the vault validator set — vault votes resumed')
         return True
 
     def maybe_check_balance(self, now: int) -> None:
@@ -496,12 +523,16 @@ class BondRelay:
         world = self._world()
         if world is None or world.config is None:
             return
+        # Due once per aligned boundary, so every validator votes into the same round however its own
+        # restarts are phased; while overdue, re-voted once per round lifetime until quorum bumps it.
+        interval = self.cfg.heartbeat_interval_secs
+        boundary = now // interval * interval
         last = int(getattr(world.config, 'last_attest_heartbeat', 0) or 0)
-        if now - max(last, self._last_heartbeat_attempt) < self.cfg.heartbeat_interval_secs:
+        if last >= boundary or self.throttled('heartbeat', now):
             return
         self.vote('vote_attest_heartbeat', 'config', None)  # the executor skips a round already voted
-        self._last_heartbeat_attempt = now
-        bt.logging.debug('relay: heartbeat vote queued')
+        self.note_vote('heartbeat', now)
+        bt.logging.debug(f'relay: heartbeat vote queued for boundary {boundary}')
         dev_signal.emit('relay_heartbeat')
 
     # ─── vault event polling (freshness, never truth) ────────────────────────

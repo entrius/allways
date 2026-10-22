@@ -70,3 +70,23 @@ class LowBalance:
         elif self._warned_at is not None and balance >= self.low * self.clear_ratio:
             self._warned_at = None
             bt.logging.info(f'{self.label} topped up: {shown}')
+
+
+def vote_line(contract: str, kind: str, subject: object, values: object = None) -> None:
+    """One INFO line per quorum vote this validator casts, the same shape on every validator, so two
+    validators' proposals for a round can be lined up (``grep 'vote '``) and diffed: a round binds the
+    values, and votes that differ never reach quorum together."""
+    line = f'vote {contract}:{kind} {_short(subject)}'
+    if values is not None:
+        line += f' values={_short(values)}'
+    bt.logging.info(line)
+
+
+def _short(value: object) -> str:
+    """Compact and stable: keys shortened to 8 characters, sequences kept in order."""
+    if isinstance(value, (bytes, bytearray)):
+        return bytes(value).hex()[:16]
+    if isinstance(value, (list, tuple)):
+        return '[' + ','.join(_short(v) for v in value) + ']'
+    text = str(value)
+    return text[:8] if len(text) >= 32 and text.isalnum() else text

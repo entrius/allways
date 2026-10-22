@@ -18,6 +18,7 @@ from typing import Any, Dict
 import bittensor as bt
 
 from allways import dev_signal
+from allways.validator.runtime.logs import vote_line
 from allways.validator.world.binding import hotkey_ss58
 from allways.vault import codec
 
@@ -119,6 +120,7 @@ def _relay_one(relay, row: Dict[str, Any], now: int) -> bool:
     if not relay.can_write():
         return False
     relay.note_write()
+    vote_line('vault', 'slash', swap_key, (hotkey, int(row['penalty']), row['user_addr'], int(row['reimbursement'])))
     result = relay.vault.vote_slash(hotkey, swap_key, int(row['penalty']), row['user_addr'], int(row['reimbursement']))
     relay.note_vote(f'slash:{swap_key}', now)
     if result.ok:
