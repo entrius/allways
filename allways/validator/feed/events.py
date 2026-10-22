@@ -17,7 +17,7 @@ import threading
 import time
 from collections import OrderedDict
 from dataclasses import dataclass
-from typing import Any, Callable, List, Optional, Tuple
+from typing import Any, Callable, Dict, List, Optional, Tuple
 
 import bittensor as bt
 
@@ -135,8 +135,20 @@ class FeedStatus:
     cursor: Optional[Tuple[int, str]] = None
 
 
-# Truncated txs whose accounts the feed names per hour; past this the hourly rescan heals them instead.
-TRUNCATED_REREADS_PER_HOUR = 120
+# A truncated live tx costs one getTransaction to name its accounts; at most this many an hour. Past it the
+# feed publishes the tx with nothing named, and the World brings its rescan forward instead.
+TRUNCATED_TX_READS_PER_HOUR = 600
+# Truncated txs per signer per hour whose every account the World re-reads; past this only the signer's own
+# accounts are named. Counted per signer, so one signer's txs never use up another's.
+TRUNCATED_REREADS_PER_SIGNER_HOUR = 20
+
+
+def tx_signers(tx: Optional[dict]) -> List[str]:
+    """The keys that signed a getTransaction result (the fee payer when the header is missing)."""
+    message = ((tx or {}).get('transaction') or {}).get('message') or {}
+    keys = [k if isinstance(k, str) else k.get('pubkey') for k in message.get('accountKeys') or []]
+    n = int((message.get('header') or {}).get('numRequiredSignatures') or 1)
+    return [k for k in keys[:n] if k]
 
 
 def tx_account_keys(tx: Optional[dict]) -> List[str]:
@@ -300,7 +312,8 @@ class EventFeed(Component):
         self._sweep_until: Optional[str] = None
         self._sweep_next: Optional[str] = None
         self._swept_at = 0.0
-        self._truncated_window, self._truncated_count = 0, 0
+        self._truncated_window, self._truncated_tx_reads = 0, 0
+        self._truncated_by_signer: Dict[str, int] = {}
 
     def setup(self) -> None:
         self._rpc = self._rpc_factory()
@@ -330,27 +343,37 @@ class EventFeed(Component):
 
     def _truncated(self, sig: str, slot, block_time, tx: Optional[dict], now: float) -> List[EventRecord]:
         """A tx whose logs the runtime cut short may have changed accounts with no event saying so. Name
-        every account it touched so the World re-reads them; past the hourly cap the rescan heals instead."""
+        every account it touched and its signers, so the World re-reads them; past a signer's hourly budget
+        only the signers (the World re-reads their own accounts), past the read ceiling nothing (it rescans)."""
         window = int(now // 3600)
         if window != self._truncated_window:
-            self._truncated_window, self._truncated_count = window, 0
-        self._truncated_count += 1
-        if self._truncated_count > TRUNCATED_REREADS_PER_HOUR:
-            bt.logging.warning(f'feed: {sig} logs truncated, over {TRUNCATED_REREADS_PER_HOUR}/h: left to the rescan')
-            return []
-        try:
-            tx = tx if tx is not None else self._rpc.get_transaction(sig)
-        except Exception as e:
-            tx = None
-            bt.logging.warning(f'feed: {sig} logs truncated and its transaction is unreadable ({e})')
-        accounts = tx_account_keys(tx)
+            self._truncated_window, self._truncated_tx_reads, self._truncated_by_signer = window, 0, {}
+        if tx is None:
+            if self._truncated_tx_reads >= TRUNCATED_TX_READS_PER_HOUR:
+                if self._truncated_tx_reads == TRUNCATED_TX_READS_PER_HOUR:
+                    self._truncated_tx_reads += 1  # warned once per hour
+                    bt.logging.warning(f'feed: over {TRUNCATED_TX_READS_PER_HOUR} truncated txs this hour: rescanning')
+                return [EventRecord(TX_LOGS_TRUNCATED, {'accounts': [], 'signers': []}, slot, block_time, sig)]
+            self._truncated_tx_reads += 1
+            try:
+                tx = self._rpc.get_transaction(sig)
+            except Exception as e:
+                bt.logging.warning(f'feed: {sig} logs truncated and its transaction is unreadable ({e})')
+        accounts, signers = tx_account_keys(tx), tx_signers(tx)
         if not accounts:
             self.gaps.publish(HistoryGap(block_time or now))  # can't name its accounts: rescan them all
             return []
-        bt.logging.warning(
-            f'feed: {sig} logs truncated (signer {accounts[0]}): re-reading the {len(accounts)} accounts it touched'
-        )
-        return [EventRecord(TX_LOGS_TRUNCATED, {'accounts': accounts}, slot, block_time, sig)]
+        counts = self._truncated_by_signer
+        for signer in signers:
+            counts[signer] = counts.get(signer, 0) + 1
+        if any(counts[s] > TRUNCATED_REREADS_PER_SIGNER_HOUR for s in signers):
+            bt.logging.warning(f"feed: {sig} logs truncated (signer {signers[0]}): re-reading the signer's accounts")
+            accounts = []
+        else:
+            bt.logging.warning(
+                f'feed: {sig} logs truncated (signer {signers[0]}): re-reading the {len(accounts)} accounts it touched'
+            )
+        return [EventRecord(TX_LOGS_TRUNCATED, {'accounts': accounts, 'signers': signers}, slot, block_time, sig)]
 
     def _stamp_live(self, now: float) -> None:
         self._held.extend(self.live.take())

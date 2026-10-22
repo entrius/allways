@@ -22,6 +22,7 @@ from solders.pubkey import Pubkey
 
 from allways.solana import layouts, pdas
 from allways.solana.client import swap_key_from_tx_hash
+from allways.solana.events import TX_LOGS_TRUNCATED
 from allways.validator.feed.events import HISTORY_HORIZON_SECS, FeedStatus
 from allways.validator.runtime.bus import Latest, Subscription
 from allways.validator.runtime.component import Component
@@ -46,6 +47,8 @@ SAVE_HEARTBEAT_SECS = 30
 # A full re-read this often, so a lost event (a dropped notification, an empty getTransaction) can't
 # leave an account stale for longer: 8 getProgramAccounts an hour (one per type, and Config).
 RESCAN_SECS = 3600.0
+# A truncated tx the feed could not name any account of brings the rescan forward, at most this often.
+TRUNCATED_RESCAN_SECS = 600.0
 
 
 @dataclass(frozen=True)
@@ -128,6 +131,13 @@ class Accounts:
         return None
 
 
+def _key(value: Any) -> Optional[str]:
+    """A decoded pubkey field as base58, whether the decoder left it as bytes or made it a Pubkey."""
+    if isinstance(value, (bytes, bytearray)) and len(value) == 32:
+        return str(Pubkey.from_bytes(bytes(value)))
+    return None if value is None else str(value)
+
+
 class _BindingSource:
     """Lets build_attribution verify the Binding accounts already in hand instead of scanning again."""
 
@@ -176,6 +186,7 @@ class WorldReader(Component):
         self._scan_slot = 0
         self._slot = 0
         self._need_scan = True
+        self._rescan_owed = False  # a truncated tx named nothing: rescan once TRUNCATED_RESCAN_SECS allows
         self._scanned_at = 0.0
         self._pending_reads: Set[AccountKey] = set()  # cleared only by a read that landed
         self._requested: Set[AccountKey] = set()  # from other threads, via request_reads
@@ -193,7 +204,8 @@ class WorldReader(Component):
         status, _ = self.feed_status.get()  # read before draining: everything up to its cursor is drained below
         if self.gaps.drain() or self.events.dropped != self._dropped:
             self._dropped, self._need_scan = self.events.dropped, True
-        if self._need_scan or now - self._scanned_at >= RESCAN_SECS:
+        since = now - self._scanned_at
+        if self._need_scan or since >= RESCAN_SECS or (self._rescan_owed and since >= TRUNCATED_RESCAN_SECS):
             self._scan(routine=not self._need_scan)
             self._scanned_at = now
         for record in self.events.drain():
@@ -255,7 +267,7 @@ class WorldReader(Component):
         """Every account of every tracked type. Each read must be served at or past the slot read first (a
         node behind it refuses, and the scan fails whole and is retried); the scan then stands at the oldest
         slot a read was served at. An account the World already holds from a newer slot is left as it is."""
-        slot = int(self._client.rpc.get_slot())
+        slot = max(int(self._client.rpc.get_slot()), self._slot)  # never older than an event already applied
         program_id = self._client.program_id
         config_pda = str(pdas.config_pda(program_id))
         fresh: Dict[str, Tuple[int, Dict[str, bytes]]] = {}
@@ -285,7 +297,7 @@ class WorldReader(Component):
         self._scan_slot = scan_slot
         self._slot = max(self._slot, scan_slot)
         self._refresh_attribution()
-        self._need_scan = False
+        self._need_scan = self._rescan_owed = False
         counts = ', '.join(f'{t}={len(v)}' for t, v in self._accounts.items())
         if not routine:
             bt.logging.info(f'world: scanned at slot {self._scan_slot}: {counts}')
@@ -342,7 +354,23 @@ class WorldReader(Component):
         for pda in t.quote_removals:
             if self._newer(('MinerQuote', pda), slot):
                 self._drop('MinerQuote', pda, slot)
+        if record.name == TX_LOGS_TRUNCATED:
+            signers = set(record.fields.get('signers') or ())
+            t.reads |= self._held_by(signers)
+            self._rescan_owed |= not signers and not record.fields.get('accounts')
         return {key for key in t.reads if self._newer(key, slot)}
+
+    def _held_by(self, owners: Set[str]) -> Set[AccountKey]:
+        """Every account the World holds whose miner, user, or router is one of ``owners``."""
+        if not owners:
+            return set()
+        held = set()
+        for name, accounts in self._accounts.items():
+            fields = layouts.ACCOUNT_PUBKEY_FIELDS.get(name, [])
+            for pda, account in accounts.items():
+                if any(_key(getattr(account, f, None)) in owners for f in fields):
+                    held.add((name, pda))
+        return held
 
     def _ledgers(self, record: Any, slot: int) -> None:
         f, t = record.fields, int(record.block_time or 0)

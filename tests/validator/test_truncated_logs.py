@@ -8,9 +8,18 @@ from solders.pubkey import Pubkey
 
 from allways.solana import layouts, pdas
 from allways.solana.events import LOG_TRUNCATED, TX_LOGS_TRUNCATED, EventRecord
-from allways.validator.feed.events import TRUNCATED_REREADS_PER_HOUR, HistoryGap, LiveFeed, SlotClock, _Pending
+from allways.solana.rpc import TransientRpcError
+from allways.validator.feed.events import (
+    TRUNCATED_REREADS_PER_SIGNER_HOUR,
+    TRUNCATED_TX_READS_PER_HOUR,
+    HistoryGap,
+    LiveFeed,
+    SlotClock,
+    _Pending,
+)
+from allways.validator.world.snapshot import TRUNCATED_RESCAN_SECS
 from tests.validator.test_feed import NOW, _FakeLive, _feed, _SigRpc
-from tests.validator.test_world import MINER, _Client, _quote_fields, _reader
+from tests.validator.test_world import MINER, _Client, _quote_fields, _quote_pda, _reader
 
 PROGRAM = str(Keypair().pubkey())
 SIGNER, OTHER = str(Keypair().pubkey()), str(Keypair().pubkey())
@@ -54,6 +63,7 @@ def test_a_truncated_live_tx_names_every_account_it_touched(tmp_path):
     feed.tick(NOW)
     (record,) = events.drain()
     assert (record.name, record.fields['accounts']) == (TX_LOGS_TRUNCATED, [SIGNER, OTHER])
+    assert record.fields['signers'] == [SIGNER]  # no header: the fee payer
     assert rpc.tx_reads == ['live-1']
 
 
@@ -64,14 +74,47 @@ def test_an_unreadable_truncated_tx_falls_back_to_a_rescan(tmp_path):
     assert events.drain() == [] and gaps.drain()[-1] == HistoryGap(NOW)  # after the boot backfill's own gap
 
 
-def test_past_the_hourly_cap_truncated_txs_are_left_to_the_rescan(tmp_path):
-    rpc = _TxRpc([SIGNER])
+class _SignedTxRpc(_SigRpc):
+    """getTransaction for txs signed by ``signer_of(sig)``, each touching that signer and OTHER_ACCOUNT."""
+
+    def __init__(self, signer_of):
+        super().__init__([])
+        self.signer_of = signer_of
+
+    def get_transaction(self, sig):
+        self.tx_reads.append(sig)
+        message = {'header': {'numRequiredSignatures': 1}, 'accountKeys': [self.signer_of(sig), OTHER_ACCOUNT]}
+        return {'blockTime': NOW, 'transaction': {'message': message}, 'meta': {'logMessages': []}}
+
+
+OTHER_ACCOUNT = str(Keypair().pubkey())
+
+
+def test_one_signers_truncated_txs_do_not_use_up_another_signers_rereads(tmp_path):
+    rpc = _SignedTxRpc(lambda sig: OTHER if sig == 'victim' else SIGNER)
     feed, live, events, _ = _live_feed(tmp_path, rpc)
-    for i in range(TRUNCATED_REREADS_PER_HOUR + 5):
+    for i in range(130):  # past what one signer may have fully re-read in an hour
+        live.inbox.append(_Pending(9 + i, f'live-{i}', [], truncated=True))
+    live.inbox.append(_Pending(500, 'victim', [], truncated=True))
+    feed.tick(NOW)
+    records = {r.signature: r.fields for r in events.drain()}
+    assert records['victim'] == {'accounts': [OTHER, OTHER_ACCOUNT], 'signers': [OTHER]}
+    # Past its own budget a signer's txs still name the signer, whose own accounts the World re-reads.
+    assert records['live-129'] == {'accounts': [], 'signers': [SIGNER]}
+    assert sum(1 for f in records.values() if f['accounts']) == TRUNCATED_REREADS_PER_SIGNER_HOUR + 1
+
+
+def test_past_the_hourly_transaction_read_ceiling_a_truncated_tx_asks_for_a_rescan(tmp_path):
+    rpc = _SignedTxRpc(lambda sig: str(Keypair().pubkey()))  # a fresh signer every tx
+    feed, live, events, gaps = _live_feed(tmp_path, rpc)
+    gaps.drain()
+    for i in range(TRUNCATED_TX_READS_PER_HOUR + 5):
         live.inbox.append(_Pending(9 + i, f'live-{i}', [], truncated=True))
     feed.tick(NOW)
-    assert len(events.drain()) == TRUNCATED_REREADS_PER_HOUR
-    assert len(rpc.tx_reads) == TRUNCATED_REREADS_PER_HOUR
+    records = events.drain()
+    assert len(rpc.tx_reads) == TRUNCATED_TX_READS_PER_HOUR
+    assert [r.fields for r in records[-5:]] == [{'accounts': [], 'signers': []}] * 5
+    assert gaps.drain() == []  # not a history gap: scoring's ledgers are whole
 
 
 def test_a_truncated_backfilled_tx_is_named_from_the_tx_already_read(tmp_path):
@@ -124,3 +167,42 @@ def test_the_world_rereads_a_truncated_txs_accounts_and_types_them_itself(tmp_pa
     assert world.get('MinerQuote', quote_pda).rate == 9
     assert world.get('MinerQuote', foreign) is None
     assert world.get('Swap', held) is None
+
+
+def test_a_truncated_tx_rereads_its_signers_own_accounts(tmp_path):
+    client = _Client()
+    reader, events, _, _, out = _reader(client, tmp_path)
+    reader.tick(NOW)  # boot scan
+    events.publish(EventRecord('QuoteSet', _quote_fields(rate=5), 200, NOW, 'q'))
+    reader.tick(NOW)
+    quote = {k: v for k, v in _quote_fields(rate=9).items() if k != 'update_fee'}
+    client.put('MinerQuote', _quote_pda(), dict(quote, miner=bytes(MINER), bump=0))  # changed, its event cut off
+    client.slot = 300
+    events.publish(EventRecord(TX_LOGS_TRUNCATED, {'accounts': [], 'signers': [str(MINER)]}, 300, NOW, 't'))
+    reader.tick(NOW)
+    (_, (keys, _)) = client.rpc.calls[-1]
+    assert str(pdas.miner_state_pda(MINER)) in keys and str(pdas.binding_pda(MINER)) in keys
+    assert out.get()[0].get('MinerQuote', _quote_pda()).rate == 9
+
+
+def test_a_truncated_tx_naming_nothing_brings_the_rescan_forward(tmp_path):
+    client = _Client()
+    reader, events, *_ = _reader(client, tmp_path)
+    reader.tick(NOW)
+    scans = client.scans
+    client.lagging = (299, client.live)  # a node that has not seen the truncated tx refuses
+    events.publish(EventRecord(TX_LOGS_TRUNCATED, {'accounts': [], 'signers': []}, 300, NOW, 't'))
+    reader.tick(NOW + 1)
+    reader.tick(NOW + TRUNCATED_RESCAN_SECS - 1)
+    assert client.scans == scans  # at most one such rescan per interval
+    try:
+        reader.tick(NOW + TRUNCATED_RESCAN_SECS)
+    except TransientRpcError:
+        pass
+    assert client.scans == scans
+    client.lagging, client.slot = None, 300
+    reader.tick(NOW + TRUNCATED_RESCAN_SECS)
+    assert client.scans > scans and reader._scan_slot == 300
+    scans = client.scans
+    reader.tick(NOW + 2 * TRUNCATED_RESCAN_SECS)
+    assert client.scans == scans  # owed once, not forever

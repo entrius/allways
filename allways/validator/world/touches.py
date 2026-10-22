@@ -61,6 +61,9 @@ def touches(name: str, fields: Any, program_id: Optional[Any] = None) -> Touches
         return out
     if name == TX_LOGS_TRUNCATED:
         out.reads |= {(UNTYPED, str(pk)) for pk in fields.get('accounts') or ()}  # typed at read time
+        for signer in fields.get('signers') or ():  # the World adds the signer's other accounts it holds
+            out.reads |= _miner_reads(signer, _hubs({}), program_id)
+            out.reads.add(('Binding', str(pdas.binding_pda(signer, program_id))))
         return out
     if name in CONFIG_EVENTS:
         out.reads.add(('Config', str(pdas.config_pda(program_id))))
