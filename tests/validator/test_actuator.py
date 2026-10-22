@@ -167,3 +167,36 @@ def test_writes_pushed_into_the_shared_inbox_after_boot_are_sent():
     inbox.push(intent('vote_set_attestation', ('miner', 'tao'), None, NOW, payload=('miner', 'tao', 1, True, 1)))
     act.tick(NOW)
     assert sent == [('vote_set_attestation', ('miner', 'tao'))]
+
+
+def test_a_submitted_write_queued_behind_an_in_flight_one_is_sent_once_it_lands():
+    sent = []
+    act, rpc, world = _actuator([], sent)
+    act.queue.push(intent('vote_set_attestation', 'm', None, NOW, payload=('m', 'tao', 100, True, 7)))
+    act.tick(NOW)
+    # The relay nets a verdict: a new payload under the same key while the first is still in flight.
+    act.queue.push(intent('vote_set_attestation', 'm', None, NOW + 2, payload=('m', 'tao', 80, True, 7)))
+    world.set(_world(NOW + 2))
+    act.tick(NOW + 2)
+    assert len(sent) == 1 and len(act.queue) == 1  # held in the inbox, not dropped
+    rpc.statuses['sig-m'] = {'err': None, 'confirmationStatus': 'confirmed'}
+    world.set(_world(NOW + 4 + LANDED_HOLD_SECS))
+    act.tick(NOW + 4)  # the first lands
+    act.tick(NOW + 4 + LANDED_HOLD_SECS)
+    assert len(sent) == 2 and len(act.queue) == 0
+
+
+def test_a_submitted_write_that_failed_on_chain_is_retried_after_its_rest():
+    sent = []
+    act, rpc, world = _actuator([], sent)
+    act.queue.push(intent('vote_attest_heartbeat', 'config', None, NOW))
+    act.tick(NOW)
+    rpc.statuses['sig-config'] = {'err': {'InstructionError': [0, 'Custom']}}
+    act.tick(NOW + 2)
+    assert len(sent) == 1 and len(act.queue) == 1  # back in the inbox, resting
+    retry = ACTIONS['vote_attest_heartbeat'].retry_secs
+    world.set(_world(NOW + 2 + retry))
+    act.tick(NOW + 2 + retry - 1)
+    assert len(sent) == 1
+    act.tick(NOW + 2 + retry)
+    assert len(sent) == 2

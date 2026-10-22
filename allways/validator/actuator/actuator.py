@@ -104,8 +104,10 @@ class Actuator(Component):
             if i.not_before <= now and i.key not in self._in_flight and i.key not in self._resting
         ]
         for key, held in submitted.items():
-            if key in self._resting:
-                self.queue.requeue(held)  # submitted work exists only in the inbox: never drop it while it rests
+            # Submitted work exists only in the inbox: never drop it while it rests, or while an earlier
+            # write with its key is in flight (a newer payload goes out once that one resolves).
+            if key in self._resting or key in self._in_flight:
+                self.queue.requeue(held)
         due.sort(key=lambda i: (int(i.urgency), i.deadline))
         sent = 0
         for intent in due:
@@ -162,6 +164,11 @@ class Actuator(Component):
             self._done(sent.intent)
         for sent, err in resolved.failed:
             bt.logging.warning(f'actuator: {label(sent.intent)} failed on-chain: {err}')
+            # A planned intent is re-planned if still due; a submitted one rests, then goes back in.
+            if sent.intent.key in self._submitted:
+                action = ACTIONS.get(sent.intent.key[0])
+                self._resting[sent.intent.key] = now + (action.retry_secs if action is not None else 6.0)
+                self.queue.requeue(sent.intent)
             self._done(sent.intent)
         for sent in resolved.expired:
             bt.logging.warning(f'actuator: {label(sent.intent)} never landed, sending again')
