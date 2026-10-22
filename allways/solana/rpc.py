@@ -235,6 +235,24 @@ class SolanaRpc:
         res = self._call('getProgramAccounts', [str(program_id), cfg])
         return [(item['pubkey'], base64.b64decode(item['account']['data'][0])) for item in res]
 
+    def get_program_accounts_with_context(
+        self,
+        program_id,
+        disc8: Optional[bytes] = None,
+        min_context_slot: Optional[int] = None,
+        commitment: str = 'confirmed',
+    ) -> Tuple[int, List[Tuple[str, bytes]]]:
+        """``get_program_accounts`` plus the slot the node served it at. With ``min_context_slot`` a node
+        behind that slot refuses (retried as transient, then raised) instead of answering from older state."""
+        cfg: dict = {'encoding': 'base64', 'commitment': commitment, 'withContext': True}
+        if disc8 is not None:
+            cfg['filters'] = [{'memcmp': {'offset': 0, 'bytes': base58.b58encode(disc8).decode()}}]
+        if min_context_slot is not None:
+            cfg['minContextSlot'] = int(min_context_slot)
+        res = self._call('getProgramAccounts', [str(program_id), cfg])
+        accounts = [(item['pubkey'], base64.b64decode(item['account']['data'][0])) for item in res['value']]
+        return int(res['context']['slot']), accounts
+
     def get_slot(self, commitment: str = 'confirmed') -> int:
         return int(self._call('getSlot', [{'commitment': commitment}]))
 

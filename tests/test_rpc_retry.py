@@ -89,3 +89,18 @@ def test_confirm_tolerates_transient_status_read_then_confirms():
     rpc.get_signature_statuses = flaky
     assert rpc.confirm('sig', timeout=5, poll=0)['confirmationStatus'] == 'confirmed'
     assert calls['n'] == 3  # kept polling through the transient reads instead of raising
+
+
+def test_program_accounts_with_context_pins_the_slot_and_a_node_behind_it_raises():
+    behind = {'error': {'code': -32016, 'message': 'Minimum context slot has not been reached'}}
+    served = {'context': {'slot': 205}, 'value': [{'pubkey': 'P', 'account': {'data': ['AQI=', 'base64']}}]}
+    rpc = _rpc([_Resp(body=behind), _Resp(body=_ok(served))])
+    assert rpc.get_program_accounts_with_context('prog', disc8=b'\0' * 8, min_context_slot=200) == (
+        205,
+        [('P', b'\1\2')],
+    )
+    cfg = rpc._session.post.call_args.kwargs['json']['params'][1]
+    assert cfg['minContextSlot'] == 200 and cfg['withContext'] is True
+    rpc = _rpc([_Resp(body=behind)] * 5)
+    with pytest.raises(TransientRpcError):  # never falls back to an unpinned read
+        rpc.get_program_accounts_with_context('prog', min_context_slot=200)

@@ -44,7 +44,7 @@ _TYPE_OF = {layouts.DISCRIMINATORS[t]: t for t in (*ACCOUNT_TYPES, 'Config')}
 # With nothing changed, the World still saves this often, so its saved-at time stays fresh for a restore.
 SAVE_HEARTBEAT_SECS = 30
 # A full re-read this often, so a lost event (a dropped notification, an empty getTransaction) can't
-# leave an account stale for longer: ~7 getProgramAccounts an hour.
+# leave an account stale for longer: 8 getProgramAccounts an hour (one per type, and Config).
 RESCAN_SECS = 3600.0
 
 
@@ -252,36 +252,43 @@ class WorldReader(Component):
         return self._config is not None
 
     def _scan(self, routine: bool = False) -> None:
-        """Every account of every tracked type. The slot is read first, so everything the scan returns
-        is at least that new and older events must not overwrite it."""
+        """Every account of every tracked type. Each read must be served at or past the slot read first (a
+        node behind it refuses, and the scan fails whole and is retried); the scan then stands at the oldest
+        slot a read was served at. An account the World already holds from a newer slot is left as it is."""
         slot = int(self._client.rpc.get_slot())
         program_id = self._client.program_id
-        fresh: Dict[str, Dict[str, Any]] = {}
-        for name in ACCOUNT_TYPES:
-            fresh[name] = {}
-            for pda, raw in self._client.rpc.get_program_accounts(program_id, disc8=layouts.DISCRIMINATORS[name]):
-                fresh[name][str(pda)] = raw
         config_pda = str(pdas.config_pda(program_id))
-        config_raw = self._client.rpc.get_account_info(config_pda)
+        fresh: Dict[str, Tuple[int, Dict[str, bytes]]] = {}
+        for name in (*ACCOUNT_TYPES, 'Config'):
+            served_at, accounts = self._client.rpc.get_program_accounts_with_context(
+                program_id, disc8=layouts.DISCRIMINATORS[name], min_context_slot=slot
+            )
+            fresh[name] = (
+                int(served_at),
+                {str(pda): raw for pda, raw in accounts if name != 'Config' or str(pda) == config_pda},
+            )
+        scan_slot = min(served_at for served_at, _ in fresh.values())
         missed = 0
         for name, old in self._accounts.items():
-            for pda in set(old) - set(fresh[name]):
-                self._drop(name, pda, slot)
-                missed += 1
-            missed += len(set(fresh[name]) - set(old))
-        for name, accounts in fresh.items():
+            served_at, accounts = fresh[name]
+            for pda in set(old) - set(accounts):
+                if self._slot_of.get((name, pda), 0) <= served_at:
+                    self._drop(name, pda, served_at)
+                    missed += 1
+            missed += len(set(accounts) - set(old))
+        for name, (served_at, accounts) in fresh.items():
             for pda, raw in accounts.items():
-                self._put_raw(name, pda, raw, slot)
-        if config_raw is not None:
-            self._put_raw('Config', config_pda, config_raw, slot)
-        self._slot_of.clear()
-        self._scan_slot = slot
-        self._slot = max(self._slot, slot)
+                if self._slot_of.get((name, pda), 0) <= served_at:
+                    self._put_raw(name, pda, raw, served_at)
+        # Only a value newer than the scan still needs its own slot to guard it against older events.
+        self._slot_of = {key: at for key, at in self._slot_of.items() if at > scan_slot}
+        self._scan_slot = scan_slot
+        self._slot = max(self._slot, scan_slot)
         self._refresh_attribution()
         self._need_scan = False
         counts = ', '.join(f'{t}={len(v)}' for t, v in self._accounts.items())
         if not routine:
-            bt.logging.info(f'world: scanned at slot {slot}: {counts}')
+            bt.logging.info(f'world: scanned at slot {self._scan_slot}: {counts}')
         elif missed:
             bt.logging.warning(f'world: the hourly rescan found {missed} account(s) the events missed ({counts})')
         else:

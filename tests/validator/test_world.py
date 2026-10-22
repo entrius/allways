@@ -5,6 +5,7 @@ from solders.keypair import Keypair
 
 from allways.solana import layouts, pdas
 from allways.solana.events import EventRecord
+from allways.solana.rpc import TransientRpcError
 from allways.validator.feed.events import HISTORY_HORIZON_SECS, FeedStatus, HistoryGap
 from allways.validator.runtime.bus import Latest, Topic
 from allways.validator.store.db import Store
@@ -40,13 +41,20 @@ class _Rpc:
         return self.client.slot
 
     def get_program_accounts(self, program_id, disc8=None):
+        return self.get_program_accounts_with_context(program_id, disc8)[1]
+
+    def get_program_accounts_with_context(self, program_id, disc8=None, min_context_slot=None):
+        """Served from ``client.lagging`` (slot, accounts) when set: a load-balanced node behind the tip."""
+        slot, accounts = self.client.lagging or (self.client.slot, self.client.live)
+        if min_context_slot is not None and slot < min_context_slot:
+            raise TransientRpcError('getProgramAccounts: Minimum context slot has not been reached')
         self.client.scans += 1
         out = []
-        for pda, value in self.client.live.items():
+        for pda, value in accounts.items():
             raw = base64.b64decode(value['data'][0])
             if raw[:8] == disc8:
                 out.append((pda, raw))
-        return out
+        return slot, out
 
     def get_account_info(self, pda):
         value = self.client.live.get(str(pda))
@@ -66,6 +74,7 @@ class _Client:
         self.slot = 100
         self.live = {}
         self.scans = 0
+        self.lagging = None
         self.rpc = _Rpc(self)
         self._store(pdas.config_pda(), layouts.DISCRIMINATORS['Config'] + b'opaque')
 
@@ -368,3 +377,53 @@ def test_a_restored_world_marks_every_live_swaps_deposit_spent(tmp_path):
     again.tick(NOW)
     (held,) = out.get()[0].deposits.values()
     assert held.initiated
+
+
+# ── the hourly scan never trusts a node behind what the World already holds ──
+
+
+def _swap_held_from_slot(client, reader, slot):
+    """A swap the World read at ``slot`` (a claim the events named), live on the tip."""
+    swap_pda = str(pdas.swap_pda(bytes(range(32))))
+    client._store(swap_pda, layouts.DISCRIMINATORS['Swap'] + b'live')
+    reader._put_raw('Swap', swap_pda, layouts.DISCRIMINATORS['Swap'] + b'live', slot)
+    return swap_pda
+
+
+def _opaque_swaps(client):
+    decode = client._decode
+    client._decode = lambda name, raw: (
+        SimpleNamespace(status='PendingAttestation', from_tx_hash='ab' * 32) if name == 'Swap' else decode(name, raw)
+    )
+
+
+def test_a_scan_served_by_a_node_behind_its_slot_fails_and_keeps_the_world(tmp_path):
+    client = _Client()
+    _opaque_swaps(client)
+    reader, *_ = _reader(client, tmp_path)
+    reader.tick(NOW)
+    client.slot = 200
+    swap_pda = _swap_held_from_slot(client, reader, 190)
+    client.lagging = (180, {k: v for k, v in client.live.items() if k != swap_pda})  # created in the lag
+    try:
+        reader.tick(NOW + RESCAN_SECS)
+    except TransientRpcError:
+        pass  # the component backs off and ticks again
+    assert swap_pda in reader._accounts['Swap']
+    assert reader._scan_slot < 190  # nothing below the claim's slot is ignored yet
+    client.lagging = None  # the next attempt reaches a node at the tip
+    reader.tick(NOW + RESCAN_SECS + 1)
+    assert swap_pda in reader._accounts['Swap'] and reader._scan_slot == 200
+
+
+def test_a_scan_never_drops_an_account_read_after_its_context_slot(tmp_path):
+    client = _Client()
+    _opaque_swaps(client)
+    reader, *_ = _reader(client, tmp_path)
+    reader.tick(NOW)
+    client.slot = 200
+    swap_pda = _swap_held_from_slot(client, reader, 210)  # created at 205, read on a node at 210
+    client.lagging = (204, {k: v for k, v in client.live.items() if k != swap_pda})  # at the slot asked, not past it
+    reader.tick(NOW + RESCAN_SECS)
+    assert swap_pda in reader._accounts['Swap']
+    assert reader._scan_slot == 204  # the slot the scan's reads were served at, not the one asked for
