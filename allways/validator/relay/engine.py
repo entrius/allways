@@ -28,6 +28,7 @@ import bittensor as bt
 
 from allways import dev_signal
 from allways.constants import (
+    LOW_BALANCE_REMIND_SECS,
     RELAY_BALANCE_CHECK_SECS,
     RELAY_FEE_CADENCE_SECS,
     RELAY_HEARTBEAT_INTERVAL_SECS,
@@ -42,7 +43,7 @@ from allways.solana import pdas
 from allways.validator.relay import attestation as attestation_job
 from allways.validator.relay import exits, stop_point
 from allways.validator.relay import slash as slash_job
-from allways.validator.runtime.logs import Episodes
+from allways.validator.runtime.logs import Episodes, LowBalance
 from allways.validator.world.snapshot import World
 
 # Vault events that move a miner's bond or its books — each one makes that miner's attestation
@@ -151,7 +152,10 @@ class BondRelay:
         # Reads the vault's past settled counters, for a fresh fee ledger's stop point (see stop_point).
         self.archive = archive
         self._fee_stop_known = False
-        self._last_balance_check = 0.0
+        # Every vault vote needs ~0.075 TAO free up front.
+        self._low_balance = LowBalance(
+            'relay: vault signer', 'TAO', 1e9, RELAY_LOW_BALANCE_RAO, RELAY_BALANCE_CHECK_SECS, LOW_BALANCE_REMIND_SECS
+        )
 
     # ─── Solana, as the World holds it ───────────────────────────────────────
 
@@ -416,17 +420,10 @@ class BondRelay:
         return True
 
     def maybe_check_balance(self, now: int) -> None:
-        """Warn, hourly, when the vault signer is running out of TAO to vote with."""
-        if now - self._last_balance_check < RELAY_BALANCE_CHECK_SECS:
-            return
-        self._last_balance_check = now
+        """Warn when the vault signer is running out of TAO to vote with (see LowBalance for the cadence)."""
         reader = getattr(self.vault, 'signer_balance', None)
-        balance = reader() if reader is not None else None
-        if balance is not None and balance < RELAY_LOW_BALANCE_RAO:
-            bt.logging.warning(
-                f'relay: vault signer has {balance / 1e9:.4f} TAO free — top it up, every vault vote '
-                f'needs ~0.075 TAO free up front'
-            )
+        if reader is not None:
+            self._low_balance.maybe_check(now, reader)
 
     def _prune(self, now: int) -> None:
         try:

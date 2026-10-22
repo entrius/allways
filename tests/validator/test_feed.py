@@ -212,3 +212,30 @@ def test_a_notification_the_live_socket_dropped_is_recovered_by_the_next_sweep(t
     assert gaps.drain() == []
     feed.tick(NOW + 30 + 2 * SWEEP_SECS)
     assert events.drain() == [] and rpc.tx_reads == [sigs[1]]  # the overlap re-lists, never re-decodes
+
+
+def test_a_long_catch_up_announces_its_size_and_logs_progress_until_done(tmp_path, monkeypatch):
+    lines = []
+    monkeypatch.setattr(events_mod.bt.logging, 'info', lambda m, *a, **k: lines.append(m))
+    rpc = _SigRpc(_history(5000, spacing=10))
+    feed, _, _ = _feed(tmp_path, rpc, _FakeLive())
+    feed.setup()
+    t = NOW
+    while feed._backfill is not None:
+        feed.tick(t)
+        t += 30
+    total = HISTORY_HORIZON_SECS // 10 + 1
+    assert lines[0] == f'feed: catching up on {total} transaction(s) of history'
+    progress = [m for m in lines if 'decoded' in m]
+    assert progress and all(f'of {total} transaction(s) decoded' in m for m in progress)
+
+
+def test_a_reconnect_with_a_few_missed_transactions_logs_no_catch_up(tmp_path, monkeypatch):
+    lines = []
+    monkeypatch.setattr(events_mod.bt.logging, 'info', lambda m, *a, **k: lines.append(m))
+    history = _history(500, spacing=10)
+    feed, _, _ = _feed(tmp_path, _SigRpc(history), _FakeLive(), resume=history[10]['signature'])
+    feed.setup()
+    for i in range(5):
+        feed.tick(NOW + i)
+    assert not any('catching up' in m for m in lines)

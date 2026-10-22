@@ -35,6 +35,9 @@ HISTORY_HORIZON_SECS = 13 * 3600
 BACKFILL_PAGES_PER_TICK = 5
 BACKFILL_DECODES_PER_TICK = 300
 SEEN_SIGNATURES = 50_000
+# While a catch-up decodes history, its progress is logged this often.
+BACKFILL_PROGRESS_SECS = 60.0
+BACKFILL_ANNOUNCE_MIN = 50
 # Solana slots are ~0.4s; between two block-time anchors the feed interpolates.
 SLOT_ANCHOR_SECS = 30.0
 SLOT_SECS = 0.4
@@ -233,6 +236,7 @@ class Backfill:
         self._paged: List[dict] = []
         self._queue: List[dict] = []
         self.paging_done = False
+        self.total = 0  # transactions to decode, known once paging is done
 
     def page(self, max_pages: int = BACKFILL_PAGES_PER_TICK) -> None:
         for _ in range(max_pages):
@@ -255,6 +259,11 @@ class Backfill:
         self._queue = list(reversed(self._paged))
         self._paged = []
         self.paging_done = True
+        self.total = len(self._queue)
+
+    @property
+    def remaining(self) -> int:
+        return len(self._queue)
 
     def peek(self, limit: Optional[int] = BACKFILL_DECODES_PER_TICK) -> List[dict]:
         """The next entries, oldest first. Each stays queued until ``pop``: a failure resumes at it."""
@@ -307,6 +316,7 @@ class EventFeed(Component):
         self._last_event_at = 0.0
         self._empty_tries: dict = {}
         self._recovered = 0  # events the current backfill published
+        self._progress_at = 0.0  # when catch-up progress was last logged
         # The sweep lists back to ``_sweep_until`` (the newest signature the sweep before last listed): one
         # sweep of overlap, so a signature that became visible late is still inside the next listing.
         self._sweep_until: Optional[str] = None
@@ -401,6 +411,9 @@ class EventFeed(Component):
                 return
             if bf.truncated:
                 self.gaps.publish(HistoryGap(bf.floor))
+            if bf.total >= BACKFILL_ANNOUNCE_MIN:  # a reconnect's few missed txs are not a catch-up worth naming
+                bt.logging.info(f'feed: catching up on {bf.total} transaction(s) of history')
+                self._progress_at = now
         for entry in bf.peek():
             sig, slot = entry['signature'], int(entry.get('slot') or 0)
             if entry.get('err') is None and sig not in self.seen:
@@ -410,6 +423,9 @@ class EventFeed(Component):
                 self._recovered += published
             self._cursor = (slot, sig)
             bf.pop()
+        if bf.total >= BACKFILL_ANNOUNCE_MIN and not bf.done and now - self._progress_at >= BACKFILL_PROGRESS_SECS:
+            self._progress_at = now
+            bt.logging.info(f'feed: catching up — {bf.total - bf.remaining} of {bf.total} transaction(s) decoded')
         if bf.done:
             # A resubscribe on a quiet socket backfills nothing; only a recovery is news.
             log = bt.logging.info if self._recovered else bt.logging.debug

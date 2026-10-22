@@ -65,15 +65,21 @@ class SwapMemory:
             c.execute('INSERT OR REPLACE INTO actuator_collateral VALUES (?, ?, ?, ?, ?)', (*key, int(ok)))
 
     def prune(self, now: int) -> None:
+        """Past the history horizon: no swap that could still ask is that old (a collateral verdict is keyed
+        by its reservation's fill time)."""
         floor = now - HISTORY_HORIZON_SECS
         stale = [k for k, (_, seen) in self.deliveries.items() if seen < floor]
-        if not stale:
+        old_verdicts = [k for k in self.collateral if k[2] < floor]
+        if not stale and not old_verdicts:
             return
         for k in stale:
             del self.deliveries[k]
+        for k in old_verdicts:
+            del self.collateral[k]
         self.delivered = {k for _, k in self.deliveries}
         with self.store.tx() as c:
             c.execute('DELETE FROM actuator_deliveries WHERE seen_at < ?', (floor,))
+            c.execute('DELETE FROM actuator_collateral WHERE created_at < ?', (floor,))
 
 
 class WorldContext:

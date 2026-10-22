@@ -2,7 +2,7 @@
 
 from __future__ import annotations
 
-from typing import Callable, Dict, Hashable
+from typing import Callable, Dict, Hashable, Optional
 
 import bittensor as bt
 
@@ -24,3 +24,49 @@ class Episodes:
 
     def is_open(self, key: Hashable) -> bool:
         return key in self._open
+
+
+class LowBalance:
+    """Warns when a signing wallet runs low: once on the way down, again every ``remind_secs`` while it stays
+    low, and once when a top-up clears it (with headroom, so a balance hovering at the line doesn't flap).
+    Reads at most every ``check_secs``; ``recheck`` asks for a read on the next call (a send that failed for
+    want of funds), so a drained wallet is named at once without polling it more often."""
+
+    def __init__(
+        self,
+        label: str,
+        unit: str,
+        scale: float,
+        low: int,
+        check_secs: float,
+        remind_secs: float,
+        clear_ratio: float = 1.2,
+    ) -> None:
+        self.label, self.unit, self.scale, self.low = label, unit, scale, low
+        self.check_secs, self.remind_secs, self.clear_ratio = check_secs, remind_secs, clear_ratio
+        self._next_read = 0.0
+        self._warned_at: Optional[float] = None  # set while low
+
+    def recheck(self) -> None:
+        self._next_read = 0.0
+
+    def maybe_check(self, now: float, read: Callable[[], Optional[int]]) -> None:
+        if now < self._next_read:
+            return
+        self._next_read = now + self.check_secs
+        try:
+            balance = read()
+        except Exception:
+            return  # unreadable is not low; the next read decides
+        if balance is None:
+            return
+        shown = f'{balance / self.scale:.4f} {self.unit}'
+        if balance < self.low:
+            if self._warned_at is None or now - self._warned_at >= self.remind_secs:
+                self._warned_at = now
+                bt.logging.warning(
+                    f'{self.label} has {shown} — top it up (warns under {self.low / self.scale:g} {self.unit})'
+                )
+        elif self._warned_at is not None and balance >= self.low * self.clear_ratio:
+            self._warned_at = None
+            bt.logging.info(f'{self.label} topped up: {shown}')

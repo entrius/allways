@@ -11,13 +11,14 @@ from typing import Any, Callable, Dict, Iterable, Optional, Protocol, Set, Tuple
 
 import bittensor as bt
 
+from allways.constants import LOW_BALANCE_REMIND_SECS, VOTER_BALANCE_CHECK_SECS, VOTER_LOW_BALANCE_LAMPORTS
 from allways.validator.actuator.executors import StaleWorld
 from allways.validator.actuator.planners import ACTIONS
 from allways.validator.chain.confirm import ConfirmTracker
 from allways.validator.runtime.bus import Latest
 from allways.validator.runtime.component import Component
 from allways.validator.runtime.deadline_queue import DeadlineQueue, Intent
-from allways.validator.runtime.logs import Episodes
+from allways.validator.runtime.logs import Episodes, LowBalance
 from allways.validator.world.snapshot import World
 
 # A World older than this is too stale to decide deadline-bound actions on; the actuator waits instead.
@@ -72,6 +73,15 @@ class Actuator(Component):
         self._submitted: Set[Tuple[Any, ...]] = set()  # in-flight keys that came from the inbox
         self._resting: Dict[Tuple[Any, ...], float] = {}  # key → when a send that went nowhere may be retried
         self._episodes = Episodes()
+        self._caught_up: Optional[bool] = None  # last logged readiness: attest/confirm wait while the ledgers catch up
+        self._low_balance = LowBalance(
+            'actuator: Solana voting key',
+            'SOL',
+            1e9,
+            VOTER_LOW_BALANCE_LAMPORTS,
+            VOTER_BALANCE_CHECK_SECS,
+            LOW_BALANCE_REMIND_SECS,
+        )
 
     def setup(self) -> None:
         self._client = self._client_factory()
@@ -86,6 +96,8 @@ class Actuator(Component):
             self._episodes.start('world', f'actuator: the World is {now - world.taken_at:.0f}s old, holding sends')
             return
         self._episodes.end('world', 'actuator: World current, sending')
+        self._log_readiness(world)
+        self._low_balance.maybe_check(now, self._balance)
         planned: Dict[Tuple[Any, ...], Intent] = {}
         for planner in self.planners:
             try:
@@ -147,12 +159,29 @@ class Actuator(Component):
             return NOOP
         except Exception as e:
             bt.logging.warning(f'actuator: {label(intent)} send failed: {e}')
+            if _out_of_funds(e):
+                self._low_balance.recheck()
             return FAILED  # the planner re-plans it next tick if still due
         if not signature:
             return NOOP
         self.confirms.track(signature, intent, now)
         self._in_flight.add(intent.key)
         return SENT
+
+    def _log_readiness(self, world: World) -> None:
+        """One line each way: the ledger-reading votes (attest, confirm) wait while the feed catches up on
+        history, so an operator can tell a validator that is still catching up from one ready to vote."""
+        if world.complete == self._caught_up:
+            return
+        self._caught_up = world.complete
+        if world.complete:
+            bt.logging.info('actuator: caught up on history — attest and confirm votes enabled')
+        else:
+            bt.logging.info('actuator: catching up on history — attest and confirm votes held until it completes')
+
+    def _balance(self) -> Optional[int]:
+        client = self._client
+        return None if client is None else int(client.rpc.get_balance(client.keypair.pubkey()))
 
     def _settle(self, now: float) -> None:
         if not self.confirms.pending():
@@ -164,6 +193,8 @@ class Actuator(Component):
             self._done(sent.intent)
         for sent, err in resolved.failed:
             bt.logging.warning(f'actuator: {label(sent.intent)} failed on-chain: {err}')
+            if _out_of_funds(err):
+                self._low_balance.recheck()
             # A planned intent is re-planned if still due; a submitted one rests, then goes back in.
             if sent.intent.key in self._submitted:
                 action = ACTIONS.get(sent.intent.key[0])
@@ -190,3 +221,9 @@ def label(intent: Intent) -> str:
     if isinstance(subject, (tuple, list)):
         subject = '/'.join(str(part)[:16] for part in subject)
     return f'{kind} {str(subject)[:16]}'.rstrip()
+
+
+def _out_of_funds(err: Any) -> bool:
+    """A send or landed tx refused for want of lamports (not a program error such as InsufficientCollateral)."""
+    text = str(err).lower()
+    return any(m in text for m in ('insufficient funds', 'insufficient lamports', 'no record of a prior credit'))

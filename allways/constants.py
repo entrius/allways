@@ -317,6 +317,12 @@ RELAY_FEE_SETTLE_GRACE_SECS = 120
 # per call; below this the relay warns, hourly.
 RELAY_LOW_BALANCE_RAO = 500_000_000
 RELAY_BALANCE_CHECK_SECS = 3600
+# The Solana key every program vote is signed with. A vote costs ~5,000 lamports, and the first voter of a
+# round also fronts its rent until the last voter's close refunds it, so this covers many rounds.
+VOTER_LOW_BALANCE_LAMPORTS = 100_000_000
+VOTER_BALANCE_CHECK_SECS = 3600
+# While a signing wallet stays low, its warning repeats this often (once on the way down, then reminders).
+LOW_BALANCE_REMIND_SECS = 6 * 3600
 # Slow continuous vault↔attestation repair loop (crash-between-paired-writes, missed refreshes):
 # after the boot audit, every bound miner is re-checked once per interval, a few per forward step.
 RELAY_RECONCILE_INTERVAL_SECS = 900
