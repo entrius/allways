@@ -311,3 +311,19 @@ class TestDepositScanner:
         assert provider.find_recent_outgoing(RECIPIENT, RECIPIENT, 1) is None
         # Never leap a block the scan could not read — the deposit in it must stay reachable.
         assert provider.scan_cursors[(RECIPIENT.lower(), RECIPIENT.lower(), 1)] == 10_000 - MAX_WALK_BLOCKS
+
+
+class TestNullQuorum:
+    def test_receipt_and_block_nulls_seek_quorum(self, provider):
+        # 2026-10-22, #3901: a null receipt from the first rung was believed without asking the fallbacks.
+        # Both the receipt and the block read must now carry the same null-quorum rule as the tx lookup.
+        seen = {}
+        responses = mined_responses()
+
+        def fake_rpc(method, params, timeout=15, **kw):
+            seen[method] = kw.get('null_needs_quorum', False)
+            return responses[method]
+
+        provider.chain.eth_rpc = fake_rpc
+        assert provider.fetch_matching_tx(TX, RECIPIENT, 10**18) is not None
+        assert seen['eth_getTransactionReceipt'] is True and seen['eth_getBlockByNumber'] is True
