@@ -33,8 +33,9 @@ def _refusal_call(signature: str) -> tuple[str, bool]:
 
 
 # transfer() runs contract code (~65k for Circle's FiatToken) — cap bounds the miner's
-# gas spend against a pathological estimate without pinching the real cost.
-MAX_TOKEN_TRANSFER_GAS = 150_000
+# gas spend against a pathological estimate without pinching the real cost. A first-time
+# holder costs far more where new storage is priced up: Sepolia estimates ~154k (×1.2 ≈ 185k).
+MAX_TOKEN_TRANSFER_GAS = 200_000
 # Floor and estimator-down fallback: covers FiatToken's worst case while staying under the cap.
 DEFAULT_TOKEN_TRANSFER_GAS = 120_000
 
