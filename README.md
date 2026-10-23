@@ -295,9 +295,6 @@ every 5 minutes and moves back once it answers. On mainnet, pair a finney fallba
 failover. The neurons and `alw` both honour them; endpoints are logged with any key redacted. See
 `.env.example`.
 
-The dev environment in `alw-utils/dev-environment` provisions a local chain
-automatically — no manual lite-node step is required there.
-
 ## License
 
 MIT License
