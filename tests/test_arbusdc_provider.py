@@ -404,7 +404,7 @@ class TestSendGuards:
 
     def test_absurd_gas_estimate_refused(self, provider, monkeypatch):
         monkeypatch.setenv('ARB_PRIVATE_KEY', TEST_KEY)
-        rpc_stub(provider, self._send_responses(est=hex(200_000)))  # ×1.2 > 150k cap
+        rpc_stub(provider, self._send_responses(est=hex(200_000)))  # ×1.2 > 200k cap
         assert provider.send_amount(RECIPIENT, AMOUNT) is None
 
     def test_low_gas_estimate_raised_to_floor(self, provider):
