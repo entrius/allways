@@ -6,6 +6,8 @@ Native cross-chain transactions for programs that hold one asset and need to pay
 
 [![Twitter](https://img.shields.io/twitter/follow/allways_io?style=social)](https://x.com/allways_io)
 
+**Links:** [Website](https://all-ways.io) · [App and API (Allways Access)](https://allways.venturalabs.ai) · [Docs](https://docs.all-ways.io) · Agent quickstarts: [protocol](https://all-ways.io/llms.txt), [API](https://allways.venturalabs.ai/llms.txt)
+
 ## Overview
 
 Allways is a settlement layer built to be driven by software. An agent or application that holds SOL, TAO, BTC, or any supported asset submits a single swap and receives the destination asset natively in its own wallet — no account, no custodian, no bridge in the path. Allways creates a verification layer above independent systems: miners complete transactions, validators independently verify both legs on-chain, and a smart contract enforces outcomes through collateral and slashing.
