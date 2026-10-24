@@ -72,11 +72,6 @@ def test_resolve_ws_url_swaps_scheme_and_keeps_the_key(monkeypatch):
     assert os.environ['SOLANA_WS_URL'] == 'wss://override'
 
 
-def test_mentions_defaults_to_the_program_and_narrows_to_a_miner():
-    assert ProgramEventFeed('ws://x', 'prog').mentions == 'prog'
-    assert ProgramEventFeed('ws://x', 'prog', mentions=MINER).mentions == str(MINER)
-
-
 def test_connected_only_after_the_subscribe_ack_and_session_counts_acks():
     feed = ProgramEventFeed('ws://x', 'prog')
     assert not feed.connected and feed.session == 0

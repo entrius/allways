@@ -2,7 +2,7 @@ import os
 import re
 from collections import OrderedDict
 from dataclasses import dataclass
-from typing import Any, Dict, Mapping, Optional, Tuple
+from typing import Any, Dict, Hashable, List, Mapping, Optional, Tuple
 from urllib.parse import urlparse
 
 import bittensor as bt
@@ -11,7 +11,7 @@ from eth_account import Account
 from eth_account.messages import encode_defunct
 from eth_utils import is_checksum_address
 
-from allways.assets.asset import Asset, ProviderUnreachableError
+from allways.assets.asset import Asset, ProviderUnreachableError, SendResult, TransactionInfo
 from allways.assets.chain import Chain, canonical_hex_tx_hash
 
 _HEX_ADDR_RE = re.compile(r'0x[0-9a-fA-F]{40}')
@@ -350,6 +350,12 @@ class EvmChain(Chain):
             raise ConnectionError(f'Cannot reach {self.network_def.label} RPC: {e}') from e
         return chain_id, tip
 
+    def share_key(self) -> Optional[Hashable]:
+        return (EvmChain, *self.probe_key)
+
+    def http_sessions(self) -> List[Any]:
+        return [self.http]
+
     def get_current_block_height(self) -> Optional[int]:
         try:
             return int(self.eth_rpc('eth_blockNumber', [], timeout=10), 16)
@@ -417,9 +423,17 @@ class EvmChain(Chain):
             return False
 
 
+# What a leg's matcher finds: (provable sender, amount paid to the expected recipient).
+Match = Tuple[str, int]
+
+
 class EvmAsset(Asset):
-    """Base for assets on EVM chains: key handling, send dedup ladder, deposit-scan
-    cursors, the settled-tx cache, and the connection check scaffold.
+    """Base for assets on EVM chains: key handling, the by-hash read and the settled-tx cache,
+    the send path and its dedup ladder, deposit-scan cursors, and the connection check scaffold.
+
+    A coin and a token differ only in how a payment shows up — the tx's own ``value`` versus a
+    Transfer log — and in what a transfer costs and refuses. Those are the hooks: ``_tx_match``,
+    ``_receipt_match`` and ``_transfer_fields``.
 
     Chain questions route through ``self.chain`` (seam rule): every EVM asset, coin or
     token, binds ``self._chain`` to its host network's `EvmChain` at construction. Env
@@ -436,7 +450,6 @@ class EvmAsset(Asset):
         # Asset-scoped log tag (the wire id). Transport lines carry the CHAIN's tag instead —
         # one Arbitrum ladder serves every Arbitrum asset, so the two must stay distinguishable.
         self._log = f'[{self.chain_def.id}]'
-        self.last_send_error: Optional[str] = None
         # Settled-tx cache, keyed tx_hash → immutable per-block facts. A mined tx's receipt
         # and its block's timestamp are immutable per block hash, so the validator's 12s
         # re-verify pays 1 RPC instead of 3 — parity with BTC's single /tx. Reorg-safe: an
@@ -451,10 +464,6 @@ class EvmAsset(Asset):
         self.scan_cursors: dict[Tuple[str, str, int], int] = {}
         self.SCAN_LOOKBACK_BLOCKS = max(1, SCAN_LOOKBACK_SECS // self.chain_def.seconds_per_block)
 
-    def _send_error(self, msg: str) -> None:
-        self.last_send_error = msg
-        bt.logging.error(msg)
-
     def describe(self) -> str:
         chain = self.chain
         hosts = ', '.join(urlparse(base).netloc or base for base in chain.rpc_bases)
@@ -466,7 +475,7 @@ class EvmAsset(Asset):
         return acct is not None and norm(acct.address) == norm(address)
 
     def check_connection(
-        self, require_send: bool = True, checked: Optional[Dict[tuple, Optional[Exception]]] = None
+        self, require_send: bool = True, checked: Optional[Dict[Hashable, Optional[Exception]]] = None
     ) -> None:
         """``checked`` (``EvmChain.probe_key`` → its probe's error, None = passed) lets every asset on one network
         share one probe, as ``Tao.check_connection`` does for a subtensor: Ethereum hosts five assets, each with an
@@ -529,3 +538,251 @@ class EvmAsset(Asset):
         self.scan_cursors[key] = height
         if len(self.scan_cursors) > self._MAX_SCAN_CURSORS:
             self.scan_cursors.pop(next(iter(self.scan_cursors)))
+
+    # --- Verification ---
+
+    # A coin transfer is fully described by its tx (from/to/value), so it is matched off the tx even once
+    # mined; a token transfer only by its calldata while pending, and by its receipt's Transfer log once mined.
+    _MATCHES_ON_TX = False
+
+    def _tx_match(self, tx_hash: str, tx: dict, recipient: str, amount: int) -> Optional[Match]:
+        """The match read off the tx object alone, else None (logging why)."""
+        raise NotImplementedError
+
+    def _receipt_match(self, tx_hash: str, receipt: dict, recipient: str, amount: int) -> Optional[Match]:
+        """The match read off a status-1 receipt, else None (logging why). Unused when ``_MATCHES_ON_TX``."""
+        raise NotImplementedError
+
+    def fetch_matching_tx(
+        self,
+        tx_hash: str,
+        expected_recipient: str,
+        expected_amount: int,
+        block_hint: int = 0,
+        max_scan_blocks: int = 150,  # unused — eth_getTransactionByHash is an O(1) index
+    ) -> Optional[TransactionInfo]:
+        """Look up a tx by hash and match recipient + amount.
+
+        Inclusion is not settlement (the TAO lesson): a mined tx can still have reverted, so a mined
+        match requires ``eth_getTransactionReceipt`` status 1 before it counts. A mined tx whose
+        receipt or timestamp can't be read is 'unknown', never 'absent' — that raises
+        ProviderUnreachableError rather than risking a false slash verdict. Expecteds arrive
+        canonicalized (verify_transaction) — only on-chain values normalize here.
+        """
+        prefix = self.chain_def.env_prefix
+        try:
+            tx = self.chain.eth_rpc('eth_getTransactionByHash', [tx_hash], null_needs_quorum=True)
+        except Exception as e:
+            raise ProviderUnreachableError(f'{prefix} RPC unreachable: {e}') from e
+        if tx is None:
+            bt.logging.debug(f'{self._log} tx {tx_hash[:16]}... not found')
+            return None
+
+        pending = tx.get('blockNumber') is None
+        match = None
+        if pending or self._MATCHES_ON_TX:
+            match = self._tx_match(tx_hash, tx, expected_recipient, expected_amount)
+            if match is None:
+                return None
+        if pending:
+            # In the mempool: a valid match, just not mined yet — callers queue and retry.
+            sender, amount = match
+            return TransactionInfo(
+                tx_hash=tx_hash,
+                confirmed=False,
+                sender=sender,
+                recipient=expected_recipient,
+                amount=amount,
+                block_number=None,
+                confirmations=0,
+                block_time=None,
+            )
+
+        # Cache hit: the fresh tx fetch reports the same blockHash a fully-settled read was cached
+        # under, so its receipt/log/timestamp are immutable — skip the receipt+block RPCs (2 of the 3
+        # calls on the validator's 12s re-verify path). The blockHash equality IS the canonical-
+        # continuity check: a reorg changes it → miss → full refetch below. A match that lives in the
+        # receipt (a token's Transfer log) must also be THIS leg's: a cached settled read must never
+        # vouch for a different recipient's claim on the same tx hash. Mismatch → full refetch, whose
+        # log scan gives the authoritative reject.
+        tx_block_hash = tx.get('blockHash') or ''
+        cached = self._settled_cache.get(tx_hash)
+        if (
+            cached is not None
+            and tx_block_hash
+            and cached['block_hash'] == tx_block_hash
+            and (
+                match is not None or (cached['recipient'] == expected_recipient and cached['amount'] >= expected_amount)
+            )
+        ):
+            match = match or (cached['sender'], cached['amount'])
+            block_number = cached['block_number']
+            block_time = cached['block_time']
+        else:
+            # A null receipt for a mined tx is one node's lag, not a fact: ask the remaining endpoints before
+            # concluding "unavailable" (one lagging node would otherwise stall the leg, fallbacks never asked).
+            try:
+                receipt = self.chain.eth_rpc('eth_getTransactionReceipt', [tx_hash], null_needs_quorum=True)
+            except Exception as e:
+                raise ProviderUnreachableError(f'{prefix} receipt fetch failed for {tx_hash[:16]}...: {e}') from e
+            if receipt is None:
+                raise ProviderUnreachableError(f'{prefix} tx {tx_hash[:16]}... is mined but its receipt is unavailable')
+            if int(receipt.get('status') or '0x0', 16) != 1:
+                bt.logging.warning(f'{self._log} tx {tx_hash[:16]}... reverted (status 0) — moved no funds, rejecting')
+                return None
+            if match is None:
+                match = self._receipt_match(tx_hash, receipt, expected_recipient, expected_amount)
+                if match is None:
+                    return None
+            block_number = int(receipt['blockNumber'], 16)
+
+            # The freshness gate fails closed on a missing block_time, so an unreadable
+            # timestamp must be 'unknown' (raise), never a verdict — same as the receipt above.
+            try:
+                block = self.chain.eth_rpc('eth_getBlockByNumber', [hex(block_number), False], null_needs_quorum=True)
+            except Exception as e:
+                raise ProviderUnreachableError(f'{prefix} block fetch failed for {tx_hash[:16]}...: {e}') from e
+            block_time = int((block or {}).get('timestamp') or '0x0', 16) or None
+            if block_time is None:
+                raise ProviderUnreachableError(
+                    f'{prefix} tx {tx_hash[:16]}... is mined but block {block_number} has no readable timestamp'
+                )
+            # The block at that height is no longer the one the receipt names: a reorg landed between the two
+            # reads, or the reads came from endpoints on different forks. Either clears on a later read, so it
+            # is 'unknown' (raise) — never "no such payment", which can end a swap an honest miner paid.
+            if block.get('hash') and block['hash'] != receipt.get('blockHash'):
+                raise ProviderUnreachableError(
+                    f'{prefix} tx {tx_hash[:16]}... receipt names block {receipt.get("blockHash")} but block '
+                    f'{block_number} reads {block["hash"]} — reorg or endpoint disagreement, retrying'
+                )
+
+            # Cache only a fully-settled, internally-consistent read (status 1, timestamped,
+            # tx/receipt agree on the block hash) — pending/absent/reverted are never cached.
+            receipt_block_hash = receipt.get('blockHash') or ''
+            if receipt_block_hash and (not tx_block_hash or tx_block_hash == receipt_block_hash):
+                self._settled_cache[tx_hash] = {
+                    'block_hash': receipt_block_hash,
+                    'block_number': block_number,
+                    'block_time': block_time,
+                    'sender': match[0],
+                    'recipient': expected_recipient,
+                    'amount': match[1],
+                }
+                while len(self._settled_cache) > self._SETTLED_CACHE_MAX:
+                    self._settled_cache.popitem(last=False)
+
+        sender, amount = match
+        tip = self.chain.cached_block_height()
+        confirmations = max(0, tip - block_number + 1) if tip is not None else 0
+        return TransactionInfo(
+            tx_hash=tx_hash,
+            confirmed=confirmations >= self.chain_def.min_confirmations,
+            sender=sender,
+            recipient=expected_recipient,
+            amount=amount,
+            block_number=block_number,
+            confirmations=confirmations,
+            block_time=block_time,
+        )
+
+    # --- Send ---
+
+    def _transfer_fields(self, from_addr: str, to_address: str, amount: int, max_fee: int) -> Optional[dict]:
+        """The ``to``/``value``/``data``/``gas`` of the transfer, once its balances and gas check out; None
+        (after ``_send_error``) when it must not be sent."""
+        raise NotImplementedError
+
+    def send_amount(
+        self, to_address: str, amount: int, from_address: Optional[str] = None, dedup_key: Optional[str] = None
+    ) -> SendResult:
+        """Send ``amount`` (smallest unit) as a type-2 (EIP-1559) tx signed with {PREFIX}_PRIVATE_KEY.
+
+        ``from_address`` (the miner's committed address) must match the key — validators enforce
+        sender == committed address, so sending from any other key is a wasted tx. Returns
+        (tx_hash, 0) or None, with the reason in ``last_send_error``.
+        """
+        self.last_send_error = None
+        prefix, unit = self.chain_def.env_prefix, self.chain_def.native_unit
+        norm = self.chain.normalize_address
+        acct = self.chain._account()
+        if acct is None:
+            self._send_error(f'{self.chain._key_env} not set or unusable')
+            return None
+        if from_address and norm(acct.address) != norm(from_address):
+            self._send_error(
+                f'{prefix} key derives {acct.address} but committed address is {from_address} — key mismatch'
+            )
+            return None
+
+        head = self.chain.get_current_block_height()
+        if head is None:
+            self._send_error('cannot read the chain head to scope send dedup — not sending')
+            return None
+
+        try:
+            # A prior own broadcast for THIS obligation blocks a fresh send unless provably
+            # absent from every endpoint — probing by hash sees the mempool; never pay twice.
+            want = (norm(to_address), int(amount), dedup_key or '')
+            try:
+                prior = self._prior_broadcast(want, head)
+            except Exception as e:
+                self._send_error(f'prior broadcast unresolved ({e}) — refusing a possible double send')
+                return None
+            if prior:
+                bt.logging.info(f'Reusing prior tx {prior} from {acct.address} → {to_address} ({amount} {unit})')
+                return (prior, 0)
+
+            latest = self.chain.eth_rpc('eth_getBlockByNumber', ['latest', False])
+            base_fee = int((latest or {}).get('baseFeePerGas') or '0x0', 16)
+            try:
+                tip_fee = int(self.chain.eth_rpc('eth_maxPriorityFeePerGas', []), 16)
+            except Exception:
+                tip_fee = FALLBACK_PRIORITY_FEE_WEI
+            # A chain that enforces a tip floor rejects anything under it outright, and the failure
+            # repeats identically on every retry — clamp rather than sign an unbroadcastable tx.
+            tip_fee = max(tip_fee, self.chain.network_def.min_priority_fee_wei)
+            # 2× base fee absorbs six consecutive maximally-full blocks before the cap binds.
+            max_fee = 2 * base_fee + tip_fee
+
+            fields = self._transfer_fields(acct.address, to_address, amount, max_fee)
+            if fields is None:
+                return None
+
+            nonce = int(self.chain.eth_rpc('eth_getTransactionCount', [acct.address, 'pending']), 16)
+            signed = Account.sign_transaction(
+                {
+                    'chainId': self.chain.chain_id,
+                    'nonce': nonce,
+                    **fields,
+                    'maxFeePerGas': max_fee,
+                    'maxPriorityFeePerGas': tip_fee,
+                },
+                acct.key,
+            )
+            expected_txid = signed.hash.hex()
+            expected_txid = expected_txid if expected_txid.startswith('0x') else f'0x{expected_txid}'
+            # Record pre-broadcast so a retry can reclaim it even if the response is lost.
+            self.broadcasted_txids[expected_txid] = (*want, head)
+
+            raw = getattr(signed, 'raw_transaction', None) or getattr(signed, 'rawTransaction')
+            raw_hex = raw.hex()
+            raw_hex = raw_hex if raw_hex.startswith('0x') else f'0x{raw_hex}'
+            try:
+                tx_hash = self.chain.eth_rpc('eth_sendRawTransaction', [raw_hex], timeout=30)
+            except Exception as broadcast_err:
+                # The tx may have been accepted anyway — check before declaring failure.
+                try:
+                    probe = self.chain.eth_rpc('eth_getTransactionByHash', [expected_txid], null_needs_quorum=True)
+                    if probe is not None:
+                        return (expected_txid, 0)
+                except Exception:
+                    pass
+                self._send_error(f'{prefix} broadcast failed: {broadcast_err}')
+                return None
+
+            bt.logging.info(f'{self._log} sent {amount} {unit} to {to_address} (tx: {tx_hash}, maxFee: {max_fee})')
+            # A quirky null broadcast reply must never persist as a blank tx hash.
+            return (tx_hash or expected_txid, 0)
+        except Exception as e:
+            self._send_error(f'{self._log} send failed: {type(e).__name__}: {e}')
+            return None

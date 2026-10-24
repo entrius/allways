@@ -1,8 +1,7 @@
-"""V-M3: a testnet neuron with an explicit mainnet SOLANA_RPC_URL silently ran the hub on mainnet.
+"""Boot cluster guard: a testnet neuron must not run the hub against a mainnet SOLANA_RPC_URL.
 
-The old guard was a log-only ``'mainnet' in url`` check — blind to real paid endpoints (Helius /
-QuickNode subdomains, bare IPs, ``?api-key=`` URLs), which is exactly what a mainnet RPC looks like.
-The boot guard now classifies the cluster *positively* by genesis hash and fails closed.
+A URL check is blind to paid endpoints (Helius / QuickNode subdomains, bare IPs, ``?api-key=``
+URLs), so the guard classifies the cluster positively by genesis hash and fails closed.
 """
 
 from types import SimpleNamespace
@@ -46,7 +45,7 @@ def test_classify_cluster_reads_genesis_not_url():
 
 
 def test_testnet_neuron_on_mainnet_fails_closed():
-    # The finding: a keyed mainnet URL with no literal 'mainnet' substring still gets caught.
+    # A keyed mainnet URL with no literal 'mainnet' substring is still caught.
     with pytest.raises(RuntimeError, match='MAINNET'):
         assert_cluster_safe(fake_rpc(MAINNET), PROGRAM, TESTNET_NEURON)
 

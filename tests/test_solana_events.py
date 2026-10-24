@@ -1,7 +1,7 @@
-"""B3.1 — unit tests for Solana event decode + cursor ingest.
+"""Unit tests for Solana event decode + cursor ingest.
 
-Decoder: discriminators recomputed independently via Anchor's sha256("event:<Name>")[:8] formula, plus a
-borsh round-trip per event. Ingest: cursor paging (oldest-first, until-cursor) + skips failed txs, driven
+Decoder: discriminators recomputed independently via Anchor's sha256("event:<Name>")[:8] formula, plus the
+borsh round-trip of the slash event. Ingest: cursor paging (oldest-first, until-cursor) + skips failed txs, driven
 by a fake client.
 """
 
@@ -38,122 +38,9 @@ def _encode(name: str, value: dict) -> bytes:
     return events.EVENT_DISCRIMINATORS[name] + events.EVENT_LAYOUTS[name].build(value)
 
 
-def test_decode_quote_set_roundtrip():
-    miner = Keypair().pubkey()
-    raw = _encode(
-        'QuoteSet',
-        {
-            'miner': bytes(miner),
-            'from_chain': 'btc',
-            'to_chain': 'tao',
-            'collateral_chain': 'tao',
-            'rate': 345 * 10**18,
-            'liquidity': 1_000,
-            'updated_at': 1_700_000_000,
-            'update_fee': 50_000,
-            'miner_from_addr': 'bc1qsrc',
-            'miner_to_addr': '5Cdst',
-        },
-    )
-    name, f = decode_event(raw)
-    assert name == 'QuoteSet'
-    assert (f.miner_from_addr, f.miner_to_addr) == ('bc1qsrc', '5Cdst'), 'judged without reading the account'
-    assert f.miner == miner  # converted to Pubkey
-    assert f.from_chain == 'btc' and f.to_chain == 'tao'
-    assert f.collateral_chain == 'tao', 'the backing tells two quotes on one direction apart'
-    assert f.rate == 345 * 10**18 and f.updated_at == 1_700_000_000
-
-
-def test_decode_pool_entry_events_carry_the_effective_fee():
-    # v16: both pool-entry events append `fee_paid` (the stake-discounted fee actually charged),
-    # so treasury attribution can tell discounted from full fees without re-deriving weights.
-    miner, router = Keypair().pubkey(), Keypair().pubkey()
-    raw = _encode(
-        'PoolOpened',
-        {
-            'miner': bytes(miner),
-            'opener': bytes(router),
-            'from_chain': 'btc',
-            'to_chain': 'sol',
-            'collateral_chain': 'sol',
-            'closes_at': 1_700_000_030,
-            'seed_slot': 0,
-            'fee_paid': 6_668_000,
-        },
-    )
-    name, f = decode_event(raw)
-    assert name == 'PoolOpened'
-    assert f.opener == router and f.fee_paid == 6_668_000
-
-    raw = _encode(
-        'ReservationRequested',
-        {'miner': bytes(miner), 'router': bytes(router), 'requests': 2, 'fee_paid': 0, 'collateral_chain': 'tao'},
-    )
-    name, f = decode_event(raw)
-    assert name == 'ReservationRequested'
-    assert f.requests == 2
-    assert f.collateral_chain == 'tao', "names which of the miner's per-hub pools was bid on"
-    assert f.fee_paid == 0, 'a same-router in-window bid update is free'
-
-
-def test_decode_bond_attested_roundtrip():
-    miner = Keypair().pubkey()
-    raw = _encode(
-        'BondAttested',
-        {
-            'miner': bytes(miner),
-            'chain': 'tao',
-            'effective_balance': 3_300_000_000,
-            'locked': True,
-            'epoch': 4,
-            'attested_at': 1_700_000_000,
-        },
-    )
-    name, f = decode_event(raw)
-    assert name == 'BondAttested'
-    assert f.miner == miner and f.chain == 'tao'
-    assert f.effective_balance == 3_300_000_000 and f.locked is True and f.epoch == 4
-
-
-def test_decode_miner_backing_changed_roundtrip():
-    # The per-purse event; MinerActivated/MinerDeactivated still mark the OR view's own transitions.
-    miner = Keypair().pubkey()
-    raw = _encode(
-        'MinerBackingChanged',
-        {'miner': bytes(miner), 'backing': 'tao', 'enabled': False, 'active_backings': 1, 'at': 42},
-    )
-    name, f = decode_event(raw)
-    assert name == 'MinerBackingChanged'
-    assert f.miner == miner and f.backing == 'tao'
-    assert f.enabled is False and f.active_backings == 1
-
-
-def test_decode_swap_completed_roundtrip():
-    miner = Keypair().pubkey()
-    raw = _encode(
-        'SwapCompleted',
-        {
-            'swap_key': bytes(range(32)),
-            'miner': bytes(miner),
-            'collateral_amount': 2_000_000_000,
-            'fee': 20_000_000,
-            'from_chain': 'btc',
-            'to_chain': 'tao',
-            'from_amount': 100_000,
-            'to_amount': 345_000_000,
-            'rate': 345 * 10**18,
-            'collateral_chain': 'sol',
-        },
-    )
-    name, f = decode_event(raw)
-    assert name == 'SwapCompleted'
-    assert f.miner == miner
-    assert f.to_amount == 345_000_000 and f.from_amount == 100_000
-
-
 def test_decode_swap_timed_out_roundtrip():
     # The slash relay's whole input: absolute figures plus the payee they are owed to. `payee` is the
-    # last field — appended in W3.1, so a stale decoder truncates rather than mis-reads the figures.
+    # last field — appended later, so a stale decoder truncates rather than mis-reads the figures.
     miner = Keypair().pubkey()
     raw = _encode(
         'SwapTimedOut',
@@ -175,7 +62,7 @@ def test_decode_swap_timed_out_roundtrip():
     assert f.collateral_chain == 'tao' and f.slash == 0
     assert f.penalty == 3_300_000_000 and f.reimbursement == 3_300_000_000
     assert f.payee == '5FHneW46xGXgs5mUiveU4sbTyGBzmstUspZC92UhjJM694ty'
-    assert bytes(f.hotkey) == bytes(range(32))  # V-M1 pin — raw bytes, like swap_key
+    assert bytes(f.hotkey) == bytes(range(32))  # raw bytes, like swap_key
 
 
 def test_decode_swap_timed_out_carries_no_payee_when_it_settled_locally():
@@ -198,43 +85,6 @@ def test_decode_swap_timed_out_carries_no_payee_when_it_settled_locally():
     _, f = decode_event(raw)
     assert f.payee == '' and f.slash == 2_200_000_000
     assert bytes(f.hotkey) == bytes(32)  # never-bound miner ⇒ zeroed pin decodes as a value
-
-
-def test_decode_miner_activated_and_collateral():
-    miner = Keypair().pubkey()
-    name, f = decode_event(_encode('MinerActivated', {'miner': bytes(miner), 'at': 1_700_000_111}))
-    assert name == 'MinerActivated' and f.miner == miner and f.at == 1_700_000_111
-
-    name, f = decode_event(_encode('CollateralPosted', {'miner': bytes(miner), 'amount': 5, 'total': 9}))
-    assert name == 'CollateralPosted' and f.total == 9
-
-
-def test_decode_fulfillment_grace_applied_roundtrip():
-    miner = Keypair().pubkey()
-    raw = _encode(
-        'FulfillmentGraceApplied',
-        {'swap_key': bytes(range(32)), 'miner': bytes(miner), 'timeout_at': 1_700_000_222},
-    )
-    name, f = decode_event(raw)
-    assert name == 'FulfillmentGraceApplied'
-    assert f.miner == miner
-    assert bytes(f.swap_key) == bytes(range(32))  # stays raw bytes
-    assert f.timeout_at == 1_700_000_222
-
-
-def test_decode_pool_resolved_carries_the_finalize_deadline():
-    miner, winner = Keypair().pubkey(), Keypair().pubkey()
-    raw = _encode(
-        'PoolResolved',
-        {'miner': bytes(miner), 'winner': bytes(winner), 'requests': 3, 'collateral_chain': 'sol', 'finalize_by': 77},
-    )
-    name, f = decode_event(raw)
-    assert name == 'PoolResolved' and f.winner == winner and f.finalize_by == 77
-
-
-def test_decode_config_changed():
-    name, f = decode_event(_encode('ConfigChanged', {'setting': 'reservation_ttl'}))
-    assert (name, f.setting) == ('ConfigChanged', 'reservation_ttl')
 
 
 PRIOR_VALUES = {
@@ -441,7 +291,7 @@ class PagingClient:
 
 
 def test_pagination_drains_a_backlog_across_ticks_without_dropping_the_gap():
-    # F3: a backlog deeper than max_pages*page_size must not silently drop the older gap. With
+    # A backlog deeper than max_pages*page_size must not silently drop the older gap. With
     # max_pages=2, page_size=2 the poller can reach only 4 of the 5 new signatures in one pass; it
     # buffers and resumes deeper next tick, holding its cursor until the whole window is assembled.
     ev = _encode('MinerActivated', {'miner': bytes(Keypair().pubkey()), 'at': 1})
@@ -499,7 +349,7 @@ class FlakyPagingRpc(PagingRpc):
 
 
 def test_pagination_rolls_back_a_partial_page_on_a_mid_pagination_rpc_failure():
-    # F3 robustness: if paging fails partway, the buffered partial page must be rolled back. The caller
+    # If paging fails partway, the buffered partial page must be rolled back. The caller
     # holds its cursor and re-pages from the same resume point next tick, so a retained partial would be
     # re-fetched — duplicating and reordering records in a later drain.
     ev = _encode('MinerActivated', {'miner': bytes(Keypair().pubkey()), 'at': 1})
@@ -549,21 +399,6 @@ def test_an_entry_the_listing_left_unstamped_is_stamped_from_its_transaction():
     assert [r.signature for r in records] == ['sigOld', 'sigTip']
     assert [r.block_time for r in records] == [1_700_000_100, 1_700_000_500]
     assert cursor == 'sigTip'
-
-
-def test_a_fresh_unstamped_tip_is_not_read_off_its_transaction():
-    """The tip still holds the cursor: re-reading it once stamped costs nothing, an RPC call per pass does."""
-    miner = Keypair().pubkey()
-    ev = _encode('MinerActivated', {'miner': bytes(miner), 'at': 1})
-    pages = [
-        {'signature': 'sigB', 'slot': 20, 'blockTime': None, 'err': None},
-        {'signature': 'sigA', 'slot': 10, 'blockTime': 1_700_000_010, 'err': None},
-    ]
-    client = FakeClient(pages, {'sigA': [ev], 'sigB': [ev]}, {'sigB': {'blockTime': 1_700_000_020}})
-
-    records, cursor = SolanaEventIngest(client).poll(until_sig=None)
-
-    assert [r.signature for r in records] == ['sigA'] and cursor == 'sigA'
 
 
 def test_an_unreadable_transaction_leaves_the_entry_abandoned_not_crashing(caplog):

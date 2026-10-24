@@ -1,4 +1,4 @@
-"""Job 2 — bond attestation maintenance (vault → Solana).
+"""Bond attestation maintenance (vault → Solana).
 
 The attestation is an ASSERTION by the quorum, not a reflection of the vault:
 
@@ -23,22 +23,7 @@ from typing import Any, Optional
 import bittensor as bt
 
 from allways import dev_signal
-from allways.solana.client import benign_marker
 from allways.solana.layouts import compose_attestation_epoch, split_attestation_epoch
-
-# A vote can race a peer's identical vote, or the round's staleness clock by a second or two.
-# The program's AlreadyVoted is an authoritative no-op, not a failure (same rule as floor_sweep).
-_BENIGN_VOTE_MARKERS = ('AlreadyVoted',)
-
-# The program refuses a DOWNWARD attestation write while the miner's hub is held (F5 — the write
-# would strand a live swap's reserve). That refusal is DEFERRED, not owed: the program guarantees the
-# write can't matter until the hub frees, so it must not hold the startup reconcile barrier down —
-# but the miner stays dirty so the write retries the moment the hub clears. See `flush`/`_write_one`.
-_HELD_HUB_MARKERS = ('AttestationWouldStrandSwap',)
-
-# Sentinel `_write_one` return: written attempt refused as deferred (see _HELD_HUB_MARKERS). Distinct
-# from True (settled → drop from dirty) and False (owed/transient → keep dirty AND fail the barrier).
-_DEFERRED = object()
 
 
 def _epoch_str(epoch: int) -> str:
@@ -77,7 +62,7 @@ def compute(relay, miner: str, hotkey: str) -> Optional[Attested]:
     gross, lock = relay.vault.get_bond_state(hotkey)
     # No bond nets to zero whatever the fee state, so the settled counter can't change the answer:
     # skip its read. Most bound miners never bond, and the reconcile pass walks every one of them.
-    settled = relay.vault.get_settled_total(hotkey) if gross else 0
+    settled = relay.settled_total(hotkey) if gross else 0
     if gross is None or settled is None or lock is None:
         bt.logging.warning(f'relay: vault reads unavailable for {hotkey[:8]}… — leaving its attestation alone')
         return None
@@ -120,11 +105,6 @@ def flush(relay, now: int, reconciling: bool = False) -> bool:
         except Exception as e:
             bt.logging.warning(f'relay: attestation for {miner[:8]} failed: {e}')
             outcome, ok = False, False
-        if outcome is _DEFERRED:
-            # Refused while the hub is held (F5). Not owed — the program guarantees the write can't
-            # matter until the hub frees — so it does NOT fail the barrier, but the miner stays dirty
-            # so the write retries once the hub clears. A fleet restart mid-swap no longer wedges here.
-            continue
         if outcome:
             relay._dirty.discard(miner)
         else:
@@ -132,11 +112,26 @@ def flush(relay, now: int, reconciling: bool = False) -> bool:
     return ok
 
 
-def _write_one(relay, miner: str, hotkey: str, now: int, reconciling: bool) -> Any:
+def _note_reflected(relay, miner: str, desired: Attested, current: Any) -> None:
+    """Release the entry hold of vault-applied slashes once Solana no longer overstates the bond.
+    ``desired`` was read off the vault after the seizure, so an attestation at or under it (or none at
+    all, which refuses entry on its own) can't back a swap with collateral that was taken."""
+    if not relay.store.unreflected_relay_slashes(relay.backing, miner):
+        return
+    if current is not None and int(current.effective_balance) > desired.effective_balance:
+        return
+    relay.store.mark_relay_slashes_reflected(relay.backing, miner)
+    bt.logging.info(f'relay: {miner[:8]} attestation reflects its applied slashes — entry hold released')
+
+
+def _write_one(relay, miner: str, hotkey: str, now: int, reconciling: bool) -> bool:
+    """Queue the vote when the attestation drifted. Landing it is the actuator's job: a write the program
+    refuses while the hub is held stays in its inbox until the hub frees."""
     desired = compute(relay, miner, hotkey)
     if desired is None:
         return False
-    current = relay.solana.get_bond_attestation(miner, relay.backing)
+    current = relay.attestation(miner)
+    _note_reflected(relay, miner, desired, current)
     if desired.matches(current):
         return True
     if current is None and desired.is_empty:
@@ -149,28 +144,8 @@ def _write_one(relay, miner: str, hotkey: str, now: int, reconciling: bool) -> A
     if not relay.can_write():
         return False
     relay.note_write()
-    if relay.read_only:
-        bt.logging.info(
-            f'relay: WOULD vote_set_attestation {miner[:8]} '
-            f'balance={desired.effective_balance} locked={desired.locked} epoch={_epoch_str(desired.epoch)} (read-only)'
-        )
-        relay.note_vote(key, now)
-        return True
-    try:
-        relay.solana.vote_set_attestation(
-            miner, relay.backing, desired.effective_balance, desired.locked, desired.epoch
-        )
-    except Exception as e:
-        if benign_marker(e, _HELD_HUB_MARKERS):
-            # Downward write refused while the hub is held. Throttle so we don't retry (or log) every
-            # tick, and defer — the reconcile barrier must not wedge on a write the program itself
-            # guarantees is immaterial until the hub frees. The miner stays dirty for a later retry.
-            relay.note_vote(key, now)
-            bt.logging.debug(f'relay: attestation for {miner[:8]} deferred — hub held, retrying once it frees')
-            return _DEFERRED
-        if not benign_marker(e, _BENIGN_VOTE_MARKERS):
-            raise
-        bt.logging.debug(f'relay: attestation vote for {miner[:8]} already recorded')
+    payload = (str(miner), relay.backing, desired.effective_balance, desired.locked, desired.epoch)
+    relay.vote('vote_set_attestation', (str(miner), relay.backing), payload)
     relay.note_vote(key, now)
     bt.logging.info(
         f'relay: attested {miner[:8]} {relay.backing} balance={desired.effective_balance} '

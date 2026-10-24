@@ -363,6 +363,14 @@ def redact_text(text: str) -> str:
     return text
 
 
+def archive_substrate(url: str) -> Any:
+    """A substrate connection to one archive endpoint, for reads of past state. Deliberately not ``build_subtensor``:
+    its fallbacks are full nodes that may have pruned the state asked for, so the caller walks its own archive list.
+    The URL is registered for log redaction before the SDK can log it (a keyed provider URL carries its key)."""
+    _guard_logs([url])
+    return bt.Subtensor(network=url).substrate
+
+
 def build_subtensor(network: Optional[str] = None, config: Optional['bt.Config'] = None) -> bt.Subtensor:
     """A Subtensor on ``network`` (the CLI) or ``config`` (the neurons), resolved exactly as ``bt.Subtensor`` resolves
     them, plus the env fallbacks.
@@ -386,7 +394,7 @@ def build_subtensor(network: Optional[str] = None, config: Optional['bt.Config']
     fallbacks, archives = _same_chain(primary_network, fallbacks), _same_chain(primary_network, archives)
     if not fallbacks and not archives:
         return bt.Subtensor(**kwargs)
-    bt.logging.info(
+    bt.logging.debug(
         f'Subtensor {redact_endpoint(primary)} with fallbacks [{", ".join(map(redact_endpoint, fallbacks))}], '
         f'archive [{", ".join(map(redact_endpoint, archives))}]'
     )

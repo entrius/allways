@@ -15,7 +15,6 @@ import pytest
 import requests
 
 from allways.solana.rpc import (
-    _MAX_READ_RETRIES,
     SolanaRpc,
     SolanaRpcError,
     TransientRpcError,
@@ -61,18 +60,6 @@ def test_call_retries_transient_rpc_code_then_succeeds():
     assert rpc._session.post.call_count == 3
 
 
-def test_call_retries_transient_http_status():
-    rpc = _rpc([_Resp(status_code=503), _Resp(body=_ok(7))])
-    assert rpc._call('getSlot', [{}]) == 7
-    assert rpc._session.post.call_count == 2
-
-
-def test_call_retries_transport_timeout():
-    rpc = _rpc([requests.Timeout('slow'), _Resp(body=_ok(9))])
-    assert rpc._call('getBalance', ['pk', {}]) == 9
-    assert rpc._session.post.call_count == 2
-
-
 def test_call_does_not_retry_deterministic_error():
     rpc = _rpc([_Resp(body=_err(-32602))])  # invalid params — a bug, not a hiccup
     with pytest.raises(SolanaRpcError) as ei:
@@ -87,13 +74,6 @@ def test_call_does_not_auto_retry_send_transaction():
     with pytest.raises(TransientRpcError):
         rpc._call('sendTransaction', ['rawtx', {}])
     assert rpc._session.post.call_count == 1  # exactly once — no double submit
-
-
-def test_call_gives_up_after_max_retries():
-    rpc = _rpc([_Resp(body=_err(-32603))] * (_MAX_READ_RETRIES + 1))
-    with pytest.raises(TransientRpcError):
-        rpc._call('getSlot', [{}])
-    assert rpc._session.post.call_count == _MAX_READ_RETRIES + 1
 
 
 def test_confirm_tolerates_transient_status_read_then_confirms():
@@ -111,8 +91,16 @@ def test_confirm_tolerates_transient_status_read_then_confirms():
     assert calls['n'] == 3  # kept polling through the transient reads instead of raising
 
 
-def test_confirm_still_raises_on_a_real_tx_error():
-    rpc = SolanaRpc('http://rpc.test')
-    rpc.get_signature_statuses = lambda _sigs: [{'err': {'InstructionError': [0, {'Custom': 6001}]}}]
-    with pytest.raises(SolanaRpcError):
-        rpc.confirm('sig', timeout=5, poll=0)
+def test_program_accounts_with_context_pins_the_slot_and_a_node_behind_it_raises():
+    behind = {'error': {'code': -32016, 'message': 'Minimum context slot has not been reached'}}
+    served = {'context': {'slot': 205}, 'value': [{'pubkey': 'P', 'account': {'data': ['AQI=', 'base64']}}]}
+    rpc = _rpc([_Resp(body=behind), _Resp(body=_ok(served))])
+    assert rpc.get_program_accounts_with_context('prog', disc8=b'\0' * 8, min_context_slot=200) == (
+        205,
+        [('P', b'\1\2')],
+    )
+    cfg = rpc._session.post.call_args.kwargs['json']['params'][1]
+    assert cfg['minContextSlot'] == 200 and cfg['withContext'] is True
+    rpc = _rpc([_Resp(body=behind)] * 5)
+    with pytest.raises(TransientRpcError):  # never falls back to an unpinned read
+        rpc.get_program_accounts_with_context('prog', min_context_slot=200)

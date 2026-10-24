@@ -10,10 +10,7 @@ strong enough that a wrong verdict can't hand a defaulting miner a free pass:
   - passive chains (BTC/TAO) and the base default: never — they can't refuse a payout.
 """
 
-import pytest
-
-from allways.assets.eth import Ether
-from allways.assets.ethusdc import EthUsdc
+from allways.assets import asset_spec
 from allways.assets.sol import RESERVED_ACCOUNTS, Sol
 from allways.constants import (
     CANCEL_REASON_ERC20_BLACKLIST,
@@ -32,7 +29,7 @@ def _evm(monkeypatch):
     monkeypatch.setenv('ETH_NETWORK', 'mainnet')
     monkeypatch.delenv('ETH_RPC_URLS', raising=False)
     monkeypatch.delenv('ETH_PRIVATE_KEY', raising=False)
-    return Ether()
+    return asset_spec('eth').cls()
 
 
 def _stub(provider, tx, receipt):
@@ -51,6 +48,7 @@ class TestEvmCancelEvidence:
     def test_reverted_with_correct_params_is_evidence(self, monkeypatch):
         p = _stub(_evm(monkeypatch), _tx(), {'status': '0x0'})
         assert p.cancel_evidence(DEST, AMOUNT, TX) == CANCEL_REASON_EVM_REVERT
+        assert p.cancel_evidence(DEST, AMOUNT, TX, from_address=MINER) == CANCEL_REASON_EVM_REVERT
 
     def test_succeeded_tx_is_not_a_refusal(self, monkeypatch):
         p = _stub(_evm(monkeypatch), _tx(), {'status': '0x1'})
@@ -69,18 +67,11 @@ class TestEvmCancelEvidence:
         p = _stub(_evm(monkeypatch), _tx(gas=90_000), {'status': '0x0'})
         assert p.cancel_evidence(DEST, AMOUNT, TX) is None
 
-    def test_calldata_is_not_accepted_as_refusal(self, monkeypatch):
-        p = _stub(_evm(monkeypatch), _tx(input='0x00'), {'status': '0x0'})
-        assert p.cancel_evidence(DEST, AMOUNT, TX) is None
-
-    def test_access_list_is_not_accepted_as_refusal(self, monkeypatch):
+    def test_calldata_or_access_list_is_not_accepted_as_refusal(self, monkeypatch):
         access = [{'address': DEST, 'storageKeys': []}]
-        p = _stub(_evm(monkeypatch), _tx(accessList=access), {'status': '0x0'})
-        assert p.cancel_evidence(DEST, AMOUNT, TX) is None
-
-    def test_from_committed_miner_is_evidence(self, monkeypatch):
-        p = _stub(_evm(monkeypatch), _tx(from_=MINER), {'status': '0x0'})
-        assert p.cancel_evidence(DEST, AMOUNT, TX, from_address=MINER) == CANCEL_REASON_EVM_REVERT
+        for extra in ({'input': '0x00'}, {'accessList': access}):
+            p = _stub(_evm(monkeypatch), _tx(**extra), {'status': '0x0'})
+            assert p.cancel_evidence(DEST, AMOUNT, TX) is None, extra
 
     def test_from_non_committed_sender_rejected(self, monkeypatch):
         # A reverted tx to the right dest with correct value+gas but sent from a THROWAWAY address is not
@@ -89,24 +80,18 @@ class TestEvmCancelEvidence:
         p = _stub(_evm(monkeypatch), _tx(from_='0x' + '11' * 20), {'status': '0x0'})
         assert p.cancel_evidence(DEST, AMOUNT, TX, from_address=MINER) is None
 
-    def test_no_tx_hash_is_none(self, monkeypatch):
+    def test_missing_tx_receipt_or_status_is_none(self, monkeypatch):
         assert _evm(monkeypatch).cancel_evidence(DEST, AMOUNT, None) is None
-
-    def test_missing_receipt_is_none(self, monkeypatch):
-        p = _stub(_evm(monkeypatch), _tx(), None)
-        assert p.cancel_evidence(DEST, AMOUNT, TX) is None
-
-    @pytest.mark.parametrize('receipt', [{}, {'status': None}, {'status': 'unknown'}])
-    def test_unreadable_status_is_none(self, monkeypatch, receipt):
-        p = _stub(_evm(monkeypatch), _tx(), receipt)
-        assert p.cancel_evidence(DEST, AMOUNT, TX) is None
+        for receipt in (None, {}, {'status': None}, {'status': 'unknown'}):
+            p = _stub(_evm(monkeypatch), _tx(), receipt)
+            assert p.cancel_evidence(DEST, AMOUNT, TX) is None, receipt
 
 
 class TestErc20CancelEvidence:
     def _provider(self, monkeypatch, blacklisted, paused):
         monkeypatch.setenv('ETH_NETWORK', 'sepolia')
         monkeypatch.delenv('ETH_RPC_URLS', raising=False)
-        p = EthUsdc()
+        p = asset_spec('ethusdc').cls()
         from allways.assets.erc20 import SEL_IS_BLACKLISTED
 
         p._eth_call = lambda selector, address='', block='latest': (

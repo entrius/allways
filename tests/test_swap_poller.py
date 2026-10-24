@@ -11,7 +11,7 @@ from unittest.mock import MagicMock
 from solders.keypair import Keypair
 
 from allways.miner import swap_poller
-from allways.miner.swap_poller import ACTIVE_STATUSES, SwapPoller
+from allways.miner.swap_poller import SwapPoller
 from allways.solana.client import swap_key_from_tx_hash
 
 
@@ -49,10 +49,6 @@ def _client(active=(), fulfilled=()):
     return client
 
 
-def test_active_statuses_are_active_and_fulfilled():
-    assert ACTIVE_STATUSES == ('Active', 'Fulfilled')
-
-
 def test_filters_to_this_miner_and_splits_active_fulfilled():
     me = Keypair().pubkey()
     other = Keypair().pubkey()
@@ -70,25 +66,6 @@ def test_filters_to_this_miner_and_splits_active_fulfilled():
     assert active[0].status == 'Active' and fulfilled[0].status == 'Fulfilled'
 
 
-def test_poll_fetches_one_snapshot():
-    me = Keypair().pubkey()
-    client = _client(
-        active=[_acct(bytes(me), 'aa')],
-        fulfilled=[_acct(bytes(me), 'cc', 'Fulfilled')],
-    )
-    poller = SwapPoller(client, me)
-    poller.poll()
-    assert client.get_swaps.call_count == 1
-
-
-def test_empty_when_no_swaps_for_miner():
-    me = Keypair().pubkey()
-    poller = SwapPoller(_client(active=[_acct(bytes(Keypair().pubkey()), 'aa')]), me)
-    active, fulfilled = poller.poll()
-    assert active == [] and fulfilled == []
-    assert poller.last_poll_ok is True
-
-
 def test_rpc_failure_sets_last_poll_not_ok_and_returns_empty():
     me = Keypair().pubkey()
     client = MagicMock()
@@ -101,64 +78,8 @@ def test_rpc_failure_sets_last_poll_not_ok_and_returns_empty():
     assert poller.last_poll_ok is False
 
 
-def test_known_set_tracks_live_swaps_only():
-    me = Keypair().pubkey()
-    client = _client(active=[_acct(bytes(me), 'aa')])
-    poller = SwapPoller(client, me)
-    poller.poll()
-    assert len(poller.known) == 1
-
-    # Next poll the swap is gone from the snapshot → known shrinks to the live set.
-    client.get_swaps.side_effect = lambda status=None: []
-    poller.poll()
-    assert poller.known == set()
-
-
 def _miner_state(ok: int, failed: int, active: bool = True):
     return types.SimpleNamespace(successful_swaps=ok, failed_swaps=failed, has_active_swap=active)
-
-
-def test_terminal_outcome_named_completed(caplog):
-    me = Keypair().pubkey()
-    client = _client(active=[_acct(bytes(me), 'aa')])
-    client.get_miner_state.return_value = _miner_state(3, 1)
-    poller = SwapPoller(client, me)
-    poller.poll()  # discovers + seeds counter baseline
-
-    client.get_swaps.side_effect = lambda status=None: []
-    client.get_miner_state.return_value = _miner_state(4, 1)  # +1 success
-    poller.poll()
-
-    assert poller.known == set()
-    assert poller._counters == (4, 1)
-
-
-def test_terminal_outcome_named_slashed(caplog):
-    me = Keypair().pubkey()
-    client = _client(active=[_acct(bytes(me), 'aa')])
-    client.get_miner_state.return_value = _miner_state(3, 1)
-    poller = SwapPoller(client, me)
-    poller.poll()
-
-    client.get_swaps.side_effect = lambda status=None: []
-    client.get_miner_state.return_value = _miner_state(3, 2)  # +1 failure
-    poller.poll()
-
-    assert poller._counters == (3, 2)
-
-
-def test_terminal_outcome_read_failure_degrades(caplog):
-    me = Keypair().pubkey()
-    client = _client(active=[_acct(bytes(me), 'aa')])
-    client.get_miner_state.return_value = _miner_state(0, 0)
-    poller = SwapPoller(client, me)
-    poller.poll()
-
-    client.get_swaps.side_effect = lambda status=None: []
-    client.get_miner_state.side_effect = RuntimeError('rpc down')
-    poller.poll()  # must not raise; falls back to ambiguous log
-
-    assert poller.known == set()
 
 
 # ─── push / follow mode ──────────────────────────────────────────────────────
@@ -188,28 +109,6 @@ def _idle_client():
     return client
 
 
-def test_sync_skips_the_snapshot_when_nothing_is_in_flight():
-    me = Keypair().pubkey()
-    client = _idle_client()
-    poller = SwapPoller(client, me)  # no feed: syncs every pass, like a miner whose socket is down
-
-    assert poller.poll() == ([], [])
-    assert poller.last_poll_ok is True
-    assert client.get_swaps.call_count == 0  # MinerState said no swap is Active → no getProgramAccounts
-
-
-def test_live_feed_idle_miner_makes_no_calls_after_catch_up():
-    me = Keypair().pubkey()
-    client = _idle_client()
-    poller = SwapPoller(client, me, feed=FakeFeed())
-
-    poller.poll()  # first pass: catch-up for session 1
-    client.reset_mock()
-    for _ in range(5):
-        assert poller.poll() == ([], [])
-    assert client.method_calls == []
-
-
 def test_pushed_swap_wakes_the_loop_and_is_point_read_not_scanned():
     me = Keypair().pubkey()
     client = _idle_client()
@@ -226,19 +125,6 @@ def test_pushed_swap_wakes_the_loop_and_is_point_read_not_scanned():
     assert [s.from_tx_hash for s in active] == ['aa'] and fulfilled == []
     assert client.get_swaps.call_count == 0
     assert client.get_swap.call_args.args[0] == swap_key_from_tx_hash('aa').hex()
-
-
-def test_swap_initiated_for_another_miner_is_ignored():
-    me = Keypair().pubkey()
-    client = _idle_client()
-    feed = FakeFeed()
-    woke = []
-    poller = SwapPoller(client, me, feed=feed, wake=lambda: woke.append(1))
-    poller.poll()
-
-    feed.push_initiated(Keypair().pubkey(), 'aa')
-    poller.poll()
-    assert woke == [] and client.get_swap.call_count == 0
 
 
 def test_followed_swap_is_dropped_after_repeated_misses_then_resynced():

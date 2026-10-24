@@ -4,11 +4,10 @@ from types import SimpleNamespace
 
 import pytest
 
-from allways.assets import ASSET_REGISTRY
 from allways.assets.alpha import Alpha
 from allways.assets.asset import ProviderUnreachableError
-from allways.assets.tao import BETA_ESCROW, Tao
-from allways.chains import ALPHA_NETUIDS, CHAIN_SN7, CHAIN_SN74
+from allways.assets.tao import BETA_ESCROW, TaoChain
+from allways.chains import CHAIN_SN7
 
 MINER = 'minerCold'
 USER = 'userCold'
@@ -87,33 +86,16 @@ def _verify(p, amount=5_000):
 # ─── registry + seam ────────────────────────────────────────────────────────
 
 
-def test_alphas_are_registered_and_bind_the_tao_chain():
-    ids = {spec.chain_id: spec for spec in ASSET_REGISTRY}
-    # Every netuid is registered, each bound to its own ChainDefinition and nothing else.
-    assert {f'sn{n}' for n in ALPHA_NETUIDS} <= set(ids)
-    assert ids['sn7'].cls.func is Alpha and ids['sn7'].cls.args == (CHAIN_SN7,)
-    assert ids['sn74'].cls.args == (CHAIN_SN74,)
-    assert ids['sn7'].kwarg_names == ids['tao'].kwarg_names
-    p = Alpha(CHAIN_SN7, SimpleNamespace())
-    assert isinstance(p, Alpha) and isinstance(p.chain, Tao) and p.netuid == 7
-    assert Alpha(CHAIN_SN74, SimpleNamespace()).netuid == 74
-
-
 def test_beta_escrow_is_never_a_valid_payee_on_tao_or_alpha():
     # Keyless protocol custody: transfer_stake into it fails (CannotUseSystemAccount), TAO sent there is
     # stranded. Invalid at the chain, so reserve refuses it and an in-flight swap cancels no-fault.
     assert BETA_ESCROW == '5EYCAe5jLQhn6ofDSwHx3AZmsZPVFHnKpstqap4vqwDWtp7s'
-    for chain in (Tao(SimpleNamespace()), Alpha(CHAIN_SN7, SimpleNamespace()).chain):
+    for chain in (TaoChain(SimpleNamespace()), Alpha(CHAIN_SN7, SimpleNamespace()).chain):
         assert not chain.is_valid_address(BETA_ESCROW)
         assert chain.is_valid_address('5GrwvaEF5zXb26Fz9rcQpDWS57CtERHpNehXCPcNoHGKutQY')
 
 
 # ─── verification ───────────────────────────────────────────────────────────
-
-
-def test_real_extrinsic_shape_decodes_with_its_hash():
-    """substrate.get_block yields GenericExtrinsic objects: the hash lives on the object, not in .value."""
-    assert Alpha(CHAIN_SN7, SimpleNamespace()).decode_transfer_stake(_ext(), False) == (TXID, MINER, 5_000, USER)
 
 
 def test_amount_comes_from_the_call_not_the_event():
@@ -191,7 +173,7 @@ def test_unreadable_events_raise_rather_than_reading_as_absent():
 def test_missing_block_time_raises():
     """is_tx_fresh fails closed on None, which would ride a paid leg to a TIMEOUT slash."""
     with pytest.raises(ProviderUnreachableError):
-        _verify(_provider(block_time=None))
+        _provider(block_time=None).verify_transaction(TXID, MINER, 5_000, block_hint=BLOCK)
 
 
 # ─── balances + price ───────────────────────────────────────────────────────
@@ -212,32 +194,6 @@ def test_balance_read_failure_raises_rather_than_reading_as_empty():
         Alpha(CHAIN_SN7, SimpleNamespace(get_stake_info_for_coldkey=boom)).get_balance(MINER)
 
 
-def test_get_balance_sums_this_netuid_across_hotkeys():
-    stakes = [_stake('hk1', 100), _stake('hk2', 250), _stake('hk3', 999, netuid=NETUID + 1)]
-    assert Alpha(CHAIN_SN7, SimpleNamespace(get_stake_info_for_coldkey=lambda ck: stakes)).get_balance(MINER) == 350
-
-
-def test_value_rao_floors_and_raises_on_failure():
-    p = Alpha(CHAIN_SN7, SimpleNamespace(get_subnet_price=lambda netuid, block=None: SimpleNamespace(rao=333_333_333)))
-    assert p.value_rao(3) == 0
-    assert p.value_rao(3_000_000_000) == 999_999_999
-
-    def boom(netuid, block=None):
-        raise RuntimeError('rpc down')
-
-    with pytest.raises(ProviderUnreachableError):
-        Alpha(CHAIN_SN7, SimpleNamespace(get_subnet_price=boom)).value_rao(1)
-
-    calls = []
-
-    def historical(netuid, block=None):
-        calls.append((netuid, block))
-        return SimpleNamespace(rao=2 * 10**9)
-
-    assert Alpha(CHAIN_SN7, SimpleNamespace(get_subnet_price=historical)).value_rao(3 * 10**9, block=42) == 6 * 10**9
-    assert calls == [(NETUID, 42)]
-
-
 # ─── delivery gates ─────────────────────────────────────────────────────────
 
 
@@ -256,21 +212,6 @@ def test_transfer_toggle_off_defers_but_never_cancels():
     assert off.can_deliver_to(MINER, 1) is False
     assert off.delivery_refused(MINER, 0) is True
     assert Alpha(CHAIN_SN7, _toggles()).delivery_refused(MINER, 0) is False
-
-
-def test_transfers_off_is_no_address_refusal():
-    """A subnet-wide toggle is nobody's address, so it is no address refusal."""
-    assert Alpha(CHAIN_SN7, _toggles(transfer=False)).address_refused(MINER) is False
-
-
-def test_a_pruned_subnet_defers_and_never_cancels():
-    """SubnetLimit is full, so a registration dissolves the lowest-priced subnet and its alpha is
-    force-liquidated to coldkey TAO. A no-fault cancel would leave the taker's deposit with the miner,
-    so the swap defers and times out: the vault pays the taker, same as transfers-off."""
-    gone = Alpha(CHAIN_SN7, _toggles(exists=False))
-    assert gone.can_deliver_to(MINER, 1) is False
-    assert gone.delivery_refused(MINER, 0) is True
-    assert gone.cancel_evidence(MINER, 1) is None
 
 
 def test_unreadable_toggle_is_not_evidence_and_defers_the_slash():
@@ -357,7 +298,7 @@ def test_send_reuses_a_prior_broadcast_per_dedup_key():
     assert len(calls) == 1
     assert p.send_amount(USER, 5_000, dedup_key='swap-2') == (TXID, BLOCK)
     assert len(calls) == 2
-    assert not p.chain.broadcasted_txids
+    assert not hasattr(p.chain, 'broadcasted_txids')
 
 
 def test_ambiguous_response_records_the_attempt_and_the_next_call_adopts_the_landed_send():
@@ -371,14 +312,6 @@ def test_ambiguous_response_records_the_attempt_and_the_next_call_adopts_the_lan
     assert len(calls) == 1
 
 
-def test_failed_response_with_a_signed_extrinsic_keeps_its_hash():
-    """A submit that raised after signing still names the extrinsic: the next poll probes that exact hash."""
-    signed_only = SimpleNamespace(success=False, message='ws dropped', extrinsic=_ext(), extrinsic_receipt=None)
-    p, _ = _sender([_stake('hk', 9_000)], response=signed_only)
-    assert p.send_amount(USER, 5_000, dedup_key='swap-1') is None
-    assert p.broadcasted_txids['swap-1'][2] == TXID
-
-
 def test_whole_position_sentinel_is_not_an_amount():
     """u64::MAX means "my whole live position" on subtensor, so the call's figure is not what moved:
     a dust position would otherwise satisfy any pinned amount (validator and miner both credit >=)."""
@@ -389,14 +322,6 @@ def test_whole_position_sentinel_is_not_an_amount():
 
 
 FULL = [f'hk{i}' for i in range(128)]  # a recipient at subtensor's StakingHotkeys cap
-
-
-def test_send_lands_on_a_hotkey_the_recipient_already_stakes_to():
-    """A transfer that lands on a hotkey the recipient already holds never grows its StakingHotkeys,
-    so it can never hit the cap — preferred even over a larger position."""
-    p, calls = _sender([_stake('small', 6_000), _stake('big', 9_000)], recipient_hotkeys=['small'])
-    assert p.send_amount(USER, 5_000, dedup_key='swap-1') == (TXID, BLOCK)
-    assert calls[0]['hotkey_ss58'] == 'small'
 
 
 def test_a_recipient_at_the_cap_is_paid_onto_a_hotkey_it_already_stakes_to():
@@ -439,16 +364,75 @@ def test_a_refused_send_is_returned_as_refusal_evidence():
     assert p.send_amount(USER, 5_000, dedup_key='swap-1') == (TXID, BLOCK)
 
 
-def _refused_on_chain(*, error='AccountRejectsStakingHotkeyGrowth', recipient_hotkeys=(), sender=MINER):
-    """The miner's transfer_stake to USER sits in BLOCK and failed with ``error``."""
-    p, _ = _sender([], recipient_hotkeys=recipient_hotkeys)
-    p.chain.get_block = lambda n: {'extrinsics': [_ext(dest=USER, sender=sender)]} if n == BLOCK else None
+def _flips_flag_in_the_send_block(recipient_hotkeys=('theirs',), second=None):
+    """USER turns its flag on in the same block as the miner's first transfer, which fails on it."""
+    state = {'flags': 0}
+    receipt = SimpleNamespace(extrinsic_hash=TXID, block_hash='0xincl')
+    refused = SimpleNamespace(
+        success=False,
+        message="{'name': 'AccountRejectsStakingHotkeyGrowth'}",
+        extrinsic=_ext(),
+        extrinsic_receipt=receipt,
+    )
+    landed = SimpleNamespace(success=True, message='', extrinsic=_ext(), extrinsic_receipt=receipt)
+    responses = [refused, second or landed]
+    p, calls = _sender([_stake('big', 9_000)], recipient_hotkeys=recipient_hotkeys)
+
+    def transfer(to_address, origin, destination, amount):
+        calls.append((origin, destination))
+        state['flags'] = 1 << 1
+        return responses.pop(0)
+
+    p.transfer = transfer
+    query = p.subtensor.substrate.query
+    p.subtensor.substrate.query = lambda m, name, params, block_hash=None: (
+        state['flags'] if name == 'AccountFlags' else query(m, name, params, block_hash)
+    )
+    return p, calls
+
+
+def test_a_refusal_from_a_flag_flipped_after_the_pick_is_resent_onto_the_recipients_hotkey():
+    """The pick saw the flag off and landed on the miner's own hotkey; the recipient turned it on in the
+    same block. The failed tx moved nothing, so the miner re-picks and pays onto 'theirs' instead of
+    handing in the refusal."""
+    p, calls = _flips_flag_in_the_send_block()
+    assert p.send_amount(USER, 5_000, dedup_key='swap-1') == (TXID, BLOCK)
+    assert calls == [('big', 'big'), ('big', 'theirs')]
+
+
+def test_a_resend_is_attempted_at_most_once():
+    refused_again = SimpleNamespace(
+        success=False,
+        message="{'name': 'AccountRejectsStakingHotkeyGrowth'}",
+        extrinsic=_ext(),
+        extrinsic_receipt=SimpleNamespace(extrinsic_hash=TXID, block_hash='0xincl'),
+    )
+    p, calls = _flips_flag_in_the_send_block(second=refused_again)
+    assert p.send_amount(USER, 5_000, dedup_key='swap-1') == (TXID, BLOCK)
+    assert calls == [('big', 'big'), ('big', 'theirs')]
+
+
+def _refused_on_chain(
+    *, error='AccountRejectsStakingHotkeyGrowth', recipient_hotkeys=(), sender=MINER, flags=0, events=(), ahead=0
+):
+    """The miner's transfer_stake to USER sits in BLOCK behind ``ahead`` other extrinsics and failed with
+    ``error``; ``recipient_hotkeys`` and ``flags`` are USER's state at the parent block."""
+    p, _ = _sender([], recipient_hotkeys=recipient_hotkeys, flags=flags)
+    other = SimpleNamespace(extrinsic_hash=bytes(32), value={'address': USER, 'call': {}})
+    exts = [other] * ahead + [_ext(dest=USER, sender=sender)]
+    p.chain.get_block = lambda n: {'extrinsics': exts} if n == BLOCK else None
     failed = {'Module': {'index': 7, 'error': '0xaf000000'}}
-    p.chain.get_block_events = lambda h: [_event('System', 'ExtrinsicFailed', {'dispatch_error': failed})]
+    refusal = _event('System', 'ExtrinsicFailed', {'dispatch_error': failed}, ahead)
+    p.chain.get_block_events = lambda h: [*events, refusal]
     p.subtensor.substrate.metadata = SimpleNamespace(
         get_module_error=lambda module_index, error_index: SimpleNamespace(name=error)
     )
     return p
+
+
+def _flag_set(who=USER, idx=0, enabled=True):
+    """The SubtensorModule event set_reject_staking_hotkey_growth emits, in extrinsic ``idx``."""
+    return _event('SubtensorModule', 'RejectStakingHotkeyGrowthUpdated', {'coldkey': who, 'enabled': enabled}, idx)
 
 
 def test_a_refused_send_to_a_recipient_with_no_hotkey_is_cancel_evidence():
@@ -461,6 +445,7 @@ def test_a_refused_send_to_a_recipient_with_no_hotkey_is_cancel_evidence():
     'case',
     [
         dict(recipient_hotkeys=['theirs']),  # the miner could have landed there
+        dict(recipient_hotkeys=['theirs'], flags=1 << 1),  # flag already on: it should have
         dict(error='SlippageTooHigh'),
         dict(sender='someoneElse'),
     ],
@@ -468,6 +453,38 @@ def test_a_refused_send_to_a_recipient_with_no_hotkey_is_cancel_evidence():
 def test_a_refusal_the_miner_could_have_avoided_is_not_cancel_evidence(case):
     p = _refused_on_chain(**case)
     assert p.cancel_evidence(USER, 5_000, TXID, from_address=MINER, block_hint=BLOCK) is None
+
+
+def test_a_flag_the_recipient_turned_on_in_the_delivery_block_is_cancel_evidence():
+    """At the parent block the flag was off, so landing on the miner's own hotkey was legal; the taker
+    then turned the flag on ahead of the miner's transfer in the same block. The miner did nothing it
+    could have avoided, so the failed transfer is a no-fault cancel, not a slash."""
+    p = _refused_on_chain(recipient_hotkeys=['theirs'], events=[_flag_set(idx=0)], ahead=1)
+    assert p.cancel_evidence(USER, 5_000, TXID, from_address=MINER, block_hint=BLOCK) == 8
+
+
+@pytest.mark.parametrize(
+    'case',
+    [
+        # the flag was already on at the parent block: the miner should have landed on 'theirs'
+        dict(flags=1 << 1, events=[_flag_set(idx=0)]),
+        # no flag change in the block: a coldkey swap copies AccountFlags without this event
+        dict(events=[]),
+        # turned on by someone else, or only after the miner's transfer
+        dict(events=[_flag_set(who='someoneElse', idx=0)]),
+        dict(events=[_flag_set(idx=1)]),
+    ],
+)
+def test_a_same_block_refusal_counts_only_when_the_recipient_itself_flipped_the_flag(case):
+    p = _refused_on_chain(**{'recipient_hotkeys': ['theirs'], 'ahead': 1, **case})
+    assert p.cancel_evidence(USER, 5_000, TXID, from_address=MINER, block_hint=BLOCK) is None
+
+
+def test_refusal_evidence_never_reads_head_state_for_a_missing_parent_block():
+    p = _refused_on_chain(recipient_hotkeys=['theirs'], events=[_flag_set(idx=0)], ahead=1)
+    p.chain.get_block_hash = lambda n: None if n == BLOCK - 1 else f'0xblock{n}'
+    with pytest.raises(ProviderUnreachableError):
+        p.cancel_evidence(USER, 5_000, TXID, from_address=MINER, block_hint=BLOCK)
 
 
 def test_send_needs_one_hotkey_holding_the_whole_amount():

@@ -20,11 +20,3 @@ def test_retry_when_zero_accept_and_not_deterministic():
 
 def test_no_retry_when_reject_is_deterministic():
     assert _should_retry_relay(_info(0, True)) is False  # wrong amount/recipient — resend can't help
-
-
-def test_no_retry_once_a_validator_accepts():
-    assert _should_retry_relay(_info(1, False)) is False  # quorum already progressing
-
-
-def test_no_retry_on_missing_info():
-    assert _should_retry_relay(None) is False

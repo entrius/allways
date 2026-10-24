@@ -1,4 +1,4 @@
-"""`alw swap now` must name the failing bound (F-2), not a generic "within bounds" shrug.
+"""`alw swap now` must name the failing bound, not a generic "within bounds" shrug.
 
 ``unviable_reason`` existed for exactly these branches and was never called: both no-viable-miner
 fail paths printed the same generic line, leaving the taker guessing WHICH bound (min/max swap,

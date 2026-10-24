@@ -67,20 +67,12 @@ class TestVerifySwapSafetyCushion:
     """The cushion is MINER_TIMEOUT_CUSHION_SECS before timeout_at — the miner stops STARTING a fulfill
     that long before the deadline so the validator extension flow still has runway."""
 
-    def test_allows_swap_well_before_cushion_window(self, at_now):
+    def test_cushion_window_blocks_a_new_fulfill_from_its_boundary_on(self, at_now):
         f = make_fulfiller()
         at_now(5000 - MINER_TIMEOUT_CUSHION_SECS - 100)
         result = f.verify_swap_safety(make_swap(timeout_at=5000))
         assert result is not None
         assert result[1] == 'bc1q-miner'
-
-    def test_blocks_swap_inside_cushion_window(self, at_now):
-        f = make_fulfiller()
-        at_now(5000 - MINER_TIMEOUT_CUSHION_SECS + 1)
-        assert f.verify_swap_safety(make_swap(timeout_at=5000)) is None
-
-    def test_blocks_swap_at_cushion_boundary(self, at_now):
-        f = make_fulfiller()
         at_now(5000 - MINER_TIMEOUT_CUSHION_SECS)  # >= check → unsafe at the exact boundary
         assert f.verify_swap_safety(make_swap(timeout_at=5000)) is None
 
@@ -125,7 +117,7 @@ class TestSentCacheCleanup:
         assert f.mark_fulfilled_attempts == {k1: 2, k3: 1}
 
     def test_mark_fulfilled_retry_not_gated_by_cushion_after_send(self, at_now):
-        # #462: once dest funds are out the swap stays Active until mark_fulfilled lands, so the cushion
+        # Once dest funds are out the swap stays Active until mark_fulfilled lands, so the cushion
         # (scoped to STARTING a fulfill) must NOT gate the post-send retry. Uses the REAL
         # verify_swap_safety so the cushion actually runs on the retry path.
         swap = make_swap(timeout_at=5000)
@@ -169,19 +161,15 @@ class TestSentCacheCleanup:
         )
         assert f.sent[swap.key_hex].marked_fulfilled is True
 
-    def test_unmarked_stale_discarded_once_past_deadline_margin(self, at_now):
-        f = make_fulfiller()
-        f.sent = {'k': SentSwap('leaked-tx', 50, marked_fulfilled=False, timeout_at=1000)}
-        at_now(1000 + SENT_CACHE_DISCARD_MARGIN_SECS + 1)  # provably past any extended deadline
-        f.cleanup_stale_sends(active_swap_keys=set())
-        assert f.sent == {}
-
-    def test_unmarked_stale_retained_at_margin_boundary(self, at_now):
+    def test_unmarked_stale_discarded_only_past_deadline_margin(self, at_now):
         f = make_fulfiller()
         f.sent = {'k': SentSwap('b', 2, marked_fulfilled=False, timeout_at=1000)}
         at_now(1000 + SENT_CACHE_DISCARD_MARGIN_SECS)  # exactly at margin → retain (discard uses strict >)
         f.cleanup_stale_sends(active_swap_keys=set())
         assert set(f.sent) == {'k'}
+        at_now(1000 + SENT_CACHE_DISCARD_MARGIN_SECS + 1)  # provably past any extended deadline
+        f.cleanup_stale_sends(active_swap_keys=set())
+        assert f.sent == {}
 
     def test_legacy_entry_without_deadline_never_discarded(self, at_now):
         f = make_fulfiller()
@@ -198,12 +186,6 @@ class TestSentCacheCleanup:
 
         reader = make_fulfiller(sent_cache_path=cache_path)
         assert reader.sent['7e'] == SentSwap('tx7', 123, marked_fulfilled=False, timeout_at=456)
-
-    def test_legacy_three_element_cache_loads_with_zero_timeout(self, tmp_path: Path):
-        cache_path = tmp_path / 'sent_cache.json'
-        cache_path.write_text('{"9a": ["legacy-tx", 999, false]}')  # pre-fix 3-element shape
-        reader = make_fulfiller(sent_cache_path=cache_path)
-        assert reader.sent['9a'] == SentSwap('legacy-tx', 999, marked_fulfilled=False, timeout_at=0)
 
 
 class TestTotalObligationGate:
@@ -246,17 +228,10 @@ class TestTotalObligationGate:
         f.sent[earlier.key_hex] = SentSwap('tx', 1, marked_fulfilled=False, timeout_at=5000)
         assert f.unfunded_obligation_reason(later, payout) is None
 
-    def test_single_obligation_never_reads_the_balance(self):
-        f, earlier, _later, payout = self._dual(balance=0)
-        f.note_active_swaps([earlier])
-        # No concurrent peer → the provider's own send preflight owns the check.
-        assert f.unfunded_obligation_reason(earlier, payout) is None
-        f.providers['tao'].get_balance.assert_not_called()
-
 
 class TestSendDestUsesPinnedSender:
     def test_send_dest_funds_passes_pinned_miner_to_addr_not_stale_cache(self):
-        # H4: the dest send must use the swap's pinned miner_to_addr, not a chain-wide cache that
+        # The dest send must use the swap's pinned miner_to_addr, not a chain-wide cache that
         # last-write-wins across quotes (sending from the wrong wallet → slash).
         provider = MagicMock()
         provider.send_amount.return_value = ('tx', 1)
