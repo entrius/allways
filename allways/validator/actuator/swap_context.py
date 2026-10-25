@@ -179,9 +179,20 @@ class WorldContext:
     def deposit_claimed(self, swap: Any) -> bool:
         """Another swap claimed this deposit first, or a swap already spent it (a closed swap's key can be
         claimed again). The ledger covers every live swap: the World marks a live Swap's deposit spent
-        whenever it reads one, under whichever spelling it used."""
+        whenever it reads one, under whichever spelling it used.
+
+        An earlier claim that never initiated doesn't hold the deposit against a canonical one: decide() only
+        asks this after the canonical-form check, so that claim is another spelling, which never attests.
+        Otherwise a variant landing first would leave neither attestable and the deposit at the miner."""
         held = self.world.deposits.get(tx_key(swap.from_tx_hash))
-        return held is not None and (held.swap_key != swap_key_from_tx_hash(swap.from_tx_hash).hex() or held.initiated)
+        if held is None or held.initiated:
+            return held is not None
+        canonical = self._canonical(swap)
+        return held.swap_key != swap_key_from_tx_hash(swap.from_tx_hash).hex() and not canonical
+
+    def _canonical(self, swap: Any) -> bool:
+        provider = self.provider(swap.from_chain)
+        return provider is not None and provider.chain.canonical_tx_hash(swap.from_tx_hash) == swap.from_tx_hash
 
     def payout_reuse(self, swap: Any) -> bool:
         """The deposit is a delivery this validator verified for some swap. A payout from a posted miner wallet

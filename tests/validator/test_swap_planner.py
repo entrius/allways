@@ -174,12 +174,21 @@ def test_a_stale_confirmed_delivery_times_out_instead_of_waiting_forever(tmp_pat
     assert report.decision == 'timeout' and intent.key[0] == 'timeout_swap'
 
 
-def test_a_deposit_another_swap_claimed_first_is_rejected(tmp_path):
-    other = DepositClaim(swap_key='ff' * 32, slot=1, seen_at=NOW)
+def test_a_deposit_another_swap_initiated_on_is_rejected(tmp_path):
+    other = DepositClaim(swap_key='ff' * 32, slot=1, seen_at=NOW, initiated=True)
     planner = _planner(tmp_path, btc=_Watcher(verify=_ok()))
     world = _world(_swap('PendingAttestation'), reservation=_reservation(), deposits={tx_key(SRC_TX): other})
     report, intents = _decision(planner, world)
     assert report.decision == 'reject' and 'already claimed' in report.reason and intents == []
+
+
+def test_an_earlier_claim_that_never_initiated_does_not_hold_a_canonical_deposit(tmp_path):
+    # Another key on the same tx_key is another spelling of it, which never attests (corpus C02).
+    other = DepositClaim(swap_key='ff' * 32, slot=1, seen_at=NOW)
+    planner = _planner(tmp_path, btc=_Watcher(verify=_ok()))
+    world = _world(_swap('PendingAttestation'), reservation=_reservation(), deposits={tx_key(SRC_TX): other})
+    report, _ = _decision(planner, world)
+    assert report.decision == 'attest'
 
 
 @pytest.mark.parametrize('initiated', [False, True])

@@ -74,6 +74,44 @@ def test_a_lost_extension_race_is_a_no_op_but_a_real_failure_raises():
     raise AssertionError('a real failure was swallowed')
 
 
+class _RefusedAttest(_Client):
+    def __init__(self, reserved_until, max_extend_at):
+        super().__init__()
+        self.reservation = SimpleNamespace(reserved_until=reserved_until, max_extend_at=max_extend_at)
+        self.extended = []
+
+    def get_reservation(self, miner, backing='sol'):
+        return self.reservation
+
+    def vote_initiate(self, *a, **k):
+        self.calls.append('vote_initiate')
+        raise RuntimeError('Blockhash not found')
+
+    def extend_reservation(self, miner, target_at, backing='sol', **k):
+        self.extended.append(target_at)
+        return 'sig-extend'
+
+
+@pytest.mark.parametrize('left, extends', [(60, True), (3000, False)])
+def test_a_refused_attest_extends_the_reservation_only_near_expiry(left, extends):
+    # #813: a refused vote_initiate near expiry slides the reservation, so the claim is retried, not reaped.
+    now = int(time.time())
+    client = _RefusedAttest(reserved_until=now + left, max_extend_at=now + 7200)
+    with pytest.raises(RuntimeError, match='Blockhash'):
+        SWAP_EXECUTORS['vote_initiate'](client, _intent('vote_initiate'))
+    assert bool(client.extended) is extends
+    if extends:
+        assert now + left < client.extended[0] <= now + 7200
+
+
+def test_a_refused_attest_at_the_ceiling_is_not_extended():
+    now = int(time.time())
+    client = _RefusedAttest(reserved_until=now + 60, max_extend_at=now + 60)
+    with pytest.raises(RuntimeError):
+        SWAP_EXECUTORS['vote_initiate'](client, _intent('vote_initiate'))
+    assert client.extended == []
+
+
 class _Rpc:
     def __init__(self, failures=0):
         self.failures, self.sent, self.confirmed = failures, 0, False

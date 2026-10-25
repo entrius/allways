@@ -397,15 +397,15 @@ def test_non_canonical_in_flight_claim_refuses_to_attest(spec):
 
 
 @family
-def test_a_variant_claim_in_the_ledger_refuses_the_canonical_claim(spec):
-    # One deposit, two spellings, two swap keys: the earlier claim holds the case-blind ledger row.
+def test_an_earlier_variant_claim_does_not_hold_the_deposit_against_the_canonical_claim(spec):
+    # One deposit, two spellings, two swap keys: the variant holds the case-blind ledger row, but it can never
+    # attest, so the canonical claim must (corpus C02: otherwise neither attests and the deposit stays at the miner).
     for variant in _variants(spec):
         rules, swap = _claim(spec, _canonical(spec))
         rules.world = replace(
             rules.world, deposits={tx_key(variant): DepositClaim(swap_key_from_tx_hash(variant).hex(), 1, 1)}
         )
-        action = rules.decide(swap, now=1500)
-        assert action.decision == Decision.REJECT and 'already claimed' in action.reason, variant
+        assert rules.decide(swap, now=1500).decision == Decision.ATTEST, variant
 
 
 @family
@@ -566,7 +566,7 @@ def _claimed(tx_hash, slot, sig):
 
 def test_two_spellings_of_one_deposit_fold_into_one_ledger_row(tmp_path):
     # End to end: '0X…UPPER' claimed first, '0x…lower' later. The World keeps one row (the
-    # earlier claim), and the canonical claim is refused attestation off it.
+    # earlier claim); that spelling can never attest, so the canonical claim still does (corpus C02).
     reader, events, _, _, out = _reader(_Client(), tmp_path)
     reader.tick(WORLD_NOW)
     upper, lower = '0X' + HEX.upper(), '0x' + HEX.lower()
@@ -579,8 +579,7 @@ def test_two_spellings_of_one_deposit_fold_into_one_ledger_row(tmp_path):
 
     rules, swap = _claim(ETH_SPEC, lower)
     rules.world = world
-    action = rules.decide(swap, now=1500)
-    assert action.decision == Decision.REJECT and 'already claimed' in action.reason
+    assert rules.decide(swap, now=1500).decision == Decision.ATTEST
 
 
 def test_an_initiation_marks_the_deposit_spent_under_every_spelling(tmp_path):
