@@ -6,7 +6,8 @@ second quorum verbatim — never reconstructed from state, because every argumen
 the vault round, so a recomputed figure conflicts with its peers instead of co-counting with them.
 
 Ordering: the netted attestation is queued FIRST (``engine`` sequences the flush between
-``arm_verdicts`` and ``relay_verdicts``), before the vault has applied anything. Idempotency comes
+``arm_verdicts`` and ``relay_verdicts``), before the vault has applied anything. Verdicts the vault has
+ALREADY applied are settled before that flush (``settle_applied``), so they are never netted twice. Idempotency comes
 from the vault's permanent ``swap_ref`` marker — checked before voting, and re-checked after a
 revert, since pallet-contracts flattens every ink! ``Err`` into one ``ContractReverted``.
 """
@@ -83,6 +84,17 @@ def arm_verdicts(relay, now: int) -> None:
     # releases the miner's entry hold (``has_pending_debit``).
     for row in relay.store.unreflected_relay_slashes(relay.backing):
         relay.mark_dirty(row['miner'])
+
+
+def settle_applied(relay) -> None:
+    """Close every open verdict whose seizure the vault already shows, before the attestation nets it.
+    The vault's gross is already net of an applied seizure, so netting it again double-counts it: a
+    validator that replays history on a fresh store (a new or rebuilt one) would otherwise attest a
+    bond the slash already paid twice over, down to zero. A read, not a vote, so it runs whether or not
+    this validator is in the vault's set. An unreadable marker leaves the verdict open (netted)."""
+    for row in relay.store.open_relay_slashes(relay.backing):
+        if relay.vault.is_slashed(row['swap_key']):
+            _settle(relay, row, 'already applied on the vault')
 
 
 def relay_verdicts(relay, now: int) -> bool:

@@ -14,6 +14,7 @@ from allways.constants import RELAY_FEE_SETTLE_GRACE_SECS as GRACE
 from allways.solana import pdas
 from allways.validator.relay import attestation as attestation_job
 from allways.validator.relay import exits as exit_relay
+from allways.validator.relay import slash as slash_job
 from allways.validator.relay.engine import BondRelay, RelayConfig
 from allways.validator.relay.ledger import RelayLedger
 from allways.validator.store.db import Store
@@ -312,6 +313,41 @@ def test_a_verdict_already_applied_on_the_vault_is_settled_without_a_second_vote
     relay.step(NOW)
     assert not [c for c in relay.vault.calls if c[0] == 'vote_slash']
     assert relay.store.open_relay_slashes('tao') == []
+
+
+def test_a_verdict_the_vault_already_applied_is_not_netted_twice():
+    # A fresh store replays a timeout whose seizure landed long ago: the vault's gross is already
+    # net of it. Netting the penalty again attested 0 on testnet (vali-gamma, 2026-10-26).
+    relay = _relay(vault=FakeVault(collateral={HOTKEY: 78 * RAO}))
+    relay.vault.slashed.add(SWAP)
+    _ingest(relay, [_timeout_event()])
+    relay.step(NOW)
+    attest = next(c for c in relay.chain.calls if c[0] == 'vote_set_attestation')
+    assert attest[3] == 78 * RAO, 'the gross already paid the slash; 56 would be the double count'
+
+
+def test_a_validator_outside_the_vault_set_still_sees_an_applied_seizure():
+    # Membership gates vault VOTES, not vault reads: a validator waiting for admission must not
+    # attest a phantom-low bond meanwhile, and must not vote the slash either.
+    vault = FakeVault(collateral={HOTKEY: 78 * RAO})
+    vault.keypair = SimpleNamespace(ss58_address='not-a-member')
+    vault.slashed.add(SWAP)
+    relay = _relay(vault=vault)
+    _ingest(relay, [_timeout_event()])
+    relay.step(NOW)
+    attest = next(c for c in relay.chain.calls if c[0] == 'vote_set_attestation')
+    assert attest[3] == 78 * RAO
+    assert relay.store.open_relay_slashes('tao') == []
+    assert not [c for c in vault.calls if c[0] == 'vote_slash']
+
+
+def test_an_unreadable_marker_keeps_the_verdict_netted():
+    # Can't tell whether the seizure happened: stay pessimistic (netted) rather than release it.
+    relay = _relay()
+    _ingest(relay, [_timeout_event()])
+    relay.vault.readable = False
+    slash_job.settle_applied(relay)
+    assert len(relay.store.open_relay_slashes('tao')) == 1
 
 
 def test_a_revert_whose_marker_is_set_counts_as_success():
