@@ -364,8 +364,11 @@ DECLARED_COLLATERAL_BAND_BPS = 100
 
 
 def required_collateral(collateral_amount: int) -> int:
-    """Lamports a miner must hold to back ``collateral_amount`` (1.10×). Mirrors the contract."""
-    return collateral_amount * COLLATERAL_REQUIREMENT_BPS // 10_000
+    """What a miner must hold to back ``collateral_amount`` (1.10×), in the backing's units. Rounds up,
+    as the contract's ``required_collateral`` does: a floor reads one unit short whenever 1.10× isn't
+    whole, so this side judged a miner covered that the program refuses (and named a penalty one unit
+    under the one the verdict carries)."""
+    return -(-collateral_amount * COLLATERAL_REQUIREMENT_BPS // 10_000)
 
 
 # ─── Emission Recycling ────────────────────────────────────
