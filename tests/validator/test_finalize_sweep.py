@@ -55,7 +55,9 @@ class SweepClient:
         return 'finalizesig'
 
 
-def _drawn_seat(client, *, router=None, finalize_by=NOW + 100, reserved_until=0, from_chain='sol', to_chain='btc'):
+def _drawn_seat(
+    client, *, router=None, finalize_by=NOW + 100, reserved_until=0, from_chain='sol', to_chain='btc', created_at=0
+):
     return SimpleNamespace(
         router=router if router is not None else client.keypair.pubkey(),
         from_chain=from_chain,
@@ -63,6 +65,7 @@ def _drawn_seat(client, *, router=None, finalize_by=NOW + 100, reserved_until=0,
         rate=RATE_FIXED,
         reserved_until=reserved_until,
         finalize_by=finalize_by,
+        created_at=created_at,
         collateral_chain='sol',
         miner_from_addr='minerDepositAddr',
     )
@@ -257,6 +260,27 @@ def test_stale_expired_reservation_residue_waits(tmp_path):
     _queue(v.store, USER_A, created_at=NOW - 10)
     assert finalize_won_seats(v, NOW) == []
     assert v.store.distinct_routed_pools() == [(MINER, 'sol', 'btc', 'sol')]
+
+
+def test_a_seat_the_previous_swap_consumed_inside_its_finalize_window_is_residue(tmp_path):
+    # 3.8.0 suite finding 2: the hub's previous swap filled its seat and initiated (reserved_until back
+    # to 0) while that draw's finalize_by was still ahead. Read by finalize_by alone it looked like our
+    # round's terminal outcome, and the queue was dropped half a second after it entered.
+    client = SweepClient(None)
+    client._reservation = _drawn_seat(client, finalize_by=NOW + 200, reserved_until=0, created_at=NOW - 60)
+    v = _validator(tmp_path, client)
+    _queue(v.store, USER_A, created_at=NOW - 10)
+    assert finalize_won_seats(v, NOW) == []
+    assert v.store.distinct_routed_pools() == [(MINER, 'sol', 'btc', 'sol')]  # kept — our draw is pending
+
+
+def test_a_seat_filled_after_we_queued_is_our_rounds_outcome(tmp_path):
+    client = SweepClient(None)
+    client._reservation = _drawn_seat(client, reserved_until=NOW + 300, created_at=NOW - 5)
+    v = _validator(tmp_path, client)
+    _queue(v.store, USER_A, created_at=NOW - 10)
+    assert finalize_won_seats(v, NOW) == []
+    assert v.store.distinct_routed_pools() == [], 'filled by another router after we queued: drop'
 
 
 def test_residue_then_fresh_draw_finalizes(tmp_path):

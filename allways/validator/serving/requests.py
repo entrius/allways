@@ -312,8 +312,16 @@ def finalize_won_seats(ctx, now: int) -> list:
         # is residue from a PREVIOUS round — our pool simply hasn't been drawn yet, so wait (the
         # TTL backstop clears a queue whose draw never comes). Treating residue as terminal
         # deleted every queue on the first sweep step and permanently dead-ended routed mode for
-        # any miner-direction carrying an old lapsed seat.
-        fresh = resv is not None and max(int(resv.reserved_until), int(resv.finalize_by)) >= entered_at
+        # any miner-direction carrying an old lapsed seat. A FILLED seat dates from its fill: one filled
+        # before we queued belongs to an earlier round even while that round's finalize_by is still
+        # ahead (a back-to-back swap on one hub consumes its seat inside the finalize window).
+        filled_at = int(getattr(resv, 'created_at', 0) or 0) if resv is not None else 0
+        if resv is None:
+            fresh = False
+        elif filled_at:
+            fresh = filled_at >= entered_at
+        else:
+            fresh = max(int(resv.reserved_until), int(resv.finalize_by)) >= entered_at
         drawn_unfilled = (
             fresh
             and int(resv.reserved_until) == 0
