@@ -408,6 +408,20 @@ class TestRateQuoteCandidates:
 
         assert rq.quote.miner_hotkey == hotkeys[0] and rq.quote.estimated_free_at == 0
 
+    @pytest.mark.parametrize('filled, held', [(False, True), (True, False)])
+    def test_only_an_unfilled_seat_holds_the_hub_through_its_finalize_window(self, filled, held):
+        # A fill consumed by vote_initiate also reads reserved_until == 0; once its swap ended it holds nothing.
+        ctx, hotkeys = self._validator('sol', 'btc', ['0.6', '0.5'])
+        state = ctx.miner_states()[hotkeys[0]]
+        now = int(time.time())
+        ctx.accounts().reservations[(str(state.miner), 'sol')] = SimpleNamespace(
+            reserved_until=0, created_at=now - 60 if filled else 0, finalize_by=now + 100
+        )
+
+        rq = rate_quote(ctx, 'sol', 'btc', self.SOL)
+
+        assert (rq.quote.miner_hotkey == hotkeys[1]) is held
+
     @pytest.mark.parametrize('bad_field', ['miner_from_addr', 'miner_to_addr'])
     def test_bad_best_address_is_absent_from_quote_levels_depth_and_candidates(self, bad_field):
         validator, hotkeys = self._validator('sol', 'btc', ['0.6', '0.5'])

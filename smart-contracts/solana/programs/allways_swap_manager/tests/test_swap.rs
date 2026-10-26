@@ -1255,6 +1255,30 @@ fn test_finalize_refuses_a_reservation_already_consumed_by_initiate() {
     );
 }
 
+#[test]
+fn test_a_completed_swap_inside_the_finalize_window_does_not_park_the_hub() {
+    // 2026-10-25 (suite lifecycle dest-refuses on the rebuild): a swap that completes inside its seat's
+    // finalize window left the consumed reservation looking like a drawn-but-unfilled seat
+    // (reserved_until == 0, finalize_by ahead), so open_or_request refused MinerReserved until finalize_by.
+    let (mut svm, _admin, vals, miner, _rr) = setup_full(COLLATERAL);
+    let finalize_by = reservation_acct(&svm, &miner.pubkey()).finalize_by;
+    set_clock(&mut svm, finalize_by - 60);
+
+    do_initiate(&mut svm, &vals, &miner.pubkey(), "srctx1");
+    let mid_swap = send(&mut svm, open_ix(&vals[1].pubkey(), &miner.pubkey()), &vals[1].pubkey(), &vals[1]);
+    assert!(mid_swap.is_err(), "a hub with a swap in flight still takes no new entry");
+
+    send(&mut svm, fulfill_ix(&miner.pubkey(), "srctx1"), &miner.pubkey(), &miner).expect("fulfill");
+    send(&mut svm, confirm_ix(&vals[0].pubkey(), &miner.pubkey(), "srctx1"), &vals[0].pubkey(), &vals[0]).expect("c0");
+    send(&mut svm, confirm_ix(&vals[1].pubkey(), &miner.pubkey(), "srctx1"), &vals[1].pubkey(), &vals[1]).expect("c1");
+    assert!(!miner_state(&svm, &miner.pubkey()).has_active_swap, "swap completed");
+    let now = svm.get_sysvar::<Clock>().unix_timestamp;
+    assert!(now <= reservation_acct(&svm, &miner.pubkey()).finalize_by, "still inside the finalize window");
+
+    send(&mut svm, open_ix(&vals[1].pubkey(), &miner.pubkey()), &vals[1].pubkey(), &vals[1])
+        .expect("the hub takes a new entry as soon as its swap completed");
+}
+
 fn reservation_acct(svm: &LiteSVM, miner: &Pubkey) -> Reservation {
     Reservation::try_deserialize(&mut svm.get_account(&resv_pda(miner)).unwrap().data.as_slice()).unwrap()
 }
