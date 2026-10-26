@@ -1839,8 +1839,8 @@
     {
       "name": "migrate_miner_state",
       "docs": [
-        "Rewrite one v10 MinerState into the v12 layout, carrying the legacy `active` bool into the SOL",
-        "activation bit."
+        "Rewrite one legacy MinerState (v10, v13 or v14 layout) into the live one, carrying the legacy",
+        "`active` bool into the SOL activation bit and seeding the v17 fee counters from `accrued_fees`."
       ],
       "discriminator": [
         38,
@@ -1913,7 +1913,17 @@
           "address": "11111111111111111111111111111111"
         }
       ],
-      "args": []
+      "args": [
+        {
+          "name": "accrued_fees",
+          "type": {
+            "array": [
+              "u64",
+              8
+            ]
+          }
+        }
+      ]
     },
     {
       "name": "open_or_request",
@@ -3200,7 +3210,7 @@
         {
           "name": "treasury",
           "docs": [
-            "Treasury sink for the quote-update churn fee — subnet revenue, separate from collateral."
+            "Treasury sink for the churn and wallet-lock fees — subnet revenue, separate from collateral."
           ],
           "writable": true,
           "pda": {
@@ -6733,6 +6743,32 @@
               "Stored PDA bump."
             ],
             "type": "u8"
+          },
+          {
+            "name": "fee_generation",
+            "docs": [
+              "The `Config.vault_generation` that `accrued_fees` counts for. A counter left from a retired",
+              "generation reads as zero (`accrued_fee`): the replacement vault has settled nothing, and the",
+              "fees the old vault held are not owed to it. Appended in v17, after `bump`, so pre-v17 readers",
+              "still parse the prefix."
+            ],
+            "type": "u64"
+          },
+          {
+            "name": "accrued_fees",
+            "docs": [
+              "Cumulative protocol fees owed to each off-chain bond vault, per hub (indexed like the other",
+              "per-hub arrays, in the backing's own units), accrued at confirm quorum. The vault's fee",
+              "true-up settles against this figure, so every validator reads one number off chain instead",
+              "of each summing its own event history. A locally-settled backing's slot stays 0: its fee",
+              "moves to the treasury at confirm."
+            ],
+            "type": {
+              "array": [
+                "u64",
+                8
+              ]
+            }
           }
         ]
       }

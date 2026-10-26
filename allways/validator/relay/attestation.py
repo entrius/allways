@@ -66,12 +66,15 @@ def compute(relay, miner: str, hotkey: str) -> Optional[Attested]:
     if gross is None or settled is None or lock is None:
         bt.logging.warning(f'relay: vault reads unavailable for {hotkey[:8]}… — leaving its attestation alone')
         return None
+    # The on-chain counter, scoped to THIS vault: the retired one's settled counter is gone, so its
+    # accruals against a fresh `settled` would re-charge fees it already collected.
+    accrued = relay.accrued_fees(miner)
+    if accrued is None:
+        bt.logging.warning(f'relay: fee counter unreadable for {miner[:8]}… — leaving its attestation alone')
+        return None
     generation = relay.vault_generation()
     if generation is None:
         return None
-    # Scoped to THIS vault: the retired one's settled counter is gone, so summing its accruals
-    # against a fresh `settled` would re-charge fees it already collected.
-    accrued = relay.store.accrued_fee_total(miner, relay.backing, vault_generation=generation)
     # Fees the miner has earned the protocol but the vault has not yet booked. The vault debits at
     # settle time; Solana's guards must see the miner clipped from the moment the fee is earned.
     unsettled = max(0, accrued - settled)

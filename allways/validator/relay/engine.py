@@ -41,8 +41,9 @@ from allways.constants import (
     VOTE_ROUND_TTL_SECS,
 )
 from allways.solana import pdas
+from allways.solana.layouts import hub_accrued_fee
 from allways.validator.relay import attestation as attestation_job
-from allways.validator.relay import exits, stop_point
+from allways.validator.relay import exits
 from allways.validator.relay import slash as slash_job
 from allways.validator.runtime.logs import Episodes, LowBalance
 from allways.validator.world.snapshot import World
@@ -110,7 +111,6 @@ class BondRelay:
         config: Optional[RelayConfig] = None,
         sleep: Optional[Callable[[float], None]] = None,
         timer: Optional[Callable[[], float]] = None,
-        archive: Optional[Any] = None,
     ):
         self._world = world
         self._episodes = Episodes()
@@ -151,11 +151,8 @@ class BondRelay:
         # until the relay has caught up — the fuse must not report "live" over a lost verdict.
         self._ingest_healthy = True
         # Whether the event feed has published everything up to now (no catch-up running). The fee
-        # true-up reads totals off the ledger the feed fills, so it waits on this.
+        # true-up subtracts the fees after its boundary, which the feed fills in, so it waits on this.
         self.feed_caught_up = True
-        # Reads the vault's past settled counters, for a fresh fee ledger's stop point (see stop_point).
-        self.archive = archive
-        self._fee_stop_known = False
         # Every vault vote needs ~0.075 TAO free up front.
         self._low_balance = LowBalance(
             'relay: vault signer', 'TAO', 1e9, RELAY_LOW_BALANCE_RAO, RELAY_BALANCE_CHECK_SECS, LOW_BALANCE_REMIND_SECS
@@ -180,6 +177,38 @@ class BondRelay:
 
     def attestation(self, miner: str) -> Optional[Any]:
         return self.world().get('BondAttestation', pdas.bond_attestation_pda(miner, self.backing, self.program_id))
+
+    def accrued_fees(self, miner: str, at_time: Optional[int] = None) -> Optional[int]:
+        """Cumulative fees ``miner`` owes this hub's current vault, off its on-chain counter — as of
+        ``at_time`` when given (the counter less the fees confirmed after it). None when unreadable:
+        "unknown" must never be spelled as 0, or the attestation would forget fees already earned."""
+        generation = self.vault_generation()
+        if generation is None:
+            return None
+        ms = self.miner_state(miner)
+        if ms is None:
+            return 0  # no MinerState, no confirms: nothing was ever accrued
+        total = hub_accrued_fee(ms, self.backing_bit, generation)
+        if total is None:
+            return None
+        if at_time is not None:
+            total -= self.store.fees_after(str(miner), generation, int(at_time))
+        return max(0, total)
+
+    def fee_debtors(self) -> List[str]:
+        """Every miner whose counter shows fees under the current vault generation (or can't be read,
+        so the true-up declines rather than leaving it out). Read off the World, so every validator
+        enumerates the same set whatever its own history."""
+        generation = self.vault_generation()
+        world = self._world()
+        if generation is None or world is None:
+            return []
+        debtors = []
+        for _pda, ms in world.all('MinerState'):
+            total = hub_accrued_fee(ms, self.backing_bit, generation)
+            if total is None or total > 0:
+                debtors.append(str(ms.miner))
+        return sorted(debtors)
 
     def settled_total(self, hotkey: str) -> Optional[int]:
         """The vault's settled counter for ``hotkey``, read once per step (the attestation and the fee
@@ -299,7 +328,6 @@ class BondRelay:
                     )
                     return
                 self._reconciled = True
-                self.store.seed_as_of = None  # seeds after boot are new miners or this validator's own rounds
                 self._episodes.end('reconcile')
                 bt.logging.info('relay: startup reconcile clean, heartbeat released')
                 dev_signal.emit('relay_reconciled', backing=self.backing)
@@ -364,14 +392,6 @@ class BondRelay:
         world = self._world()
         if world is None or not world.complete:
             return False
-        if not self.resolve_fee_stop(now):
-            # Seeding fee bases now would fix a wrong starting point for good, so the attestations and
-            # exits (which seed them) wait. A verdict carries its own figures and seeds nothing, so it is
-            # relayed meanwhile; this validator's entry hold covers the attestation it can't net yet.
-            slash_job.arm_verdicts(self, now)
-            if self.is_vault_member(now):
-                slash_job.relay_verdicts(self, now)
-            return False
         ok = True
         bonded = self.bonded_miners()
         for miner in bonded:
@@ -389,44 +409,6 @@ class BondRelay:
             ok = exits.run_exits(self, now) and ok
         self._prune(now)
         return ok
-
-    def resolve_fee_stop(self, now: int) -> bool:
-        """On a fresh fee ledger, learn the boundary the vault last settled before any miner is seeded.
-        False while it can't be learned yet (the reconcile barrier holds, and retries next tick)."""
-        if self._fee_stop_known:
-            return True
-        if self.store.has_fee_bases():  # this database has been counting: its bases already carry the answer
-            self._fee_stop_known = True
-            return True
-        validators = self.vault.get_validators()
-        hotkeys = sorted(
-            {hk for m in self.bonded_miners() if m not in self._exiting for hk in [self.hotkey_for(m)] if hk}
-        )
-        cadence = self.cfg.fee_cadence_secs
-        reader = self.archive = self.archive or stop_point.ArchiveReader(self.vault)
-        try:
-            settled = stop_point.resolve(
-                now, cadence, None if validators is None else len(validators), hotkeys, reader.settled_at
-            )
-        except Exception as e:
-            bt.logging.warning(f'relay: fee stop-point lookup failed: {e}')
-            settled = None
-        if settled is None:
-            self._episodes.start(
-                'fee-stop',
-                'relay: fresh fee ledger — waiting to learn where the vault last settled fees',
-                bt.logging.warning,
-            )
-            return False
-        self._episodes.end('fee-stop')
-        self.store.seed_as_of = settled
-        self.store.set_relay_meta('fee_stop_point', settled)
-        self._fee_stop_known = True
-        bt.logging.info(
-            f'relay: fresh fee ledger — the vault last settled fees at boundary {settled} '
-            f'({len(validators or [])} validator(s), {len(hotkeys)} bound miner(s) checked)'
-        )
-        return True
 
     def is_vault_member(self, now: int) -> bool:
         """Whether this validator may vote on the vault. Outside its set every vault vote reverts (and still
@@ -474,7 +456,7 @@ class BondRelay:
                 miners.add(str(att.miner))
         try:
             miners.update(row['miner'] for row in self.store.open_relay_slashes(self.backing))
-            miners.update(self.store.accrued_fee_totals(self.backing))
+            miners.update(self.fee_debtors())
         except Exception as e:
             bt.logging.warning(f'relay: ledger scan failed: {e}')
         return sorted(miners)

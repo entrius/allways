@@ -1,4 +1,4 @@
-"""The hub relay as a component: its fee ledger without full history, and what it hands the actuator."""
+"""The hub relay as a component: its recent fee rows, and what it hands the actuator."""
 
 from types import SimpleNamespace
 
@@ -19,61 +19,42 @@ from allways.validator.runtime.deadline_queue import DeadlineQueue
 from allways.validator.store.db import Store
 from allways.validator.world.snapshot import World
 
-CADENCE = 1000
 NOW = 10_500  # the last fee boundary is 10_000
 MINER, HOTKEY = str(Keypair().pubkey()), 'hk'
 
 
-def _ledger(tmp_path, settled=0, now=NOW):
-    clock = {'now': now}
-    vault = {'settled': settled}
-    ledger = RelayLedger(
-        Store(str(tmp_path / 'r.db')),
-        'tao',
-        settled=lambda miner: vault['settled'],
-        boundary=lambda t: (t // CADENCE) * CADENCE,
-        clock=lambda: clock['now'],
+def _ledger(tmp_path):
+    return RelayLedger(Store(str(tmp_path / 'r.db')), 'tao')
+
+
+def test_only_the_fees_after_a_time_and_in_this_generation_count_beyond_the_counter(tmp_path):
+    ledger = _ledger(tmp_path)
+    ledger.record_relay_fee('a', MINER, 'tao', 5, 9_900, vault_generation=1)
+    ledger.record_relay_fee('b', MINER, 'tao', 3, 10_200, vault_generation=1)
+    ledger.record_relay_fee('c', MINER, 'tao', 4, 10_300, vault_generation=0)  # a retired vault's fee
+    ledger.record_relay_fee('d', 'other', 'tao', 9, 10_300, vault_generation=1)
+    assert ledger.fees_after(MINER, 1, 10_000) == 3
+    assert ledger.fees_after(MINER, 1, 9_000) == 8
+    assert ledger.fees_after(MINER, 1, 10_200) == 0, 'a fee AT the boundary is in the total as of it'
+
+
+def test_pruning_drops_rows_past_the_horizon(tmp_path):
+    ledger = _ledger(tmp_path)
+    ledger.record_relay_fee('a', MINER, 'tao', 5, 9_900, vault_generation=1)
+    ledger.record_relay_fee('b', MINER, 'tao', 3, 10_200, vault_generation=1)
+    ledger.prune_relay_fees(10_000)
+    rows = ledger.store.conn().execute('SELECT swap_key FROM relay_tao_fees').fetchall()
+    assert [r['swap_key'] for r in rows] == ['b']
+
+
+def test_the_pre_v17_fee_base_table_is_dropped(tmp_path):
+    store = Store(str(tmp_path / 'r.db'))
+    store.conn().execute(
+        'CREATE TABLE relay_tao_fee_base (miner TEXT, generation INTEGER, base INTEGER, as_of INTEGER)'
     )
-    return ledger, vault, clock
-
-
-def test_a_fresh_ledger_seeds_from_the_vault_and_counts_only_fees_after_the_boundary(tmp_path):
-    ledger, *_ = _ledger(tmp_path, settled=7)
-    ledger.record_relay_fee('a', MINER, 'tao', 5, 9_900, vault_generation=1)  # before the boundary: in settled
-    ledger.record_relay_fee('b', MINER, 'tao', 3, 10_200, vault_generation=1)
-    assert ledger.accrued_fee_total(MINER, 'tao', vault_generation=1) == 7 + 3
-    assert ledger.accrued_fee_total(MINER, 'tao', at_time=10_100, vault_generation=1) == 7
-
-
-def test_a_short_count_heals_once_the_vault_settles_the_boundary(tmp_path):
-    ledger, vault, clock = _ledger(tmp_path, settled=4)
-    ledger.record_relay_fee('b', MINER, 'tao', 3, 10_200, vault_generation=1)
-    assert ledger.accrued_fee_total(MINER, 'tao', vault_generation=1) == 7
-    clock['now'], vault['settled'] = 11_050, 12  # the 11_000 round settled 5 fees this ledger never saw
-    assert ledger.accrued_fee_total(MINER, 'tao', vault_generation=1) == 12
-    vault['settled'] = 12
-    assert ledger.accrued_fee_total(MINER, 'tao', vault_generation=1) == 12  # healed once, never again
-
-
-def test_an_exit_residual_settled_past_the_boundary_is_not_counted_twice(tmp_path):
-    ledger, vault, _ = _ledger(tmp_path, settled=0)
-    ledger.record_relay_fee('b', MINER, 'tao', 3, 10_200, vault_generation=1)
-    assert ledger.accrued_fee_total(MINER, 'tao', vault_generation=1) == 3
-    ledger.set_relay_meta(f'exit:{MINER}', '1')
-    vault['settled'] = 3  # the residual settle covers the fee after the boundary
-    assert ledger.accrued_fee_total(MINER, 'tao', vault_generation=1) == 3
-
-
-def test_folding_keeps_the_totals_and_drops_the_rows(tmp_path):
-    ledger, *_ = _ledger(tmp_path, settled=7)
-    ledger.record_relay_fee('b', MINER, 'tao', 3, 10_200, vault_generation=1)
-    ledger.record_relay_fee('c', MINER, 'tao', 2, 10_400, vault_generation=1)
-    ledger.record_relay_fee('d', 'unseeded', 'tao', 9, 10_300, vault_generation=1)
-    assert ledger.accrued_fee_total(MINER, 'tao', vault_generation=1) == 12
-    ledger.fold(10_300)
-    assert ledger.accrued_fee_total(MINER, 'tao', vault_generation=1) == 12
-    rows = ledger.store.conn().execute('SELECT swap_key FROM relay_tao_fees ORDER BY swap_key').fetchall()
-    assert [r['swap_key'] for r in rows] == ['c', 'd']  # an unseeded miner's rows wait for its seed
+    RelayLedger(store, 'tao')
+    names = {r['name'] for r in store.conn().execute("SELECT name FROM sqlite_master WHERE type = 'table'")}
+    assert 'relay_tao_fee_base' not in names and 'relay_tao_fees' in names
 
 
 class _Vault:
@@ -103,7 +84,13 @@ class _Vault:
 
 def _world():
     miner_state = SimpleNamespace(
-        miner=MINER, active_backings=pdas.BACKING_BIT_TAO, has_active_swap=False, busy_until=0, settling_until=0
+        miner=MINER,
+        active_backings=pdas.BACKING_BIT_TAO,
+        has_active_swap=False,
+        busy_until=0,
+        settling_until=0,
+        fee_generation=1,
+        accrued_fees=[0] * 8,
     )
     return World(
         taken_at=NOW,
@@ -239,10 +226,10 @@ def test_a_verdict_the_ledger_refused_holds_the_ack_until_it_lands(tmp_path, mon
 
 
 def test_a_swap_fee_recorded_twice_counts_once(tmp_path):
-    ledger, *_ = _ledger(tmp_path, settled=0)
+    ledger = _ledger(tmp_path)
     ledger.record_relay_fee('b', MINER, 'tao', 3, 10_200, vault_generation=1)
     ledger.record_relay_fee('b', MINER, 'tao', 3, 10_200, vault_generation=1)  # the same event replayed
-    assert ledger.accrued_fee_total(MINER, 'tao', vault_generation=1) == 3
+    assert ledger.fees_after(MINER, 1, 10_000) == 3
 
 
 def test_an_unreadable_debit_ledger_holds_new_swaps(tmp_path):

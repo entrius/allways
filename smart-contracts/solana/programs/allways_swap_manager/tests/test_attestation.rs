@@ -490,9 +490,12 @@ fn migrate_config_ix(admin: &Pubkey) -> Instruction {
     )
 }
 fn migrate_miner_ix(admin: &Pubkey, miner: &Pubkey) -> Instruction {
+    migrate_miner_seeded_ix(admin, miner, [0; 8])
+}
+fn migrate_miner_seeded_ix(admin: &Pubkey, miner: &Pubkey, accrued_fees: [u64; 8]) -> Instruction {
     Instruction::new_with_bytes(
         pid(),
-        &allways_swap_manager::instruction::MigrateMinerState {}.data(),
+        &allways_swap_manager::instruction::MigrateMinerState { accrued_fees }.data(),
         allways_swap_manager::accounts::MigrateMinerState {
             admin: *admin,
             config: config_pda(),
@@ -1703,6 +1706,97 @@ fn test_migrate_miner_state_broadcasts_v13_scalars_into_every_hub_slot() {
     // Idempotent — a second crank is a no-op on the already-grown account.
     send(&mut svm, migrate_miner_ix(&admin.pubkey(), &m), &admin.pubkey(), &admin).expect("again");
     assert_eq!(miner_state(&svm, &m).busy_slot(BACKING_BIT_TAO), 42);
+}
+
+/// The v14-v16 `MinerState` body (per-hub arrays, no fee counters) — the shape the v17 crank grows.
+#[derive(AnchorSerialize)]
+struct MinerStateV14 {
+    miner: Pubkey,
+    collateral: u64,
+    active: bool,
+    active_backings: u8,
+    has_active_swap: bool,
+    active_swap_backings: u8,
+    busy_until: [i64; 8],
+    settling_until: [i64; 8],
+    reserved_collateral: [u64; 8],
+    deactivation_at: i64,
+    successful_swaps: u32,
+    failed_swaps: u32,
+    bump: u8,
+}
+
+fn set_vault_generation(svm: &mut LiteSVM, generation: u64) {
+    let mut cfg = config_acct(svm);
+    cfg.vault_generation = generation;
+    let mut buf = Vec::new();
+    cfg.try_serialize(&mut buf).unwrap();
+    overwrite(svm, config_pda(), buf);
+}
+
+fn downgrade_to_v14(svm: &mut LiteSVM, m: &Pubkey, has_active_swap: bool) {
+    let live = miner_state(svm, m);
+    let legacy = MinerStateV14 {
+        miner: *m,
+        collateral: live.collateral,
+        active: true,
+        active_backings: BACKING_BIT_SOL | BACKING_BIT_TAO,
+        has_active_swap,
+        active_swap_backings: if has_active_swap { BACKING_BIT_TAO } else { 0 },
+        busy_until: [42, 43, 0, 0, 0, 0, 0, 0],
+        settling_until: [0, 9, 0, 0, 0, 0, 0, 0],
+        reserved_collateral: [0, 1_100, 0, 0, 0, 0, 0, 0],
+        deactivation_at: 7,
+        successful_swaps: 5,
+        failed_swaps: 2,
+        bump: live.bump,
+    };
+    let mut body = Vec::new();
+    legacy.serialize(&mut body).unwrap();
+    downgrade(svm, miner_pda(m), &MinerState::DISCRIMINATOR, body);
+}
+
+#[test]
+fn test_migrate_miner_state_v14_seeds_the_fee_counters_and_keeps_every_field() {
+    // v17 only appends the counters, so a live swap carries across (no drain), every v14 field is
+    // verbatim, and the seed lands under the config's current vault generation.
+    let (mut svm, admin, _vals, miner) = setup();
+    let m = miner.pubkey();
+    set_vault_generation(&mut svm, 3);
+    downgrade_to_v14(&mut svm, &m, true);
+    let seed = [0, 37_160_837, 0, 0, 0, 0, 0, 0];
+
+    send(&mut svm, migrate_miner_seeded_ix(&admin.pubkey(), &m, seed), &admin.pubkey(), &admin).expect("migrate");
+    let ms = miner_state(&svm, &m);
+    assert_eq!(svm.get_account(&miner_pda(&m)).unwrap().data.len(), 8 + MinerState::INIT_SPACE);
+    assert_eq!(ms.accrued_fee(BACKING_BIT_TAO, 3), 37_160_837);
+    assert_eq!(ms.fee_generation, 3);
+    assert!(ms.swap_on(BACKING_BIT_TAO), "in-flight swap carried, not drained");
+    assert_eq!(ms.busy_slot(BACKING_BIT_SOL), 42);
+    assert_eq!(ms.busy_slot(BACKING_BIT_TAO), 43);
+    assert_eq!(ms.settling_slot(BACKING_BIT_TAO), 9);
+    assert_eq!(ms.reserved(BACKING_BIT_TAO), 1_100);
+    assert_eq!((ms.deactivation_at, ms.successful_swaps, ms.failed_swaps), (7, 5, 2));
+
+    // One-shot: the seed is read only by the crank that grows the account.
+    let reseed = [0, 1, 0, 0, 0, 0, 0, 0];
+    send(&mut svm, migrate_miner_seeded_ix(&admin.pubkey(), &m, reseed), &admin.pubkey(), &admin).expect("again");
+    assert_eq!(miner_state(&svm, &m).accrued_fee(BACKING_BIT_TAO, 3), 37_160_837, "re-run can't rewrite it");
+}
+
+#[test]
+fn test_migrate_miner_state_refuses_a_fee_seed_on_the_local_hub() {
+    let (mut svm, admin, _vals, miner) = setup();
+    let m = miner.pubkey();
+    downgrade_to_v14(&mut svm, &m, false);
+    let err = send(
+        &mut svm,
+        migrate_miner_seeded_ix(&admin.pubkey(), &m, [5, 0, 0, 0, 0, 0, 0, 0]),
+        &admin.pubkey(),
+        &admin,
+    )
+    .expect_err("a sol fee never owes a vault");
+    assert!(err.contains("InvalidAccountForMigration"), "{err}");
 }
 
 #[test]

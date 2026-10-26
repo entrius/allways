@@ -16,7 +16,7 @@ from construct import Bytes as _Raw
 
 # `Config.version` the deployed program writes (constants.rs CONFIG_VERSION). Mirrored here so a schema
 # bump is one edit on each side rather than a literal buried in a test.
-CONFIG_VERSION = 16
+CONFIG_VERSION = 17
 
 # Width of MinerState's per-hub transient arrays (constants.rs MAX_BACKING_SLOTS) — one slot per
 # `active_backings` bit, indexed by bit position.
@@ -107,6 +107,19 @@ def hub_reserved_collateral(state, bit: int) -> int:
     return int(arr[idx]) if idx < len(arr) else 0
 
 
+def hub_accrued_fee(state, bit: int, generation: int):
+    """ONE hub's cumulative fees owed to its vault in ``generation`` (contract ``MinerState::accrued_fee``),
+    or None when the account predates the v17 counters. None is "unknown", never zero: netting zero
+    would attest a bond the miner's fees already spoke for."""
+    arr = getattr(state, 'accrued_fees', None)
+    if arr is None:
+        return None
+    if int(getattr(state, 'fee_generation', 0) or 0) != int(generation):
+        return 0  # a counter left from a retired vault: the replacement is owed nothing for it
+    idx = max(bit.bit_length() - 1, 0)
+    return int(arr[idx]) if idx < len(arr) else 0
+
+
 Pubkey32 = _Raw(32)
 Hash32 = _Raw(32)
 Sig64 = _Raw(64)
@@ -171,6 +184,10 @@ MinerState = CStruct(
     'successful_swaps' / U32,
     'failed_swaps' / U32,
     'bump' / U8,
+    # v17 fee counters (appended after `bump`): per-hub cumulative fees owed to that hub's vault, under
+    # `fee_generation`. Read through `hub_accrued_fee`.
+    'fee_generation' / U64,
+    'accrued_fees' / U64[MAX_BACKING_SLOTS],
 )
 
 # W2 — the quorum's assertion about a bond this program can't read (one per miner per backing chain).
@@ -635,7 +652,7 @@ IX_DISCRIMINATORS = {
     'close_legacy_pool': bytes([135, 68, 69, 243, 68, 50, 121, 183]),
     'close_legacy_reservation': bytes([114, 19, 114, 1, 9, 107, 205, 116]),
     'close_legacy_initiate_round': bytes([70, 12, 167, 155, 208, 160, 73, 154]),
-    # v3 upgrade cranks (no args each; run migrate_config first).
+    # Upgrade cranks (run migrate_config first). migrate_miner_state takes IX_MIGRATE_MINER_ARGS.
     'migrate_config': bytes([92, 131, 58, 105, 210, 154, 224, 193]),
     'migrate_miner_state': bytes([38, 86, 4, 75, 122, 83, 220, 214]),
 }
@@ -703,6 +720,8 @@ IX_SET_ATTESTATION_ARGS = CStruct(
     'epoch' / U64,
 )
 IX_PUBKEY_ARGS = CStruct('value' / Pubkey32)  # remove_validator
+# migrate_miner_state: the v17 fee-counter seed, one cumulative figure per hub slot.
+IX_MIGRATE_MINER_ARGS = CStruct('accrued_fees' / U64[MAX_BACKING_SLOTS])
 IX_U8_ARGS = CStruct('value' / U8)  # set_consensus_threshold
 IX_I64_ARGS = CStruct('value' / I64)  # set_fulfillment_timeout
 IX_BOOL_ARGS = CStruct('value' / Bool)  # set_halted

@@ -382,9 +382,12 @@ pub mod allways_swap_manager {
     pub fn migrate_config(ctx: Context<MigrateConfig>) -> Result<()> {
         migrate::migrate_config(ctx)
     }
-    /// Rewrite one v10 MinerState into the v12 layout, carrying the legacy `active` bool into the SOL
-    /// activation bit.
-    pub fn migrate_miner_state(ctx: Context<MigrateMinerState>) -> Result<()> {
-        migrate::migrate_miner_state(ctx)
+    /// Rewrite one legacy MinerState (v10, v13 or v14 layout) into the live one, carrying the legacy
+    /// `active` bool into the SOL activation bit and seeding the v17 fee counters from `accrued_fees`.
+    pub fn migrate_miner_state(
+        ctx: Context<MigrateMinerState>,
+        accrued_fees: [u64; MAX_BACKING_SLOTS],
+    ) -> Result<()> {
+        migrate::migrate_miner_state(ctx, accrued_fees)
     }
 }
