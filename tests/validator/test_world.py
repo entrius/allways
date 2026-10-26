@@ -228,6 +228,22 @@ def test_a_restart_restores_the_world_instead_of_scanning(tmp_path):
     assert world.config == {'raw': b'opaque'}
 
 
+def test_a_saved_account_that_no_longer_decodes_is_rescanned_not_fatal(tmp_path):
+    # 3.8.1 rollout: the program grew MinerState, and the restart decoded the cached 261-byte accounts with
+    # the new layout — every restart raised in setup, and the validator crash-looped.
+    client = _Client()
+    _live_quote(client, 9)
+    reader, _, _, _, _ = _reader(client, tmp_path)
+    reader.tick(NOW)
+    reader.store.conn().execute("UPDATE world_accounts SET data = substr(data, 1, 20) WHERE type = 'MinerQuote'")
+    scans = client.scans
+
+    again, _, _, _, out = _reader(client, tmp_path)
+    again.tick(NOW)
+    assert client.scans > scans, 'the undecodable cache falls back to a scan'
+    assert out.get()[0].get('MinerQuote', _quote_pda()).rate == 9
+
+
 def test_the_world_records_its_feed_position_with_its_state(tmp_path):
     client = _Client()
     reader, _, _, _, _ = _reader(client, tmp_path)

@@ -242,8 +242,12 @@ class WorldReader(Component):
         saved_at = self.store.get_meta('world.saved_at')
         if saved_at is None or self.clock() - int(saved_at) > HISTORY_HORIZON_SECS:
             return False
+        undecodable = 0
         for row in persist.load(self.store, 'world_accounts'):
-            self._put_raw(row['type'], row['pda'], bytes(row['data']), int(row['slot']), record=False)
+            try:
+                self._put_raw(row['type'], row['pda'], bytes(row['data']), int(row['slot']), record=False)
+            except Exception:
+                undecodable += 1  # saved under an older account layout (a program upgrade grew it)
         for row in persist.load(self.store, 'world_deposits'):
             self._deposits[row['tx_key']] = DepositClaim(
                 row['swap_key'], row['slot'], row['seen_at'], bool(row['initiated'])
@@ -260,6 +264,10 @@ class WorldReader(Component):
         self._scan_slot = int(self.store.get_meta('world.scan_slot') or 0)
         self._slot = int(self.store.get_meta('world.slot') or 0)
         self._refresh_attribution()
+        if undecodable:
+            # A restart must not crash-loop on its own cache: the scan re-reads every account from chain.
+            bt.logging.warning(f'world: {undecodable} saved account(s) no longer decode — rescanning from chain')
+            return False
         bt.logging.info(f'world: restored at slot {self._slot}')
         return self._config is not None
 
