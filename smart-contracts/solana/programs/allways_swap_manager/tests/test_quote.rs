@@ -88,6 +88,8 @@ fn activate(svm: &mut LiteSVM, program_id: &Pubkey, miner: &Pubkey, mask: u8) {
         successful_swaps: 0,
         failed_swaps: 0,
         bump,
+        fee_generation: 0,
+        accrued_fees: [0; allways_swap_manager::constants::MAX_BACKING_SLOTS],
     };
     let mut data = Vec::new();
     state.try_serialize(&mut data).unwrap();

@@ -14,18 +14,20 @@ arming is re-derived every pass, so a restart mid-exit simply resumes.
 
 **True-up.** Per-swap fee rounds are uneconomic, so fees ride the attestation off-chain and land
 on the vault as one block-boundary-aligned global batch. Every validator fires at the same
-boundary, reads totals AT that boundary, and sorts by AccountId — the vector is byte-identical by
-construction, which is what lets the round's contents-hash key converge. It lists only miners still
-owed something, so a long-running validator (which remembers every miner that ever paid) and a fresh
-one agree. It fires a grace period after the boundary and only once the event feed has caught up,
-so a fee confirmed just before the boundary is in every validator's ledger. A boundary with nothing
+boundary, reads each miner's total AT that boundary (its on-chain fee counter, less the fees
+confirmed after the boundary), and sorts by AccountId — the vector is byte-identical by
+construction, which is what lets the round's contents-hash key converge. The counter is the same
+for every validator whatever history it has seen; only the fees after the boundary come from the
+event feed, and those sit inside the history every validator replays. It lists only miners still
+owed something. It fires a grace period after the boundary and only once the event feed has caught
+up, so a fee confirmed just after the boundary is subtracted everywhere. A boundary with nothing
 owed is skipped: a no-op round is pure postage.
 """
 
 from __future__ import annotations
 
 import hashlib
-from typing import Dict, List, Optional, Tuple
+from typing import List, Optional, Tuple
 
 import bittensor as bt
 
@@ -75,12 +77,9 @@ def _advance(relay, miner: str, now: int) -> bool:
         bt.logging.debug(f'relay: {miner[:8]} exit waiting — {why}')
         return True  # waiting is a healthy state, not an outstanding obligation
 
-    generation = relay.vault_generation()
-    if generation is None:
-        return False
-    total = relay.store.accrued_fee_total(miner, relay.backing, vault_generation=generation)
+    total = relay.accrued_fees(miner)
     settled = relay.settled_total(hotkey)
-    if settled is None:
+    if total is None or settled is None:
         return False
     if total > settled:
         return _settle_residual(relay, miner, hotkey, total, now)
@@ -199,14 +198,13 @@ def cadence_entries(relay, boundary: int) -> Optional[List[Tuple[str, int]]]:
     and both must vote the same bytes. Two validators can still read the vault either side of a
     round applying; that needs a round to land after the next boundary's grace, and costs that one
     boundary."""
-    generation = relay.vault_generation()
-    if generation is None:
+    if relay.vault_generation() is None:
         return None
-    totals: Dict[str, int] = relay.store.accrued_fee_totals(
-        relay.backing, at_time=boundary, vault_generation=generation
-    )
     entries: List[Tuple[bytes, str, int]] = []
-    for miner, total in totals.items():
+    for miner in relay.fee_debtors():
+        total = relay.accrued_fees(miner, at_time=boundary)
+        if total is None:
+            return None
         if total <= 0:
             continue
         hotkey = relay.hotkey_for(miner)

@@ -75,12 +75,13 @@ pub const TREASURY_SEED: &[u8] = b"treasury";
 #[constant]
 pub const ATTEST_SEED: &[u8] = b"attest";
 
-/// On-chain schema/version for upgrade tracking, bumped as phases land. v16: stake-scaled
+/// On-chain schema/version for upgrade tracking, bumped as phases land. v17: on-chain fee counters
+/// (`MinerState.fee_generation` + `accrued_fees`, accrued at confirm; `Config` unchanged). v16: stake-scaled
 /// reservation-fee discount (fee semantics + entry-event `fee_paid`; layout unchanged from v15).
 /// v15 appends `vault_generation`; v14: v3.1 per-hub swap concurrency — per-hub transient state on
 /// MinerState, per-hub Pool/Reservation seeds. v13 = W2b quote-level backing; v12 = W2 bond
 /// attestation; v11 = W1 seam; v10 = A4 freshness replay.
-pub const CONFIG_VERSION: u32 = 16;
+pub const CONFIG_VERSION: u32 = 17;
 
 /// Max validators in the whitelist (bounds the Config `validators` Vec and a round's voters).
 pub const MAX_VALIDATORS: usize = 16;

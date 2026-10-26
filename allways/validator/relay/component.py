@@ -51,14 +51,12 @@ class HubRelay(Component):
         self.program_id = program_id
         self.cfg = config or RelayConfig.from_env()
         cadence = self.cfg.fee_cadence_secs
-        if 2 * cadence + RELAY_FEE_SETTLE_GRACE_SECS > HISTORY_HORIZON_SECS:
+        if cadence + RELAY_FEE_SETTLE_GRACE_SECS > HISTORY_HORIZON_SECS:
             bt.logging.warning(
-                f'{self.name}: fee cadence {cadence}s is over half the {HISTORY_HORIZON_SECS}s history window — '
-                'a fresh validator cannot count back to where the vault may stand, and will vote short'
+                f'{self.name}: fee cadence {cadence}s is over the {HISTORY_HORIZON_SECS}s history window — '
+                'a fresh validator cannot see every fee after a boundary, and will vote that true-up long'
             )
-        self.ledger = RelayLedger(
-            store, hub.chain, self._settled, boundary=lambda t: (t // cadence) * cadence, clock=lambda: self.clock()
-        )
+        self.ledger = RelayLedger(store, hub.chain)
         self.relay: Optional[BondRelay] = None
         self._held: List[Any] = []  # events whose ledger write failed, retried next tick
         # The subscription overflowed: events this process will never see. From then on it never acks (a
@@ -75,10 +73,6 @@ class HubRelay(Component):
         except Exception as e:
             bt.logging.warning(f'{self.name}: pending-debit check failed for {str(miner)[:8]} ({e}); assuming owed')
             return True
-
-    def _settled(self, miner: str) -> Optional[int]:
-        hotkey = self.relay.hotkey_for(miner) if self.relay is not None else None
-        return self.relay.settled_total(hotkey) if hotkey is not None else None
 
     def _vote(self, kind: str, subject: Any, payload: Any) -> None:
         self.queue.push(intent(kind, subject, None, self.clock(), payload))
@@ -131,8 +125,7 @@ class HubRelay(Component):
         self.relay._ingest_healthy = not self._held and not self._lost
         self.relay.feed_caught_up = status is not None and not status.catching_up
         self.relay.step(int(now))
-        boundary = int(self.ledger.get_relay_meta('fee_cadence_boundary') or 0)
-        self.ledger.fold(min(int(now) - HISTORY_HORIZON_SECS, boundary))
+        self.ledger.prune_relay_fees(int(now) - HISTORY_HORIZON_SECS)
 
 
 def ink_vault(subtensor_factory: Callable[[], Any], wallet: Any) -> Callable[[], Any]:

@@ -28,7 +28,7 @@ pub struct TimeoutSwap<'info> {
         bump = miner_state.bump,
         constraint = miner_state.miner == miner.key(),
     )]
-    pub miner_state: Account<'info, MinerState>,
+    pub miner_state: Box<Account<'info, MinerState>>,
 
     /// The miner's own collateral vault — the slash is debited from here.
     #[account(mut, seeds = [COLLATERAL_SEED, miner.key().as_ref()], bump = collateral_vault.bump)]

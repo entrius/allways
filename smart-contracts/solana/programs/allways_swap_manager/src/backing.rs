@@ -189,6 +189,8 @@ mod tests {
             successful_swaps: 0,
             failed_swaps: 0,
             bump: 255,
+            fee_generation: 0,
+            accrued_fees: [0; crate::constants::MAX_BACKING_SLOTS],
         }
     }
 
