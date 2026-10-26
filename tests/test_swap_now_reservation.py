@@ -387,6 +387,41 @@ def test_watch_swap_close_with_unreadable_verdict_stays_neutral(monkeypatch):
     assert 'closed on-chain' in joined and 'COMPLETED' not in joined and 'MINER FAILED' not in joined
 
 
+def test_watch_swap_ends_on_a_close_it_never_saw_live():
+    """The relay can wait out a dead validator's axon for its full timeout, and a fast swap settles
+    inside that wait: the account is already closed on the first read. Its SwapCompleted event must
+    end the watch at once, not after 900 s of polling a swap that finished."""
+    from unittest.mock import MagicMock
+
+    client = MagicMock()
+    client.get_swap.return_value = None
+    joined = _run_watch(client, ('SwapCompleted', types.SimpleNamespace()))
+    assert 'COMPLETED' in joined
+    assert client.get_swap.call_count == 1
+
+
+def test_watch_swap_keeps_polling_a_swap_with_no_account_and_no_verdict():
+    """No account and no closing event yet (not created, or the verdict is unreadable): keep
+    watching rather than claim anything."""
+    from unittest.mock import MagicMock, patch
+
+    from allways.cli.swap_commands import swap as swap_mod
+
+    client = MagicMock()
+    client.get_swap.side_effect = [None, None, KeyboardInterrupt]
+    out = []
+    with (
+        patch('allways.cli.swap_commands.swap.time.sleep'),
+        patch('allways.cli.swap_commands.swap._swap_verdict', lambda *_a: None),
+        patch.object(swap_mod.console, 'print', lambda *a, **k: out.append(' '.join(str(x) for x in a))),
+    ):
+        swap_mod._watch_swap(client, 'ab' * 32, 'tao')
+    joined = ' '.join(out)
+    assert client.get_swap.call_count == 3
+    assert 'COMPLETED' not in joined and 'closed on-chain' not in joined
+    assert 'Stopped watching' in joined
+
+
 # ── manual-path deadline notice ─────────────────────────────────────────────
 # _SEND_MARGIN_SECS is checked once, at reservation time. On the manual path the send and the relay
 # happen outside this process, so nothing re-checks it — and a deposit landing after reserved_until

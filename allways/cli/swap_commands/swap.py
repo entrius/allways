@@ -923,9 +923,9 @@ def _swap_verdict(client, key: bytes):
 
 
 def _watch_swap(client, swap_key_hex: str, to_chain: str, timeout_secs: int = 900) -> None:
-    """Watch a just-relayed swap to a terminal state, printing transitions. A closed account is the
-    SUCCESS signal (swaps close on settle) — so once we've seen it live, its disappearance reads as
-    COMPLETED, never the bare 'never existed' scare."""
+    """Watch a just-relayed swap to a terminal state, printing transitions. Swaps close on settle, so a
+    closed account ends the watch once we've seen it live or its closing event (SwapCompleted /
+    SwapTimedOut) is readable, never on the bare 'never existed' scare."""
     key = bytes.fromhex(swap_key_hex)
     resume = f'[dim]  Resume anytime with `alw view swap {swap_key_hex} --watch`.[/dim]'
     console.print(f'[dim]  Watching your swap — this settles on its own; Ctrl-C is safe to walk away.[/dim]\n{resume}')
@@ -945,32 +945,36 @@ def _watch_swap(client, swap_key_hex: str, to_chain: str, timeout_secs: int = 90
                     last = status
                 if status == 'Fulfilled':
                     seen_fulfilled = True
-            elif seen_live:
-                # Closed ≠ delivered: a timeout closes the account too (the fix for reading it as
-                # success). Pull the closing event for the honest message; stay neutral if unreadable.
+            else:
+                # A swap can close before the first read here: the relay waits out a dead validator's
+                # axon for its full timeout, and a fast swap settles inside that wait. Its closing
+                # event ends the watch as surely as seeing it close; without either, keep polling.
                 verdict = _swap_verdict(client, key)
-                if verdict is not None and verdict[0] == 'SwapTimedOut':
-                    ev = verdict[1]
-                    chain = str(ev.collateral_chain)
-                    amt = int(ev.reimbursement) / 10 ** get_chain_def(chain).decimals
-                    # 'sol' settles in the closing tx itself; other backings pay out via the vault
-                    # relay a few minutes later — don't claim money moved before it has.
-                    paid = 'You were reimbursed' if chain == NUMERAIRE_CHAIN else 'You are being reimbursed'
-                    console.print(
-                        f'[red]  ✗ MINER FAILED[/red] — it never delivered, and was slashed. {paid} '
-                        f'[bold]{amt:g} {chain.upper()}[/bold] from its bond '
-                        f'(your full payout + penalty) to [cyan]{ev.payee}[/cyan].'
-                    )
-                elif verdict is not None and verdict[0] == 'SwapCompleted':
-                    console.print(
-                        f'[green]  ✓ COMPLETED[/green] — settled on-chain, your {to_chain.upper()} was delivered.'
-                    )
-                else:
-                    console.print(
-                        f'[yellow]  Swap closed on-chain[/yellow] — verdict unreadable from here; '
-                        f'check your {to_chain.upper()} balance or `alw view swap {swap_key_hex}`.'
-                    )
-                return
+                if seen_live or verdict is not None:
+                    # Closed ≠ delivered: a timeout closes the account too (the fix for reading it as
+                    # success). Pull the closing event for the honest message; stay neutral if unreadable.
+                    if verdict is not None and verdict[0] == 'SwapTimedOut':
+                        ev = verdict[1]
+                        chain = str(ev.collateral_chain)
+                        amt = int(ev.reimbursement) / 10 ** get_chain_def(chain).decimals
+                        # 'sol' settles in the closing tx itself; other backings pay out via the vault
+                        # relay a few minutes later — don't claim money moved before it has.
+                        paid = 'You were reimbursed' if chain == NUMERAIRE_CHAIN else 'You are being reimbursed'
+                        console.print(
+                            f'[red]  ✗ MINER FAILED[/red] — it never delivered, and was slashed. {paid} '
+                            f'[bold]{amt:g} {chain.upper()}[/bold] from its bond '
+                            f'(your full payout + penalty) to [cyan]{ev.payee}[/cyan].'
+                        )
+                    elif verdict is not None and verdict[0] == 'SwapCompleted':
+                        console.print(
+                            f'[green]  ✓ COMPLETED[/green] — settled on-chain, your {to_chain.upper()} was delivered.'
+                        )
+                    else:
+                        console.print(
+                            f'[yellow]  Swap closed on-chain[/yellow] — verdict unreadable from here; '
+                            f'check your {to_chain.upper()} balance or `alw view swap {swap_key_hex}`.'
+                        )
+                    return
             time.sleep(4)
     except KeyboardInterrupt:
         console.print(f'\n[dim]  Stopped watching (the swap keeps settling on its own).[/dim]\n{resume}')

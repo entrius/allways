@@ -73,6 +73,25 @@ def test_full_quorum_resolution_filters_the_relay():
     assert needed == 1  # ceil(67% of 1 validator)
 
 
+def test_relay_needs_one_accept_whatever_the_quorum():
+    """A claim lands once: the other members answer that it already exists (a rejection), so
+    waiting for a 2-of-3 headcount of accepts waited on every validator, a dead one for the whole
+    timeout, while the swap settled. Attestation is chain-driven, so one accept ends the relay."""
+    hotkeys = [bytes([i]) * 32 for i in (0x21, 0x22, 0x23)]
+    by_pubkey = {bytes([i]) * 32: hk for i, hk in zip((1, 2, 3), hotkeys)}
+    cfg = _cfg([SimpleNamespace(key=pk, weight=1) for pk in by_pubkey], threshold=66)
+    client = SimpleNamespace(
+        get_config=lambda: cfg,
+        get_binding=lambda pk: SimpleNamespace(hotkey=by_pubkey[bytes(pk)]),
+    )
+    sub = _subtensor(_metagraph([ss58_encode(hk, ss58_format=42) for hk in hotkeys]))
+
+    axons, names, needed = post_tx.resolve_relay_axons(client, sub, netuid=7)
+
+    assert len(axons) == 3  # the whole quorum still gets the relay
+    assert needed == 1
+
+
 def test_partial_resolution_falls_back_to_broadcast_all(monkeypatch, capsys):
     sentinel = [SimpleNamespace(hotkey='5All1'), SimpleNamespace(hotkey='5All2')]
     monkeypatch.setattr(post_tx, 'discover_validators', lambda subtensor, netuid: sentinel)
