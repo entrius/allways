@@ -17,6 +17,7 @@ from solders.transaction import Transaction
 from allways.constants import CANCEL_REASON_OTHER
 from allways.solana import pdas
 from allways.solana.client import AllwaysSolanaClient, benign_marker, swap_from_solana, swap_key_from_tx_hash
+from allways.validator.actuator.swaps import _extend_target
 from allways.validator.runtime.deadline_queue import Intent
 
 # A peer already slid it, or it is at the ceiling.
@@ -111,14 +112,49 @@ def vote_initiate(client: Any, intent: Intent) -> Optional[str]:
     if _voted(client, pdas.REQ_INITIATE, swap):
         return None
     backing = str(getattr(swap, 'collateral_chain', 'sol') or 'sol').lower()
-    return client.vote_initiate(
-        _swap_key(swap),
-        swap.miner,
-        swap.from_chain,
-        str(swap.user_from_addr),
-        backing=backing,
-        miner_from_addr=str(swap.miner_from_addr),
-    )
+    try:
+        return client.vote_initiate(
+            _swap_key(swap),
+            swap.miner,
+            swap.from_chain,
+            str(swap.user_from_addr),
+            backing=backing,
+            miner_from_addr=str(swap.miner_from_addr),
+        )
+    except Exception:
+        _extend_after_refused_attest(client, swap)
+        raise
+
+
+def _extend_after_refused_attest(client: Any, swap: Any) -> None:
+    """An attest the chain refused leaves a verified deposit at the miner with the clock running. Near expiry,
+    slide the reservation so the re-planned attest gets another try instead of the claim being reaped (#813).
+    Zero confirmations assumed (the longest bucket). Never raises: the refusal itself is what the caller reports."""
+    try:
+        reservation = client.get_reservation(swap.miner, str(swap.collateral_chain))
+        if reservation is None:
+            return
+        target = _extend_target(
+            swap.from_chain, 0, int(reservation.reserved_until), int(reservation.max_extend_at), int(time.time())
+        )
+        if not target:
+            return
+        client.extend_reservation(
+            swap.miner,
+            target,
+            str(swap.collateral_chain),
+            from_chain=swap.from_chain,
+            from_addr=swap.user_from_addr,
+            miner_from_addr=swap.miner_from_addr,
+        )
+        bt.logging.warning(
+            f'vote_initiate {_swap_key(swap).hex()[:16]}: attest refused near expiry, extended reserved_until to {target}'
+        )
+    except Exception as e:
+        if not benign_marker(e, BENIGN_EXTEND):
+            bt.logging.error(
+                f'vote_initiate {_swap_key(swap).hex()[:16]}: extension after a refused attest failed: {e}'
+            )
 
 
 def confirm_swap(client: Any, intent: Intent) -> Optional[str]:
