@@ -334,6 +334,7 @@ class BondRelay:
 
             self.poll_vault_events()
             self.audit_ring(now)
+            slash_job.settle_applied(self)
             slash_job.arm_verdicts(self, now)
             attestation_job.flush(self, now)
             if self.is_vault_member(now):
@@ -399,6 +400,7 @@ class BondRelay:
         # This pass read everyone, so the ring's first lap starts from it instead of rediscovering
         # the same set in the same tick.
         self._open_lap(now, bonded)
+        slash_job.settle_applied(self)
         ok = attestation_job.flush(self, now, reconciling=True) and ok
         slash_job.arm_verdicts(self, now)
         member = self.is_vault_member(now)  # a validator outside the vault's set has no vault writes to owe
