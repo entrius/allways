@@ -314,7 +314,12 @@ def finalize_won_seats(ctx, now: int) -> list:
         # deleted every queue on the first sweep step and permanently dead-ended routed mode for
         # any miner-direction carrying an old lapsed seat.
         fresh = resv is not None and max(int(resv.reserved_until), int(resv.finalize_by)) >= entered_at
-        drawn_unfilled = fresh and int(resv.reserved_until) == 0 and int(resv.finalize_by) != 0
+        drawn_unfilled = (
+            fresh
+            and int(resv.reserved_until) == 0
+            and int(getattr(resv, 'created_at', 0) or 0) == 0
+            and int(resv.finalize_by) != 0
+        )
         won = (
             drawn_unfilled
             and now <= int(resv.finalize_by)

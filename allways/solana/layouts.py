@@ -91,9 +91,10 @@ def estimated_free_at(state, bit: int, reservation=None, pool=None, pair: tuple 
     if reservation is not None:
         reserved_until = int(getattr(reservation, 'reserved_until', 0) or 0)
         finalize_by = int(getattr(reservation, 'finalize_by', 0) or 0)
+        unfilled = int(getattr(reservation, 'created_at', 0) or 0) == 0  # a consumed fill holds nothing
         if reserved_until != 0 and reserved_until >= now:
             holds.append(reserved_until)
-        elif reserved_until == 0 and finalize_by != 0 and now <= finalize_by:
+        elif reserved_until == 0 and unfilled and finalize_by != 0 and now <= finalize_by:
             holds.append(max(busy_until, finalize_by))
     return max(holds, default=0)
 
