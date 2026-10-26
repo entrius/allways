@@ -1257,9 +1257,8 @@ fn test_finalize_refuses_a_reservation_already_consumed_by_initiate() {
 
 #[test]
 fn test_a_completed_swap_inside_the_finalize_window_does_not_park_the_hub() {
-    // 2026-10-25 (suite lifecycle dest-refuses on the rebuild): a swap that completes inside its seat's
-    // finalize window left the consumed reservation looking like a drawn-but-unfilled seat
-    // (reserved_until == 0, finalize_by ahead), so open_or_request refused MinerReserved until finalize_by.
+    // A swap that completes inside its seat's finalize window must not leave the consumed reservation
+    // looking like a drawn-but-unfilled seat (reserved_until == 0, finalize_by ahead).
     let (mut svm, _admin, vals, miner, _rr) = setup_full(COLLATERAL);
     let finalize_by = reservation_acct(&svm, &miner.pubkey()).finalize_by;
     set_clock(&mut svm, finalize_by - 60);
