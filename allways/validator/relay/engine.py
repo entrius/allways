@@ -22,7 +22,7 @@ from __future__ import annotations
 import os
 import time
 from dataclasses import dataclass
-from typing import Any, Callable, Dict, List, Optional, Set
+from typing import Any, Callable, Dict, List, Optional, Set, Tuple
 
 import bittensor as bt
 
@@ -31,6 +31,7 @@ from allways.constants import (
     LOW_BALANCE_REMIND_SECS,
     RELAY_BALANCE_CHECK_SECS,
     RELAY_FEE_CADENCE_SECS,
+    RELAY_FEE_INPUT_SETTLE_SECS,
     RELAY_HEARTBEAT_INTERVAL_SECS,
     RELAY_LOW_BALANCE_RAO,
     RELAY_MINER_READ_INTERVAL_SECS,
@@ -71,6 +72,7 @@ class RelayConfig:
 
     heartbeat_interval_secs: int = RELAY_HEARTBEAT_INTERVAL_SECS
     fee_cadence_secs: int = RELAY_FEE_CADENCE_SECS
+    fee_input_settle_secs: int = RELAY_FEE_INPUT_SETTLE_SECS
     reconcile_interval_secs: int = RELAY_RECONCILE_INTERVAL_SECS
     quiescence_grace_secs: int = RELAY_QUIESCENCE_GRACE_SECS
     swap_retention_secs: int = RELAY_SWAP_RETENTION_SECS
@@ -91,6 +93,7 @@ class RelayConfig:
         return cls(
             heartbeat_interval_secs=secs('ALLWAYS_RELAY_HEARTBEAT_SECS', RELAY_HEARTBEAT_INTERVAL_SECS),
             fee_cadence_secs=secs('ALLWAYS_RELAY_FEE_CADENCE_SECS', RELAY_FEE_CADENCE_SECS),
+            fee_input_settle_secs=secs('ALLWAYS_RELAY_FEE_INPUT_SETTLE_SECS', RELAY_FEE_INPUT_SETTLE_SECS),
             reconcile_interval_secs=secs('ALLWAYS_RELAY_RECONCILE_SECS', RELAY_RECONCILE_INTERVAL_SECS),
             quiescence_grace_secs=secs('ALLWAYS_RELAY_QUIESCENCE_GRACE_SECS', RELAY_QUIESCENCE_GRACE_SECS),
             vote_retry_secs=secs('ALLWAYS_RELAY_VOTE_RETRY_SECS', VOTE_ROUND_TTL_SECS),
@@ -153,6 +156,9 @@ class BondRelay:
         # Whether the event feed has published everything up to now (no catch-up running). The fee
         # true-up subtracts the fees after its boundary, which the feed fills in, so it waits on this.
         self.feed_caught_up = True
+        # Each fee debtor's (counter, ledger total) and when this relay first saw that pair: the true-up
+        # waits until every pair has held still for `fee_input_settle_secs` (see `fee_inputs_settled`).
+        self._fee_inputs: Dict[str, Tuple[Tuple[Optional[int], int], float]] = {}
         # Every vault vote needs ~0.075 TAO free up front.
         self._low_balance = LowBalance(
             'relay: vault signer', 'TAO', 1e9, RELAY_LOW_BALANCE_RAO, RELAY_BALANCE_CHECK_SECS, LOW_BALANCE_REMIND_SECS
@@ -209,6 +215,29 @@ class BondRelay:
             if total is None or total > 0:
                 debtors.append(str(ms.miner))
         return sorted(debtors)
+
+    def fee_inputs_settled(self, now: float) -> bool:
+        """Whether every fee debtor's on-chain counter and this relay's fee ledger have both held still
+        for ``fee_input_settle_secs``. The counter comes from the World and the ledger from the feed, so
+        just after a confirm one can hold the fee and the other not yet: a counter ahead of the ledger
+        counts a fee confirmed after the boundary, a ledger ahead of the counter subtracts one the
+        counter never held. Either way this validator would vote a total no other validator reads."""
+        generation = self.vault_generation()
+        if generation is None:
+            return False
+        settled, seen = True, {}
+        for miner in self.fee_debtors():
+            ms = self.miner_state(miner)
+            counter = None if ms is None else hub_accrued_fee(ms, self.backing_bit, generation)
+            inputs = (counter, self.store.fees_after(miner, generation, 0))
+            first = self._fee_inputs.get(miner)
+            if first is None or first[0] != inputs:
+                first = (inputs, now)
+            seen[miner] = first
+            if now - first[1] < self.cfg.fee_input_settle_secs:
+                settled = False
+        self._fee_inputs = seen
+        return settled
 
     def settled_total(self, hotkey: str) -> Optional[int]:
         """The vault's settled counter for ``hotkey``, read once per step (the attestation and the fee

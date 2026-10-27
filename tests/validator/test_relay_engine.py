@@ -139,6 +139,7 @@ def _store():
 
 
 def _relay(vault=None, solana=None, store=None, attribution=None, **cfg):
+    cfg.setdefault('fee_input_settle_secs', 0)  # its own test below; elsewhere a true-up fires on its first pass
     chain = solana or FakeChain(miner_states={MINER: _miner_state()})
     relay = BondRelay(
         chain.world,
@@ -607,6 +608,25 @@ def test_the_round_waits_for_the_event_feed_to_catch_up():
     relay.feed_caught_up = True
     exit_relay.maybe_cadence_settle(relay, NOW + GRACE + 12)
     assert relay.vault.calls == [('vote_collect_fees_batch', [(HOTKEY, 5 * RAO)])]
+
+
+def test_the_round_waits_until_the_counter_and_the_feed_agree_on_a_fresh_confirm():
+    # 2026-10-27 testnet: a swap confirmed 2 min after the boundary. One validator read the counter with
+    # the fee in it before its feed had delivered the confirm, didn't subtract it, and voted a total the
+    # other two (correctly) didn't: a fee one boundary early, and no quorum.
+    relay = _relay(fee_cadence_secs=1000, fee_input_settle_secs=30)
+    _fee(relay, SWAP, MINER, 5 * RAO, NOW - 10)
+    ms = relay.chain.miner_states[MINER]
+    ms.accrued_fees[pdas.BACKING_BIT_TAO.bit_length() - 1] += 6 * RAO  # the counter holds the later confirm...
+    exit_relay.maybe_cadence_settle(relay, NOW + GRACE)
+    exit_relay.maybe_cadence_settle(relay, NOW + GRACE + 12)
+    assert not relay.vault.calls, 'counter ahead of the ledger: no vote'
+    relay.store.record_relay_fee(SWAP2, MINER, 'tao', 6 * RAO, NOW + 100, vault_generation=0)  # ...the feed delivers it
+    exit_relay.maybe_cadence_settle(relay, NOW + GRACE + 24)
+    exit_relay.maybe_cadence_settle(relay, NOW + GRACE + 36)
+    assert not relay.vault.calls, 'the pair changed: its clock restarts'
+    exit_relay.maybe_cadence_settle(relay, NOW + GRACE + 60)
+    assert relay.vault.calls == [('vote_collect_fees_batch', [(HOTKEY, 5 * RAO)])], 'the later fee is subtracted'
 
 
 def test_totals_are_read_at_the_boundary_not_at_the_moment_of_firing():
