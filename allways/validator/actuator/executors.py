@@ -31,6 +31,25 @@ BENIGN_RESOLVE = ('NoRequests', 'PoolNotClosed', 'SeedSlotNotYetProduced')
 BENIGN_WEIGHTS = ('AlreadyVoted', 'WeightsUpdateTooSoon', 'NotValidator')
 # Already voted this value, or a late vote for the value peers just wrote (the read raced the quorum write).
 BENIGN_ATTESTATION = ('AlreadyVoted', 'AttestationUnchanged')
+# A swap vote that arrives after its peers reached quorum: the claim was consumed (initiate) or the
+# swap account closed (confirm, timeout, cancel).
+BENIGN_LATE_INITIATE = ('NotPending', 'AlreadyVoted')
+BENIGN_LATE_CLOSE = ('AccountNotInitialized', 'AlreadyVoted')
+
+# kind → the refusals that mean a peer already did it. The actuator logs these at debug, whether the
+# send's simulation refused it or it landed failed: with more voters than quorum needs, the slowest
+# loses most of these races every round. Everything else (VoteHashMismatch above all) stays a warning.
+LOST_RACE = {
+    'vote_initiate': BENIGN_LATE_INITIATE,
+    'confirm_swap': BENIGN_LATE_CLOSE,
+    'timeout_swap': BENIGN_LATE_CLOSE,
+    'cancel_swap': BENIGN_LATE_CLOSE,
+    'close_stale_claim': BENIGN_CLOSE,
+    'extend_reservation': BENIGN_EXTEND,
+    'extend_timeout': BENIGN_EXTEND,
+    'resolve_pool': BENIGN_RESOLVE,
+    'vote_set_attestation': BENIGN_ATTESTATION,
+}
 
 Executor = Callable[[Any, Intent], Optional[str]]
 

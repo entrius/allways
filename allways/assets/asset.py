@@ -1,4 +1,5 @@
 from abc import ABC, abstractmethod
+from collections import OrderedDict
 from dataclasses import dataclass
 from typing import Dict, Hashable, Optional, Tuple
 
@@ -16,6 +17,24 @@ class MissingTestnetDeployment(ValueError):
 
 class ProviderUnreachableError(Exception):
     """Raised when a chain provider cannot reach its backend during verification."""
+
+
+# A rejected tx is re-verified on every pass while its swap or reservation is live (every ~2s), and a
+# mined tx's verdict never changes: warn the first time, log the repeats at debug.
+_WARNED_MAX = 4096
+_warned: 'OrderedDict[str, None]' = OrderedDict()
+
+
+def warn_once(message: str) -> None:
+    """Log ``message`` as a warning the first time it is seen, at debug after that."""
+    if message in _warned:
+        _warned.move_to_end(message)
+        bt.logging.debug(message, stacklevel=2)
+        return
+    _warned[message] = None
+    if len(_warned) > _WARNED_MAX:
+        _warned.popitem(last=False)
+    bt.logging.warning(message, stacklevel=2)
 
 
 # What ``send_amount`` resolves to: (tx_hash, block_number) on success — block_number is 0 when
@@ -189,7 +208,7 @@ class Asset(ABC):
             return None
 
         if expected_sender and chain.normalize_address(tx_info.sender) != expected_sender:
-            bt.logging.warning(
+            warn_once(
                 f'verify_transaction: sender mismatch on tx {tx_hash[:16]}... '
                 f'(expected {expected_sender}, got {tx_info.sender!r})'
             )
