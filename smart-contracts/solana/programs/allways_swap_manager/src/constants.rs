@@ -75,6 +75,12 @@ pub const TREASURY_SEED: &[u8] = b"treasury";
 #[constant]
 pub const ATTEST_SEED: &[u8] = b"attest";
 
+/// Seed prefix for a per-value tallied vote round (`seeds = [TALLY_SEED, miner, chain]`). Bond
+/// attestation is its only user: its value moves over time, so a round must count competing values
+/// rather than bind to the first one.
+#[constant]
+pub const TALLY_SEED: &[u8] = b"tally";
+
 /// On-chain schema/version for upgrade tracking, bumped as phases land. v17: on-chain fee counters
 /// (`MinerState.fee_generation` + `accrued_fees`, accrued at confirm; `Config` unchanged). v16: stake-scaled
 /// reservation-fee discount (fee semantics + entry-event `fee_paid`; layout unchanged from v15).
@@ -97,7 +103,8 @@ pub const REQ_CONFIRM: u8 = 6;
 pub const REQ_TIMEOUT: u8 = 7;
 /// Global (non-per-target) round for the validator-weight vector.
 pub const REQ_SET_WEIGHTS: u8 = 8;
-/// Per-(miner, backing chain) round writing a `BondAttestation`.
+/// Domain tag for the bond-attestation payload hash (`attestation_hash`). Its round is a `TallyRound`
+/// at `[TALLY_SEED, miner, chain]`, not a `VoteRound` keyed by this byte.
 pub const REQ_SET_ATTESTATION: u8 = 9;
 /// Global round bumping `Config.last_attest_heartbeat` (the dead-man fuse's liveness signal).
 pub const REQ_ATTEST_HEARTBEAT: u8 = 10;

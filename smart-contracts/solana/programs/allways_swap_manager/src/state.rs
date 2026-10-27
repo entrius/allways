@@ -323,6 +323,30 @@ pub struct VoteRound {
     pub bump: u8,
 }
 
+/// One validator's standing vote in a `TallyRound`.
+#[derive(AnchorSerialize, AnchorDeserialize, Clone, InitSpace)]
+pub struct TallyVote {
+    pub voter: Pubkey,
+    /// keccak-256 of the payload this validator is voting for.
+    pub hash: [u8; 32],
+    /// When the vote was cast (or last changed); a vote older than VOTE_ROUND_TTL_SECS stops counting.
+    pub voted_at: i64,
+}
+
+/// A vote round that counts every value voted for (`seeds = [TALLY_SEED, miner, chain]`).
+///
+/// Unlike `VoteRound`, nothing binds the round to the first voter's value: each validator holds one
+/// vote, and whichever value reaches the threshold wins. A stray, late or minority vote just loses
+/// instead of locking every other value out until the TTL.
+#[account]
+#[derive(InitSpace)]
+pub struct TallyRound {
+    #[max_len(MAX_VALIDATORS)]
+    pub votes: Vec<TallyVote>,
+    /// Stored PDA bump.
+    pub bump: u8,
+}
+
 /// Confirmed reservation for a miner (`seeds = [RESV_SEED, miner]`).
 ///
 /// Created UNFILLED by `resolve_pool` (lottery draw: pins `router` + miner quote, `reserved_until = 0`);

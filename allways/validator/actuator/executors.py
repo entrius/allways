@@ -29,6 +29,8 @@ BENIGN_CLOSE = ('ClaimNotExpired', 'NotPending', 'AccountNotInitialized', 'could
 BENIGN_RESOLVE = ('NoRequests', 'PoolNotClosed', 'SeedSlotNotYetProduced')
 # Already voted this round, the on-chain cadence floor, or de-whitelisted mid-attempt.
 BENIGN_WEIGHTS = ('AlreadyVoted', 'WeightsUpdateTooSoon', 'NotValidator')
+# Already voted this value, or a late vote for the value peers just wrote (the read raced the quorum write).
+BENIGN_ATTESTATION = ('AlreadyVoted', 'AttestationUnchanged')
 
 Executor = Callable[[Any, Intent], Optional[str]]
 
@@ -279,12 +281,12 @@ def vote_set_weights(client: Any, intent: Intent) -> Optional[str]:
 
 def vote_set_attestation(client: Any, intent: Intent) -> Optional[str]:
     """A held hub's refusal (AttestationWouldStrandSwap) raises, so the relay's vote is retried once the
-    hub frees; an already-recorded vote is a no-op."""
+    hub frees; an already-recorded vote, or one for the value peers just wrote, is a no-op."""
     miner, chain, balance, locked, epoch = intent.payload
     try:
         return client.vote_set_attestation(miner, chain, balance, locked, epoch)
     except Exception as e:
-        if _benign(e, ('AlreadyVoted',)):
+        if _benign(e, BENIGN_ATTESTATION):
             return None
         raise
 
