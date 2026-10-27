@@ -138,6 +138,7 @@ DISCRIMINATORS = {
     'Pool': bytes([241, 154, 109, 4, 17, 177, 109, 188]),
     'Reservation': bytes([188, 235, 0, 111, 208, 253, 247, 212]),
     'Swap': bytes([53, 206, 146, 152, 44, 97, 120, 177]),
+    'TallyRound': bytes([252, 197, 213, 174, 200, 138, 162, 34]),
     'Treasury': bytes([238, 239, 123, 238, 89, 1, 168, 253]),
     'VoteRound': bytes([155, 210, 10, 166, 226, 108, 60, 182]),
 }
@@ -302,6 +303,13 @@ VoteRound = CStruct(
     'bump' / U8,
 )
 
+TallyVote = CStruct('voter' / Pubkey32, 'hash' / Hash32, 'voted_at' / I64)
+
+TallyRound = CStruct(
+    'votes' / Vec(TallyVote),
+    'bump' / U8,
+)
+
 Config = CStruct(
     'admin' / Pubkey32,
     'version' / U32,
@@ -347,6 +355,7 @@ ACCOUNT_PUBKEY_FIELDS = {
     'Swap': ['user', 'miner'],
     'Pool': ['miner'],
     'CollateralVault': [],
+    'TallyRound': [],
     'Treasury': [],
     'VoteRound': [],
 }
@@ -741,6 +750,7 @@ ACCOUNT_LAYOUTS = {
     'Pool': Pool,
     'Reservation': Reservation,
     'Swap': Swap,
+    'TallyRound': TallyRound,
     'Treasury': Treasury,
     'VoteRound': VoteRound,
 }

@@ -154,7 +154,7 @@ pub mod allways_swap_manager {
 
     // --- Bond attestation (the collateral mirror for backings this program can't read) ---
     /// A validator attests a miner's effective bond on one backing chain; written on quorum. The full
-    /// payload is hash-bound, so divergent attestations conflict instead of co-counting.
+    /// payload is hash-bound and tallied per value, so divergent attestations compete instead of co-counting.
     pub fn vote_set_attestation(
         ctx: Context<VoteSetAttestation>,
         chain: String,

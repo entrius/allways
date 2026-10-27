@@ -1,14 +1,14 @@
 use anchor_lang::prelude::*;
 
 use crate::backing;
-use crate::consensus::{attestation_hash, record_vote, reset_round};
+use crate::consensus::{attestation_hash, record_tallied_vote};
 use crate::constants::{
-    required_collateral, ATTEST_SEED, CONFIG_SEED, MINER_SEED, REQ_SET_ATTESTATION, RESV_SEED, VOTE_SEED,
+    required_collateral, ATTEST_SEED, CONFIG_SEED, MINER_SEED, RESV_SEED, TALLY_SEED,
 };
 use crate::error::ErrorCode;
 use crate::events::BondAttested;
 use crate::penalty::drop_backing_under_floor;
-use crate::state::{BondAttestation, Config, MinerState, Reservation, VoteRound};
+use crate::state::{BondAttestation, Config, MinerState, Reservation, TallyRound};
 
 /// Validators write a miner's effective bond on one backing chain. Solana can't read the vault holding
 /// it, so the quorum's assertion IS the value every collateral guard reads.
@@ -56,15 +56,16 @@ pub struct VoteSetAttestation<'info> {
     )]
     pub attestation: Account<'info, BondAttestation>,
 
-    /// Reusable per-(miner, chain) round — one bond, one open proposal at a time.
+    /// Reusable per-(miner, chain) round. Tallied per value: the bond moves over time and validators
+    /// can briefly read it differently, so competing values are counted rather than refused.
     #[account(
         init_if_needed,
         payer = validator,
-        space = 8 + VoteRound::INIT_SPACE,
-        seeds = [VOTE_SEED, &[REQ_SET_ATTESTATION], miner.key().as_ref(), chain.as_bytes()],
+        space = 8 + TallyRound::INIT_SPACE,
+        seeds = [TALLY_SEED, miner.key().as_ref(), chain.as_bytes()],
         bump,
     )]
-    pub vote_round: Account<'info, VoteRound>,
+    pub tally_round: Account<'info, TallyRound>,
 
     pub system_program: Program<'info, System>,
 }
@@ -89,6 +90,18 @@ pub fn handler(
     require!(
         epoch >= ctx.accounts.attestation.epoch,
         ErrorCode::AttestationEpochStale
+    );
+
+    // A vote for the value already written changes nothing. Refusing it keeps a vote that lands just
+    // after quorum (the validator read the account before the write) from sitting in the next tally.
+    // `miner` is only set at quorum, so a never-written attestation always accepts its first write.
+    let stored = &ctx.accounts.attestation;
+    require!(
+        stored.miner == Pubkey::default()
+            || stored.effective_balance != effective_balance
+            || stored.locked != locked
+            || stored.epoch != epoch,
+        ErrorCode::AttestationUnchanged
     );
 
     let now = Clock::get()?.unix_timestamp;
@@ -121,10 +134,10 @@ pub fn handler(
     let miner_key = ctx.accounts.miner.key();
     let bound = attestation_hash(&miner_key, &chain, effective_balance, locked, epoch);
     let validator = ctx.accounts.validator.key();
-    let round_bump = ctx.bumps.vote_round;
+    let round_bump = ctx.bumps.tally_round;
 
-    let quorum = record_vote(
-        &mut ctx.accounts.vote_round,
+    let quorum = record_tallied_vote(
+        &mut ctx.accounts.tally_round,
         &ctx.accounts.config,
         validator,
         bound,
@@ -142,7 +155,6 @@ pub fn handler(
         // From the chain's clock at quorum, never a validator-supplied value.
         attestation.attested_at = now;
         attestation.bump = ctx.bumps.attestation;
-        reset_round(&mut ctx.accounts.vote_round);
         emit!(BondAttested {
             miner: miner_key,
             chain: chain.clone(),

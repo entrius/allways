@@ -37,7 +37,6 @@ const REQ_ACTIVATE: u8 = 0;
 const REQ_INITIATE: u8 = 2;
 const REQ_DEACTIVATE: u8 = 5;
 const REQ_TIMEOUT: u8 = 7;
-const REQ_SET_ATTESTATION: u8 = 9;
 const REQ_ATTEST_HEARTBEAT: u8 = 10;
 const BASE_TS: i64 = 1_700_000_000;
 const TTL: i64 = 1_800;
@@ -94,11 +93,7 @@ fn vote_pda(req: u8, key: &[u8]) -> Pubkey {
     Pubkey::find_program_address(&[b"vote", &[req], key], &pid()).0
 }
 fn attest_round_pda(m: &Pubkey, chain: &str) -> Pubkey {
-    Pubkey::find_program_address(
-        &[b"vote", &[REQ_SET_ATTESTATION], m.as_ref(), chain.as_bytes()],
-        &pid(),
-    )
-    .0
+    Pubkey::find_program_address(&[b"tally", m.as_ref(), chain.as_bytes()], &pid()).0
 }
 fn resv_pda(m: &Pubkey) -> Pubkey {
     resv_pda_b(m, SOL)
@@ -286,7 +281,7 @@ fn attest_ix(
             miner_state: miner_pda(miner),
             reservation: resv_pda_b(miner, chain),
             attestation: attest_pda(miner, chain),
-            vote_round: attest_round_pda(miner, chain),
+            tally_round: attest_round_pda(miner, chain),
             system_program: SYSTEM_PROGRAM,
         }
         .to_account_metas(None),
@@ -760,8 +755,8 @@ fn test_attestation_round_writes_the_bond_on_quorum() {
 
 #[test]
 fn test_attestation_round_binds_the_full_payload() {
-    // The whole point of the payload hash: two validators reading different balances must CONFLICT,
-    // not co-count into a quorum that writes whichever value arrived first.
+    // The whole point of the payload hash: two validators reading different balances must be tallied
+    // apart, not co-count into a quorum that writes whichever value arrived first.
     let (mut svm, _admin, vals, miner) = setup();
     let m = miner.pubkey();
 
@@ -772,16 +767,94 @@ fn test_attestation_round_binds_the_full_payload() {
         (5_000_000_000, false, 3, "lock bit"),
         (5_000_000_000, true, 4, "epoch"),
     ] {
-        let err = send(&mut svm, attest_ix(&vals[1].pubkey(), &m, TAO, bal, locked, epoch), &vals[1].pubkey(), &vals[1])
-            .expect_err("divergent payload must not co-count");
-        assert!(err.contains("VoteHashMismatch"), "{what} not bound into the round: {err}");
+        send(&mut svm, attest_ix(&vals[1].pubkey(), &m, TAO, bal, locked, epoch), &vals[1].pubkey(), &vals[1])
+            .expect("a divergent vote is recorded, not refused");
+        assert_eq!(attestation_acct(&svm, &m, TAO).epoch, 0, "{what} not bound into the vote: co-counted to quorum");
     }
-    assert_eq!(attestation_acct(&svm, &m, TAO).epoch, 0, "no quorum was ever reached");
 
     // The matching payload still closes the round.
     send(&mut svm, attest_ix(&vals[1].pubkey(), &m, TAO, 5_000_000_000, true, 3), &vals[1].pubkey(), &vals[1])
         .expect("matching payload reaches quorum");
     assert_eq!(attestation_acct(&svm, &m, TAO).effective_balance, 5_000_000_000);
+}
+
+#[test]
+fn test_a_late_vote_after_quorum_does_not_hold_up_the_next_value() {
+    // 3 validators, quorum 2: the third validator's vote for the value just written lands after the
+    // write. It must not sit in the round and keep the next value from landing.
+    let (mut svm, _admin, vals, miner) = setup();
+    let m = miner.pubkey();
+    attest(&mut svm, &vals, &m, 5_000_000_000, true, 3);
+
+    let err = send(&mut svm, attest_ix(&vals[2].pubkey(), &m, TAO, 5_000_000_000, true, 3), &vals[2].pubkey(), &vals[2])
+        .expect_err("a vote for the stored value is refused");
+    assert!(err.contains("AttestationUnchanged"), "{err}");
+
+    // The bond moves seconds later; the new value lands at once, no TTL wait.
+    attest(&mut svm, &vals, &m, 4_000_000_000, true, 3);
+    assert_eq!(attestation_acct(&svm, &m, TAO).effective_balance, 4_000_000_000);
+}
+
+#[test]
+fn test_a_stray_vote_does_not_block_the_value_the_quorum_agrees_on() {
+    // One validator votes a different value first. The other two agree, and their value wins at once.
+    let (mut svm, _admin, vals, miner) = setup();
+    let m = miner.pubkey();
+
+    send(&mut svm, attest_ix(&vals[2].pubkey(), &m, TAO, 9_000_000_000, true, 3), &vals[2].pubkey(), &vals[2])
+        .expect("stray vote");
+    attest(&mut svm, &vals, &m, 5_000_000_000, true, 3);
+    assert_eq!(attestation_acct(&svm, &m, TAO).effective_balance, 5_000_000_000, "the majority value is written");
+
+    // The stray vote went with the round: it can't pair with a later vote for the same stray value.
+    send(&mut svm, attest_ix(&vals[0].pubkey(), &m, TAO, 9_000_000_000, true, 3), &vals[0].pubkey(), &vals[0])
+        .expect("one vote");
+    assert_eq!(attestation_acct(&svm, &m, TAO).effective_balance, 5_000_000_000, "one vote is not a quorum");
+}
+
+#[test]
+fn test_a_validator_can_change_its_attestation_vote() {
+    let (mut svm, _admin, vals, miner) = setup();
+    let m = miner.pubkey();
+
+    send(&mut svm, attest_ix(&vals[0].pubkey(), &m, TAO, 9_000_000_000, true, 3), &vals[0].pubkey(), &vals[0])
+        .expect("first read");
+    send(&mut svm, attest_ix(&vals[0].pubkey(), &m, TAO, 5_000_000_000, true, 3), &vals[0].pubkey(), &vals[0])
+        .expect("re-read replaces the validator's own vote");
+    let err = send(&mut svm, attest_ix(&vals[0].pubkey(), &m, TAO, 5_000_000_000, true, 3), &vals[0].pubkey(), &vals[0])
+        .expect_err("the same vote twice");
+    assert!(err.contains("AlreadyVoted"), "{err}");
+
+    send(&mut svm, attest_ix(&vals[1].pubkey(), &m, TAO, 5_000_000_000, true, 3), &vals[1].pubkey(), &vals[1])
+        .expect("quorum");
+    assert_eq!(attestation_acct(&svm, &m, TAO).effective_balance, 5_000_000_000);
+}
+
+#[test]
+fn test_an_expired_attestation_vote_stops_counting() {
+    // An old vote must not pair with a fresh one: the write needs the threshold agreeing within the TTL.
+    let (mut svm, _admin, vals, miner) = setup();
+    let m = miner.pubkey();
+
+    send(&mut svm, attest_ix(&vals[0].pubkey(), &m, TAO, 5_000_000_000, true, 3), &vals[0].pubkey(), &vals[0])
+        .expect("old vote");
+    set_clock(&mut svm, BASE_TS + TTL + 1);
+    send(&mut svm, attest_ix(&vals[1].pubkey(), &m, TAO, 5_000_000_000, true, 3), &vals[1].pubkey(), &vals[1])
+        .expect("fresh vote");
+    assert_eq!(attestation_acct(&svm, &m, TAO).epoch, 0, "the expired vote did not count");
+
+    send(&mut svm, attest_ix(&vals[2].pubkey(), &m, TAO, 5_000_000_000, true, 3), &vals[2].pubkey(), &vals[2])
+        .expect("second fresh vote");
+    assert_eq!(attestation_acct(&svm, &m, TAO).effective_balance, 5_000_000_000);
+}
+
+#[test]
+fn test_a_never_written_attestation_accepts_an_empty_first_write() {
+    // The unchanged guard compares against stored values; a fresh account's zeroes are not a write.
+    let (mut svm, _admin, vals, miner) = setup();
+    let m = miner.pubkey();
+    attest(&mut svm, &vals, &m, 0, false, 0);
+    assert_eq!(attestation_acct(&svm, &m, TAO).miner, m, "written");
 }
 
 #[test]
@@ -1139,7 +1212,6 @@ fn test_concurrent_sol_and_tao_swaps_run_and_settle_independently() {
     let attest_key = Some(attest_pda(&m, TAO));
     light_tao_purse(&mut svm, &vals, &miner, required_collateral(TAO_AMOUNT as u64));
     beat_heartbeat(&mut svm, &vals);
-    attest(&mut svm, &vals, &m, required_collateral(TAO_AMOUNT as u64), true, 1);
 
     // SOL swap to Active (spoke pair, sol hub).
     draw(&mut svm, &vals[0], &m, SPOKE_FROM, SPOKE_TO);

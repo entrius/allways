@@ -201,6 +201,8 @@ def test_the_attestation_executor_treats_already_voted_as_done_and_a_held_hub_as
     i = intent('vote_set_attestation', (MINER, 'tao'), None, NOW, (MINER, 'tao', 1, True, 3))
     assert vote_set_attestation(_Client(), i) == 'sig'
     assert vote_set_attestation(_Client(error='custom program error: AlreadyVoted'), i) is None
+    # A late vote for the value peers just wrote is refused on-chain, and is done, not a failure.
+    assert vote_set_attestation(_Client(error='Error Code: AttestationUnchanged'), i) is None
     try:
         vote_set_attestation(_Client(error='AttestationWouldStrandSwap'), i)
     except RuntimeError:
