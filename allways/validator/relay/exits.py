@@ -162,6 +162,9 @@ def maybe_cadence_settle(relay, now: int) -> None:
     if not relay.feed_caught_up:
         bt.logging.debug(f'relay: fee boundary {boundary} waits for the event feed to catch up')
         return
+    if not relay.fee_inputs_settled(now):
+        bt.logging.debug(f'relay: fee boundary {boundary} waits for fee counters and the feed to agree')
+        return
 
     entries = cadence_entries(relay, boundary)
     if entries is None:

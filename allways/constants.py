@@ -313,6 +313,11 @@ RELAY_FEE_CADENCE_SECS = 6 * 3600
 # How long after a boundary the true-up waits before reading totals at it, so a fee confirmed
 # just before the boundary has reached every validator's ledger first.
 RELAY_FEE_SETTLE_GRACE_SECS = 120
+# How long every fee debtor's on-chain counter and this validator's fee ledger must both hold still
+# before the true-up reads them. They arrive by different paths (the World re-reads the counter, the
+# feed delivers the confirm), so for a few seconds after a confirm one can lead the other, and a
+# total read then puts that fee at the wrong boundary. Over two relay ticks, so a drain lands inside it.
+RELAY_FEE_INPUT_SETTLE_SECS = 30
 # The vault signer (the validator hotkey) pays every vault vote and needs ~0.075 TAO free up front
 # per call; below this the relay warns, hourly.
 RELAY_LOW_BALANCE_RAO = 500_000_000
