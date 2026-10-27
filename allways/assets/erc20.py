@@ -5,7 +5,7 @@ from typing import Dict, Hashable, Optional
 import bittensor as bt
 from eth_utils import keccak, to_checksum_address
 
-from allways.assets.asset import MissingTestnetDeployment
+from allways.assets.asset import MissingTestnetDeployment, warn_once
 from allways.assets.evm import EVM_NETWORKS, EvmAsset, EvmChain, Match
 from allways.chains import ChainDefinition
 from allways.constants import (
@@ -185,7 +185,7 @@ class Erc20(EvmAsset):
     def _receipt_match(self, tx_hash: str, receipt: dict, recipient: str, amount: int) -> Optional[Match]:
         match = self._transfer_log(receipt, recipient, amount)
         if match is None:
-            bt.logging.warning(
+            warn_once(
                 f'{self._log} tx {tx_hash[:16]}... has no Transfer log from {self.token_contract} paying '
                 f'{recipient} >= {amount}'
             )

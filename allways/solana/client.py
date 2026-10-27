@@ -163,6 +163,8 @@ def _load_program_errors() -> dict:
 # Anchor code → (ErrorCode name, message), straight from the packaged IDL — the one source of truth.
 PROGRAM_ERRORS = _load_program_errors()
 _ERROR_CODES = {name: code for code, (name, _) in PROGRAM_ERRORS.items()}
+# Anchor framework errors a benign marker may name. A landed failed tx carries only the number.
+_ERROR_CODES['AccountNotInitialized'] = 3012
 
 
 def program_error_code(err: Exception) -> Optional[int]:
@@ -181,9 +183,10 @@ def benign_marker(err: Exception, names: Tuple[str, ...]) -> Optional[str]:
     """The matched benign error NAME (for terse logs), or None for a real failure. Names without a
     code entry (framework/RPC messages) match on name alone."""
     s = str(err)
+    found = program_error_code(err)
     for name in names:
         code = _ERROR_CODES.get(name)
-        if name in s or (code is not None and f"'Custom': {code}" in s):
+        if name in s or (code is not None and found == code):
             return name
     return None
 

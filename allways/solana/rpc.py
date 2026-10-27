@@ -186,7 +186,7 @@ class SolanaRpc:
                 return body['result']
             except requests.ConnectionError:
                 transient: TransientRpcError = SolanaRpcUnreachable(
-                    f'{method}: could not connect to {self.url}', url=self.url
+                    f'{method}: could not connect to {redact_rpc_url(self.url)}', url=self.url
                 )
             except requests.Timeout as e:
                 transient = TransientRpcError(f'{method}: {type(e).__name__}: {e}')

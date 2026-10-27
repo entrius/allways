@@ -4,6 +4,7 @@ from typing import Optional
 import bittensor as bt
 from eth_utils import to_checksum_address
 
+from allways.assets.asset import warn_once
 from allways.assets.evm import EVM_NETWORKS, EvmAsset, EvmChain, EvmRpcError, Match
 from allways.chains import ChainDefinition
 from allways.constants import CANCEL_REASON_EVM_REVERT
@@ -59,7 +60,7 @@ class EvmCoin(EvmAsset):
         to = self.chain.normalize_address(tx.get('to') or '')  # null for contract creation
         value = int(tx.get('value') or '0x0', 16)
         if to != self.chain.normalize_address(recipient) or value < amount:
-            bt.logging.warning(
+            warn_once(
                 f'{self._log} tx {tx_hash[:16]}... does not pay {recipient} >= {amount} '
                 f'{self.chain_def.native_unit} '
                 f'(to={tx.get("to")}, value={value})'
