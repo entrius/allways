@@ -635,7 +635,15 @@ def confirm_deposit(ctx, miner_hotkey: str, from_tx_hash: str, from_tx_block: in
     # is no claim, no Swap, no timeout and no refund: the deposit is simply lost. Buy runway first.
     _extend_for_claim(ctx.client, miner_pk, reservation, backing)
 
-    sig = ctx.client.submit_swap_claim(miner_pk, swap_key, from_tx_hash, tx_info.block_number or 0, backing)
+    try:
+        sig = ctx.client.submit_swap_claim(miner_pk, swap_key, from_tx_hash, tx_info.block_number or 0, backing)
+    except Exception:
+        # The taker relays to every validator at once, so a peer's claim can land between the check above
+        # and this send (after the World above was taken, so read the chain). That is the same answer as
+        # the check, not a relay failure.
+        if ctx.client.get_swap(swap_key) is not None:
+            return ConfirmResult(False, 'Source deposit already claimed')
+        raise
     ctx.store.record_deposit_claim(from_tx_hash, swap_key.hex(), int(time.time()))
     return ConfirmResult(True, '', swap_key.hex(), sig, from_tx_hash)
 

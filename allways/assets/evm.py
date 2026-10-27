@@ -11,7 +11,7 @@ from eth_account import Account
 from eth_account.messages import encode_defunct
 from eth_utils import is_checksum_address
 
-from allways.assets.asset import Asset, ProviderUnreachableError, SendResult, TransactionInfo
+from allways.assets.asset import Asset, ProviderUnreachableError, SendResult, TransactionInfo, warn_once
 from allways.assets.chain import Chain, canonical_hex_tx_hash
 
 _HEX_ADDR_RE = re.compile(r'0x[0-9a-fA-F]{40}')
@@ -628,7 +628,7 @@ class EvmAsset(Asset):
             if receipt is None:
                 raise ProviderUnreachableError(f'{prefix} tx {tx_hash[:16]}... is mined but its receipt is unavailable')
             if int(receipt.get('status') or '0x0', 16) != 1:
-                bt.logging.warning(f'{self._log} tx {tx_hash[:16]}... reverted (status 0) — moved no funds, rejecting')
+                warn_once(f'{self._log} tx {tx_hash[:16]}... reverted (status 0) — moved no funds, rejecting')
                 return None
             if match is None:
                 match = self._receipt_match(tx_hash, receipt, expected_recipient, expected_amount)

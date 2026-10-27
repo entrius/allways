@@ -8,7 +8,7 @@ from solders.keypair import Keypair
 from solders.pubkey import Pubkey
 from solders.signature import Signature
 
-from allways.assets.asset import Asset, ProviderUnreachableError, SendResult, TransactionInfo
+from allways.assets.asset import Asset, ProviderUnreachableError, SendResult, TransactionInfo, warn_once
 from allways.assets.chain import Chain
 from allways.chains import CHAIN_SOL, ChainDefinition
 from allways.constants import CANCEL_REASON_SOL_RESERVED
@@ -384,7 +384,7 @@ class SolanaAsset(Asset):
         keys = self.chain.account_keys(tx, meta)
         credit, sender = self._credit(keys, tx, meta, expected_recipient)
         if credit is None or credit < expected_amount:
-            bt.logging.warning(
+            warn_once(
                 f'{LOG_SOL} tx {tx_hash[:16]}... credits {expected_recipient} {credit} {self.chain_def.native_unit} '
                 f'(< {expected_amount} required)'
             )

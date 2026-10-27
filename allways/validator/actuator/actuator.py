@@ -12,7 +12,8 @@ from typing import Any, Callable, Dict, Iterable, Optional, Protocol, Set, Tuple
 import bittensor as bt
 
 from allways.constants import LOW_BALANCE_REMIND_SECS, VOTER_BALANCE_CHECK_SECS, VOTER_LOW_BALANCE_LAMPORTS
-from allways.validator.actuator.executors import StaleWorld
+from allways.solana.client import benign_marker
+from allways.validator.actuator.executors import LOST_RACE, StaleWorld
 from allways.validator.actuator.planners import ACTIONS
 from allways.validator.chain.confirm import ConfirmTracker
 from allways.validator.runtime.bus import Latest
@@ -158,6 +159,10 @@ class Actuator(Component):
             self.refresh(e.keys)
             return NOOP
         except Exception as e:
+            race = _lost_race(intent, e)
+            if race:
+                bt.logging.debug(f'actuator: {label(intent)} not sent, a peer got there first ({race})')
+                return NOOP
             bt.logging.warning(f'actuator: {label(intent)} send failed: {e}')
             if _out_of_funds(e):
                 self._low_balance.recheck()
@@ -194,7 +199,11 @@ class Actuator(Component):
             self._resting[sent.intent.key] = now + LANDED_HOLD_SECS
             self._done(sent.intent)
         for sent, err in resolved.failed:
-            bt.logging.warning(f'actuator: {label(sent.intent)} failed on-chain: {err}')
+            race = _lost_race(sent.intent, err)
+            if race:
+                bt.logging.debug(f'actuator: {label(sent.intent)} landed after a peer got there first ({race})')
+            else:
+                bt.logging.warning(f'actuator: {label(sent.intent)} failed on-chain: {err}')
             if _out_of_funds(err):
                 self._low_balance.recheck()
             # A planned intent is re-planned if still due; a submitted one rests, then goes back in.
@@ -223,6 +232,12 @@ def label(intent: Intent) -> str:
     if isinstance(subject, (tuple, list)):
         subject = '/'.join(str(part)[:16] for part in subject)
     return f'{kind} {str(subject)[:16]}'.rstrip()
+
+
+def _lost_race(intent: Intent, err: Any) -> Optional[str]:
+    """The benign error name when ``err`` only means a peer's vote or crank already settled this intent."""
+    names = LOST_RACE.get(intent.key[0])
+    return benign_marker(err, names) if names else None
 
 
 def _out_of_funds(err: Any) -> bool:

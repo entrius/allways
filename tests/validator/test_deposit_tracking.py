@@ -281,6 +281,20 @@ def test_failed_submit_can_be_retried(tmp_path):
     assert relay.confirm('0x' + HEX).ok
 
 
+def test_a_peer_claiming_first_is_already_claimed_not_a_failure(tmp_path):
+    # Every validator relays the taker's deposit at once; a peer's claim lands between the check and the send.
+    relay = _Relay(ETH_SPEC, {'sol': dict(created_at=CREATED_AT)}, tmp_path)
+    canonical = _canonical(ETH_SPEC)
+
+    def peer_won(*a, **kw):
+        relay.client.swaps[swap_key_from_tx_hash(canonical)] = SimpleNamespace(from_tx_hash=canonical)
+        raise RuntimeError("{'InstructionError': [0, {'Custom': 0}]}")
+
+    relay.client.submit_swap_claim = peer_won
+    r = relay.confirm('0x' + HEX)
+    assert not r.ok and 'already claimed' in r.reason
+
+
 @family
 def test_junk_spellings_never_claim(spec, tmp_path):
     relay = _Relay(spec, {'sol': dict(created_at=CREATED_AT)}, tmp_path)
