@@ -154,7 +154,7 @@ pub mod allways_swap_manager {
 
     // --- Bond attestation (the collateral mirror for backings this program can't read) ---
     /// A validator attests a miner's effective bond on one backing chain; written on quorum. The full
-    /// payload is hash-bound, so divergent attestations conflict instead of co-counting.
+    /// payload is hash-bound and tallied per value, so divergent attestations compete instead of co-counting.
     pub fn vote_set_attestation(
         ctx: Context<VoteSetAttestation>,
         chain: String,
@@ -382,9 +382,12 @@ pub mod allways_swap_manager {
     pub fn migrate_config(ctx: Context<MigrateConfig>) -> Result<()> {
         migrate::migrate_config(ctx)
     }
-    /// Rewrite one v10 MinerState into the v12 layout, carrying the legacy `active` bool into the SOL
-    /// activation bit.
-    pub fn migrate_miner_state(ctx: Context<MigrateMinerState>) -> Result<()> {
-        migrate::migrate_miner_state(ctx)
+    /// Rewrite one legacy MinerState (v10, v13 or v14 layout) into the live one, carrying the legacy
+    /// `active` bool into the SOL activation bit and seeding the v17 fee counters from `accrued_fees`.
+    pub fn migrate_miner_state(
+        ctx: Context<MigrateMinerState>,
+        accrued_fees: [u64; MAX_BACKING_SLOTS],
+    ) -> Result<()> {
+        migrate::migrate_miner_state(ctx, accrued_fees)
     }
 }

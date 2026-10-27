@@ -1,7 +1,7 @@
 import os
 import threading
 import time
-from typing import Any, Optional, Tuple
+from typing import Any, Dict, Hashable, List, Optional, Tuple
 from urllib.parse import urlparse
 
 import base58
@@ -21,6 +21,23 @@ ADDR_TYPE_P2WPKH = 'p2wpkh'
 ADDR_TYPE_P2TR = 'p2tr'
 
 LOG_ESPLORA = '[Esplora]'
+
+# Node reject reasons (relayed verbatim by Esplora/mempool.space POST /tx bodies) for a tx that would
+# overflow a mempool ancestor/descendant/cluster limit.
+MEMPOOL_CHAIN_LIMIT_MARKERS = (
+    'too-long-mempool-chain',
+    'too many unconfirmed ancestors',
+    'too many descendants',
+    'ancestor size limit',
+    'descendant size limit',
+    'too-large-cluster',
+    'cluster size limit',
+)
+
+
+def is_mempool_chain_limit_error(text: Optional[str]) -> bool:
+    lowered = (text or '').lower()
+    return any(marker in lowered for marker in MEMPOOL_CHAIN_LIMIT_MARKERS)
 
 
 def detect_address_type(address: str) -> str:
@@ -184,14 +201,13 @@ class Bitcoin(Asset, Chain):
         self.http = requests.Session()
         self.http.headers['Connection'] = 'close'
 
-        # Last failure reason from send_amount / send_amount_lightweight, so
-        # callers can surface a useful message without scraping logs.
-        self.last_send_error: Optional[str] = None
-
         # Scopes find_recent_outgoing reuse to this process AND (v3.1) to one obligation each:
         # txid → dedup scope (the swap key). A fresh `alw swap`
         # run can't return a tx hash already consumed by an earlier swap.
         self.broadcasted_txids: dict[str, str] = {}
+        # Our unconfirmed txs whose change a broadcast was refused for (mempool chain limit). Their
+        # change stays unspendable until it confirms, so payouts fall back to other coins.
+        self.chain_limited_txids: set[str] = set()
 
         # Optional operator-supplied Esplora endpoints (paid/private), tried
         # before the public defaults. Empty → public blockstream → mempool.
@@ -199,10 +215,6 @@ class Bitcoin(Asset, Chain):
             os.environ.get('BTC_ESPLORA_URLS', ''),
             os.environ.get('BTC_ESPLORA_API_KEY_HEADER', 'Authorization'),
         )
-
-    def _send_error(self, msg: str) -> None:
-        self.last_send_error = msg
-        bt.logging.error(msg)
 
     @property
     def chain_def(self) -> ChainDefinition:
@@ -250,7 +262,9 @@ class Bitcoin(Asset, Chain):
         except Exception:
             return False
 
-    def check_connection(self, require_send: bool = True) -> None:
+    def check_connection(
+        self, require_send: bool = True, checked: Optional[Dict[Hashable, Optional[Exception]]] = None
+    ) -> None:
         if require_send and not os.environ.get('BTC_PRIVATE_KEY'):
             raise ConnectionError('BTC signing requires the BTC_PRIVATE_KEY env var')
         try:
@@ -279,14 +293,14 @@ class Bitcoin(Asset, Chain):
     # --- Esplora API methods (blockstream.info + mempool.space fallback) ---
     # The sole data source for tx verification, confirmations, and balances.
 
-    def api_calc_confirmations(self, block_number: int) -> int:
+    def api_calc_confirmations(self, block_number: int, tip: Optional[int] = None) -> int:
         """Confirmations for a mined block from the pass-cached chain tip, so N BTC legs in one
         forward pass share a single ``/blocks/tip/height`` instead of one each (mirrors the shipped
         SOL hoist, #542/#543). The validator clears the tip each pass (one fetch/pass); the base's
         15s TTL caps staleness for callers that never clear (miner fulfillment, axon-reserve), so the
         tip can never freeze. A stale-low tip biases confirmations low — conservative, never a false
         confirm. A failed tip fetch (None) is not cached and yields 0, so it retries next call."""
-        tip_height = self.chain.cached_block_height()
+        tip_height = tip if tip is not None else self.chain.cached_block_height()
         if tip_height is None:
             return 0
         return max(0, tip_height - block_number + 1)
@@ -309,13 +323,15 @@ class Bitcoin(Asset, Chain):
         if cached is not None:
             bt.logging.debug(f'{LOG_ESPLORA} tx {tx_hash[:16]}... pending @tip {tip} (cached, no refetch)')
             return cached
-        info = self._fetch_verify_transaction(tx_hash, expected_recipient, expected_amount)
+        # Confirmations come from the same tip that keys the cache: a second read could land on a lagging
+        # backend and park a short count under the newer tip until the next block.
+        info = self._fetch_verify_transaction(tx_hash, expected_recipient, expected_amount, tip)
         if info is not None and not info.confirmed and tip is not None:
             self._verify_cache[key] = info
         return info
 
     def _fetch_verify_transaction(
-        self, tx_hash: str, expected_recipient: str, expected_amount: int
+        self, tx_hash: str, expected_recipient: str, expected_amount: int, tip: Optional[int] = None
     ) -> Optional[TransactionInfo]:
         try:
             resp = self.btc_api_get(f'/tx/{tx_hash}', timeout=15)
@@ -331,7 +347,7 @@ class Bitcoin(Asset, Chain):
             confirmations = 0
 
             if confirmed and block_number:
-                confirmations = self.api_calc_confirmations(block_number)
+                confirmations = self.api_calc_confirmations(block_number, tip)
 
             min_confs = self.chain_def.min_confirmations
             is_confirmed = confirmations >= min_confs if confirmed else False
@@ -380,6 +396,9 @@ class Bitcoin(Asset, Chain):
         except Exception as e:
             bt.logging.error(f'Esplora tx lookup failed for {tx_hash}: {e}')
             return None
+
+    def http_sessions(self) -> List[Any]:
+        return [self.http]
 
     def get_current_block_height(self) -> Optional[int]:
         """Bitcoin chain tip via the Esplora API. None on failure."""
@@ -749,6 +768,23 @@ class Bitcoin(Asset, Chain):
             raw_tx = final_tx.serialize().hex()
             tx_hash = self.broadcast_tx(raw_tx, dedup_key=dedup_key)
             if tx_hash is None:
+                if is_mempool_chain_limit_error(self.last_send_error):
+                    pinned = {u['txid'] for u in selected if not self.is_confirmed_utxo(u)}
+                    pinned -= self.chain_limited_txids
+                    if pinned:
+                        # Each retry excludes at least one more coin, so this recursion is bounded.
+                        self.chain_limited_txids |= pinned
+                        bt.logging.warning(
+                            f'Broadcast hit a mempool chain limit; rebuilding without unconfirmed change '
+                            f'from {sorted(pinned)}'
+                        )
+                        return self.send_amount_lightweight(
+                            to_address,
+                            amount,
+                            from_address=from_address,
+                            fee_rate_override=fee_rate_override,
+                            dedup_key=dedup_key,
+                        )
                 return None
 
             bt.logging.info(f'Sent {amount} sat to {to_address} via embit (tx: {tx_hash}, fee: {fee})')
@@ -815,7 +851,9 @@ class Bitcoin(Asset, Chain):
         base_vsize = 11 + sum(8 + len(script.serialize()) for script in output_scripts)
         selected = []
         total_in = 0
-        for utxo in sorted(utxos, key=lambda u: u['value'], reverse=True):
+        # Confirmed coins first (largest first): unconfirmed change only tops up, so a payout doesn't
+        # inherit a mempool chain someone else can grow until our spend is refused.
+        for utxo in sorted(utxos, key=lambda u: (not self.is_confirmed_utxo(u), -u['value'])):
             selected.append(utxo)
             total_in += utxo['value']
             est_vsize = base_vsize + len(selected) * input_vsize
@@ -831,9 +869,17 @@ class Bitcoin(Asset, Chain):
             return None
         return selected, total_in, fee
 
+    @staticmethod
+    def is_confirmed_utxo(utxo: dict) -> bool:
+        return bool((utxo.get('status') or {}).get('confirmed'))
+
     def is_spendable_utxo(self, utxo: dict) -> bool:
-        """Confirmed, or change from a tx this process broadcast (we won't replace our own)."""
-        return bool((utxo.get('status') or {}).get('confirmed')) or utxo.get('txid') in self.broadcasted_txids
+        """Confirmed, or change from a tx this process broadcast (we won't replace our own) whose
+        mempool chain hasn't already refused a spend."""
+        if self.is_confirmed_utxo(utxo):
+            return True
+        txid = utxo.get('txid')
+        return txid in self.broadcasted_txids and txid not in self.chain_limited_txids
 
     def broadcast_tx(self, raw_hex: str, dedup_key: Optional[str] = None) -> Optional[str]:
         """Broadcast a raw transaction. Returns tx_hash or None."""

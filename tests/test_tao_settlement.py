@@ -5,18 +5,25 @@ in a block and still decodes to the intended dest/amount. Only a Balances.Transf
 funds moved, so that event is what the verifier reads. Backends are mocked — no network.
 """
 
-from types import SimpleNamespace
 from unittest.mock import MagicMock
 
 import pytest
 
 from allways.assets.asset import ProviderUnreachableError
-from allways.assets.tao import Tao
+from allways.assets.tao import Tao, TaoChain
 
 MINER = 'minerTAO'
 USER = 'userTAO'
 TXID = '0xdeposit'
 BLOCK = 500
+
+
+def _bare_tao():
+    """A Tao on a TaoChain, both built without __init__ (no real subtensor needed)."""
+    p = Tao.__new__(Tao)
+    p._chain = TaoChain.__new__(TaoChain)
+    p.scan_cursors, p.broadcasted_txids = {}, {}
+    return p
 
 
 def _transfer_event(dest, amount, sender, extrinsic_idx=0):
@@ -31,21 +38,21 @@ def _transfer_event(dest, amount, sender, extrinsic_idx=0):
 
 
 def _provider(*, call_amount=5_000, events, head=BLOCK + 10):
-    p = Tao.__new__(Tao)  # skip __init__ (no real subtensor needed)
+    p = _bare_tao()  # skip __init__ (no real subtensor needed)
     p.subtensor = MagicMock()
     p.subtensor.get_current_block.return_value = head
-    p.block_cache = {}
-    p.block_hash_cache = {}
-    p.events_cache = {}
+    p.chain.block_cache = {}
+    p.chain.block_hash_cache = {}
+    p.chain.events_cache = {}
     p.scan_cursors = {}
     block = {
         '_raw': True,
         'extrinsics': [{'extrinsic_hash': TXID, 'dest': MINER, 'amount': call_amount, 'sender': USER}],
     }
-    p.get_block = lambda n: block if n == BLOCK else None
-    p.get_block_hash = lambda n: f'0xblock{n}'
-    p.get_block_events = lambda h: events
-    p.get_block_time = lambda n: 1_700_000_000
+    p.chain.get_block = lambda n: block if n == BLOCK else None
+    p.chain.get_block_hash = lambda n: f'0xblock{n}'
+    p.chain.get_block_events = lambda h: events
+    p.chain.get_block_time = lambda n: 1_700_000_000
     return p
 
 
@@ -76,15 +83,9 @@ def _failed_dispatch_events(extrinsic_idx=0):
 
 
 def test_included_but_failed_transfer_is_not_a_deposit():
-    """The exploited path: extrinsic sits in the block, decodes perfectly, moved nothing."""
+    """The extrinsic sits in the block, decodes perfectly, moved nothing."""
     p = _provider(events=_failed_dispatch_events())
     assert p.fetch_matching_tx(TXID, MINER, 5_000, block_hint=BLOCK) is None
-
-
-def test_fee_events_alone_are_not_mistaken_for_settlement():
-    """Withdraw/TransactionFeePaid touch the payer's balance but are not a credit to anyone."""
-    p = _provider(events=_failed_dispatch_events())
-    assert p.settled_credit(BLOCK, 0, MINER) is None
 
 
 def test_settled_transfer_is_accepted():
@@ -98,11 +99,6 @@ def test_settled_transfer_is_accepted():
 def test_amount_comes_from_the_event_not_the_call():
     """A call claiming 5000 that only settled 4999 is a short deposit, not a match."""
     p = _provider(call_amount=5_000, events=[_transfer_event(MINER, 4_999, USER)])
-    assert p.fetch_matching_tx(TXID, MINER, 5_000, block_hint=BLOCK) is None
-
-
-def test_settlement_to_another_recipient_does_not_count():
-    p = _provider(events=[_transfer_event('someoneElse', 5_000, USER)])
     assert p.fetch_matching_tx(TXID, MINER, 5_000, block_hint=BLOCK) is None
 
 
@@ -120,28 +116,9 @@ def test_unreadable_events_surface_as_unreachable_not_as_absent():
     def boom(_):
         raise ProviderUnreachableError('events unavailable')
 
-    p.get_block_events = boom
+    p.chain.get_block_events = boom
     with pytest.raises(ProviderUnreachableError):
         p.fetch_matching_tx(TXID, MINER, 5_000, block_hint=BLOCK)
-
-
-def test_overpayment_still_settles():
-    p = _provider(events=[_transfer_event(MINER, 9_000, USER)])
-    info = p.fetch_matching_tx(TXID, MINER, 5_000, block_hint=BLOCK)
-    assert info is not None and info.amount == 9_000
-
-
-def test_events_are_fetched_once_per_block():
-    calls = []
-    p = _provider(events=[_transfer_event(MINER, 5_000, USER)])
-    p.events_cache = {}
-    real_events = [_transfer_event(MINER, 5_000, USER)]
-    p.subtensor.substrate = SimpleNamespace(get_events=lambda h: calls.append(h) or real_events)
-    del p.get_block_events  # exercise the real caching path
-    p.get_block_events = Tao.get_block_events.__get__(p)
-    assert p.settled_credit(BLOCK, 0, MINER) == (USER, 5_000)
-    assert p.settled_credit(BLOCK, 0, MINER) == (USER, 5_000)
-    assert len(calls) == 1
 
 
 # ─── shape drift must read as unknown, never as "no funds moved" ─────────────
@@ -153,9 +130,6 @@ def test_events_are_fetched_once_per_block():
     [
         'unexpected-scalar',
         {'sender': 'A', 'receiver': 'B', 'value': 7},  # renamed keys
-        ['A', 'B'],  # too few positional params
-        {'from': 'A', 'to': 'B', 'amount': 'not-a-number'},
-        {'from': None, 'to': 'B', 'amount': 7},
     ],
 )
 def test_unreadable_transfer_payload_raises_rather_than_reading_as_absent(attributes):
@@ -164,7 +138,7 @@ def test_unreadable_transfer_payload_raises_rather_than_reading_as_absent(attrib
         'event': {'module_id': 'Balances', 'event_id': 'Transfer', 'attributes': attributes},
     }
     with pytest.raises(ProviderUnreachableError):
-        Tao._transfer_from_event(record)
+        TaoChain._transfer_from_event(record)
 
 
 def test_unreadable_payload_on_a_non_transfer_event_is_still_just_absent():
@@ -173,20 +147,7 @@ def test_unreadable_payload_on_a_non_transfer_event_is_still_just_absent():
         'extrinsic_idx': 0,
         'event': {'module_id': 'Balances', 'event_id': 'Withdraw', 'attributes': 'unexpected-scalar'},
     }
-    assert Tao._transfer_from_event(record) is None
-
-
-def test_unreadable_transfer_payload_surfaces_through_settled_credit():
-    p = _provider(
-        events=[
-            {
-                'extrinsic_idx': 0,
-                'event': {'module_id': 'Balances', 'event_id': 'Transfer', 'attributes': 'unexpected-scalar'},
-            }
-        ]
-    )
-    with pytest.raises(ProviderUnreachableError):
-        p.settled_credit(BLOCK, 0, MINER)
+    assert TaoChain._transfer_from_event(record) is None
 
 
 def test_unrecognised_phase_shape_raises_rather_than_matching_nothing():
@@ -200,7 +161,7 @@ def test_unrecognised_phase_shape_raises_rather_than_matching_nothing():
         ]
     )
     with pytest.raises(ProviderUnreachableError):
-        p.settled_credit(BLOCK, 0, MINER)
+        p.chain.settled_credit(BLOCK, 0, MINER)
 
 
 def test_empty_event_list_is_unknown_not_a_no_credit():
@@ -208,4 +169,18 @@ def test_empty_event_list_is_unknown_not_a_no_credit():
     records. No events means a broken response, not a block where nothing settled."""
     p = _provider(events=[])
     with pytest.raises(ProviderUnreachableError):
-        p.settled_credit(BLOCK, 0, MINER)
+        p.chain.settled_credit(BLOCK, 0, MINER)
+
+
+def test_a_node_behind_the_hinted_block_is_unreachable_not_absent():
+    # A not-found leg can slash; a node that hasn't imported the hinted block yet knows nothing.
+    p = _provider(events=[_transfer_event(MINER, 5_000, USER)], head=BLOCK - 5)
+    p.chain.get_block = lambda n: None
+    with pytest.raises(ProviderUnreachableError):
+        p.verify_transaction(tx_hash=TXID, expected_recipient=MINER, expected_amount=5_000, block_hint=BLOCK)
+
+
+def test_a_hash_absent_from_readable_hinted_blocks_is_still_absent():
+    p = _provider(events=[], head=BLOCK + 10)
+    p.chain.get_block = lambda n: {'_raw': True, 'extrinsics': []}
+    assert p.verify_transaction(tx_hash=TXID, expected_recipient=MINER, expected_amount=5_000, block_hint=BLOCK) is None

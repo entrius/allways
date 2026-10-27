@@ -58,11 +58,13 @@ class FlakyEsplora:
 
     spendable_balance = Bitcoin.spendable_balance
     is_spendable_utxo = Bitcoin.is_spendable_utxo
+    is_confirmed_utxo = staticmethod(Bitcoin.is_confirmed_utxo)
 
-    def __init__(self, results, broadcasted=()):
+    def __init__(self, results, broadcasted=(), chain_limited=()):
         self.results = list(results)
         self.paths = []
         self.broadcasted_txids = {txid: None for txid in broadcasted}
+        self.chain_limited_txids = set(chain_limited)
 
     def btc_api_get(self, path, timeout=None):
         self.paths.append(path)
@@ -82,6 +84,13 @@ def test_btc_balance_counts_confirmed_coins_and_our_own_change_only():
     esplora = FlakyEsplora([EsploraResponse(coins)], broadcasted=['ours'])
     assert BtcBalanceReader(esplora).get_balance('bc1qminer') == 850_000
     assert esplora.paths == ['/address/bc1qminer/utxo']
+
+
+def test_btc_balance_leaves_out_our_change_once_its_chain_is_limited():
+    # Change a payout was refused for spending (descendant limits) is not spendable until it confirms.
+    coins = [utxo('a', 800_000), utxo('ours', 50_000, confirmed=False)]
+    esplora = FlakyEsplora([EsploraResponse(coins)], broadcasted=['ours'], chain_limited=['ours'])
+    assert BtcBalanceReader(esplora).get_balance('bc1qminer') == 800_000
 
 
 @pytest.mark.parametrize(

@@ -3,7 +3,7 @@ use solana_keccak_hasher::hashv;
 
 use crate::constants::{MAX_VALIDATORS, REQ_SET_ATTESTATION, REQ_SET_WEIGHTS, VOTE_ROUND_TTL_SECS};
 use crate::error::ErrorCode;
-use crate::state::{Config, ValidatorInfo, VoteRound};
+use crate::state::{Config, TallyRound, TallyVote, ValidatorInfo, VoteRound};
 
 /// Canonical bound hash for a vote round, from (request_type, target pubkey).
 pub fn request_hash(request_type: u8, target: &Pubkey) -> [u8; 32] {
@@ -42,7 +42,7 @@ pub fn backing_request_hash(request_type: u8, miner: &Pubkey, backing: &str) -> 
 
 /// Bound hash for a bond-attestation round: binds the FULL payload, since none of the values being
 /// written live in the round's seeds. Two validators attesting different balances must land on
-/// different hashes and conflict, never co-count into one quorum that writes whichever arrived first.
+/// different hashes and be tallied apart, never co-count into one quorum that writes either value.
 pub fn attestation_hash(
     miner: &Pubkey,
     chain: &str,
@@ -115,6 +115,58 @@ pub fn record_vote<'info>(
     let total = config.validators.len() as u64;
     let threshold = config.consensus_threshold_percent as u64;
     Ok(votes.saturating_mul(100) >= threshold.saturating_mul(total))
+}
+
+/// Record a validator's vote into a per-value `round`; returns true iff `bound_hash` now holds the
+/// threshold. On quorum the round is emptied so the account is reusable (rent stays parked).
+///
+/// Each validator holds one vote. Voting a different value replaces its own vote, so a validator that
+/// re-reads the source is never locked out by its earlier vote. Votes older than VOTE_ROUND_TTL_SECS,
+/// and votes of validators since removed, are dropped before counting. The threshold is floored at a
+/// majority (`set_threshold`), so two values can never both hold it.
+pub fn record_tallied_vote<'info>(
+    round: &mut Account<'info, TallyRound>,
+    config: &Config,
+    validator: Pubkey,
+    bound_hash: [u8; 32],
+    round_bump: u8,
+    now: i64,
+) -> Result<bool> {
+    require!(!config.validators.is_empty(), ErrorCode::NoValidators);
+    require!(
+        config.validators.iter().any(|v| v.key == validator),
+        ErrorCode::NotValidator
+    );
+    round.bump = round_bump;
+
+    round.votes.retain(|vote| {
+        now.saturating_sub(vote.voted_at) <= VOTE_ROUND_TTL_SECS
+            && config.validators.iter().any(|v| v.key == vote.voter)
+    });
+    match round.votes.iter_mut().find(|vote| vote.voter == validator) {
+        Some(vote) => {
+            require!(vote.hash != bound_hash, ErrorCode::AlreadyVoted);
+            vote.hash = bound_hash;
+            vote.voted_at = now;
+        }
+        None => {
+            require!(round.votes.len() < MAX_VALIDATORS, ErrorCode::ValidatorSetFull);
+            round.votes.push(TallyVote {
+                voter: validator,
+                hash: bound_hash,
+                voted_at: now,
+            });
+        }
+    }
+
+    let votes = round.votes.iter().filter(|vote| vote.hash == bound_hash).count() as u64;
+    let total = config.validators.len() as u64;
+    let threshold = config.consensus_threshold_percent as u64;
+    let quorum = votes.saturating_mul(100) >= threshold.saturating_mul(total);
+    if quorum {
+        round.votes.clear();
+    }
+    Ok(quorum)
 }
 
 /// Reset a round to empty so its PDA is reusable for the next round (rent stays parked).

@@ -19,7 +19,7 @@ import time
 import click
 
 from allways.assets.asset import ProviderUnreachableError
-from allways.assets.tao import Tao, parse_extrinsic_id
+from allways.assets.tao import TaoChain, parse_extrinsic_id
 from allways.cli.dendrite_lite import (
     broadcast_until_quorum,
     discover_quorum_axons,
@@ -60,7 +60,7 @@ def _resolve_extrinsic_id(client, from_chain: str, block_num: int, ext_idx: int)
     provider = gate_provider(from_chain, client)
     if provider is None:
         fail(f'Cannot read {from_chain.upper()} to resolve extrinsic {block_num}-{ext_idx}.')
-    if not isinstance(provider.chain, Tao):
+    if not isinstance(provider.chain, TaoChain):
         fail(f'`{block_num}-{ext_idx}` is a Subtensor extrinsic id; post the {from_chain.upper()} tx hash instead.')
     try:
         return provider.locate_transfer(block_num, ext_idx)
@@ -210,6 +210,11 @@ def post_tx_command(tx_hash: str, tx_block: int, miner_hint: str):
 def resolve_relay_axons(client, subtensor, netuid: int):
     """The targets for the confirm relay: (axons, hotkey→label names, accepts needed).
 
+    One accept is enough: a claim lands once (the first validator to relay it creates it; the rest answer
+    that it already exists, which reads as a rejection), and attestation is chain-driven, so every quorum
+    member picks the claim up from the PendingAttestation scan. Waiting for a headcount of accepts meant
+    waiting on every validator, a dead one for the full timeout, while a fast swap settled meanwhile.
+
     Preferred: just the contract's validator quorum — non-members can't submit claims (the
     program rejects them with NotValidator), so relaying to them only spammed their errors and
     held the relay for the full timeout on dead axons. Falls back LOUDLY to every serving
@@ -220,7 +225,7 @@ def resolve_relay_axons(client, subtensor, netuid: int):
         needed = votes_needed(cfg)
         axons, names = discover_quorum_axons(client, subtensor, netuid, cfg=cfg)
         if len(axons) >= needed:
-            return axons, names, needed
+            return axons, names, 1
         console.print(
             f'[yellow]Resolved only {len(axons)} of the {needed} quorum validator(s) from chain — '
             'relaying to every serving validator instead.[/yellow]'

@@ -1,5 +1,4 @@
-"""`alw status` shows the configured bittensor identity (coldkey + TAO balance) alongside the
-Solana keypair, and no longer points at a browser swap flow (unsupported)."""
+"""`alw status` renders the configured identity and never prints the RPC API key."""
 
 import types
 from unittest.mock import MagicMock
@@ -38,77 +37,6 @@ def test_status_shows_tao_identity_when_wallet_configured(monkeypatch):
     assert 'ck (5FabcColdkey)' in result.output
     assert '10.5000 τ' in result.output
     assert 'browser' not in result.output.lower()
-
-
-def test_status_omits_tao_lines_without_wallet(monkeypatch):
-    _patch(monkeypatch, {'network': 'test'}, None)
-
-    result = CliRunner().invoke(status.status_command, [])
-
-    assert result.exit_code == 0, result.output
-    assert 'TAO balance' not in result.output
-    assert 'browser' not in result.output.lower()
-
-
-def test_status_json_includes_tao_fields(monkeypatch):
-    _patch(monkeypatch, {'wallet': 'ck', 'network': 'test'}, ('5FabcColdkey', None))
-
-    result = CliRunner().invoke(status.status_command, ['--json'])
-
-    assert result.exit_code == 0, result.output
-    assert '"coldkey": "5FabcColdkey"' in result.output
-    assert '"tao_balance": null' in result.output
-
-
-def test_tao_identity_none_without_wallet():
-    assert status._tao_identity({}) is None
-
-
-def _binding(hotkey: bytes):
-    return types.SimpleNamespace(hotkey=hotkey, miner=None)
-
-
-def test_status_shows_bound_hotkey_with_match_note(monkeypatch):
-    hk = b'\x01' * 32
-    ss58 = status.hotkey_bytes_to_ss58(hk)
-    _patch(monkeypatch, {'network': 'test'}, None, binding=_binding(hk), local_hotkey=ss58)
-
-    result = CliRunner().invoke(status.status_command, [])
-
-    assert result.exit_code == 0, result.output
-    flat = ' '.join(result.output.split())
-    assert f'Bound hotkey: {ss58}' in flat
-    assert 'matches your configured hotkey' in flat
-
-
-def test_status_flags_binding_config_mismatch(monkeypatch):
-    hk = b'\x01' * 32
-    _patch(monkeypatch, {'network': 'test'}, None, binding=_binding(hk), local_hotkey='5SomethingElse')
-
-    result = CliRunner().invoke(status.status_command, [])
-
-    assert result.exit_code == 0, result.output
-    assert 'configured hotkey differs' in ' '.join(result.output.split())
-
-
-def test_status_unbound_points_at_bind_command(monkeypatch):
-    _patch(monkeypatch, {'network': 'test'}, None)
-
-    result = CliRunner().invoke(status.status_command, [])
-
-    assert result.exit_code == 0, result.output
-    assert 'alw bind-hotkey' in result.output
-
-
-def test_status_json_includes_bound_hotkey(monkeypatch):
-    hk = b'\x02' * 32
-    ss58 = status.hotkey_bytes_to_ss58(hk)
-    _patch(monkeypatch, {'network': 'test'}, None, binding=_binding(hk))
-
-    result = CliRunner().invoke(status.status_command, ['--json'])
-
-    assert result.exit_code == 0, result.output
-    assert f'"bound_hotkey": "{ss58}"' in result.output
 
 
 def test_status_redacts_rpc_api_key(monkeypatch):

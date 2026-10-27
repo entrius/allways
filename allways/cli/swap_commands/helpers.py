@@ -941,9 +941,9 @@ def gate_provider(chain: str, client, subtensor=None):
     """Read-only provider for the CLI's screens; None when unbuildable (screens fail open, the validator
     re-gates). Every value in ``avail`` is a thunk, so an unused backend is never built. ``subtensor`` is
     the caller's lazy getter when it has one, else the CLI context supplies it on demand."""
-    from allways.assets import ASSET_REGISTRY
+    from allways.assets import asset_spec
 
-    spec = next((s for s in ASSET_REGISTRY if s.chain_id == chain), None)
+    spec = asset_spec(chain)
     if spec is None:
         return None
     avail = {

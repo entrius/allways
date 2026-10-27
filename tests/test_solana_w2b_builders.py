@@ -54,9 +54,8 @@ def _metas(ix):
 # --- discriminators independently recomputed --------------------------------------------------
 
 
-@pytest.mark.parametrize(
-    'name',
-    [
+def test_discriminators_match_anchors_formula():
+    for name in (
         'set_quote',
         'remove_quote',
         'open_or_request',
@@ -74,10 +73,8 @@ def _metas(ix):
         'set_attest_max_age',
         'migrate_config',
         'migrate_miner_state',
-    ],
-)
-def test_discriminators_match_anchors_formula(name):
-    assert layouts.IX_DISCRIMINATORS[name] == _global_disc(name)
+    ):
+        assert layouts.IX_DISCRIMINATORS[name] == _global_disc(name), name
 
 
 # --- the backing rides in the seeds ------------------------------------------------------------
@@ -87,7 +84,7 @@ def test_quote_pda_separates_two_backings_on_one_direction():
     miner = Keypair().pubkey()
     sol_backed = pdas.quote_pda(miner, 'sol', 'tao', 'sol', PID)
     tao_backed = pdas.quote_pda(miner, 'sol', 'tao', 'tao', PID)
-    assert sol_backed != tao_backed, 'D2: one miner, one direction, two live offers'
+    assert sol_backed != tao_backed, 'one miner, one direction, two live offers'
     # And neither collides with the pre-W2b address the reaper targets.
     assert pdas.legacy_quote_pda(miner, 'sol', 'tao', PID) not in (sol_backed, tao_backed)
 
@@ -255,7 +252,7 @@ def test_vote_set_attestation_builds_the_round_and_the_pda(client):
         (pdas.config_pda(PID), False, False),
         (miner, False, False),
         (pdas.miner_state_pda(miner, PID), False, True),  # writable: under-floor bond drops the hub bit
-        (pdas.reservation_pda(miner, 'tao', PID), False, False),  # F5: filled-reservation obligation floor
+        (pdas.reservation_pda(miner, 'tao', PID), False, False),  # filled-reservation obligation floor
         (pdas.bond_attestation_pda(miner, 'tao', PID), False, True),
         (pdas.attestation_round_pda(miner, 'tao', PID), False, True),
         (SYSTEM_PROGRAM, False, False),

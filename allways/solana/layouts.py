@@ -16,7 +16,7 @@ from construct import Bytes as _Raw
 
 # `Config.version` the deployed program writes (constants.rs CONFIG_VERSION). Mirrored here so a schema
 # bump is one edit on each side rather than a literal buried in a test.
-CONFIG_VERSION = 16
+CONFIG_VERSION = 17
 
 # Width of MinerState's per-hub transient arrays (constants.rs MAX_BACKING_SLOTS) — one slot per
 # `active_backings` bit, indexed by bit position.
@@ -91,9 +91,10 @@ def estimated_free_at(state, bit: int, reservation=None, pool=None, pair: tuple 
     if reservation is not None:
         reserved_until = int(getattr(reservation, 'reserved_until', 0) or 0)
         finalize_by = int(getattr(reservation, 'finalize_by', 0) or 0)
+        unfilled = int(getattr(reservation, 'created_at', 0) or 0) == 0  # a consumed fill holds nothing
         if reserved_until != 0 and reserved_until >= now:
             holds.append(reserved_until)
-        elif reserved_until == 0 and finalize_by != 0 and now <= finalize_by:
+        elif reserved_until == 0 and unfilled and finalize_by != 0 and now <= finalize_by:
             holds.append(max(busy_until, finalize_by))
     return max(holds, default=0)
 
@@ -102,6 +103,19 @@ def hub_reserved_collateral(state, bit: int) -> int:
     """ONE hub's collateral already obligated to in-flight swaps (contract ``MinerState::reserved``), in
     the backing's own units. A pre-v3.3 shape carries no array — nothing is reserved."""
     arr = getattr(state, 'reserved_collateral', ())
+    idx = max(bit.bit_length() - 1, 0)
+    return int(arr[idx]) if idx < len(arr) else 0
+
+
+def hub_accrued_fee(state, bit: int, generation: int):
+    """ONE hub's cumulative fees owed to its vault in ``generation`` (contract ``MinerState::accrued_fee``),
+    or None when the account predates the v17 counters. None is "unknown", never zero: netting zero
+    would attest a bond the miner's fees already spoke for."""
+    arr = getattr(state, 'accrued_fees', None)
+    if arr is None:
+        return None
+    if int(getattr(state, 'fee_generation', 0) or 0) != int(generation):
+        return 0  # a counter left from a retired vault: the replacement is owed nothing for it
     idx = max(bit.bit_length() - 1, 0)
     return int(arr[idx]) if idx < len(arr) else 0
 
@@ -124,6 +138,7 @@ DISCRIMINATORS = {
     'Pool': bytes([241, 154, 109, 4, 17, 177, 109, 188]),
     'Reservation': bytes([188, 235, 0, 111, 208, 253, 247, 212]),
     'Swap': bytes([53, 206, 146, 152, 44, 97, 120, 177]),
+    'TallyRound': bytes([252, 197, 213, 174, 200, 138, 162, 34]),
     'Treasury': bytes([238, 239, 123, 238, 89, 1, 168, 253]),
     'VoteRound': bytes([155, 210, 10, 166, 226, 108, 60, 182]),
 }
@@ -170,6 +185,10 @@ MinerState = CStruct(
     'successful_swaps' / U32,
     'failed_swaps' / U32,
     'bump' / U8,
+    # v17 fee counters (appended after `bump`): per-hub cumulative fees owed to that hub's vault, under
+    # `fee_generation`. Read through `hub_accrued_fee`.
+    'fee_generation' / U64,
+    'accrued_fees' / U64[MAX_BACKING_SLOTS],
 )
 
 # W2 — the quorum's assertion about a bond this program can't read (one per miner per backing chain).
@@ -284,6 +303,13 @@ VoteRound = CStruct(
     'bump' / U8,
 )
 
+TallyVote = CStruct('voter' / Pubkey32, 'hash' / Hash32, 'voted_at' / I64)
+
+TallyRound = CStruct(
+    'votes' / Vec(TallyVote),
+    'bump' / U8,
+)
+
 Config = CStruct(
     'admin' / Pubkey32,
     'version' / U32,
@@ -329,6 +355,7 @@ ACCOUNT_PUBKEY_FIELDS = {
     'Swap': ['user', 'miner'],
     'Pool': ['miner'],
     'CollateralVault': [],
+    'TallyRound': [],
     'Treasury': [],
     'VoteRound': [],
 }
@@ -634,7 +661,7 @@ IX_DISCRIMINATORS = {
     'close_legacy_pool': bytes([135, 68, 69, 243, 68, 50, 121, 183]),
     'close_legacy_reservation': bytes([114, 19, 114, 1, 9, 107, 205, 116]),
     'close_legacy_initiate_round': bytes([70, 12, 167, 155, 208, 160, 73, 154]),
-    # v3 upgrade cranks (no args each; run migrate_config first).
+    # Upgrade cranks (run migrate_config first). migrate_miner_state takes IX_MIGRATE_MINER_ARGS.
     'migrate_config': bytes([92, 131, 58, 105, 210, 154, 224, 193]),
     'migrate_miner_state': bytes([38, 86, 4, 75, 122, 83, 220, 214]),
 }
@@ -702,6 +729,8 @@ IX_SET_ATTESTATION_ARGS = CStruct(
     'epoch' / U64,
 )
 IX_PUBKEY_ARGS = CStruct('value' / Pubkey32)  # remove_validator
+# migrate_miner_state: the v17 fee-counter seed, one cumulative figure per hub slot.
+IX_MIGRATE_MINER_ARGS = CStruct('accrued_fees' / U64[MAX_BACKING_SLOTS])
 IX_U8_ARGS = CStruct('value' / U8)  # set_consensus_threshold
 IX_I64_ARGS = CStruct('value' / I64)  # set_fulfillment_timeout
 IX_BOOL_ARGS = CStruct('value' / Bool)  # set_halted
@@ -721,6 +750,7 @@ ACCOUNT_LAYOUTS = {
     'Pool': Pool,
     'Reservation': Reservation,
     'Swap': Swap,
+    'TallyRound': TallyRound,
     'Treasury': Treasury,
     'VoteRound': VoteRound,
 }

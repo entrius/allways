@@ -142,6 +142,17 @@ pub struct MinerState {
     pub failed_swaps: u32,
     /// Stored PDA bump.
     pub bump: u8,
+    /// The `Config.vault_generation` that `accrued_fees` counts for. A counter left from a retired
+    /// generation reads as zero (`accrued_fee`): the replacement vault has settled nothing, and the
+    /// fees the old vault held are not owed to it. Appended in v17, after `bump`, so pre-v17 readers
+    /// still parse the prefix.
+    pub fee_generation: u64,
+    /// Cumulative protocol fees owed to each off-chain bond vault, per hub (indexed like the other
+    /// per-hub arrays, in the backing's own units), accrued at confirm quorum. The vault's fee
+    /// true-up settles against this figure, so every validator reads one number off chain instead
+    /// of each summing its own event history. A locally-settled backing's slot stays 0: its fee
+    /// moves to the treasury at confirm.
+    pub accrued_fees: [u64; MAX_BACKING_SLOTS],
 }
 
 impl MinerState {
@@ -241,6 +252,30 @@ impl MinerState {
         let slot = Self::backing_slot(bit);
         self.reserved_collateral[slot] = self.reserved_collateral[slot].saturating_sub(amount);
     }
+
+    /// Add an off-chain backing's confirm fee to this vault generation's counter. The first accrual
+    /// after a vault replacement restarts every counter at zero, the same answer `accrued_fee` gives
+    /// before it. Checked: a wrapped total would forgive everything already owed.
+    pub fn accrue_fee(&mut self, bit: u8, fee: u64, generation: u64) -> Result<()> {
+        if self.fee_generation != generation {
+            self.accrued_fees = [0; MAX_BACKING_SLOTS];
+            self.fee_generation = generation;
+        }
+        let slot = Self::backing_slot(bit);
+        self.accrued_fees[slot] = self.accrued_fees[slot]
+            .checked_add(fee)
+            .ok_or(crate::error::ErrorCode::Overflow)?;
+        Ok(())
+    }
+
+    /// Fees this hub's vault is owed in `generation`, cumulative: 0 when the counter is from a
+    /// retired generation.
+    pub fn accrued_fee(&self, bit: u8, generation: u64) -> u64 {
+        if self.fee_generation != generation {
+            return 0;
+        }
+        self.accrued_fees[Self::backing_slot(bit)]
+    }
 }
 
 /// A miner's bond on one backing chain, as asserted by validator quorum
@@ -284,6 +319,30 @@ pub struct VoteRound {
     pub voters: Vec<Pubkey>,
     /// Unix timestamp the round opened (0 = empty/available). Used for TTL reset.
     pub created_at: i64,
+    /// Stored PDA bump.
+    pub bump: u8,
+}
+
+/// One validator's standing vote in a `TallyRound`.
+#[derive(AnchorSerialize, AnchorDeserialize, Clone, InitSpace)]
+pub struct TallyVote {
+    pub voter: Pubkey,
+    /// keccak-256 of the payload this validator is voting for.
+    pub hash: [u8; 32],
+    /// When the vote was cast (or last changed); a vote older than VOTE_ROUND_TTL_SECS stops counting.
+    pub voted_at: i64,
+}
+
+/// A vote round that counts every value voted for (`seeds = [TALLY_SEED, miner, chain]`).
+///
+/// Unlike `VoteRound`, nothing binds the round to the first voter's value: each validator holds one
+/// vote, and whichever value reaches the threshold wins. A stray, late or minority vote just loses
+/// instead of locking every other value out until the TTL.
+#[account]
+#[derive(InitSpace)]
+pub struct TallyRound {
+    #[max_len(MAX_VALIDATORS)]
+    pub votes: Vec<TallyVote>,
     /// Stored PDA bump.
     pub bump: u8,
 }
@@ -635,6 +694,8 @@ mod tests {
             successful_swaps: 0,
             failed_swaps: 0,
             bump: 255,
+            fee_generation: 0,
+            accrued_fees: [0; MAX_BACKING_SLOTS],
         }
     }
 
@@ -700,6 +761,22 @@ mod tests {
         ms.release_reserved(BACKING_BIT_SOL, 500);
         assert_eq!(ms.reserved(BACKING_BIT_SOL), 0);
         assert_eq!(ms.reserved(BACKING_BIT_TAO), 900, "one hub's release touches only its slot");
+    }
+
+    #[test]
+    fn a_fee_accrues_on_its_own_hub_and_restarts_with_a_new_vault() {
+        let mut ms = miner();
+        ms.accrue_fee(BACKING_BIT_TAO, 100, 0).unwrap();
+        ms.accrue_fee(BACKING_BIT_TAO, 23, 0).unwrap();
+        assert_eq!(ms.accrued_fee(BACKING_BIT_TAO, 0), 123, "cumulative");
+        assert_eq!(ms.accrued_fee(BACKING_BIT_SOL, 0), 0, "one hub's fee touches only its slot");
+        // A replaced vault is owed nothing yet, before and after the first accrual under it.
+        assert_eq!(ms.accrued_fee(BACKING_BIT_TAO, 1), 0);
+        ms.accrue_fee(BACKING_BIT_TAO, 5, 1).unwrap();
+        assert_eq!(ms.accrued_fee(BACKING_BIT_TAO, 1), 5);
+        assert_eq!(ms.accrued_fee(BACKING_BIT_TAO, 0), 0, "the retired generation reads as zero");
+        ms.accrued_fees[MinerState::backing_slot(BACKING_BIT_TAO)] = u64::MAX;
+        assert!(ms.accrue_fee(BACKING_BIT_TAO, 1, 1).is_err(), "overflow must refuse, not wrap");
     }
 
     #[test]

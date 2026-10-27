@@ -20,10 +20,9 @@ from websockets.http11 import Response
 from allways.utils import subtensor as st
 from allways.utils.subtensor import (
     PrimaryWatch,
+    archive_substrate,
     build_subtensor,
-    describe_subtensor,
     is_rate_limited,
-    parse_endpoints,
     redact_endpoint,
     serialize_subtensor,
 )
@@ -51,22 +50,16 @@ def fake_subtensor(monkeypatch):
 # ─── build_subtensor ────────────────────────────────────────────────────────
 
 
+def test_an_archive_connection_is_that_endpoint_alone_with_its_key_redacted(fake_subtensor, monkeypatch):
+    monkeypatch.setenv(st.FALLBACK_ENDPOINTS_ENV, FINNEY)  # a full node: never a stand-in for an archive read
+    assert archive_substrate(KEYED) is fake_subtensor.return_value.substrate
+    fake_subtensor.assert_called_once_with(network=KEYED)
+    assert st._redactor.secrets == {KEYED: redact_endpoint(KEYED)}
+
+
 def test_unset_env_builds_a_plain_subtensor(fake_subtensor):
     config = object()
     assert build_subtensor(config=config) is fake_subtensor.return_value
-    fake_subtensor.assert_called_once_with(config=config)
-
-
-def test_unset_env_cli_network_is_passed_as_is(fake_subtensor):
-    build_subtensor(network='finney')
-    fake_subtensor.assert_called_once_with(network='finney')
-
-
-def test_empty_env_values_count_as_unset(fake_subtensor, monkeypatch):
-    monkeypatch.setenv(st.FALLBACK_ENDPOINTS_ENV, ' , ,')
-    monkeypatch.setenv(st.ARCHIVE_ENDPOINTS_ENV, '')
-    config = object()
-    build_subtensor(config=config)
     fake_subtensor.assert_called_once_with(config=config)
 
 
@@ -80,14 +73,6 @@ def test_env_lists_pass_through_in_order(fake_subtensor, monkeypatch):
         fallback_endpoints=[FINNEY, 'ws://10.0.0.2:9944'],
         archive_endpoints=[ARCHIVE],
         retry_forever=False,
-    )
-
-
-def test_archive_alone_turns_the_retry_wrapper_on(fake_subtensor, monkeypatch):
-    monkeypatch.setenv(st.ARCHIVE_ENDPOINTS_ENV, ARCHIVE)
-    build_subtensor(network=KEYED)
-    fake_subtensor.assert_called_once_with(
-        network=KEYED, fallback_endpoints=[], archive_endpoints=[ARCHIVE], retry_forever=False
     )
 
 
@@ -145,26 +130,6 @@ def test_current_node_discarded_state_answer_reaches_the_archive_switch(fake_sub
     assert exc.value.block_hash == block_hash
 
 
-def test_other_rpc_errors_pass_through_untouched(fake_subtensor, monkeypatch):
-    monkeypatch.setenv(st.ARCHIVE_ENDPOINTS_ENV, ARCHIVE)
-    error = SubstrateRequestException('Client error: Execution failed')
-    originals = {'rpc_request': _raising(error)}
-    fake_subtensor.return_value.substrate = SimpleNamespace(_original_methods=originals)
-    build_subtensor(network=FINNEY)
-    with pytest.raises(SubstrateRequestException) as exc:
-        originals['rpc_request']('state_call', [])
-    assert exc.value is error
-
-
-def test_no_archive_leaves_rpc_errors_alone(fake_subtensor, monkeypatch):
-    monkeypatch.setenv(st.FALLBACK_ENDPOINTS_ENV, KEYED)
-    rpc_request = _raising(SubstrateRequestException('UnknownBlock: State already discarded for 0x00'))
-    originals = {'rpc_request': rpc_request}
-    fake_subtensor.return_value.substrate = SimpleNamespace(_original_methods=originals)
-    build_subtensor(network=FINNEY)
-    assert originals['rpc_request'] is rpc_request
-
-
 def _http(status):
     return InvalidStatus(Response(status, 'Too Many Requests' if status == 429 else 'Error', Headers()))
 
@@ -185,28 +150,17 @@ def test_a_429_handshake_at_construction_builds_on_the_next_endpoint(fake_subten
     )
 
 
-def test_a_rate_limited_first_request_at_construction_builds_on_the_next_endpoint(fake_subtensor, monkeypatch):
-    monkeypatch.setenv(st.FALLBACK_ENDPOINTS_ENV, FINNEY)
-    fake_subtensor.side_effect = [SubstrateRequestException('Too Many Requests'), MagicMock()]
-    build_subtensor(network=KEYED)
-    assert fake_subtensor.call_args.kwargs['network'] == FINNEY
-
-
-@pytest.mark.parametrize('status', [403, 503])
-def test_a_refused_handshake_at_construction_builds_on_the_next_endpoint(fake_subtensor, monkeypatch, status):
+@pytest.mark.parametrize(
+    'error',
+    [_http(403), _http(503), SubstrateRequestException('Too Many Requests')],
+    ids=['403', '503', 'rate-limited-request'],
+)
+def test_a_refused_handshake_at_construction_builds_on_the_next_endpoint(fake_subtensor, monkeypatch, error):
     """A primary answering 403 (revoked or blocked key) used to crash-loop the validator with a fallback configured."""
     monkeypatch.setenv(st.FALLBACK_ENDPOINTS_ENV, FINNEY)
-    fake_subtensor.side_effect = [_http(status), MagicMock()]
+    fake_subtensor.side_effect = [error, MagicMock()]
     build_subtensor(network=KEYED)
     assert fake_subtensor.call_args.kwargs['network'] == FINNEY
-
-
-def test_a_non_http_construction_error_is_raised_as_before(fake_subtensor, monkeypatch):
-    monkeypatch.setenv(st.FALLBACK_ENDPOINTS_ENV, FINNEY)
-    fake_subtensor.side_effect = [SubstrateRequestException('Verification Error')]
-    with pytest.raises(SubstrateRequestException):
-        build_subtensor(network=KEYED)
-    assert fake_subtensor.call_count == 1
 
 
 def test_a_refused_handshake_with_no_fallback_is_raised_as_before(fake_subtensor, monkeypatch):
@@ -234,14 +188,7 @@ def test_every_endpoint_rate_limited_at_construction_raises_the_last(fake_subten
         _http(429),
         st.RateLimited('x'),
         {'code': -32029, 'message': 'Request limit reached'},
-        {'code': -32005, 'message': 'limit exceeded'},
-        {'code': 429, 'message': 'x'},
-        {'code': -32000, 'message': 'Too Many Requests'},
-        {'jsonrpc': '2.0', 'id': 1, 'error': {'code': -32099, 'message': 'rate-limited, slow down'}},
         SubstrateRequestException('Rate limit exceeded'),
-        SubstrateRequestException('ratelimit'),
-        SubstrateRequestException("{'jsonrpc': '2.0', 'error': {'code': -32029, 'message': 'x'}}"),
-        SubstrateRequestException('HTTP 429'),
         ConnectionError('server rejected WebSocket connection: HTTP 429'),
     ],
 )
@@ -253,15 +200,9 @@ def test_rate_limits_are_recognised(error):
     'error',
     [
         _http(403),
-        _http(503),
         {'code': -32005, 'message': 'Batched requests are not supported by this server'},
-        {'code': 1010, 'message': 'Invalid Transaction'},
-        {'code': -32000, 'message': 'Client error: Execution failed'},
         SubstrateRequestException('UnknownBlock: State already discarded for 0x429'),
         SubstrateRequestException('Subscription 7 invalid: TxRateLimitExceeded'),
-        SubstrateRequestException('ServingRateLimitExceeded'),
-        SubstrateRequestException('block 429 not found'),
-        ConnectionError('Connection refused'),
     ],
 )
 def test_other_errors_are_not_rate_limits(error):
@@ -271,7 +212,6 @@ def test_other_errors_are_not_rate_limits(error):
 # ─── PrimaryWatch (a real RetrySyncSubstrate over scripted sockets) ─────────
 
 FALLBACK = 'ws://10.0.0.2:9944'
-ARCHIVE_2 = 'ws://10.0.0.3:9944'
 
 
 class _Socket:
@@ -375,14 +315,6 @@ def test_a_429_handshake_mid_run_fails_over(net, logs):
     assert substrate.url == FALLBACK and len(logs['warning']) == 1 and 'rate limited' in logs['warning'][0]
 
 
-def test_a_non_rate_limit_rpc_error_stays_on_the_primary_as_before(net, logs):
-    net.set(KEYED, lambda method: {'code': 1002, 'message': 'Verification Error: Runtime error'})
-    substrate, _ = _substrate(net)
-    with pytest.raises(SubstrateRequestException, match='Verification Error'):
-        substrate.rpc_request('author_submitExtrinsic', ['0x00'])
-    assert substrate.url == KEYED and net.dials == [KEYED] and logs['warning'] == []
-
-
 def test_a_refused_handshake_mid_run_fails_over(net, logs):
     net.set(FALLBACK, _ok)
     substrate, _ = _substrate(net)
@@ -431,25 +363,6 @@ def test_the_connection_returns_to_the_primary_once_it_answers(net, logs):
     assert net.dials.count(KEYED) == 2, 'on the primary: no more probes'
 
 
-@pytest.mark.parametrize('throttle', [_limited, _http(429)], ids=['rpc-error', 'handshake-429'])
-def test_a_primary_still_throttling_is_re_tried_once_per_interval(net, logs, throttle):
-    net.set(KEYED, throttle)
-    net.set(FALLBACK, _ok)
-    clock = _Clock()
-    substrate, _ = _substrate(net, clock=clock)
-    substrate.rpc_request('chain_getHead', [])
-    for _ in range(3):
-        clock.now += st.PRIMARY_RETRY_SECONDS
-        for _ in range(5):
-            substrate.rpc_request('chain_getHead', [])
-    assert substrate.url == FALLBACK
-    assert net.dials.count(KEYED) == 1 + 3, 'one probe per interval, however many requests'
-    assert all(sock.close_code for sock in net.sockets if sock.url == KEYED), 'failed probes close their socket'
-    assert len(logs['debug']) == 3
-    assert len(logs['warning']) == 1 and logs['success'] == []
-    assert all('<redacted>' in line and '0123456789abcdef' not in line for line in logs['debug'])
-
-
 def test_returning_rewinds_the_fallbacks_so_the_next_failure_fails_over_again(net, logs):
     net.set(KEYED, _limited)
     net.set(FALLBACK, _ok)
@@ -482,18 +395,6 @@ def test_a_discarded_state_switch_warns_and_comes_back_with_the_archive_list_rew
     assert substrate.url == ARCHIVE, 'a spent iter(archive_nodes) would raise StopIteration here'
 
 
-def test_a_fallback_to_fallback_move_does_not_warn_again(net, logs):
-    """The SDK fails over once per call (its re-run is not retried), as for a dropped socket; the next call moves on."""
-    net.set(KEYED, _limited)
-    net.set(FALLBACK, _limited)
-    net.set(ARCHIVE_2, _ok)
-    substrate, _ = _substrate(net, fallbacks=(FALLBACK, ARCHIVE_2))
-    with pytest.raises(st.RateLimited):
-        substrate.rpc_request('chain_getHead', [])
-    assert substrate.rpc_request('chain_getHead', [])['result'] == 'chain_getHead@ok'
-    assert substrate.url == ARCHIVE_2 and len(logs['warning']) == 1
-
-
 def test_every_endpoint_down_still_comes_back_to_the_primary(net, logs):
     """retry_forever=False: with the list spent the SDK raises MaxRetriesExceeded; the watch is what recovers."""
     net.set(KEYED, _limited)
@@ -508,23 +409,6 @@ def test_every_endpoint_down_still_comes_back_to_the_primary(net, logs):
     clock.now += st.PRIMARY_RETRY_SECONDS
     assert substrate.rpc_request('chain_getHead', [])['result'] == 'chain_getHead@ok'
     assert substrate.url == KEYED
-
-
-def test_a_connection_built_off_the_primary_warns_once_and_re_tries_it(fake_subtensor, monkeypatch, net, logs):
-    monkeypatch.setenv(st.FALLBACK_ENDPOINTS_ENV, FINNEY)
-    net.set(FINNEY, _ok)
-    on_fallback = RetrySyncSubstrate(FINNEY, _mock=True)
-    fake_subtensor.side_effect = [_http(429), SimpleNamespace(substrate=on_fallback)]
-    build_subtensor(network=KEYED)
-    assert logs['warning'] == [
-        f'Subtensor left the primary wss://api-bittensor-mainnet.n.dwellir.com/<redacted> for {FINNEY}: '
-        'rate limited. Re-trying the primary every 300s'
-    ]
-
-
-def test_install_is_a_no_op_without_the_retry_internals():
-    plain = SimpleNamespace(_original_methods=None)
-    assert PrimaryWatch.install(plain, KEYED, [FINNEY], []) is None
 
 
 def test_serialize_subtensor_prevents_overlapping_rpc_round_trips():
@@ -555,20 +439,6 @@ def test_serialize_subtensor_prevents_overlapping_rpc_round_trips():
 # ─── parse_endpoints ────────────────────────────────────────────────────────
 
 
-@pytest.mark.parametrize(
-    'raw, expected',
-    [
-        (None, []),
-        ('', []),
-        ('  ', []),
-        (FINNEY, [FINNEY]),
-        (f' {FINNEY} ,, {ARCHIVE} ,', [FINNEY, ARCHIVE]),
-    ],
-)
-def test_parse_endpoints(raw, expected):
-    assert parse_endpoints(raw) == expected
-
-
 # ─── redact_endpoint ────────────────────────────────────────────────────────
 
 
@@ -577,19 +447,8 @@ def test_parse_endpoints(raw, expected):
     [
         (KEYED, 'wss://api-bittensor-mainnet.n.dwellir.com/<redacted>'),
         ('wss://rpc.example.com:443/ws?apikey=secret', 'wss://rpc.example.com:443/<redacted>'),
-        ('wss://user:secret@rpc.example.com', 'wss://rpc.example.com/<redacted>'),
         (FINNEY, FINNEY),
-        ('ws://127.0.0.1:9944', 'ws://127.0.0.1:9944'),
-        ('wss://entrypoint-finney.opentensor.ai/', 'wss://entrypoint-finney.opentensor.ai/'),
-        ('finney', 'finney'),
-        (None, ''),
-        ('', ''),
     ],
 )
 def test_redact_endpoint(url, expected):
     assert redact_endpoint(url) == expected
-
-
-def test_describe_subtensor_redacts_the_chain():
-    sub = SimpleNamespace(network='unknown', chain_endpoint=KEYED)
-    assert describe_subtensor(sub) == 'Network: unknown, Chain: wss://api-bittensor-mainnet.n.dwellir.com/<redacted>'

@@ -19,8 +19,8 @@ from construct import ConstructError
 from solders.pubkey import Pubkey
 
 # One source of truth for event discriminators + borsh layouts (all program events) lives in layouts.py,
-# alongside the account layouts. The validator crown ingests only the subset it cares about (event_index.py
-# dispatches by name and ignores the rest); the dashboard indexer decodes the full set from the same tables.
+# alongside the account layouts. Each validator component folds only the events it reads and ignores the
+# rest; the dashboard indexer decodes the full set from the same tables.
 from allways.solana.layouts import EVENT_DISCRIMINATORS, EVENT_LAYOUTS, EVENT_PRIOR_LAYOUTS, EVENT_PUBKEY_FIELDS
 
 _BY_DISC = {disc: name for name, disc in EVENT_DISCRIMINATORS.items()}
@@ -33,6 +33,16 @@ _INVOKE = re.compile(rf'^Program ({_B58}) invoke \[(\d+)\]$')
 _EXIT = re.compile(rf'^Program ({_B58}) (?:success$|failed: )')
 
 logger = logging.getLogger(__name__)
+
+
+# The runtime replaces every log line past its ~10KB cap with this one line; events after it are lost.
+LOG_TRUNCATED = 'Log truncated'
+# The feed's synthetic event for such a tx: ``accounts`` names every account it touched, for the World to re-read.
+TX_LOGS_TRUNCATED = 'TxLogsTruncated'
+
+
+def logs_truncated(logs: Optional[List[str]]) -> bool:
+    return LOG_TRUNCATED in (logs or ())
 
 
 def program_event_payloads(logs: Optional[List[str]], program_id: Any) -> List[bytes]:

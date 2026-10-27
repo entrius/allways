@@ -1,0 +1,303 @@
+"""Per-round scoring log block: how the pool was distributed, who held
+crown, why each non-earner earned nothing, why pool recycled. Pure
+presentation — never mutates state."""
+
+from __future__ import annotations
+
+import time
+from dataclasses import dataclass
+from typing import TYPE_CHECKING, Any, Dict, List, Optional, Sequence, Set, Tuple
+
+import bittensor as bt
+import numpy as np
+
+from allways.chains import canonical_pair, get_chain_def
+from allways.constants import (
+    FEE_POOL_MULTIPLE,
+    RECYCLE_UID,
+    declarable_backings,
+    hub_leg,
+)
+from allways.utils.rate import min_executable_hub_leg
+
+if TYPE_CHECKING:
+    from allways.validator.scoring.fee_pool import FeePoolShare
+    from allways.validator.scoring.rewards import DirectionTrace
+
+
+NON_EARNER_LINE_CAP = 30
+
+
+@dataclass
+class WeightingTrace:
+    """Per-hotkey capacity + eligibility factors for the scoring log.
+
+    ``capacity_factor`` is the time-weighted average of
+    ``min(1, collateral / (1.1 × max_swap))`` over the miner's crown intervals — the
+    per-block series lives in the event watcher, so a post-window collateral
+    top-up cannot retroactively scale it (#409). ``eligible`` is the flat 0/1
+    crown gate read off the on-chain MinerState counters (B3.3)."""
+
+    capacity_factor: float = 1.0
+    eligible: bool = False
+    qvol_share: float = 0.0  # summed across lanes — a diagnostic, not a paid figure
+
+    def record_capacity(self, factor: float) -> None:
+        self.capacity_factor = factor
+
+    def record_qvol(self, share: float) -> None:
+        self.qvol_share += share
+
+    def record_eligibility(self, eligible: bool) -> None:
+        self.eligible = eligible
+
+
+def log_scoring_trace(
+    hotkeys: Sequence[str],
+    ledger: Any,
+    *,
+    window_start: int,
+    window_end: int,
+    direction_traces: Dict[Tuple[str, str, str], DirectionTrace],
+    rewards: np.ndarray,
+    eligibility: Dict[str, bool],
+    distributed: float,
+    recycled: float,
+    weighting_traces: Optional[Dict[str, 'WeightingTrace']] = None,
+    swap_bounds: Optional[Dict[str, Tuple[int, int]]] = None,
+    live_rates: Optional[Dict[Tuple[str, str, str, str], float]] = None,
+    fee_pool: Optional['FeePoolShare'] = None,
+) -> None:
+    recycle_uid = RECYCLE_UID if RECYCLE_UID < len(rewards) else 0
+    hotkey_to_uid = {hk: uid for uid, hk in enumerate(hotkeys)}
+    weighting_traces = weighting_traces or {}
+
+    header = f'scoring: window=[{window_start}, {window_end}], distributed={distributed:.6f}, recycled={recycled:.6f}'
+    if fee_pool is not None:
+        header += f', {fee_pool_fields(fee_pool)}'
+    lines = [header]
+
+    idle = 0
+    for (from_c, to_c, backing), trace in direction_traces.items():
+        if not is_live_lane(trace):
+            idle += 1  # most of the registry, most of the time: counted, not listed
+            continue
+        holders = ', '.join(
+            f'UID{hotkey_to_uid[hk]}: {secs:.0f}s'
+            for hk, secs in sorted(trace.crown_time.items(), key=lambda kv: -kv[1])
+            if hk in hotkey_to_uid
+        )
+        lines.append(
+            f'  [{from_c}→{to_c}|{backing}] pool={trace.paid_pool:g} holders={{{holders}}} '
+            f'unfilled={trace.unfilled_time}s qvol={trace.qualified_volume}'
+        )
+
+    if idle:
+        lines.append(f'  {idle} idle lane(s): no crown holder, no unfilled time, no qualified volume')
+
+    # Log everyone paid OR holding crown — an ineligible crown holder earning 0 must appear.
+    crown_holders = {hk for t in direction_traces.values() for hk, secs in t.crown_time.items() if secs > 0}
+    shown = [u for u in range(len(rewards)) if rewards[u] > 0 or hotkeys[u] in crown_holders]
+
+    for uid in sorted(shown, key=lambda u: -float(rewards[u])):
+        hk = hotkeys[uid]
+        crown_secs = sum(t.crown_time.get(hk, 0.0) for t in direction_traces.values())
+        if uid == recycle_uid and crown_secs == 0:
+            continue
+        crown_reward = float(rewards[uid]) - (recycled if uid == recycle_uid else 0.0)
+        eligible = eligibility.get(hk, False)
+        wt = weighting_traces.get(hk)
+        extras = ''
+        if wt is not None:
+            extras = f' cap={wt.capacity_factor:.2f}'
+            if wt.qvol_share > 0:
+                extras += f' qvol={wt.qvol_share:.2f}'
+        lines.append(
+            f'  uid={uid} hotkey={hk[:8]}.. crown_s={crown_secs:.0f} eligible={eligible}{extras} reward={crown_reward:.3f}'
+        )
+
+    # Collateral as-of window_start mirrors the scoring replay's starting
+    # state, so the non-earner diagnosis can tell "excluded by collateral"
+    # from "genuinely outbid". Absent hotkey == unknown (fail-open), per the
+    # gate in scoring.py.
+    collaterals = dict(ledger.get_miner_collaterals_at(window_start))
+    lines.extend(
+        non_earner_lines(
+            hotkeys,
+            ledger,
+            window_start,
+            window_end,
+            rewards,
+            eligibility,
+            direction_traces,
+            recycle_uid,
+            collaterals,
+            swap_bounds,
+            covered=crown_holders,
+            live_rates=live_rates,
+        )
+    )
+
+    if recycled > 0:
+        parts = [
+            f'{t.unfilled_time}s unfilled in {f}→{to}|{b}'
+            for (f, to, b), t in direction_traces.items()
+            if t.unfilled_time > 0
+        ]
+        cause = '; '.join(parts) or 'no crown winners'
+        lines.append(f'  recycled={recycled:.3f} → UID{recycle_uid} (subnet owner) cause={cause}')
+
+    summary = round_summary(window_start, window_end, direction_traces, rewards, recycle_uid, distributed)
+    bt.logging.info(summary + (f' ({fee_pool_fields(fee_pool)})' if fee_pool is not None else ''))
+    bt.logging.debug('\n'.join(lines))
+
+
+def fee_pool_fields(fee_pool: 'FeePoolShare') -> str:
+    """The round's fee-pool inputs as ``key=value`` pairs; an unread input prints ``n/a``."""
+
+    def tao(value: Optional[float]) -> str:
+        return 'n/a' if value is None else f'{value:.6f}'
+
+    return (
+        f'fees_24h={tao(fee_pool.fees_tao)}TAO, emission_24h={tao(fee_pool.emission_tao)}TAO, '
+        f'multiple={FEE_POOL_MULTIPLE:g}, miner_share={fee_pool.share:.6f}' + ('' if fee_pool.fresh else ' (kept)')
+    )
+
+
+def is_live_lane(trace: 'DirectionTrace') -> bool:
+    """A lane worth a log line: someone held its crown, it sat unfilled, or it cleared qualified volume. The
+    pool alone doesn't count — with no volume anywhere, the fallback gives every registry lane a pool."""
+    return trace.unfilled_time > 0 or trace.qualified_volume > 0 or any(s > 0 for s in trace.crown_time.values())
+
+
+def round_summary(
+    window_start: int,
+    window_end: int,
+    direction_traces: Dict[Tuple[str, str, str], 'DirectionTrace'],
+    rewards: np.ndarray,
+    recycle_uid: int,
+    distributed: float,
+) -> str:
+    """The round in one line: the window, what share went to miners, over how many lanes, and to whom."""
+    span = '–'.join(time.strftime('%H:%M', time.gmtime(t)) for t in (window_start, window_end))
+    paid_lanes = sum(1 for t in direction_traces.values() if t.pool > 0 and any(v > 0 for v in t.crown_time.values()))
+    top = sorted(((float(r), uid) for uid, r in enumerate(rewards) if r > 0 and uid != recycle_uid), reverse=True)[:5]
+    earners = ', '.join(f'uid{uid} {r:.1%}' for r, uid in top)
+    return (
+        f'scoring: round {span} UTC, {distributed:.1%} to miners over {paid_lanes} lane(s), '
+        f'{1 - distributed:.1%} recycled' + (f'; top: {earners}' if earners else '')
+    )
+
+
+def non_earner_lines(
+    hotkeys: Sequence[str],
+    ledger: Any,
+    window_start: int,
+    window_end: int,
+    rewards: np.ndarray,
+    eligibility: Dict[str, bool],
+    direction_traces: Dict[Tuple[str, str, str], DirectionTrace],
+    recycle_uid: int,
+    collaterals: Optional[Dict[str, int]] = None,
+    swap_bounds: Optional[Dict[str, Tuple[int, int]]] = None,
+    covered: Optional[Set[str]] = None,
+    live_rates: Optional[Dict[Tuple[str, str, str, str], float]] = None,
+) -> List[str]:
+    collaterals = collaterals or {}
+    covered = covered or set()
+    ever_active = set(ledger.get_active_miners_at(window_start))
+    for e in ledger.get_active_events_in_range(window_start, window_end):
+        if e['active']:
+            ever_active.add(e['hotkey'])
+
+    # Live on-chain quotes (the round's reconcile read), collapsed across backings:
+    # the diagnosis anchors on the pair's hub leg, so one rate per pair is enough.
+    rates_by_hotkey: Dict[str, Dict[Tuple[str, str], float]] = {}
+    for (hk, from_c, to_c, _backing), r in (live_rates or {}).items():
+        if r > 0:
+            rates_by_hotkey.setdefault(hk, {})[(from_c, to_c)] = r
+
+    out: List[str] = []
+    for uid, hk in enumerate(hotkeys):
+        # crown holders already got a full factor line above
+        if uid == recycle_uid or rewards[uid] > 0 or hk in covered:
+            continue
+        latest_rates = rates_by_hotkey.get(hk, {})
+        if not latest_rates and hk not in ever_active:
+            continue
+        eligible = eligibility.get(hk, False)
+        reason = diagnose_non_earner(
+            hk, latest_rates, eligible, ever_active, direction_traces, collaterals, swap_bounds
+        )
+        out.append(f'  uid={uid} hotkey={hk[:8]}.. crown_s=0 reason="{reason}" eligible={eligible}')
+        if len(out) >= NON_EARNER_LINE_CAP:
+            break
+    return out
+
+
+def diagnose_non_earner(
+    hotkey: str,
+    latest_rates: Dict[Tuple[str, str], float],
+    eligible: bool,
+    ever_active: Set[str],
+    direction_traces: Dict[Tuple, DirectionTrace],
+    collaterals: Optional[Dict[str, int]] = None,
+    swap_bounds: Optional[Dict[str, Tuple[int, int]]] = None,
+) -> str:
+    """Best-effort reason a miner earned no crown. Direction-aware: btc→sol is
+    lower-rate-wins, sol→btc higher-wins, so "outbid" only fires when the
+    miner's own rate is genuinely worse than the winner's. A rate that is at
+    least as good as the winner's but still earned nothing was excluded by the
+    capacity / can_fund collateral gate — report that, not "outbid"."""
+    collaterals = collaterals or {}
+    swap_bounds = swap_bounds or {}
+    if not latest_rates:
+        return 'no_rate_posted'
+    if hotkey not in ever_active:
+        return 'not_active_during_window'
+    if not eligible:
+        return 'ineligible'  # > MAX_FAILED_SWAPS timeouts, or no completed fill in the activity window
+
+    outbid_parts: List[str] = []
+    dead_parts: List[str] = []
+    for (from_c, to_c), own in latest_rates.items():
+        # latest_rates carries no backing, so diagnose against the pair's first declarable
+        # lane; the plain pair key keeps direct callers working.
+        lane = (from_c, to_c, (declarable_backings(from_c, to_c) or [None])[0])
+        trace = direction_traces.get(lane) or direction_traces.get((from_c, to_c))
+        if trace is not None and trace.pool <= 0:
+            # Most of the registry is dead at any time — a live pair's real reason outranks it.
+            dead_parts.append(f'{from_c}→{to_c}')
+            continue
+        if trace is None or trace.best_rate <= 0:
+            continue
+        best = trace.best_rate
+        canon_from, _ = canonical_pair(from_c, to_c)
+        lower_wins = from_c != canon_from
+        competitive = own <= best if lower_wins else own >= best
+        if not competitive:
+            outbid_parts.append(f'{from_c}→{to_c}: own={own:g} vs best={best:g}')
+            continue
+        # A funding diagnosis only makes sense where the SOL collateral events ARE the
+        # direction's purse (sol-hub); a tao-hub direction runs purse-neutral in scoring.
+        hub = hub_leg(from_c, to_c)
+        if hub != 'sol':
+            return f'competitive_but_unfilled ({from_c}→{to_c}: own={own:g} vs best={best:g})'
+        # Rate is at least as good as the winner's, yet earned nothing — a
+        # qualification gate dropped this miner. Collateral is the usual cause.
+        if hotkey not in collaterals:
+            return f'unknown_collateral ({from_c}→{to_c}: own={own:g} beats/ties best={best:g}, no baseline)'
+        min_swap_hub, max_swap_hub = swap_bounds.get(hub, (0, 0))
+        min_leg = min_executable_hub_leg(own, from_c, to_c, min_swap_hub, max_swap_hub)
+        have = collaterals[hotkey]
+        if min_leg > 0 and have < min_leg:
+            scale = 10 ** get_chain_def(hub).decimals
+            return f'insufficient_collateral ({from_c}→{to_c}: have={have / scale:g} need={min_leg / scale:g} {hub})'
+        # Competitive and funded — lost to a tie split, busy, or active-flag timing.
+        return f'competitive_but_unfilled ({from_c}→{to_c}: own={own:g} vs best={best:g})'
+
+    if outbid_parts:
+        return 'outbid (' + '; '.join(outbid_parts) + ')'
+    if dead_parts:
+        return 'dead_pair (' + '; '.join(dead_parts) + ': no qualified fill in the pool window, pool=0)'
+    return 'no_competing_winner'

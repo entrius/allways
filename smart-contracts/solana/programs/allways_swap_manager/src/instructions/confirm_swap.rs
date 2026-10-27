@@ -32,7 +32,7 @@ pub struct ConfirmSwap<'info> {
         bump = miner_state.bump,
         constraint = miner_state.miner == miner.key(),
     )]
-    pub miner_state: Account<'info, MinerState>,
+    pub miner_state: Box<Account<'info, MinerState>>,
 
     /// The miner's own collateral vault — the 1% fee is debited from here.
     #[account(mut, seeds = [COLLATERAL_SEED, miner.key().as_ref()], bump = collateral_vault.bump)]
@@ -119,11 +119,12 @@ pub fn handler(
         let fee = (collateral_amount / FEE_DIVISOR).max(1);
         let min_collateral = ctx.accounts.config.min_collateral;
 
-        // Only a locally-settled backing takes its fee here. For any other, the fee is a ledger entry
-        // on the bond vault (netted into the attestation at earn time, settled in a batch round), so
-        // Solana must move nothing — debiting the SOL vault by a rao figure would charge a TAO-backed
+        // Only a locally-settled backing takes its fee here. For any other, the fee is accrued on the
+        // miner's `accrued_fees` counter (netted into the attestation at earn time, settled in a batch
+        // round against that counter), so Solana must move nothing — debiting the SOL vault by a rao figure would charge a TAO-backed
         // miner real lamports at ~1000x the intended rate. The event below carries the absolute figure
         // the fee relay needs, which is the whole Solana-side obligation.
+        let bit = crate::backing::backing_bit(&collateral_chain)?;
         let actual_fee = if crate::backing::settles_locally(&collateral_chain) {
             let actual_fee = apply_penalty(&mut ctx.accounts.miner_state, min_collateral, fee, now)?;
             // Move it out of the miner's collateral vault into the subnet treasury (both are
@@ -140,9 +141,12 @@ pub fn handler(
             }
             actual_fee
         } else {
+            // The vault settles against this counter, so the obligation is on chain the moment the fee
+            // is earned: no validator has to have seen this event to know what the miner owes.
+            let generation = ctx.accounts.config.vault_generation;
+            ctx.accounts.miner_state.accrue_fee(bit, fee, generation)?;
             fee
         };
-        let bit = crate::backing::backing_bit(&collateral_chain)?;
         ctx.accounts.miner_state.set_swap(bit, false);
         ctx.accounts.miner_state.set_busy(bit, 0);
         ctx.accounts

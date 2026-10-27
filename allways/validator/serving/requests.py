@@ -1,0 +1,987 @@
+"""The request ops of the on-behalf reservation flow: reserve, confirm, rate and status.
+
+Shared by the axon handlers (the CLI) and the localhost seam (a validator's product offering). Each takes
+the serving component as ``ctx``: program reads come from the World (``ctx.accounts()``), sends go through
+``ctx.client`` and wait to land, because the caller needs the verdict. Every op validates the protocol's
+invariants before it signs; the caller is never trusted."""
+
+import time
+from dataclasses import dataclass, field
+from typing import Optional, Tuple
+
+import bittensor as bt
+from bittensor import Keypair
+from solders.pubkey import Pubkey
+
+from allways.assets.asset import ProviderUnreachableError
+from allways.assets.tao import TaoChain, parse_extrinsic_id
+from allways.chains import SUPPORTED_CHAINS, canonical_pair
+from allways.cli.swap_commands.swap_intake import (
+    MinerCandidate,
+    bounds_from_config,
+    candidate_miners,
+    collateral_matches,
+    compute_intake_amounts,
+    free_purse,
+    hub_bounds,
+    leg_value,
+    max_intake_from_amount,
+    min_intake_from_amount,
+    rate_display_from_fixed,
+    select_best_miner,
+    swap_viable,
+    transfers_off_reason,
+    unviable_reason,
+    viable_intakes,
+)
+from allways.constants import FEE_DIVISOR, NUMERAIRE_CHAIN
+from allways.eligibility import direction_eligible, quote_addresses_valid
+from allways.solana.client import contract_reject_reason, swap_key_from_tx_hash
+from allways.solana.layouts import estimated_free_at
+from allways.solana.pdas import BACKING_BITS
+from allways.validator.actuator.swaps import attest_reject_reason, is_tx_fresh
+from allways.validator.serving.market import AlphaPriceMemo, Market, memo_priced
+
+EMPTY_SWAP_KEY = b'\x00' * 32
+_alpha_prices = AlphaPriceMemo()  # /rate prices alpha legs off this memo; reserve and finalize read live
+
+
+def resolve_miner_pubkey(ctx, miner_hotkey: str) -> Optional[Pubkey]:
+    """The Solana miner a hotkey (ss58) is bound to, off the bindings the World verified; None if unbound."""
+    Keypair(ss58_address=miner_hotkey)  # a malformed hotkey is the caller's error (ValueError)
+    return ctx.accounts().miner_for(miner_hotkey)
+
+
+def _best_offer(client, miner_pk, miner_state, from_chain, to_chain, from_amount, bounds, providers=None):
+    """The offer of this miner's that gives the user the most — one market per pair, mixed by rate
+    (D2), NOT a preference for either purse. Reuses the taker's selector, so a routed user and a
+    self-represented one pick the same offer, including its exact-tie preference for "sol".
+    Returns ``((quote, backing), '')`` or ``(None, reason)`` — the reason is the taker-facing one
+    from the same gate set, so a routed rejection reads like a self-represented one."""
+    offers = {}
+    candidates = []
+    now = int(time.time())
+    for q in client.get_quotes_for_direction(miner_pk, from_chain, to_chain) or []:
+        if q is None:
+            continue
+        if not quote_addresses_valid(q, providers or {}):
+            continue  # an address its chain rejects can never be reserved or delivered from
+        backing = str(getattr(q, 'collateral_chain', NUMERAIRE_CHAIN) or NUMERAIRE_CHAIN)
+        if not direction_eligible(miner_state, from_chain, to_chain, now, backing):
+            continue  # struck or mid-settle: candidate_miners never lists it, so a route must not land on it
+        purse = free_purse(client, miner_pk, miner_state, backing)
+        if purse is None:
+            continue  # no locked bond behind it — the contract's entry gate would refuse the bid
+        offers[backing] = q
+        candidates.append(MinerCandidate(miner_pk, rate_display_from_fixed(q.rate), purse, backing))
+    if not candidates:
+        return None, f'miner has no eligible quote for {from_chain}->{to_chain}'
+    hub_min, hub_max = hub_bounds(bounds, from_chain, to_chain)
+    best = select_best_miner(candidates, from_chain, to_chain, from_amount, hub_min, hub_max, bounds, providers)
+    if best is None:
+        why = unviable_reason(candidates, from_chain, to_chain, from_amount, hub_min, hub_max, bounds, providers)
+        return None, why
+    return (offers[best[0].backing], best[0].backing), ''
+
+
+@dataclass
+class RoutedRejection:
+    """A finalize the contract refused, and the user whose request it was."""
+
+    reason: str
+    users: list
+
+
+# Keyed per (miner pubkey, from_chain, to_chain); the next request on that pool clears it. Memory-only:
+# after a restart the offering falls back to its own backstop.
+_routed_rejections: dict = {}
+
+
+@dataclass
+class ReserveResult:
+    ok: bool
+    reason: str = ''
+    pool_closes_at: int = 0
+    sig: str = ''
+    retry_after: int = 0
+
+
+def reserve_on_behalf(
+    ctx,
+    miner_hotkey: str,
+    from_chain: str,
+    to_chain: str,
+    user_pubkey: str,
+    user_from_addr: str,
+    user_to_addr: str,
+    from_amount: int,
+) -> ReserveResult:
+    """Enter the miner's reservation pool on the user's behalf (validator = router).
+
+    Idempotent per miner within a window: a fresh miner OPENS the pool, a repeat call from this
+    validator UPSERTs its request (free). ``to_amount`` is derived from the PINNED pool rate when a
+    pool is open (so joiners stay rate-consistent for D1) else the miner's live quote (which the
+    contract pins at open). Validates eligibility + bounds before paying the fee.
+    """
+    # Chain ids are lowercase everywhere (the program enforces it at intake); reject a
+    # cased/unknown id here too so it can't derive a mismatched quote PDA or pool first.
+    if from_chain not in SUPPORTED_CHAINS or to_chain not in SUPPORTED_CHAINS:
+        return ReserveResult(False, f'unsupported chain pair {from_chain}->{to_chain} (chain ids are lowercase)')
+
+    # Canonical source form at intake: the finalize hash + source-lock PDA are byte-keyed on this
+    # string (V-C2), so a case variant of a live source would mint a second lock over one deposit.
+    providers = ctx.providers
+    src_asset = providers.get(from_chain)
+    if src_asset is not None:
+        user_from_addr = src_asset.chain.normalize_address(user_from_addr)
+
+    try:
+        user_pk = Pubkey.from_string(user_pubkey)
+    except Exception:
+        return ReserveResult(False, 'invalid user Solana pubkey')
+
+    client = ctx.accounts()
+    cfg = client.get_config()
+    if getattr(cfg, 'halted', False):
+        return ReserveResult(False, 'the program is halted: no new reservations')  # it would refuse the bid
+    miner_pk = resolve_miner_pubkey(ctx, miner_hotkey)
+    if miner_pk is None:
+        return ReserveResult(False, 'miner hotkey is not bound to a Solana miner')
+
+    miner_state = client.get_miner_state(miner_pk)
+    if miner_state is None or not miner_state.active:
+        return ReserveResult(False, 'miner is not active')
+
+    now = int(time.time())
+    bounds = bounds_from_config(cfg)
+    quote = None
+    # Contest slots are per (miner, hub) since v3.1 — a joinable pool may exist on any backing.
+    pool = None
+    joining = False
+    backing = NUMERAIRE_CHAIN
+    pools = {}
+    for candidate_backing in BACKING_BITS:
+        p = pools[candidate_backing] = client.get_pool(miner_pk, candidate_backing)
+        if (
+            p is not None
+            and int(getattr(p, 'opened_at', 0) or 0) != 0
+            and now <= int(getattr(p, 'closes_at', 0) or 0)
+            and p.from_chain == from_chain
+            and p.to_chain == to_chain
+        ):
+            pool, joining, backing = p, True, candidate_backing
+            break
+    if joining:
+        # A strike or settle can land after the pool opened; a joiner must not ride on it either.
+        if not direction_eligible(miner_state, from_chain, to_chain, now, backing):
+            return ReserveResult(False, f'miner is no longer eligible on the {backing} hub')
+        rate_fixed = pool.rate  # pinned at open — joiners must quote against it
+        quote = client.get_quote(miner_pk, from_chain, to_chain, backing)
+        if quote is not None and not quote_addresses_valid(quote, providers):
+            return ReserveResult(False, 'the pooled quote has an address its chain rejects')
+    else:
+        offer, why = _best_offer(client, miner_pk, miner_state, from_chain, to_chain, from_amount, bounds, providers)
+        if offer is None:
+            return ReserveResult(False, why)
+        quote, backing = offer
+        rate_fixed = quote.rate
+        # One swap per HUB: only the chosen offer's hub has to take a new entry.
+        free_at = estimated_free_at(
+            miner_state,
+            BACKING_BITS.get(backing, 0),
+            client.get_reservation(miner_pk, backing),
+            pools.get(backing),
+            (from_chain, to_chain),
+            now,
+        )
+        if free_at:
+            return ReserveResult(False, 'miner is busy on that hub; try again shortly', retry_after=free_at)
+
+    try:
+        amts = compute_intake_amounts(
+            from_chain, to_chain, from_amount, rate_display_from_fixed(rate_fixed), backing, providers
+        )
+    except (ValueError, ProviderUnreachableError) as e:
+        return ReserveResult(False, str(e))
+    if amts.to_amount <= 0:
+        return ReserveResult(False, 'non-positive dest amount for that source amount')
+
+    purse = free_purse(client, miner_pk, miner_state, backing)
+    if purse is None:
+        return ReserveResult(False, f'no locked {backing} bond backs that offer')
+    min_swap, max_swap = bounds.get(backing, (0, 0))
+    ok, reason = swap_viable(amts.collateral_amount, purse, min_swap, max_swap, backing)
+    if not ok:
+        return ReserveResult(False, reason)
+
+    # Deliverability gates — BEFORE any funds move: a dest that can't take delivery (malformed
+    # address, or one that provably refuses transfers) must bounce here, not strand a paid swap
+    # later. Format first: it's offline and a malformed address can never be delivered to.
+    provider = providers.get(to_chain)
+    miner_quote = quote or client.get_quote(miner_pk, from_chain, to_chain, backing)
+    missing = next((chain for chain in (from_chain, to_chain) if chain not in providers), None)
+    if missing:
+        return ReserveResult(False, f'this validator cannot verify {missing} right now')
+    off = transfers_off_reason(from_chain, to_chain, providers)
+    if off:
+        return ReserveResult(False, f'{off} — reservation refused, no funds moved')
+    if provider is not None:
+        # Validity only: NOT a deliverability prediction. Reserve-time deliverability isn't a security
+        # boundary (a dest can pass here then revert later via 7702/conditional code); the sound check is
+        # the delivery-time reverted-tx proof (cancel_swap). Fat-finger UX belongs in the client app.
+        if not provider.chain.is_valid_address(user_to_addr):
+            return ReserveResult(False, f'destination is not a valid {to_chain} address')
+        # Reject user_to_addr == the miner's committed delivery address. The miner must deliver FROM
+        # miner_to_addr, so this makes every delivery a from==to self-transfer that the anti-wash
+        # verifier rejects → the leg never confirms → the miner is force-slashed with no cancel escape.
+        miner_to_addr = getattr(miner_quote, 'miner_to_addr', '') if miner_quote else ''
+        if miner_to_addr and provider.chain.normalize_address(user_to_addr) == provider.chain.normalize_address(
+            miner_to_addr
+        ):
+            return ReserveResult(False, 'destination must differ from the miner delivery address')
+    # Same gate, source side (T18): the miner's receive address must accept the user's funds —
+    # a miner quoting a malformed/rejecting/blacklisted address griefs takers into a burned fee.
+    src_provider = providers.get(from_chain)
+    if src_provider is not None:
+        miner_from_addr = getattr(miner_quote, 'miner_from_addr', '') if miner_quote else ''
+        if miner_from_addr and (
+            not src_provider.chain.is_valid_address(miner_from_addr)
+            or not src_provider.can_deliver_to(miner_from_addr, from_amount)
+        ):
+            return ReserveResult(False, 'miner receive address cannot accept the source funds')
+        blocker = miner_from_addr and src_provider.send_blocker(user_from_addr, miner_from_addr, from_amount)
+        if blocker:
+            return ReserveResult(False, blocker)
+
+    # Two-phase: this places a BID only (the pair). The taker + amounts computed above are a
+    # pre-flight viability check; naming them on-chain is the winner's `finalize_reservation` step.
+    try:
+        sig = ctx.client.open_or_request(miner_pk, from_chain, to_chain, backing)
+    except Exception as e:
+        reason = contract_reject_reason(e)
+        if reason is None:
+            raise
+        return ReserveResult(
+            False, reason, retry_after=_free_at_after_reject(ctx.client, miner_pk, backing, (from_chain, to_chain))
+        )
+    # The entry landed: queue the user's details for `finalize_won_seats`. Persisted so a restart inside
+    # the pool/finalize window still honors the routing promise.
+    ctx.store.upsert_routed_request(
+        str(miner_pk), from_chain, to_chain, backing, str(user_pk), user_from_addr, user_to_addr, from_amount, now
+    )
+    _routed_rejections.pop((str(miner_pk), from_chain, to_chain), None)
+    pool = ctx.client.get_pool(miner_pk, backing)  # live: the World can't have seen our own entry yet
+    closes_at = int(getattr(pool, 'closes_at', 0) or 0) if pool else 0
+    return ReserveResult(True, '', closes_at, sig)
+
+
+# Staleness backstop for queued routed requests: pool window + finalize window + generous slack.
+ROUTED_REQUEST_TTL_SECS = 900
+
+
+def draw_pool_winner(requests: list) -> dict:
+    """Select which queued user gets a won seat. FIFO for now — a deliberate stub:
+    selection policy (user stake weighting, priority fees, batching) evolves HERE
+    without touching the sweep or the persistence around it."""
+    return requests[0]
+
+
+def finalize_won_seats(ctx, now: int) -> list:
+    """The routed-reservation sweep: for every miner-direction with queued requests, check the
+    reservation and act once its outcome is known. Won a drawn seat → finalize it on-chain for
+    ``draw_pool_winner``'s pick (amounts recomputed from the PINNED rate, mirroring the CLI's
+    native Phase 3) and drop the queue — non-selected users' clients see another user pinned and
+    re-request. Lost / filled by another router / finalize window lapsed → drop the queue. A
+    transient RPC fault keeps the queue for the next step's retry (inside the finalize window).
+    Returns the miners finalized this pass."""
+    store, client = ctx.store, ctx.accounts()
+    me = str(ctx.client.keypair.pubkey())
+    finalized: list = []
+    declared_seats: list = []  # pinned after the loop: a slow price RPC never delays another seat's finalize
+    for miner, from_chain, to_chain, backing in store.distinct_routed_pools():
+        queue = store.pending_routed_requests(miner, from_chain, to_chain, backing)
+        if not queue:
+            continue
+        entered_at = queue[0]['created_at']
+        try:
+            resv = client.get_reservation(Pubkey.from_string(miner), backing)
+        except Exception as e:
+            bt.logging.warning(f'routed sweep {miner[:8]}: reservation read failed, retrying next step: {e}')
+            continue
+        # The Reservation PDA is reused across rounds: state older than our oldest queued request
+        # is residue from a PREVIOUS round — our pool simply hasn't been drawn yet, so wait (the
+        # TTL backstop clears a queue whose draw never comes). Treating residue as terminal
+        # deleted every queue on the first sweep step and permanently dead-ended routed mode for
+        # any miner-direction carrying an old lapsed seat. A FILLED seat dates from its fill: one filled
+        # before we queued belongs to an earlier round even while that round's finalize_by is still
+        # ahead (a back-to-back swap on one hub consumes its seat inside the finalize window).
+        filled_at = int(getattr(resv, 'created_at', 0) or 0) if resv is not None else 0
+        if resv is None:
+            fresh = False
+        elif filled_at:
+            fresh = filled_at >= entered_at
+        else:
+            fresh = max(int(resv.reserved_until), int(resv.finalize_by)) >= entered_at
+        drawn_unfilled = (
+            fresh
+            and int(resv.reserved_until) == 0
+            and int(getattr(resv, 'created_at', 0) or 0) == 0
+            and int(resv.finalize_by) != 0
+        )
+        won = (
+            drawn_unfilled
+            and now <= int(resv.finalize_by)
+            and str(resv.router) == me
+            and resv.from_chain == from_chain
+            and resv.to_chain == to_chain
+        )
+        if not won:
+            # No seat we can fill: not drawn yet (open pool / residue) → wait; a fresh terminal
+            # outcome (lost to another router, filled, lapsed) → drop.
+            if drawn_unfilled and now <= int(resv.finalize_by):
+                bt.logging.info(f'routed sweep {miner[:8]}: seat won by another router, dropping queue')
+                store.delete_routed_requests(miner, from_chain, to_chain, backing)
+            elif fresh:
+                bt.logging.info(f'routed sweep {miner[:8]}: reservation filled or window lapsed, dropping queue')
+                store.delete_routed_requests(miner, from_chain, to_chain, backing)
+            continue
+        # A source may back only ONE live-unclaimed reservation per miner: two reservations sharing
+        # (from_chain, from_addr) are both matchable by a single `>=`-amount deposit, so an attacker
+        # declaring a victim's from_addr on the miner's OTHER hub could siphon that deposit. Draw only from
+        # queued users whose source doesn't already back a live seat — skip a colliding entry, don't drop
+        # the whole queue (else one crafted front-of-queue request knocks out every honest queued user).
+        providers = ctx.providers
+        src = providers.get(from_chain)
+        try:
+            live_slots, _ = _live_unclaimed_slots(client, Pubkey.from_string(miner), now)
+        except Exception as e:
+            bt.logging.warning(f'routed sweep {miner[:8]}: live-slot read failed, retrying next step: {e}')
+            continue
+
+        def _collides(addr: str) -> bool:
+            want = src.chain.normalize_address(addr) if src else addr
+            return any(
+                s.from_chain == from_chain
+                and (src.chain.normalize_address(s.from_addr) if src else s.from_addr) == want
+                for s, _b in live_slots
+            )
+
+        eligible = [q for q in queue if not _collides(q['user_from_addr'])]
+        if not eligible:
+            bt.logging.warning(
+                f'routed sweep {miner[:8]}: every queued source already backs a live seat — nothing to '
+                f'finalize this pass (TTL prunes stale colliders)'
+            )
+            continue
+        req = draw_pool_winner(eligible)
+        try:
+            # The reservation lives at the queue's backing-seeded address, so the stored chain can
+            # only agree; the fill is sized against THAT leg or the purse gate reads the wrong side.
+            fill = compute_intake_amounts(
+                from_chain, to_chain, req['from_amount'], rate_display_from_fixed(resv.rate), backing, providers
+            )
+            ctx.client.finalize_reservation(
+                Pubkey.from_string(miner),
+                Pubkey.from_string(req['user_pubkey']),
+                # Normalized again at commit: rows queued before the intake normalization shipped
+                # (or by an older validator) must still land canonical, or the lock PDA diverges.
+                src.chain.normalize_address(req['user_from_addr']) if src else req['user_from_addr'],
+                req['user_to_addr'],
+                fill.collateral_amount,
+                fill.from_amount,
+                fill.to_amount,
+                backing,
+                from_chain=from_chain,
+                miner_from_addr=resv.miner_from_addr,
+            )
+        except Exception as e:
+            reason = contract_reject_reason(e) or (str(e) if isinstance(e, ValueError) else None)
+            if reason is None:
+                bt.logging.warning(f'routed sweep {miner[:8]}: finalize transport fault, retrying next step: {e}')
+                continue
+            bt.logging.warning(f'routed sweep {miner[:8]}: finalize rejected ({reason}), dropping that request')
+            # Only this request's fields were committed, so only it is refused; the next pass tries the
+            # next user on the same seat. /status carries the verdict so the offering can refund at once.
+            _routed_rejections[(miner, from_chain, to_chain)] = RoutedRejection(reason, [req['user_pubkey']])
+            store.delete_routed_request(miner, from_chain, to_chain, backing, req['user_pubkey'])
+            continue
+        bt.logging.success(f'routed sweep {miner[:8]}: finalized the seat for {req["user_pubkey"][:8]}')
+        store.delete_routed_requests(miner, from_chain, to_chain, backing)
+        finalized.append(miner)
+        if backing not in (from_chain, to_chain):
+            declared_seats.append((miner, backing, from_chain, to_chain, fill))
+    store.prune_routed_requests(now - ROUTED_REQUEST_TTL_SECS)
+    for seat in declared_seats:
+        pin_collateral_verdict_at_finalize(ctx, *seat)
+    return finalized
+
+
+def pin_collateral_verdict_at_finalize(ctx, miner: str, backing: str, from_chain, to_chain, fill):
+    """Pin a declared seat's verdict at its fill, priced at the fill block; a fault leaves it to the actuator."""
+    try:
+        resv = ctx.client.get_reservation(Pubkey.from_string(miner), backing)  # live: just finalized
+        if resv is None or int(resv.created_at) <= 0 or int(resv.collateral_amount) != fill.collateral_amount:
+            return
+        created_at = int(resv.created_at)
+        if ctx.store.collateral_verdict(miner, backing, created_at, fill.collateral_amount) is not None:
+            return
+        legs = (from_chain, fill.from_amount, to_chain, fill.to_amount)
+        value = leg_value(backing, *legs, ctx.providers, created_at=created_at)
+        ok = collateral_matches(fill.collateral_amount, value)
+        ctx.store.record_collateral_verdict(miner, backing, created_at, fill.collateral_amount, ok)
+    except Exception as e:
+        bt.logging.warning(f'routed sweep {miner[:8]}: collateral verdict left to the actuator: {e}')
+
+
+@dataclass
+class ConfirmResult:
+    ok: bool
+    reason: str = ''
+    swap_key: str = ''
+    sig: str = ''
+    from_tx_hash: str = ''  # the hash claimed — an extrinsic id resolves to it
+
+
+# Runway submit_swap_claim needs to land after a deposit verifies. Only the claim tx remains at this
+# point — the send and the relay are already done — so this is deliberately much shorter than the
+# CLI's pre-send margin. Once the Swap exists the crank owns every later extension.
+CLAIM_RELAY_MARGIN_SECS = 90
+
+
+def _live_unclaimed_slots(client, miner_pk, now):
+    """Every live-unclaimed per-hub reservation slot as ``[(resv, backing), ...]`` in hub order, plus a
+    reason that explains an EMPTY list (``''`` when there were candidates). v3.1 seeds one reservation
+    per (miner, backing) and a miner may hold several live at once (simultaneous swaps), so the
+    deposit's hub is not knowable up front: the caller verifies the deposit against each candidate and
+    claims the one it matches. Returning only the first live slot would reject a TAO deposit whenever a
+    SOL slot is also live-unclaimed (V-1). Live == reserved_until >= now, no swap yet claimed."""
+    slots = []
+    saw_any = False
+    saw_live_claimed = False
+    for backing in BACKING_BITS:
+        resv = client.get_reservation(miner_pk, backing)
+        if resv is None:
+            continue
+        saw_any = True
+        if int(resv.reserved_until) == 0 or int(resv.reserved_until) < now:
+            continue
+        if bytes(resv.claimed_swap_key) != EMPTY_SWAP_KEY:
+            saw_live_claimed = True
+            continue
+        slots.append((resv, backing))
+    if slots:
+        return slots, ''
+    if saw_live_claimed:
+        return slots, 'Reservation already has a claimed swap'
+    if saw_any:
+        return slots, 'Reservation is not active'
+    return slots, 'No reservation for this miner'
+
+
+def _freshest_reservation(client, miner_pk, from_chain: str = '', to_chain: str = ''):
+    """The miner's most-alive reservation across per-hub slots (v3.1) — ranked by max(reserved_until,
+    finalize_by) — so a tao-hub seat is seen by status, not just the SOL slot. With a pair, only
+    the slot carrying that pair counts: a consumer tracking its own seat must not be answered with
+    the miner's OTHER hub (a fresher stranger there read as "our seat was lost", and a same-pubkey
+    stranger there was adopted as ours)."""
+    best, best_at = None, -1
+    for backing in BACKING_BITS:
+        resv = client.get_reservation(miner_pk, backing)
+        if resv is None:
+            continue
+        if from_chain and (resv.from_chain != from_chain or resv.to_chain != to_chain):
+            continue
+        at = max(int(getattr(resv, 'reserved_until', 0) or 0), int(getattr(resv, 'finalize_by', 0) or 0))
+        if at > best_at:
+            best, best_at = resv, at
+    return best
+
+
+def _extend_for_claim(client, miner_pk, reservation, backing) -> None:
+    """Slide `reserved_until` forward so the pending claim can land, when a verified deposit arrives
+    with little runway left.
+
+    Evidence-gated on purpose: the caller has already matched this deposit against the pinned
+    reservation, so we only ever extend for a taker who demonstrably sent funds — never on request.
+    That is the same justification the crank extends under, one step earlier in the lifecycle: the
+    crank can only help once a Swap exists, and here there is no Swap yet precisely because the claim
+    has not landed.
+
+    Best-effort. A failed extension must not sink the claim — the reservation may still have just
+    enough runway, and a claim that lands is worth more than a clean error path."""
+    # Re-read the clock rather than take the caller's: verify_transaction is a source-chain RPC that
+    # can burn seconds, and a stale `now` both overstates the runway and undershoots the target.
+    now = int(time.time())
+    reserved_until = int(getattr(reservation, 'reserved_until', 0) or 0)
+    ceiling = int(getattr(reservation, 'max_extend_at', 0) or 0)
+    if reserved_until - now >= CLAIM_RELAY_MARGIN_SECS:
+        return  # plenty of runway
+    target = min(now + CLAIM_RELAY_MARGIN_SECS, ceiling)
+    if target <= reserved_until:
+        return  # already at the contract ceiling — nothing left to buy
+    try:
+        client.extend_reservation(
+            miner_pk,
+            target,
+            backing,
+            from_chain=reservation.from_chain,
+            from_addr=reservation.from_addr,
+            miner_from_addr=reservation.miner_from_addr,
+        )
+        bt.logging.info(f'claim runway: extended reserved_until {reserved_until} -> {target} (+{target - now}s)')
+    except Exception as e:  # noqa: BLE001 - never block the claim on a failed extension
+        bt.logging.warning(f'claim runway: extend_reservation failed ({e}); attempting the claim anyway')
+
+
+def _deposit_ref(provider, from_tx_hash: str, from_tx_block: int) -> Optional[Tuple[str, int]]:
+    """(hash, block hint) to verify against ``provider``: a hash as given; a Subtensor extrinsic id resolved
+    through the shared `locate_transfer`. None when the id names no creditable transfer on this chain."""
+    extrinsic_id = parse_extrinsic_id(from_tx_hash)
+    if extrinsic_id is None:
+        return from_tx_hash, from_tx_block
+    if not isinstance(provider.chain, TaoChain):
+        return None
+    try:
+        tx_hash, block = provider.locate_transfer(*extrinsic_id)
+    except ValueError as e:
+        bt.logging.debug(f'extrinsic id {from_tx_hash} names no creditable transfer: {e}')
+        return None
+    return tx_hash, block
+
+
+def confirm_deposit(ctx, miner_hotkey: str, from_tx_hash: str, from_tx_block: int = 0) -> ConfirmResult:
+    """Relay a user's source deposit into a claim: verify the tx against the pinned reservation, then
+    submit_swap_claim (creating the Swap in PendingAttestation). Accepts a content-valid deposit even before
+    it fully confirms — the crank defers voting until confirmations accrue. Fast-fails (no claim, so the short
+    TTL frees the miner) only when the tx is absent or its content doesn't match the reservation."""
+    # Reject empty/whitespace-only hashes and strip surrounding whitespace before use (#167).
+    from_tx_hash = from_tx_hash.strip() if from_tx_hash else from_tx_hash
+    if not from_tx_hash:
+        return ConfirmResult(False, 'Missing source tx hash')
+    client = ctx.accounts()
+    miner_pk = resolve_miner_pubkey(ctx, miner_hotkey)
+    if miner_pk is None:
+        return ConfirmResult(False, 'Hotkey not bound to a Solana miner')
+
+    now = int(time.time())
+    slots, reason = _live_unclaimed_slots(client, miner_pk, now)
+    if not slots:
+        return ConfirmResult(False, reason)
+
+    # A miner may hold several live-unclaimed reservations at once (v3.1 simultaneous swaps), so the
+    # deposit's hub is not knowable up front. Verify the deposit against each slot and claim the one it
+    # matches — picking the first live slot blindly would reject a TAO deposit whenever a SOL slot is
+    # also live (V-1). `verify_transaction` is the authoritative matcher (pinned recipient/amount/sender).
+    matches = []
+    unreachable = stale = False
+    for resv, resv_backing in slots:
+        provider = ctx.providers.get(resv.from_chain)
+        if provider is None:
+            continue
+        try:
+            ref = _deposit_ref(provider, from_tx_hash, from_tx_block)
+            if ref is None:
+                continue
+            # One spelling per hash: the swap key hashes the raw string, and RPCs accept several spellings.
+            tx_hash, block_hint = provider.chain.canonical_tx_hash(ref[0]), ref[1]
+            if tx_hash is None:
+                continue
+            candidate = provider.verify_transaction(
+                tx_hash=tx_hash,
+                expected_recipient=resv.miner_from_addr,
+                expected_amount=int(resv.from_amount),
+                block_hint=block_hint,
+                expected_sender=resv.from_addr,
+            )
+        except ProviderUnreachableError:
+            unreachable = True  # this hub can't be judged now; another might still match
+            continue
+        if candidate is None:
+            continue  # absent or content-mismatch for this hub — try the next live slot
+        # Deferred intake: accept a content-valid deposit pre-confirmation — the crank defers voting
+        # until it confirms. A 0-conf mempool tx has no block_time, so its freshness is deferred too;
+        # only a mined tx is freshness-checked here. A matched-but-stale deposit is terminal for its
+        # hub (its params are pinned), so it never claims — but a fresh match on another hub still can.
+        if candidate.block_time is not None:
+            grace = getattr(provider.chain_def, 'replay_grace_secs', 0)
+            if not is_tx_fresh(candidate, int(resv.created_at), grace):
+                stale = True
+                continue
+        # Deterministic pick when one deposit matches several slots (normalize-equal senders): a
+        # canonical-form from_addr wins — honest lanes commit canonical, while a case variant is the
+        # source-lock dodge (V-C2) — then the oldest reservation (the one the variant was copied from).
+        canonical = resv.from_addr == provider.chain.normalize_address(resv.from_addr)
+        matches.append(((0 if canonical else 1, int(resv.created_at)), resv, resv_backing, candidate, tx_hash))
+
+    if not matches:
+        if stale:
+            return ConfirmResult(False, 'Source tx fails freshness — stale/replayed deposit')
+        if unreachable:
+            return ConfirmResult(False, 'Source-chain provider unreachable; resend shortly')
+        # No live slot matched; fast-fail (no claim) so the short TTL frees the miner.
+        return ConfirmResult(False, 'Source tx not visible or does not match the reservation')
+    _, reservation, backing, tx_info, from_tx_hash = min(matches, key=lambda m: m[0])
+    # A payout from a posted miner wallet can't be named as a taker's source at all (finalize_reservation
+    # refuses it); what's left is a delivery this validator already verified.
+    if ctx.store.is_recorded_payout(from_tx_hash):
+        return ConfirmResult(False, "Source tx is another swap's payout, not a deposit")
+    swap_key = swap_key_from_tx_hash(from_tx_hash)
+    held = ctx.store.deposit_claim(from_tx_hash)
+    if (held is not None and (held[0] != swap_key.hex() or held[1])) or client.get_swap(swap_key) is not None:
+        return ConfirmResult(False, 'Source deposit already claimed')
+
+    # The taker's funds are already on the source chain and this deposit just verified against the
+    # pinned reservation — but submit_swap_claim needs reserved_until >= now, and once it lapses there
+    # is no claim, no Swap, no timeout and no refund: the deposit is simply lost. Buy runway first.
+    _extend_for_claim(ctx.client, miner_pk, reservation, backing)
+
+    try:
+        sig = ctx.client.submit_swap_claim(miner_pk, swap_key, from_tx_hash, tx_info.block_number or 0, backing)
+    except Exception:
+        # The taker relays to every validator at once, so a peer's claim can land between the check above
+        # and this send (after the World above was taken, so read the chain). That is the same answer as
+        # the check, not a relay failure.
+        if ctx.client.get_swap(swap_key) is not None:
+            return ConfirmResult(False, 'Source deposit already claimed')
+        raise
+    ctx.store.record_deposit_claim(from_tx_hash, swap_key.hex(), int(time.time()))
+    return ConfirmResult(True, '', swap_key.hex(), sig, from_tx_hash)
+
+
+def scan_deposit(ctx, miner_hotkey: str) -> Optional[str]:
+    """Tx hash of a user deposit matching the miner's live unclaimed reservation. Every launch
+    chain scans: BTC by esplora address index, SOL by signature index, TAO by an incremental
+    head-follow block scan (Substrate has no address index). A hash-finder only —
+    ``confirm_deposit`` remains the sole verifier, so a loose match can never mis-claim."""
+    miner_pk = resolve_miner_pubkey(ctx, miner_hotkey)
+    if miner_pk is None:
+        return None
+    slots, _ = _live_unclaimed_slots(ctx.accounts(), miner_pk, time.time())
+    # Scan each live-unclaimed hub (v3.1 may hold several at once) and return the first hash found;
+    # confirm_deposit stays the sole verifier, so a loose per-hub scan can never mis-claim.
+    for reservation, _backing in slots:
+        provider = ctx.providers.get(reservation.from_chain)
+        if provider is None:
+            continue
+        found = provider.find_recent_outgoing(
+            reservation.from_addr, reservation.miner_from_addr, int(reservation.from_amount)
+        )
+        if found:
+            return found
+    return None
+
+
+@dataclass
+class BestQuote:
+    miner_hotkey: str
+    miner: str  # Solana pubkey (base58)
+    rate_display: str
+    collateral_amount: int
+    from_amount: int
+    to_amount: int
+    # The backing the winning quote declared — it is the offer's failure guarantee, so a consumer
+    # that shows a rate has to be able to show which promise comes with it.
+    backing: str = NUMERAIRE_CHAIN
+    estimated_free_at: int = 0
+
+
+# Depth rungs served alongside /rate — enough to show the market, few enough to stay a glance.
+RATE_LEVELS_LIMIT = 5
+
+
+@dataclass
+class RateQuote:
+    quote: Optional[BestQuote]  # best executable quote for the asked size, None if nothing fits
+    reason: str  # why quote is None ('' on a hit)
+    levels: list  # top rate rungs [{rate_display, max_from_amount}], best first
+    max_from_amount: int  # largest executable source amount across ALL quotes, not just shown rungs
+    min_from_amount: int  # smallest source amount a fillable quote admits; 0 = unset, unpriceable or no depth
+    candidates: list  # top bound intakes for the asked size, selector order — a tolerance band in one scan
+
+
+def rate_quote(ctx, from_chain: str, to_chain: str, from_amount: int) -> RateQuote:
+    """Everything ``/rate`` serves, from ONE candidate scan: the best executable quote for
+    ``from_amount`` (source smallest-units; mirrors ``select_best_miner`` so the displayed rate ==
+    the reservable rate), the runners-up for that size, and the depth behind them. Rung order
+    matches the selector's ranking (most dest per source); same-rate quotes collapse to the deepest.
+    Capacities are per-rung maxima, never cumulative — a swap fills against a single miner.
+    Math on the World plus memoed alpha prices: no program read."""
+    accounts = ctx.accounts()
+    market = Market(ctx.miner_states(), accounts)
+    bounds = bounds_from_config(accounts.get_config())
+    min_swap, max_swap = hub_bounds(bounds, from_chain, to_chain)
+    providers = memo_priced(ctx.providers, _alpha_prices)
+    cands = candidate_miners(market, from_chain, to_chain, providers)
+    ranked = _ranked_intakes(cands, from_chain, to_chain, from_amount, min_swap, max_swap, bounds, providers)
+    # Free miners first, then the soonest free: a busy best rate still shows, behind the ones taking entries now.
+    now = int(time.time())
+    bound = [
+        (*intake, _candidate_free_at(market, intake[0], (from_chain, to_chain), now))
+        for intake in _bound_intakes(market.attribution, ranked)
+    ]
+    bound.sort(key=lambda intake: (intake[3] > 0, intake[3]))
+    bound = bound[:RATE_LEVELS_LIMIT]
+    bq = _best_quote(*bound[0]) if bound else None
+    reason = (
+        '' if bq else unviable_reason(cands, from_chain, to_chain, from_amount, min_swap, max_swap, bounds, providers)
+    )
+    depth: dict = {}
+    floors: list = []
+    for cand in cands:
+        cap = max_intake_from_amount(cand, from_chain, to_chain, min_swap, max_swap, bounds, providers)
+        if cap > 0:
+            depth[cand.rate_display] = max(depth.get(cand.rate_display, 0), cap)
+            floors.append(min_intake_from_amount(cand, from_chain, to_chain, min_swap, max_swap, bounds, providers))
+    # Rates are canonical 'dest per 1 canonical-source': when the taker sends the canonical
+    # source (the hub leg), higher is better; sending the spoke side, lower is better.
+    from_is_canon = from_chain == canonical_pair(from_chain, to_chain)[0]
+    best_first = sorted(depth.items(), key=lambda kv: float(kv[0]), reverse=from_is_canon)
+    levels = [{'rate_display': r, 'max_from_amount': m} for r, m in best_first[:RATE_LEVELS_LIMIT]]
+    candidates = [
+        {
+            'miner_hotkey': hotkey,
+            'rate_display': cand.rate_display,
+            'to_amount': amts.to_amount,
+            'max_from_amount': max_intake_from_amount(
+                cand, from_chain, to_chain, min_swap, max_swap, bounds, providers
+            ),
+            'estimated_free_at': free_at,
+        }
+        for cand, amts, hotkey, free_at in bound
+    ]
+    return RateQuote(bq, reason, levels, max(depth.values(), default=0), min(floors, default=0), candidates)
+
+
+def _ranked_intakes(
+    cands, from_chain: str, to_chain: str, from_amount: int, min_swap: int, max_swap: int, bounds, providers=None
+):
+    """``viable_intakes`` in selection order (most dest, tie → "sol", then input order).
+    ``providers`` prices a declared alpha leg; an exact leg reads nothing."""
+    viable = viable_intakes(cands, from_chain, to_chain, from_amount, min_swap, max_swap, bounds, providers)
+    return sorted(viable, key=lambda p: (p[1].to_amount, p[0].backing == NUMERAIRE_CHAIN), reverse=True)
+
+
+def _bound_intakes(attribution: dict, ranked):
+    """``ranked`` with each miner's hotkey; an unbound miner cannot be reserved through the seam, so it is skipped."""
+    for cand, amts in ranked:
+        hotkey = attribution.get(str(cand.miner))
+        if hotkey:
+            yield cand, amts, hotkey
+
+
+def _candidate_free_at(market: Market, cand: MinerCandidate, pair: tuple, now: int) -> int:
+    return estimated_free_at(
+        market.get_miner_state(cand.miner),
+        BACKING_BITS.get(cand.backing, 0),
+        market.get_reservation(cand.miner, cand.backing),
+        market.get_pool(cand.miner, cand.backing),
+        pair,
+        now,
+    )
+
+
+def _free_at_after_reject(client, miner_pk, backing: str, pair: tuple) -> int:
+    """A contract reject may be a busy race: re-read once, live, so the caller can wait. A failed read is just a reject."""
+    try:
+        miner_state = client.get_miner_state(miner_pk)
+        reservation = client.get_reservation(miner_pk, backing)
+        pool = client.get_pool(miner_pk, backing)
+    except Exception:
+        return 0
+    if miner_state is None:
+        return 0
+    return estimated_free_at(miner_state, BACKING_BITS.get(backing, 0), reservation, pool, pair, int(time.time()))
+
+
+def _best_quote(cand: MinerCandidate, amts, hotkey: str, free_at: int = 0) -> BestQuote:
+    return BestQuote(
+        hotkey,
+        str(cand.miner),
+        cand.rate_display,
+        amts.collateral_amount,
+        amts.from_amount,
+        amts.to_amount,
+        cand.backing,
+        free_at,
+    )
+
+
+@dataclass
+class SwapStatus:
+    """Seam ``/status`` payload. ``stage`` is the offering-facing lifecycle enum:
+
+    none → reserved → claimed → active → fulfilled → { completed | timed_out | cancelled }
+    (a claim reaped stale before attestation ends at the terminal ``expired`` instead)
+
+    ``completed``, ``timed_out``, ``cancelled``, and ``expired`` are terminal; ``timed_out`` means
+    the miner was slashed, ``cancelled`` the no-fault cancel verdict (dest provably unpayable — no
+    slash, the miner keeps the source), ``expired`` means the claim went stale pre-attestation (no
+    funds moved, the Swap PDA was closed by ``close_stale_claim``). They are sourced from the live PDA status or, after the terminal PDA closes on-chain, from
+    the validator's swap outcomes, kept from program events. A closed PDA whose outcome isn't recorded
+    yet reports ``fulfilled`` — transient, normally resolving within a tick once the
+    terminal event is ingested. Consumers keep polling on ``fulfilled`` and should apply their
+    own reconcile deadline: in the wiped-state.db + RPC-pruned edge the outcome never lands, and
+    the validator won't guess terminal truth it hasn't ingested (see ``_swap_stage``).
+
+    Resolution: the consumer passes the ``swap_key`` it persisted at claim time to resolve the
+    swap directly — required for post-attestation stages, because ``vote_initiate`` consumes
+    the reservation at attestation quorum, so the reservation stops referencing the swap the
+    moment it goes ``active``. Without ``swap_key``, resolution walks the miner's reservation
+    and only the pre-attestation stages (``none``/``reserved``/``claimed``) are reliably visible.
+
+    ``rejected`` replaces ``none`` while the pool's last draw was refused by the contract: ``detail``
+    carries the ``reason`` and the ``users`` who lost the round, so the offering fails them at once."""
+
+    # none | rejected | reserved | claimed | active | fulfilled | completed | timed_out | cancelled | expired
+    stage: str
+    reserved_until: int = 0
+    user: str = ''
+    swap_key: str = ''
+    detail: dict = field(default_factory=dict)
+
+
+def _attach_leg_confs(ctx, swap_key: bytes, detail: dict) -> None:
+    """The swap planner's last-read confirmation counts for this swap, each leg stamped so a consumer can
+    age it. Read only: a /status poll must never cost a spoke-chain read."""
+    report = ctx.report().get(swap_key.hex())
+    if report is None or not report.legs:
+        return
+    detail['leg_confs'] = {
+        ('source' if chain == report.from_chain else 'dest'): {'have': have, 'need': need, 'at': int(report.checked_at)}
+        for chain, (have, need) in report.legs.items()
+    }
+
+
+def swap_status(ctx, miner_hotkey: str, swap_key_hex: str = '', from_chain: str = '', to_chain: str = '') -> SwapStatus:
+    """Current lifecycle stage for a reservation/swap — the offering polls this.
+
+    With ``swap_key_hex`` the swap resolves by key (survives the reservation being consumed at
+    attestation quorum); without it, via the miner's live reservation (pre-attestation stages) —
+    the slot carrying ``from_chain``/``to_chain`` when given, else the freshest slot."""
+    if swap_key_hex:
+        return _swap_status_by_key(ctx, swap_key_hex)
+    client = ctx.accounts()
+    miner_pk = resolve_miner_pubkey(ctx, miner_hotkey)
+    if miner_pk is None:
+        return SwapStatus('none')
+    reservation = _freshest_reservation(client, miner_pk, from_chain, to_chain)
+    if reservation is None or reservation.reserved_until == 0:
+        return _idle_status(miner_pk, from_chain, to_chain)
+    swap_key = bytes(reservation.claimed_swap_key)
+    # An expired UNCLAIMED reservation is dead — the pool can be re-entered over it. Reporting it as
+    # 'reserved' with its stale user makes the offering's win-detection read "another validator's user
+    # holds this miner" and mark won draws lost. A claimed one still speaks through its swap's stage.
+    if swap_key == EMPTY_SWAP_KEY and int(reservation.reserved_until) < time.time():
+        return _idle_status(miner_pk, from_chain, to_chain)
+    # detail carries what the offering needs to instruct the user (where + how much to send).
+    detail = {
+        'from_chain': reservation.from_chain,
+        'to_chain': reservation.to_chain,
+        'from_amount': int(reservation.from_amount),
+        'to_amount': int(reservation.to_amount),
+        'miner_from_addr': reservation.miner_from_addr,
+        # One taker pubkey can front many payers; the source address tells their seats apart.
+        'user_from_addr': reservation.from_addr,
+    }
+    if swap_key == EMPTY_SWAP_KEY:
+        _attach_collateral_verdict(ctx, miner_pk, reservation, detail)
+        return SwapStatus('reserved', reservation.reserved_until, str(reservation.user), detail=detail)
+    swap = client.get_swap(swap_key)
+    if swap is not None:
+        detail['from_tx_hash'] = swap.from_tx_hash
+        detail['to_tx_hash'] = swap.to_tx_hash
+    _attach_leg_confs(ctx, swap_key, detail)
+    stage = _swap_stage(ctx, swap, swap_key)
+    _add_reject_reason(ctx, swap, swap_key, stage, detail)
+    return SwapStatus(stage, reservation.reserved_until, str(reservation.user), swap_key.hex(), detail)
+
+
+def _attach_collateral_verdict(ctx, miner_pk, reservation, detail: dict) -> None:
+    """``collateral_ok`` for a seat whose backing is declared (TAO behind an sn<N> leg): the stored verdict
+    pinned at the fill, ``None`` while pending. A read only — the seam never prices a leg. Absent for an exact leg."""
+    backing = str(reservation.collateral_chain)
+    if backing in (reservation.from_chain, reservation.to_chain):
+        return
+    detail['collateral_ok'] = ctx.store.collateral_verdict(
+        str(miner_pk), backing, int(reservation.created_at), int(reservation.collateral_amount)
+    )
+
+
+def _idle_status(miner_pk, from_chain: str, to_chain: str) -> SwapStatus:
+    """No live reservation: ``rejected`` if the pool's last draw was refused, else ``none``."""
+    rejection = _routed_rejections.get((str(miner_pk), from_chain, to_chain))
+    if rejection is None:
+        return SwapStatus('none')
+    return SwapStatus('rejected', detail={'reason': rejection.reason, 'users': rejection.users})
+
+
+def _swap_status_by_key(ctx, swap_key_hex: str) -> SwapStatus:
+    """Resolve directly by swap_key: a live PDA's status maps as usual; a closed PDA goes through
+    the ``swap_outcomes`` disambiguation. ``reserved_until`` is 0 here — the reservation is
+    already consumed (or irrelevant) once the consumer polls by key."""
+    swap_key = bytes.fromhex(swap_key_hex)  # bad hex raises ValueError → seam answers 400
+    if len(swap_key) != 32:
+        raise ValueError('swap_key must be 32 bytes hex')
+    swap = ctx.accounts().get_swap(swap_key)
+    stage = _swap_stage(ctx, swap, swap_key)
+    if swap is None:
+        # Closed PDA: the delivery hash survives in the fulfillment index — receipts read it
+        # from here, since the consumer may only poll again after the account is gone.
+        detail = {}
+        to_tx_hash = ctx.store.get_swap_fulfillment(swap_key_hex)
+        if to_tx_hash:
+            detail['to_tx_hash'] = to_tx_hash
+        refund = ctx.store.get_swap_refund(swap_key_hex)
+        if refund:
+            detail.update(refund)
+        return SwapStatus(stage, swap_key=swap_key_hex, detail=detail)
+    # Same detail shape as the reservation path — the Swap PDA carries the full legs.
+    detail = {
+        'from_chain': swap.from_chain,
+        'to_chain': swap.to_chain,
+        'from_amount': int(swap.from_amount),
+        'to_amount': int(swap.to_amount),
+        'miner_from_addr': swap.miner_from_addr,
+        'user_from_addr': swap.user_from_addr,
+        'from_tx_hash': swap.from_tx_hash,
+        'to_tx_hash': swap.to_tx_hash,
+    }
+    _add_reject_reason(ctx, swap, swap_key, stage, detail)
+    _attach_leg_confs(ctx, swap_key, detail)
+    return SwapStatus(stage, 0, str(swap.user), swap_key_hex, detail)
+
+
+def _add_reject_reason(ctx, swap, swap_key: bytes, stage: str, detail: dict) -> None:
+    """While a live claim awaits attestation, why it will never attest: the offline gates recomputed here,
+    else the swap planner's refusal (the declared-collateral verdict needs the fill block it prices)."""
+    if swap is None or stage != 'claimed':
+        return
+    report = ctx.report().get(swap_key.hex())
+    planned = report.reason if report is not None and report.decision == 'reject' and report.reason else None
+    reason = attest_reject_reason(ctx.providers.get, swap, FEE_DIVISOR) or planned
+    if reason is not None:
+        detail['reject_reason'] = reason
+
+
+# On-chain Swap.status is a borsh enum object; map by its variant name (not int()).
+_STAGE_BY_NAME = {
+    'PendingAttestation': 'claimed',
+    'Active': 'active',
+    'Fulfilled': 'fulfilled',
+    'Completed': 'completed',
+    'TimedOut': 'timed_out',
+}
+
+
+def _swap_stage(ctx, swap, swap_key: bytes) -> str:
+    """Stage for a claimed swap. A closed PDA is terminal, but Completed and TimedOut swaps both
+    close on-chain, so the on-chain account alone can't tell a completion from a slash — the
+    validator's swap outcomes (kept from SwapCompleted/SwapTimedOut/SwapCancelled/StaleClaimClosed)
+    disambiguate. On an outcome miss, fall back NON-terminal to ``fulfilled``: the miss is
+    normally ingest lag (another validator's quorum closed the PDA since our last
+    ingest) and self-corrects at the next ingest, whereas a terminal guess would stop the
+    consumer polling on a wrong answer — for a slash, exactly the bug this index exists to fix."""
+    if swap is None:
+        outcome = ctx.store.get_swap_outcome(swap_key.hex())
+        return outcome or 'fulfilled'
+    return _STAGE_BY_NAME.get(type(getattr(swap, 'status', None)).__name__, 'claimed')
