@@ -17,23 +17,27 @@ preserved on the [`allways-old`](https://github.com/entrius/allways/tree/allways
 
 `allways/constants.py` pins the target:
 
-| Constant          | Meaning                                                                    |
-| ----------------- | -------------------------------------------------------------------------- |
+| Constant          | Meaning                                                                     |
+| ----------------- | --------------------------------------------------------------------------- |
+| `NETUID_FINNEY`   | The subnet the treasury constants are pinned for (7)                        |
 | `TREASURY_UID`    | The UID that receives the full weight. `None` until the miner is registered |
 | `TREASURY_HOTKEY` | The hotkey expected at that UID. A guard, not a lookup                      |
-| `BURN_UID`        | The fallback target: the subnet owner hotkey's UID, whose weight is burned  |
 
 On every pass the validator syncs the metagraph and sets weights `[1.0]` on:
 
-- `TREASURY_UID`, when it is set, in range, and the hotkey registered there is `TREASURY_HOTKEY`
-- `BURN_UID` otherwise, with a `TREASURY FALLBACK` warning that says why (unset, out of range, or
-  hotkey mismatch)
+- `TREASURY_UID`, when the netuid is 7 and the UID is set, in range, and held by `TREASURY_HOTKEY`
+- otherwise the UID where the subnet owner hotkey is registered, read from the chain on each pass.
+  Weight placed there is burned. A `TREASURY FALLBACK` warning says why (another netuid, unset, out
+  of range, or hotkey mismatch)
+- nothing at all, with a `NO WEIGHTS SET` error, if the treasury cannot be used and the subnet owner
+  hotkey is not registered on the subnet. There is no hard-coded fallback UID
 
 The hotkey check stops emissions going to a stranger if the UID slot is ever recycled.
 
 Weights are set once the validator's last update is more than `--neuron.epoch_length` blocks old
 (default 150), and never more often than the subnet's `weights_rate_limit`. Commit-reveal is handled
-by the Bittensor SDK. Any chain error drops the connection and reconnects on the next pass.
+by the Bittensor SDK. A validator without a validator permit logs an error and submits nothing. Any
+chain error drops the connection and reconnects on the next pass.
 
 ## Running a validator
 
@@ -65,7 +69,8 @@ uv run python neurons/validator.py --netuid 7 --subtensor.network finney \
 uv run python neurons/validator.py --netuid 7 --subtensor.network finney --dry-run
 ```
 
-`--dry-run` needs no wallet. It logs the weights that would be set and exits. `VALIDATOR_MODE=watch`
+`--dry-run` needs no wallet. It logs the weights that would be set and exits (exit code 1 if there
+is no safe target). `VALIDATOR_MODE=watch`
 (or `--neuron.disable_set_weights`) runs the normal loop but only logs.
 
 ## Development

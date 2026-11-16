@@ -1,13 +1,14 @@
 """Allways (SN7) validator: every epoch, put 100% of weight on the pinned treasury UID.
 
-Falls back to the burn UID when the treasury UID is unset, out of range, or held by a different hotkey.
+Falls back to the subnet owner's UID (burned by the chain) when the treasury UID is unset, out of range, held by a
+different hotkey, or the validator runs on another netuid.
 """
 
 import argparse
 import os
 import sys
 import time
-from typing import Optional, Tuple
+from typing import Optional
 
 import bittensor as bt
 from bittensor.utils.btlogging import loggingmachine as bt_loggingmachine
@@ -16,14 +17,13 @@ sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
 from allways import __spec_version__, __version__  # noqa: E402
 from allways.constants import (  # noqa: E402
-    BURN_UID,
     EPOCH_LENGTH_BLOCKS,
     NETUID_FINNEY,
     POLL_INTERVAL_SECONDS,
     TREASURY_HOTKEY,
     TREASURY_UID,
 )
-from allways.subtensor import connect, endpoint_list, redact_endpoint  # noqa: E402
+from allways.subtensor import Connections, close, redact_text  # noqa: E402
 from allways.weights import select_target, weight_vector  # noqa: E402
 
 VALIDATOR_MODES = ('full', 'vote', 'watch')
@@ -76,10 +76,18 @@ def get_config() -> 'bt.Config':
     return bt.Config(parser)
 
 
+def env_int(name: str, default: int) -> int:
+    """An integer env var; unset, empty or non-numeric means the default."""
+    try:
+        return int(os.environ.get(name, '').strip())
+    except ValueError:
+        return default
+
+
 def setup_logging(config: 'bt.Config') -> None:
     # bittensor hard-codes 25 MB x 10 for --logging.record_log; size it from the existing env contract first.
-    bt_loggingmachine.DEFAULT_MAX_ROTATING_LOG_FILE_SIZE = int(os.getenv('LOG_FILE_MAX_MB', '10')) * 1024 * 1024
-    bt_loggingmachine.DEFAULT_LOG_BACKUP_COUNT = int(os.getenv('LOG_FILE_BACKUPS', '4'))
+    bt_loggingmachine.DEFAULT_MAX_ROTATING_LOG_FILE_SIZE = env_int('LOG_FILE_MAX_MB', 10) * 1024 * 1024
+    bt_loggingmachine.DEFAULT_LOG_BACKUP_COUNT = env_int('LOG_FILE_BACKUPS', 4)
     if config.logging.record_log and config.logging.logging_dir:
         os.makedirs(os.path.expanduser(config.logging.logging_dir), exist_ok=True)
     bt.logging.set_config(config=config.logging)
@@ -87,33 +95,50 @@ def setup_logging(config: 'bt.Config') -> None:
         bt.logging.set_info()
 
 
-def pick_target(subtensor: 'bt.Subtensor', netuid: int) -> Tuple[int, Optional[str]]:
-    """Sync the metagraph and choose the UID that gets the full weight."""
-    metagraph = subtensor.metagraph(netuid)
-    uid, reason = select_target(list(metagraph.hotkeys), TREASURY_UID, TREASURY_HOTKEY, BURN_UID)
-    if reason is None:
+def primary_endpoint(config: 'bt.Config') -> str:
+    """The endpoint to dial: --subtensor.network (a name or a URL), or --subtensor.chain_endpoint when only it is given.
+
+    config.subtensor.chain_endpoint always carries the SDK's finney default, so it is never read unless set.
+    """
+    if config.is_set('subtensor.chain_endpoint') and not config.is_set('subtensor.network'):
+        return config.subtensor.chain_endpoint
+    return bt.Subtensor.setup_config(None, config)[0]
+
+
+def pick_target(subtensor: 'bt.Subtensor', metagraph, netuid: int) -> Optional[int]:
+    """The UID that gets the full weight, or None when there is no safe target this pass."""
+    owner_hotkey = subtensor.get_subnet_owner_hotkey(netuid)
+    uid, reason = select_target(
+        list(metagraph.hotkeys), netuid, NETUID_FINNEY, TREASURY_UID, TREASURY_HOTKEY, owner_hotkey
+    )
+    if uid is None:
+        bt.logging.error(f'NO WEIGHTS SET: {reason}')
+    elif reason is None:
         bt.logging.info(f'Target: treasury UID {uid} ({TREASURY_HOTKEY})')
     else:
-        bt.logging.warning(f'TREASURY FALLBACK: burning to UID {uid} because {reason}')
-    return uid, reason
+        bt.logging.warning(f'TREASURY FALLBACK: burning to subnet owner UID {uid} ({owner_hotkey}) because {reason}')
+    return uid
 
 
-def dry_run(config: 'bt.Config') -> None:
-    subtensor = connect(endpoint_list(primary_endpoint(config))[0])
+def dry_run(config: 'bt.Config', connections: Optional[Connections] = None) -> int:
+    """Log the weights that would be set; the exit code is 1 when there is no safe target."""
+    connections = connections or Connections(primary_endpoint(config), fallbacks=[])
+    subtensor, _ = connections.open()
     try:
-        uid, _ = pick_target(subtensor, config.netuid)
+        netuid = config.netuid
+        uid = pick_target(subtensor, subtensor.metagraph(netuid), netuid)
+        if uid is None:
+            bt.logging.info('DRY RUN: would set no weights. Nothing submitted.')
+            return 1
         uids, weights = weight_vector(uid)
         bt.logging.info(
-            f'DRY RUN: would set weights uids={uids} weights={weights} on netuid {config.netuid} '
+            f'DRY RUN: would set weights uids={uids} weights={weights} on netuid {netuid} '
             f'(version_key={__spec_version__}, chain weights_version='
-            f'{subtensor.get_subnet_hyperparameters(config.netuid).weights_version}). Nothing submitted.'
+            f'{subtensor.get_subnet_hyperparameters(netuid).weights_version}). Nothing submitted.'
         )
+        return 0
     finally:
-        subtensor.close()
-
-
-def primary_endpoint(config: 'bt.Config') -> str:
-    return config.subtensor.chain_endpoint or config.subtensor.network or 'finney'
+        close(subtensor)
 
 
 def step(subtensor: 'bt.Subtensor', wallet: 'bt.Wallet', config: 'bt.Config', submit: bool) -> None:
@@ -131,19 +156,27 @@ def step(subtensor: 'bt.Subtensor', wallet: 'bt.Wallet', config: 'bt.Config', su
         bt.logging.debug(f'Weights not due: {since} blocks since last update, interval {interval}')
         return
 
-    target, _ = pick_target(subtensor, netuid)
+    metagraph = subtensor.metagraph(netuid)
+    target = pick_target(subtensor, metagraph, netuid)
+    if target is None:
+        return
     uids, weights = weight_vector(target)
     if not submit:
         bt.logging.info(f'Weights NOT submitted (set_weights disabled): would set uids={uids} weights={weights}')
         return
+    if not bool(metagraph.validator_permit[my_uid]):
+        bt.logging.error(f'UID {my_uid} ({hotkey}) has no validator permit on netuid {netuid}; weights not submitted.')
+        return
 
-    # The SDK commits (commit-reveal subnets) or sets directly, and re-checks the chain rate limit itself.
+    # The SDK commits (commit-reveal subnets) or sets directly. One attempt: a rejection is retried next epoch check.
     response = subtensor.set_weights(
         wallet=wallet,
         netuid=netuid,
         uids=uids,
         weights=weights,
         version_key=__spec_version__,
+        max_attempts=1,
+        mev_protection=False,
         wait_for_inclusion=True,
         wait_for_finalization=False,
     )
@@ -164,29 +197,26 @@ def run(config: 'bt.Config') -> None:
     wallet = bt.Wallet(config=config)
     # Read the hotkey up front: a missing or unreadable wallet stops the validator here, with the SDK's own error.
     bt.logging.info(f'Wallet: {wallet} hotkey {wallet.hotkey.ss58_address}')
-    endpoints = endpoint_list(primary_endpoint(config))
-    attempt = 0
-    subtensor = None
+    connections = Connections(primary_endpoint(config))
+    subtensor, on_primary = None, True
     while True:
         try:
             if subtensor is None:
-                subtensor = connect(endpoints[attempt % len(endpoints)])
+                subtensor, on_primary = connections.open()
             step(subtensor, wallet, config, submit)
-            attempt = 0
         except KeyboardInterrupt:
             raise
         except Exception as e:
-            # Any chain error: drop the connection and rebuild it next pass, moving on to the next endpoint.
-            bt.logging.error(f'Validator pass failed ({type(e).__name__}: {e}); reconnecting')
-            attempt += 1
-            if subtensor is not None:
-                try:
-                    subtensor.close()
-                except Exception:
-                    pass
-                subtensor = None
-            if len(endpoints) > 1:
-                bt.logging.warning(f'Next subtensor endpoint: {redact_endpoint(endpoints[attempt % len(endpoints)])}')
+            # Any chain error: drop the connection and rebuild it next pass.
+            bt.logging.error(f'Validator pass failed ({type(e).__name__}: {redact_text(str(e))}); reconnecting')
+            if subtensor is not None and on_primary:
+                connections.primary_failed()
+            close(subtensor)
+            subtensor = None
+        if not on_primary:
+            # A fallback serves one pass only: the next pass starts from the primary again.
+            close(subtensor)
+            subtensor, on_primary = None, True
         time.sleep(POLL_INTERVAL_SECONDS)
 
 
@@ -195,8 +225,7 @@ def main() -> None:
     setup_logging(config)
     bt.logging.info(f'Allways validator {__version__} (version_key {__spec_version__}), netuid {config.netuid}')
     if config.dry_run:
-        dry_run(config)
-        return
+        sys.exit(dry_run(config))
     try:
         run(config)
     except KeyboardInterrupt:

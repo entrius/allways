@@ -1,31 +1,40 @@
-"""Where the validator's weight goes: all of it on the treasury UID, or on the burn UID when that is not safe."""
+"""Where the validator's weight goes: all of it on the treasury UID, or on the subnet owner's UID (burned)."""
 
 from typing import List, Optional, Sequence, Tuple
 
 
 def select_target(
     hotkeys: Sequence[str],
+    netuid: int,
+    treasury_netuid: int,
     treasury_uid: Optional[int],
     treasury_hotkey: str,
-    burn_uid: int,
-) -> Tuple[int, Optional[str]]:
-    """Return ``(uid, fallback_reason)``: the treasury UID with ``None``, or the burn UID with why.
+    owner_hotkey: Optional[str],
+) -> Tuple[Optional[int], Optional[str]]:
+    """Return ``(uid, reason)``: the treasury UID with ``None``, the burn UID with why the treasury was not used,
+    or ``None`` with why no weights can be set at all.
 
-    ``hotkeys`` is the metagraph's hotkey list, indexed by UID.
+    ``hotkeys`` is the metagraph's hotkey list, indexed by UID. The burn UID is wherever the subnet owner hotkey is
+    registered: weight placed there is burned by the chain.
     """
-    # An out-of-range burn UID (a small local subnet) falls back to UID 0.
-    burn = burn_uid if 0 <= burn_uid < len(hotkeys) else 0
     # bool is an int subclass: True would otherwise silently pin UID 1.
-    if treasury_uid is None or isinstance(treasury_uid, bool) or not isinstance(treasury_uid, int):
-        return burn, 'TREASURY_UID is unset'
-    if not 0 <= treasury_uid < len(hotkeys):
-        return burn, f'TREASURY_UID {treasury_uid} is out of range (subnet has {len(hotkeys)} UIDs)'
-    if hotkeys[treasury_uid] != treasury_hotkey:
-        return burn, (
+    if netuid != treasury_netuid:
+        reason = f'netuid {netuid} is not {treasury_netuid}, the subnet the treasury constants are pinned for'
+    elif treasury_uid is None or isinstance(treasury_uid, bool) or not isinstance(treasury_uid, int):
+        reason = 'TREASURY_UID is unset'
+    elif not 0 <= treasury_uid < len(hotkeys):
+        reason = f'TREASURY_UID {treasury_uid} is out of range (subnet has {len(hotkeys)} UIDs)'
+    elif hotkeys[treasury_uid] != treasury_hotkey:
+        reason = (
             f'hotkey mismatch at TREASURY_UID {treasury_uid}: '
             f'chain has {hotkeys[treasury_uid]}, expected {treasury_hotkey}'
         )
-    return treasury_uid, None
+    else:
+        return treasury_uid, None
+
+    if not owner_hotkey or owner_hotkey not in hotkeys:
+        return None, f'{reason}, and the subnet owner hotkey {owner_hotkey} is not registered on netuid {netuid}'
+    return list(hotkeys).index(owner_hotkey), reason
 
 
 def weight_vector(target_uid: int) -> Tuple[List[int], List[float]]:

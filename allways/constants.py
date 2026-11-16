@@ -1,13 +1,10 @@
 NETUID_FINNEY = 7
 
-# The treasury miner. TREASURY_UID is set once the treasury miner is registered on SN7;
-# until then (None) every validator sends its full weight to BURN_UID.
+# The treasury miner on SN7 mainnet. TREASURY_UID is set once the treasury miner is registered;
+# until then (None) every validator sends its full weight to the subnet owner's UID, which burns it.
 TREASURY_UID: int | None = None
-# Guard only: the UID is what is pinned. A recycled slot holds another hotkey, and falls back to BURN_UID.
+# Guard only: the UID is what is pinned. A recycled slot holds another hotkey, and the weight is burned instead.
 TREASURY_HOTKEY = '5EvkLKgQpLbsvZViBEJsjA4utMjjRcxRXWPVrwhzLfJnFJrs'
-
-# SN7 subnet owner hotkey's UID: weight placed here is burned by the chain.
-BURN_UID = 53
 
 # Blocks between weight sets (the chain's weights_rate_limit is honoured on top of this).
 EPOCH_LENGTH_BLOCKS = 150
