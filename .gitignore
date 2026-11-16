@@ -6,6 +6,7 @@ allways-venv/
 
 __pycache__
 .pytest_cache/
+.ruff_cache/
 
 *.egg-info
 
@@ -17,21 +18,12 @@ __pycache__
 CLAUDE.md
 .claude/
 .vscode/
-
-# Rust/Cargo build artifacts
-target/
-**/*.rs.bk
-Cargo.lock
-!uv.lock
 tmp/
 
-# Chain node data
+# Validator log directory (docker-compose.vali.yml mounts ./data/allways)
 data/
 
-CLAUDE.md
-
 # Local tooling / scratch
-.full-e2e/
 .mcp.json
 *.md
 .vouch/

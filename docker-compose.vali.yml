@@ -3,23 +3,15 @@ services:
     image: entrius/allways:latest
     container_name: aw-vali
     restart: unless-stopped
-    mem_limit: "3g"
+    mem_limit: "1g"
     entrypoint: /app/scripts/vali-entrypoint.sh
     env_file:
       - .env
-    ports:
-      # Set AXON_PUBLISH=127.0.0.1:<port> to bind loopback-only behind a proxy (unset = raw internet publish).
-      - "${AXON_PUBLISH:-0.0.0.0:${PORT}}:${PORT}"
     volumes:
       - ${WALLET_PATH}:/root/.bittensor/wallets:ro
       - ./data/allways:/root/.allways
-      - ./data/solana:/root/.solana:ro
-    # optional: uncomment to write dashboard rows from the validator
-    # (requires STORE_DB_RESULTS=true and DB_* vars in .env)
-    # networks:
-    #   - allways_network
-    # `docker logs` buffer: 3 x 10 MB, oldest dropped. Dies with the container — the durable copy is
-    # ./data/allways/bittensor.log, rotated by the neuron (LOG_FILE_MAX_MB / LOG_FILE_BACKUPS).
+    # `docker logs` buffer: 3 x 10 MB, oldest dropped. Dies with the container; the durable copy is
+    # ./data/allways/bittensor.log, rotated by the validator (LOG_FILE_MAX_MB / LOG_FILE_BACKUPS).
     logging:
       driver: json-file
       options:
@@ -38,9 +30,3 @@ services:
       WATCHTOWER_POLL_INTERVAL: 200
       WATCHTOWER_LABEL_ENABLE: "true"
       WATCHTOWER_CLEANUP: "true"
-
-# optional: uncomment alongside the validator's `networks:` block to write
-# dashboard rows into an externally-managed allways DB.
-# networks:
-#   allways_network:
-#     external: true

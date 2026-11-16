@@ -1,304 +1,83 @@
 # Allways
 
-**Settlement layer for agents and applications**
+Bittensor Subnet 7 (SN7).
 
-Native cross-chain transactions for programs that hold one asset and need to pay in another — no wrapped tokens, no bridges, no custodian. Bittensor Subnet 7 (SN7).
+**Links:** [Website](https://all-ways.io) · [Docs](https://docs.all-ways.io)
 
-[![Twitter](https://img.shields.io/twitter/follow/allways_io?style=social)](https://x.com/allways_io)
+## What this repository is now
 
-**Links:** [Website](https://all-ways.io) · [App and API (Allways Access)](https://allways.venturalabs.ai) · [Docs](https://docs.all-ways.io) · Agent quickstarts: [protocol](https://all-ways.io/llms.txt), [API](https://allways.venturalabs.ai/llms.txt)
+This repository holds the SN7 validator and nothing else. Every epoch the validator puts 100% of its
+weight on one pinned UID, the Allways treasury miner. It does no scoring, serves no axon, and talks to
+no chain other than Bittensor.
 
-## Overview
+The previous code (cross-chain swap miner and validator, the `alw` CLI, the smart contracts) is
+preserved on the [`allways-old`](https://github.com/entrius/allways/tree/allways-old) branch.
 
-Allways is a settlement layer built to be driven by software. An agent or application that holds SOL, TAO, BTC, or any supported asset submits a single swap and receives the destination asset natively in its own wallet — no account, no custodian, no bridge in the path. Allways creates a verification layer above independent systems: miners complete transactions, validators independently verify both legs on-chain, and a smart contract enforces outcomes through collateral and slashing.
+## How the target is chosen
 
-Currently live with SOL and TAO as hubs, each paired against BTC, ETH, USDC-on-Arbitrum, HYPE, BNB, AVAX, USDC-on-Base, USDC-on-Ethereum, CRO, ASTER, UNI, QNT, POL, USDC-on-Polygon, PAXG, and USDC-on-Solana — plus every Bittensor subnet alpha token (`sn1`…`sn128`) against SOL and each spoke, and SOL ↔ TAO itself (hub-and-spoke: every pair has a SOL or TAO leg). Designed to scale to any verifiable asset.
+`allways/constants.py` pins the target:
 
-## For agents
+| Constant          | Meaning                                                                    |
+| ----------------- | -------------------------------------------------------------------------- |
+| `TREASURY_UID`    | The UID that receives the full weight. `None` until the miner is registered |
+| `TREASURY_HOTKEY` | The hotkey expected at that UID. A guard, not a lookup                      |
+| `BURN_UID`        | The fallback target: the subnet owner hotkey's UID, whose weight is burned  |
 
-Allways is designed to be operated by software, not clicked through by people. Every step of a swap — quote discovery, reservation, deposit, and settlement — is a CLI command (`alw swap now`) or a public API call (`api.all-ways.io`) with structured output, so an autonomous agent can clear a payment in another native asset as a single tool call, with no human in the loop, no exchange account, and no custodian holding its keys. This is how the network is used in practice: agents operated by the team and by users originate swaps today, and the miner and validator neurons in this repo are themselves unattended programs that quote, fulfill, and verify around the clock.
+On every pass the validator syncs the metagraph and sets weights `[1.0]` on:
 
-**Why agents need a settlement layer.** An agent's wallet is a single-chain identity, but the things it pays for are not. An LLM agent earning TAO may need to buy inference from a provider that bills in USDC; a trading agent holding SOL may need to settle an obligation in BTC; a multi-agent pipeline may split revenue across operators who each want a different native asset. Bridges and centralized exchanges break the autonomy model — they require accounts, KYC, custody, and a human to unblock them. Allways lets the agent stay self-custodial: it sends the source asset from its own wallet and receives the destination asset in its own wallet, and the protocol verifies the outcome on-chain.
+- `TREASURY_UID`, when it is set, in range, and the hotkey registered there is `TREASURY_HOTKEY`
+- `BURN_UID` otherwise, with a `TREASURY FALLBACK` warning that says why (unset, out of range, or
+  hotkey mismatch)
 
-**Swap lifecycle as tool calls.**
+The hotkey check stops emissions going to a stranger if the UID slot is ever recycled.
 
-- **Discover**: `GET` live quotes per pair from the API and select a rate, liquidity, and miner.
-- **Reserve**: lock that miner's quote and collateral for the swap window.
-- **Deposit**: send the source asset natively from the agent's wallet; validators attest the deposit on-chain.
-- **Settle**: the miner delivers the destination asset to the agent's wallet; validators verify the delivery or slash the miner's collateral to reimburse the agent.
+Weights are set once the validator's last update is more than `--neuron.epoch_length` blocks old
+(default 150), and never more often than the subnet's `weights_rate_limit`. Commit-reveal is handled
+by the Bittensor SDK. Any chain error drops the connection and reconnects on the next pass.
 
-Each call returns machine-readable state (swap id, reservation window, deadlines, attestation status), so an agent can plan, retry, and reason over the full lifecycle without parsing prose.
+## Running a validator
 
-**Use cases in production and in reach.**
+Requirements: a hotkey registered on SN7 with a validator permit. No GPU, and no open ports.
 
-- **Agent-to-agent payments**: an orchestrator pays sub-agents or tool providers in whatever asset they accept, funded from a single treasury.
-- **Inference and compute procurement**: convert earned TAO or SOL into the stablecoin or native token a GPU or model provider bills in.
-- **Treasury automation**: an agent rebalances a multi-chain treasury on a schedule or on a signal, without moving funds through a custodian.
-- **Autonomous market-making**: the reference miner is itself an agent — it posts quotes, manages collateral, and fulfills swaps programmatically; operators extend it with their own pricing and risk logic.
-- **Bittensor-native economics**: agents earning alpha or TAO on other subnets settle into the asset they actually spend, with SOL and TAO as hubs.
-
-See the Swap guide at [docs.all-ways.io](https://docs.all-ways.io/) for the full lifecycle and API reference.
-
-## Miner Risk Disclaimer
-
-The miner in this repository is **reference software**. Review the code thoroughly and build it out with your own safety and optimization measures before running it. Running the base miner, or anything you build on top of it, is at your own risk.
-
-## Getting Started
-
-### Requirements
-
-- Python 3.10+
-- Bittensor wallet
-- Docker & Docker Compose
-
-### Installation
-
-### Running with Docker
-
-**Miner:**
+### Docker (recommended)
 
 ```bash
-docker compose -f docker-compose.miner.yml up -d
-```
-
-**Validator:**
-
-```bash
+cp .env.example .env          # set WALLET_NAME, HOTKEY_NAME, WALLET_PATH
 docker compose -f docker-compose.vali.yml up -d
+docker logs -f aw-vali
 ```
 
-Both require a `.env` file with `PORT` and `WALLET_PATH` configured.
+The compose file runs `entrius/allways:latest` with watchtower, so the validator updates itself when
+a new image is published. An `.env` and compose file from the previous validator keep working:
+variables and flags that no longer apply are ignored.
 
-### CLI
+### From source
 
 ```bash
 uv sync
-# activate the uv virtual environment
-source .venv/bin/activate
-
-alw --help
+uv run python neurons/validator.py --netuid 7 --subtensor.network finney \
+  --wallet.name <coldkey> --wallet.hotkey <hotkey> --logging.info
 ```
 
-## Architecture
-
-- **Miners**: Post exchange rate pairs and collateral, fulfill swap orders
-- **Validators**: Monitor swaps, verify on-chain transactions, vote on outcomes
-- **Smart Contract**: Manages collateral, swap lifecycle, and validator voting
-- **CLI**: User interface for posting pairs, managing collateral, and executing swaps
-
-## Miner Onboarding
-
-The fast path is the wizard — it creates or picks the wallet, generates the signing keys, writes
-`.env`, runs a preflight, then walks the on-chain sequence in order and resumes on re-run:
+### Check without submitting
 
 ```bash
-alw miner init          # step by step; every prompt has a flag, -y runs it unattended
-alw doctor              # the preflight on its own
+uv run python neurons/validator.py --netuid 7 --subtensor.network finney --dry-run
 ```
 
-The manual sequence it automates: bond, then activate, then quote — in that order, for either backing. A quote is a promise that
-one specific bond answers for, so `set_quote` refuses a purse you are not already serving
-(`MinerNotActive`). Quoting before activation is rejected, not queued.
+`--dry-run` needs no wallet. It logs the weights that would be set and exits. `VALIDATOR_MODE=watch`
+(or `--neuron.disable_set_weights`) runs the normal loop but only logs.
 
-**SOL-backed** (collateral held on Solana):
+## Development
 
 ```bash
-alw collateral deposit --amount <SOL>          # fund the local purse (bind-hotkey needs it — see below)
-alw miner bind-hotkey                          # bind your hotkey to your Solana pubkey (once)
-alw miner activate                             # validators vote you active
-alw miner post sol <addr> btc <addr> <rate>    # quote
+uv sync
+uv run ruff check . && uv run ruff format --check .
+uv run pytest tests/ -q
 ```
 
-**TAO-backed** (bond held in the Bittensor vault). Same order; the bond lives on another chain,
-so activation waits on validators mirroring it to Solana rather than on a local read:
-
-```bash
-alw collateral deposit --amount 0.1            # one-time identity deposit — see the note below
-alw miner bind-hotkey                          # the vault keys bonds by hotkey, joined via this binding
-alw vault deposit --amount <TAO>               # bond into the vault (signed by the hotkey)
-alw vault lock                                 # enter service — only a LOCKED bond is attested
-                                               # wait a minute: validators mirror the bond to Solana
-alw miner activate --backing tao               # validators vote that purse active
-alw miner post sol <addr> tao <addr> <rate> --backing tao
-```
-
-Purses activate one at a time, so `alw miner activate` lights one. It infers the backing when only
-one purse is funded and not yet serving — which is every step of the order above — and asks for
-`--backing` only when both are candidates at once. Activation is refused, not queued, while the
-bond has yet to be mirrored: retry rather than wait on the request.
-
-`alw miner status` shows the required bond and whether each purse is serving yet.
-
-**A TAO-only miner still posts a small SOL deposit — once.** `bind-hotkey` requires a live local
-collateral stake (`min_collateral`, currently 0.1 SOL) — which is why the deposit comes first in both
-recipes above — because binding a hotkey is what claims that identity on Solana and the deposit is the
-anti-squat cost of the claim. Since the vault keys bonds by
-hotkey and validators join them to your Solana pubkey through that binding, a TAO-backed miner needs
-the binding to set rates or be credited for its swaps — so it needs the deposit too. That is the whole
-of it: the SOL purse never has to be activated, it posts no quotes, and it backs nothing. Withdraw it
-by deactivating and waiting out the cooldown, the same as any SOL collateral.
-
-**What a TAO-backed quote guarantees.** If the miner fails to deliver, the user is reimbursed in
-TAO from the miner's bond, shortly after the timeout. That differs from a SOL-backed quote in
-timing only: a SOL refund is instant because the collateral sits beside the swap, while the TAO
-reimbursement waits for validators to carry the timeout verdict to the vault and reach quorum
-there. Either way the user is made whole out of the bond that backed the quote.
-
-**Leaving.** A locked bond is not withdrawable on demand. Deactivate the purse
-(`alw miner deactivate --backing tao`), let in-flight swaps and their timeout windows drain, and
-validators unlock the bond once nothing is owed on it — then `alw vault withdraw` succeeds.
-
-### Quote Optimizer (opt-in)
-
-Fund the purse and the wallets, post each quote once by hand, then let the miner keep them priced —
-SOL↔TAO by default, BTC lanes when you list them (see below). No guarantees and not financial advice: you fund it, you own the outcome.
-
-- **Follow.** Each lane quotes 0.4% under the best other qualifying quote — inside the validators' 0.5% crown
-  band, with a 0.1% cushion so a one-tick undercut can't push it out.
-- **Tolerance.** The leader is followed only while that rate is between `-max_worse` and `+max_better` % of
-  the market spot price, measured as what the taker receives. With no leader, or one stingier than
-  `-max_worse`, the lane leads at `-max_worse` (the least generous rate you tolerate). A leader more generous
-  than `+max_better` is not followed.
-- **Free by default.** Routine repricing waits until a quote is 10 minutes old (plus a random 0–30 s, so the
-  moment isn't predictable), and re-posting a pulled quote
-  is a free creation. A fee is paid only to protect you, on fresh data: market drift made your quote more
-  generous than `+max_better`, a taker would pick it first, and a full-size fill would lose more than the fee;
-  or your wallet can't cover a full-size fill and a missed one (10% premium) would cost more than the fee, or
-  you already carry the last strike your hotkey is allowed.
-- **Funding.** A taker may fill up to what your collateral backs, so each delivery wallet must cover that
-  largest fill on every live lane paying out of it, plus in-flight payouts and the SOL fee reserve (a BTC wallet also keeps
-  `btc_fee_reserve` back for the payout's own network fee, which leaves the same wallet). Lanes that
-  don't fit are pulled, in reverse `lanes` order, and re-posted once the wallet covers them again.
-- **Busy purses** can't be taken until their swap resolves: their rate still updates (free), nothing else is
-  done to them, and they claim no second full-size fill.
-- **Data.** Market and wallet state arrive by websocket push on a second connection, seeded from the allways API
-  (`api.all-ways.io`, or `test-api` on testnet; `ALLWAYS_API_URL` overrides). It holds a fixed handful of
-  subscriptions whatever the market does: the managed directions' quotes (one per direction), every miner's state, bonds, the
-  program config, your own quotes and your SOL wallets. It renews every 15 minutes, opening the new connection
-  before closing the old. A competitor's removed quote pushes nothing, so the API is checked every 5 minutes to
-  drop it. Solana RPC is used to send `set_quote` / `remove_quote`, plus a config and SOL-balance read whenever
-  the feed has to re-seed — so it fits the Helius free tier (an hourly `optimizer:` log line shows the
-  websocket bytes, connections and RPC calls behind it). If the API doesn't answer at startup the optimizer
-  stays off (the miner still fulfils swaps) and retries every minute.
-- **Idle.** With no managed quote standing and none pulled for a re-post, the connection is closed and the
-  optimizer only asks the API every 5 minutes whether you've posted one.
-- **Dead-man switch.** If the feed is down for more than 2 minutes, every managed quote is pulled (paying the
-  churn fee if one is due) and re-posted once the feed is back and re-seeded.
-- **Data failures lean your way:** a re-seed the API can't answer holds everything but funding pulls, a missing
-  price holds every quote, and a 0 balance reading never pays a fee on its own.
-
-Off unless `~/.allways/miner/optimizer.json` sets `enabled`. Under
-`docker-compose.miner.yml` that file is `./data/allways/miner/optimizer.json`:
-
-```json
-{
-  "enabled": true,
-  "dry_run": false,
-  "webhook_url": "https://discord.com/api/webhooks/…",
-  "lanes": ["sol:tao:sol", "sol:tao:tao", "tao:sol:sol", "tao:sol:tao"],
-  "max_better_than_market_pct": 2.0,
-  "max_worse_than_market_pct": 1.0,
-  "repost_buffer_pct": 1.0,
-  "sol_fee_reserve": 0.05,
-  "btc_fee_reserve": 0.0002,
-  "lane_tolerance": {},
-  "pull_on_shutdown": true,
-  "price_usd": {}
-}
-```
-
-- `lanes` — `from:to:backing`, in priority order; only lanes you have already quoted are managed (their
-  addresses come from that quote), and a quote you remove yourself stays removed.
-- `max_better_than_market_pct` / `max_worse_than_market_pct` — the market tolerance above.
-- `repost_buffer_pct` — headroom above a full-size fill before a pulled quote comes back, so it doesn't flap.
-- `sol_fee_reserve` — SOL kept aside for transaction fees; below it every lane is pulled.
-- `btc_fee_reserve` — BTC kept aside in a BTC delivery wallet for each payout's network fee.
-- `lane_tolerance` — per-lane overrides of the two tolerances, keyed `from:to:backing`, e.g.
-  `{"btc:tao:tao": {"max_worse_than_market_pct": 3.0}}`: a wider miner-side edge on a lane whose taker leg
-  takes a while to confirm while your rate stays locked. Unset keys fall back to the global pair.
-- `pull_on_shutdown` — a stopped miner still quoting takes strikes; shutdown pulls and the next start re-posts.
-- `price_usd` — pin a USD price per chain instead of the CoinGecko → Coinbase → MEXC feeds.
-- `dry_run` — paper-trade: every managed lane is posted, requoted and pulled on paper against the live market (as
-  if each transaction landed) and reported the same way, and nothing is sent — no quotes need to be posted. Its
-  state lives in `optimizer_state_<hotkey>.dry_run.json`, apart from a live run's.
-
-Webhook messages (each condition once when it starts and once when it clears): start and stop (with what
-shutdown pulled); the API unreachable at startup; a dead-man pull and its recovery; every pull and post; paid
-requotes; a wallet short of a full-size fill (address and amount to send); a purse under its eligibility floor
-(with the deposit command); a new timeout strike; a dead price feed; failed transactions; and, after a post,
-why that lane is not earning emissions. Routine requotes, a lane switching between following, leading and not
-following, holds and deferred actions only go to the miner log, once per change.
-Any webhook taking a JSON body works (Discord `content`, Slack `text`).
-
-**BTC lanes** are opt-in: list them in `lanes` (`"tao:btc:tao"`, `"btc:tao:tao"`, and `sol:btc:sol` /
-`btc:sol:sol` for the SOL purse) and the default SOL↔TAO lanes are only managed if you list those too. They need the
-miner's BTC provider (`BTC_PRIVATE_KEY`), and like any lane each is posted once by hand first. The BTC wallet's
-balance is read from the same Esplora endpoints the provider sends through, counting mempool coins (a payout may
-spend unconfirmed change); a failed read is unknown, never 0. On a `*->btc` lane you deliver BTC, so the swap waits
-on your payout's confirmations — its fee is the provider's own estimate.
-
-Extending to another pair means adding its chains to `OPTIMIZER_CHAINS` in
-`allways/miner/optimizer/quote_optimizer.py` and a price id in `allways/miner/optimizer/market_price.py`; a chain
-whose provider reports a failed balance read as 0 wants a reader in `allways/miner/optimizer/balances.py`.
-
-It is a strategy bolted onto the base miner, not part of it: everything lives in `allways/miner/optimizer/`,
-and `neurons/miner.py` makes one call, `attach_optimizer(self)`, which does nothing unless `optimizer.json`
-enables it. It runs on its own thread, so swap fulfillment never waits on it, and it pulls its quotes when
-the miner exits — give `docker stop` time for that (`stop_grace_period: 60s` on the miner service). Copy it,
-change it, or swap in your own strategy behind the same call.
-
-## Validator Storage Layout
-
-Validator state lives in `~/.allways/validator/state.db` (SQLite, WAL mode).
-Tables: `pending_confirms`, `rate_events`, `swap_outcomes`. Collateral /
-active / min_collateral state is held in memory and rebuilt from contract
-events each startup; only `swap_outcomes` (the all-time credibility ledger)
-needs to persist across restarts.
-
-## Miner Environment Variables
-
-- `BTC_PRIVATE_KEY`, `ETH_PRIVATE_KEY`, `ARB_PRIVATE_KEY`, `HYPE_PRIVATE_KEY`, `BNB_PRIVATE_KEY`, `AVAX_PRIVATE_KEY`, `BASE_PRIVATE_KEY`, `CRO_PRIVATE_KEY`, `POL_PRIVATE_KEY`, `{ETH,ARB,HYPE,BNB,AVAX,BASE,CRO,POL}_RPC_URLS`, etc. — keyed by network, so assets sharing one share its config (ETH, ethusdc, uni, qnt and paxg all ride the `ETH_*` vars; BNB and aster both ride the `BNB_*` vars). See `.env.example`.
-
-## Running a Local Subtensor Lite Node (Validators)
-
-Validators read miner rate commitments every ~3 minutes AND stream contract
-events every block via the same connection. Pointing at the public `finney`
-entrypoint works but adds latency and RPC pressure — every validator on the
-network should run its own lite node for this.
-
-```bash
-# Minimal lite-node command (adjust --base-path for storage volume)
-subtensor \
-  --chain finney \
-  --base-path /var/lib/subtensor \
-  --rpc-external \
-  --ws-external \
-  --port 30333 \
-  --rpc-port 9933 \
-  --ws-port 9944 \
-  --pruning 1000
-```
-
-Then point the validator at it via `.env`:
-
-```env
-SUBTENSOR_NETWORK=ws://127.0.0.1:9944
-```
-
-`SUBTENSOR_NETWORK` also takes a keyed provider URL. `SUBTENSOR_FALLBACK_ENDPOINTS` and
-`SUBTENSOR_ARCHIVE_ENDPOINTS` (comma-separated, both optional) back it up: fallbacks take over
-when the current endpoint drops or rate-limits (HTTP 429, or a rate-limit JSON-RPC error), and the
-archive serves reads at blocks a lite node has pruned (the collateral verdict prices alpha at the
-reservation's block). A connection that left the primary logs one warning, re-tries the primary
-every 5 minutes and moves back once it answers. On mainnet, pair a finney fallback with
-`SUBTENSOR_ARCHIVE_ENDPOINTS=wss://archive.chain.opentensor.ai:443` so historical reads survive a
-failover. The neurons and `alw` both honour them; endpoints are logged with any key redacted. See
-`.env.example`.
+See [CONTRIBUTING.md](CONTRIBUTING.md).
 
 ## License
 
-MIT License
-
----
-
-<sub>Allways is permissionless, open-source, beta software. Swaps settle directly between counterparty wallets; the protocol never takes custody of user funds, and the protocol fee is charged against miner collateral rather than any user transfer. Validator operators, including those run by the project, verify swap outcomes but cannot redirect or receive any transferred amount. Use at your own risk. This software is provided "as is" without warranty of any kind. Nothing herein constitutes financial advice, and the creators assume no liability for losses arising from use of the protocol.</sub>
+MIT, see [LICENSE](LICENSE).

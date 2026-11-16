@@ -6,7 +6,6 @@ If you discover a security vulnerability in Allways, please report it responsibl
 
 ## Scope
 
-- Smart contract vulnerabilities
-- Chain provider verification bypasses
-- Collateral management issues
-- Consensus mechanism attacks
+- The validator in this repository: anything that makes it set weights on a UID other than the
+  pinned treasury UID or the burn UID
+- The published `entrius/allways` Docker image and its entrypoint
