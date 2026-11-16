@@ -374,6 +374,23 @@ def test_a_failed_pass_with_no_fallback_goes_back_to_the_primary():
     assert conns.open()[1] is True
 
 
+def test_a_primary_that_connects_but_cannot_be_read_is_closed():
+    opened = []
+
+    def dial(network):
+        st = FakeSubtensor()
+        st.substrate = SimpleNamespace(get_block_hash=lambda block: (_ for _ in ()).throw(ConnectionError('dropped')))
+        opened.append(st)
+        return st
+
+    conns = Connections('primary', fallbacks=[], connector=dial)
+    with pytest.raises(ConnectionError):
+        conns.open()
+    assert len(opened) == 1
+    assert opened[0].closed
+    assert conns.genesis is None
+
+
 def test_keyed_endpoints_are_redacted():
     assert redact_endpoint('wss://api.example.com/secret-key') == 'wss://api.example.com/<redacted>'
     assert redact_endpoint('wss://entrypoint-finney.opentensor.ai:443') == 'wss://entrypoint-finney.opentensor.ai:443'

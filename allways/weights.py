@@ -17,9 +17,9 @@ def select_target(
     ``hotkeys`` is the metagraph's hotkey list, indexed by UID. The burn UID is wherever the subnet owner hotkey is
     registered: weight placed there is burned by the chain.
     """
-    # bool is an int subclass: True would otherwise silently pin UID 1.
     if netuid != treasury_netuid:
         reason = f'netuid {netuid} is not {treasury_netuid}, the subnet the treasury constants are pinned for'
+    # bool is an int subclass: True would otherwise silently pin UID 1.
     elif treasury_uid is None or isinstance(treasury_uid, bool) or not isinstance(treasury_uid, int):
         reason = 'TREASURY_UID is unset'
     elif not 0 <= treasury_uid < len(hotkeys):

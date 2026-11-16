@@ -102,6 +102,7 @@ class Connections:
         skip, self.skip_primary_once = self.skip_primary_once, False
         error: Optional[Exception] = None
         if not skip:
+            subtensor = None
             try:
                 subtensor = self.connector(network=self.primary)
                 self.genesis = genesis_hash(subtensor)
@@ -109,6 +110,7 @@ class Connections:
                 return subtensor, True
             except Exception as e:
                 error = e
+                close(subtensor)
                 bt.logging.warning(f'Subtensor primary {redact_endpoint(self.primary)} failed: {type(e).__name__}')
         if self.genesis is None and self.fallbacks:
             bt.logging.warning('Fallback endpoints not used: the primary has not answered yet, so its chain is unknown')
