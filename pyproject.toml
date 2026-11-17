@@ -1,7 +1,7 @@
 [project]
 name = "allways"
 version = "3.7.3"
-description = "Allways - Universal Transaction Layer: Collateral-backed cross-chain swaps on Bittensor Subnet 7"
+description = "Allways - Bittensor Subnet 7 validator: full weight on the treasury UID"
 license = "MIT"
 requires-python = ">=3.10,<3.15"
 authors = [{ name = "Allways" }]
@@ -11,7 +11,6 @@ classifiers = [
     "Topic :: Software Development :: Build Tools",
     "License :: OSI Approved :: MIT License",
     "Programming Language :: Python :: 3 :: Only",
-    "Programming Language :: Python :: 3.9",
     "Programming Language :: Python :: 3.10",
     "Programming Language :: Python :: 3.11",
     "Programming Language :: Python :: 3.12",
@@ -22,27 +21,8 @@ classifiers = [
 ]
 dependencies = [
     "bittensor==10.5.0",
-    "bittensor-cli==9.23.1",
-    "bittensor-commit-reveal==0.4.0",
     "bittensor-wallet==4.1.0",
-    "wandb==0.21.3",
-    "python-dotenv==1.2.1",
-    "requests",
-    "bitcoin-message-tool",
-    "eth-account",
-    "click",
-    "rich",
-    "embit",
-    "base58",
-    "pycryptodome",
-    "numpy",
-    "psycopg[binary]==3.3.4",
-    "solders",
-    "borsh-construct",
 ]
-
-[project.scripts]
-alw = "allways.cli.main:main"
 
 [dependency-groups]
 dev = [
@@ -50,14 +30,6 @@ dev = [
     "pytest>=9.0.0",
     "ruff>=0.14.10",
 ]
-
-# bitcoin-message-tool incorrectly lists pytest as a runtime dependency
-[tool.uv]
-override-dependencies = ["pytest>=9.0.0"]
-
-[tool.pytest.ini_options]
-markers = ["integration: requires a local solana-test-validator (not run by default)"]
-addopts = "-m 'not integration'"
 
 [build-system]
 requires = ["hatchling"]
@@ -68,7 +40,7 @@ packages = ["allways"]
 
 [tool.ruff]
 line-length = 120
-target-version = "py39"
+target-version = "py310"
 
 [tool.ruff.lint]
 select = ["E", "F", "I"]

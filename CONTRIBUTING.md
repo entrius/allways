@@ -6,7 +6,7 @@
 2. Install dependencies: `uv sync`
 3. Install pre-commit hooks: `uv run pre-commit install --install-hooks`
 4. Run tests: `uv run pytest tests/`
-5. Lint: `uv run ruff check allways/ neurons/`
+5. Lint: `uv run ruff check . && uv run ruff format --check .`
 
 ## Git Hooks
 
