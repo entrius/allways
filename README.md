@@ -70,8 +70,7 @@ uv run python neurons/validator.py --netuid 7 --subtensor.network finney --dry-r
 ```
 
 `--dry-run` needs no wallet. It logs the weights that would be set and exits (exit code 1 if there
-is no safe target). `VALIDATOR_MODE=watch`
-(or `--neuron.disable_set_weights`) runs the normal loop but only logs.
+is no safe target). `--neuron.disable_set_weights` runs the normal loop but only logs.
 
 ## Development
 
