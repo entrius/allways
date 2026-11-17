@@ -26,21 +26,6 @@ from allways.constants import (  # noqa: E402
 from allways.subtensor import Connections, close, redact_text  # noqa: E402
 from allways.weights import select_target, weight_vector  # noqa: E402
 
-VALIDATOR_MODES = ('full', 'vote', 'watch')
-
-
-def validator_mode() -> str:
-    """VALIDATOR_MODE from the previous validator's env contract: only 'full' (the default) sets weights.
-
-    'vote' and 'watch' (and legacy VALIDATOR_DEV_MODE=1) never set weights before, so they still do not.
-    """
-    raw = os.environ.get('VALIDATOR_MODE', '').strip().lower()
-    if raw:
-        if raw not in VALIDATOR_MODES:
-            raise ValueError(f'VALIDATOR_MODE={raw!r} invalid, want one of {", ".join(VALIDATOR_MODES)}')
-        return raw
-    return 'watch' if os.environ.get('VALIDATOR_DEV_MODE', '0') == '1' else 'full'
-
 
 def get_config() -> 'bt.Config':
     # bittensor >= 10.5 skips CLI parsing unless this env opts in; without it every flag comes back None.
@@ -187,12 +172,9 @@ def step(subtensor: 'bt.Subtensor', wallet: 'bt.Wallet', config: 'bt.Config', su
 
 
 def run(config: 'bt.Config') -> None:
-    mode = validator_mode()
-    submit = mode == 'full' and not config.neuron.disable_set_weights
+    submit = not config.neuron.disable_set_weights
     if not submit:
-        bt.logging.warning(
-            f'set_weights is OFF (VALIDATOR_MODE={mode}, disable_set_weights={config.neuron.disable_set_weights})'
-        )
+        bt.logging.warning('set_weights is OFF (--neuron.disable_set_weights)')
 
     wallet = bt.Wallet(config=config)
     # Read the hotkey up front: a missing or unreadable wallet stops the validator here, with the SDK's own error.

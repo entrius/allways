@@ -275,31 +275,6 @@ def test_env_int_falls_back_to_the_default(monkeypatch, raw, value):
     assert validator.env_int('LOG_FILE_MAX_MB', 10) == value
 
 
-@pytest.mark.parametrize(
-    'env, mode',
-    [
-        ({}, 'full'),
-        ({'VALIDATOR_MODE': 'full'}, 'full'),
-        ({'VALIDATOR_MODE': ' Watch '}, 'watch'),
-        ({'VALIDATOR_MODE': 'vote'}, 'vote'),
-        ({'VALIDATOR_DEV_MODE': '1'}, 'watch'),
-        ({'VALIDATOR_MODE': 'full', 'VALIDATOR_DEV_MODE': '1'}, 'full'),
-    ],
-)
-def test_validator_mode(monkeypatch, env, mode):
-    monkeypatch.delenv('VALIDATOR_MODE', raising=False)
-    monkeypatch.delenv('VALIDATOR_DEV_MODE', raising=False)
-    for key, value in env.items():
-        monkeypatch.setenv(key, value)
-    assert validator.validator_mode() == mode
-
-
-def test_unknown_validator_mode_refuses_to_run(monkeypatch):
-    monkeypatch.setenv('VALIDATOR_MODE', 'ful')
-    with pytest.raises(ValueError):
-        validator.validator_mode()
-
-
 # ─── connections ────────────────────────────────────────────
 
 
