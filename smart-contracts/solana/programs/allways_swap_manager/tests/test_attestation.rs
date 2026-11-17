@@ -37,7 +37,6 @@ const REQ_ACTIVATE: u8 = 0;
 const REQ_INITIATE: u8 = 2;
 const REQ_DEACTIVATE: u8 = 5;
 const REQ_TIMEOUT: u8 = 7;
-const REQ_SET_ATTESTATION: u8 = 9;
 const REQ_ATTEST_HEARTBEAT: u8 = 10;
 const BASE_TS: i64 = 1_700_000_000;
 const TTL: i64 = 1_800;
@@ -94,11 +93,7 @@ fn vote_pda(req: u8, key: &[u8]) -> Pubkey {
     Pubkey::find_program_address(&[b"vote", &[req], key], &pid()).0
 }
 fn attest_round_pda(m: &Pubkey, chain: &str) -> Pubkey {
-    Pubkey::find_program_address(
-        &[b"vote", &[REQ_SET_ATTESTATION], m.as_ref(), chain.as_bytes()],
-        &pid(),
-    )
-    .0
+    Pubkey::find_program_address(&[b"tally", m.as_ref(), chain.as_bytes()], &pid()).0
 }
 fn resv_pda(m: &Pubkey) -> Pubkey {
     resv_pda_b(m, SOL)
@@ -286,7 +281,7 @@ fn attest_ix(
             miner_state: miner_pda(miner),
             reservation: resv_pda_b(miner, chain),
             attestation: attest_pda(miner, chain),
-            vote_round: attest_round_pda(miner, chain),
+            tally_round: attest_round_pda(miner, chain),
             system_program: SYSTEM_PROGRAM,
         }
         .to_account_metas(None),
@@ -490,9 +485,12 @@ fn migrate_config_ix(admin: &Pubkey) -> Instruction {
     )
 }
 fn migrate_miner_ix(admin: &Pubkey, miner: &Pubkey) -> Instruction {
+    migrate_miner_seeded_ix(admin, miner, [0; 8])
+}
+fn migrate_miner_seeded_ix(admin: &Pubkey, miner: &Pubkey, accrued_fees: [u64; 8]) -> Instruction {
     Instruction::new_with_bytes(
         pid(),
-        &allways_swap_manager::instruction::MigrateMinerState {}.data(),
+        &allways_swap_manager::instruction::MigrateMinerState { accrued_fees }.data(),
         allways_swap_manager::accounts::MigrateMinerState {
             admin: *admin,
             config: config_pda(),
@@ -757,8 +755,8 @@ fn test_attestation_round_writes_the_bond_on_quorum() {
 
 #[test]
 fn test_attestation_round_binds_the_full_payload() {
-    // The whole point of the payload hash: two validators reading different balances must CONFLICT,
-    // not co-count into a quorum that writes whichever value arrived first.
+    // The whole point of the payload hash: two validators reading different balances must be tallied
+    // apart, not co-count into a quorum that writes whichever value arrived first.
     let (mut svm, _admin, vals, miner) = setup();
     let m = miner.pubkey();
 
@@ -769,16 +767,94 @@ fn test_attestation_round_binds_the_full_payload() {
         (5_000_000_000, false, 3, "lock bit"),
         (5_000_000_000, true, 4, "epoch"),
     ] {
-        let err = send(&mut svm, attest_ix(&vals[1].pubkey(), &m, TAO, bal, locked, epoch), &vals[1].pubkey(), &vals[1])
-            .expect_err("divergent payload must not co-count");
-        assert!(err.contains("VoteHashMismatch"), "{what} not bound into the round: {err}");
+        send(&mut svm, attest_ix(&vals[1].pubkey(), &m, TAO, bal, locked, epoch), &vals[1].pubkey(), &vals[1])
+            .expect("a divergent vote is recorded, not refused");
+        assert_eq!(attestation_acct(&svm, &m, TAO).epoch, 0, "{what} not bound into the vote: co-counted to quorum");
     }
-    assert_eq!(attestation_acct(&svm, &m, TAO).epoch, 0, "no quorum was ever reached");
 
     // The matching payload still closes the round.
     send(&mut svm, attest_ix(&vals[1].pubkey(), &m, TAO, 5_000_000_000, true, 3), &vals[1].pubkey(), &vals[1])
         .expect("matching payload reaches quorum");
     assert_eq!(attestation_acct(&svm, &m, TAO).effective_balance, 5_000_000_000);
+}
+
+#[test]
+fn test_a_late_vote_after_quorum_does_not_hold_up_the_next_value() {
+    // 3 validators, quorum 2: the third validator's vote for the value just written lands after the
+    // write. It must not sit in the round and keep the next value from landing.
+    let (mut svm, _admin, vals, miner) = setup();
+    let m = miner.pubkey();
+    attest(&mut svm, &vals, &m, 5_000_000_000, true, 3);
+
+    let err = send(&mut svm, attest_ix(&vals[2].pubkey(), &m, TAO, 5_000_000_000, true, 3), &vals[2].pubkey(), &vals[2])
+        .expect_err("a vote for the stored value is refused");
+    assert!(err.contains("AttestationUnchanged"), "{err}");
+
+    // The bond moves seconds later; the new value lands at once, no TTL wait.
+    attest(&mut svm, &vals, &m, 4_000_000_000, true, 3);
+    assert_eq!(attestation_acct(&svm, &m, TAO).effective_balance, 4_000_000_000);
+}
+
+#[test]
+fn test_a_stray_vote_does_not_block_the_value_the_quorum_agrees_on() {
+    // One validator votes a different value first. The other two agree, and their value wins at once.
+    let (mut svm, _admin, vals, miner) = setup();
+    let m = miner.pubkey();
+
+    send(&mut svm, attest_ix(&vals[2].pubkey(), &m, TAO, 9_000_000_000, true, 3), &vals[2].pubkey(), &vals[2])
+        .expect("stray vote");
+    attest(&mut svm, &vals, &m, 5_000_000_000, true, 3);
+    assert_eq!(attestation_acct(&svm, &m, TAO).effective_balance, 5_000_000_000, "the majority value is written");
+
+    // The stray vote went with the round: it can't pair with a later vote for the same stray value.
+    send(&mut svm, attest_ix(&vals[0].pubkey(), &m, TAO, 9_000_000_000, true, 3), &vals[0].pubkey(), &vals[0])
+        .expect("one vote");
+    assert_eq!(attestation_acct(&svm, &m, TAO).effective_balance, 5_000_000_000, "one vote is not a quorum");
+}
+
+#[test]
+fn test_a_validator_can_change_its_attestation_vote() {
+    let (mut svm, _admin, vals, miner) = setup();
+    let m = miner.pubkey();
+
+    send(&mut svm, attest_ix(&vals[0].pubkey(), &m, TAO, 9_000_000_000, true, 3), &vals[0].pubkey(), &vals[0])
+        .expect("first read");
+    send(&mut svm, attest_ix(&vals[0].pubkey(), &m, TAO, 5_000_000_000, true, 3), &vals[0].pubkey(), &vals[0])
+        .expect("re-read replaces the validator's own vote");
+    let err = send(&mut svm, attest_ix(&vals[0].pubkey(), &m, TAO, 5_000_000_000, true, 3), &vals[0].pubkey(), &vals[0])
+        .expect_err("the same vote twice");
+    assert!(err.contains("AlreadyVoted"), "{err}");
+
+    send(&mut svm, attest_ix(&vals[1].pubkey(), &m, TAO, 5_000_000_000, true, 3), &vals[1].pubkey(), &vals[1])
+        .expect("quorum");
+    assert_eq!(attestation_acct(&svm, &m, TAO).effective_balance, 5_000_000_000);
+}
+
+#[test]
+fn test_an_expired_attestation_vote_stops_counting() {
+    // An old vote must not pair with a fresh one: the write needs the threshold agreeing within the TTL.
+    let (mut svm, _admin, vals, miner) = setup();
+    let m = miner.pubkey();
+
+    send(&mut svm, attest_ix(&vals[0].pubkey(), &m, TAO, 5_000_000_000, true, 3), &vals[0].pubkey(), &vals[0])
+        .expect("old vote");
+    set_clock(&mut svm, BASE_TS + TTL + 1);
+    send(&mut svm, attest_ix(&vals[1].pubkey(), &m, TAO, 5_000_000_000, true, 3), &vals[1].pubkey(), &vals[1])
+        .expect("fresh vote");
+    assert_eq!(attestation_acct(&svm, &m, TAO).epoch, 0, "the expired vote did not count");
+
+    send(&mut svm, attest_ix(&vals[2].pubkey(), &m, TAO, 5_000_000_000, true, 3), &vals[2].pubkey(), &vals[2])
+        .expect("second fresh vote");
+    assert_eq!(attestation_acct(&svm, &m, TAO).effective_balance, 5_000_000_000);
+}
+
+#[test]
+fn test_a_never_written_attestation_accepts_an_empty_first_write() {
+    // The unchanged guard compares against stored values; a fresh account's zeroes are not a write.
+    let (mut svm, _admin, vals, miner) = setup();
+    let m = miner.pubkey();
+    attest(&mut svm, &vals, &m, 0, false, 0);
+    assert_eq!(attestation_acct(&svm, &m, TAO).miner, m, "written");
 }
 
 #[test]
@@ -1136,7 +1212,6 @@ fn test_concurrent_sol_and_tao_swaps_run_and_settle_independently() {
     let attest_key = Some(attest_pda(&m, TAO));
     light_tao_purse(&mut svm, &vals, &miner, required_collateral(TAO_AMOUNT as u64));
     beat_heartbeat(&mut svm, &vals);
-    attest(&mut svm, &vals, &m, required_collateral(TAO_AMOUNT as u64), true, 1);
 
     // SOL swap to Active (spoke pair, sol hub).
     draw(&mut svm, &vals[0], &m, SPOKE_FROM, SPOKE_TO);
@@ -1703,6 +1778,97 @@ fn test_migrate_miner_state_broadcasts_v13_scalars_into_every_hub_slot() {
     // Idempotent — a second crank is a no-op on the already-grown account.
     send(&mut svm, migrate_miner_ix(&admin.pubkey(), &m), &admin.pubkey(), &admin).expect("again");
     assert_eq!(miner_state(&svm, &m).busy_slot(BACKING_BIT_TAO), 42);
+}
+
+/// The v14-v16 `MinerState` body (per-hub arrays, no fee counters) — the shape the v17 crank grows.
+#[derive(AnchorSerialize)]
+struct MinerStateV14 {
+    miner: Pubkey,
+    collateral: u64,
+    active: bool,
+    active_backings: u8,
+    has_active_swap: bool,
+    active_swap_backings: u8,
+    busy_until: [i64; 8],
+    settling_until: [i64; 8],
+    reserved_collateral: [u64; 8],
+    deactivation_at: i64,
+    successful_swaps: u32,
+    failed_swaps: u32,
+    bump: u8,
+}
+
+fn set_vault_generation(svm: &mut LiteSVM, generation: u64) {
+    let mut cfg = config_acct(svm);
+    cfg.vault_generation = generation;
+    let mut buf = Vec::new();
+    cfg.try_serialize(&mut buf).unwrap();
+    overwrite(svm, config_pda(), buf);
+}
+
+fn downgrade_to_v14(svm: &mut LiteSVM, m: &Pubkey, has_active_swap: bool) {
+    let live = miner_state(svm, m);
+    let legacy = MinerStateV14 {
+        miner: *m,
+        collateral: live.collateral,
+        active: true,
+        active_backings: BACKING_BIT_SOL | BACKING_BIT_TAO,
+        has_active_swap,
+        active_swap_backings: if has_active_swap { BACKING_BIT_TAO } else { 0 },
+        busy_until: [42, 43, 0, 0, 0, 0, 0, 0],
+        settling_until: [0, 9, 0, 0, 0, 0, 0, 0],
+        reserved_collateral: [0, 1_100, 0, 0, 0, 0, 0, 0],
+        deactivation_at: 7,
+        successful_swaps: 5,
+        failed_swaps: 2,
+        bump: live.bump,
+    };
+    let mut body = Vec::new();
+    legacy.serialize(&mut body).unwrap();
+    downgrade(svm, miner_pda(m), &MinerState::DISCRIMINATOR, body);
+}
+
+#[test]
+fn test_migrate_miner_state_v14_seeds_the_fee_counters_and_keeps_every_field() {
+    // v17 only appends the counters, so a live swap carries across (no drain), every v14 field is
+    // verbatim, and the seed lands under the config's current vault generation.
+    let (mut svm, admin, _vals, miner) = setup();
+    let m = miner.pubkey();
+    set_vault_generation(&mut svm, 3);
+    downgrade_to_v14(&mut svm, &m, true);
+    let seed = [0, 37_160_837, 0, 0, 0, 0, 0, 0];
+
+    send(&mut svm, migrate_miner_seeded_ix(&admin.pubkey(), &m, seed), &admin.pubkey(), &admin).expect("migrate");
+    let ms = miner_state(&svm, &m);
+    assert_eq!(svm.get_account(&miner_pda(&m)).unwrap().data.len(), 8 + MinerState::INIT_SPACE);
+    assert_eq!(ms.accrued_fee(BACKING_BIT_TAO, 3), 37_160_837);
+    assert_eq!(ms.fee_generation, 3);
+    assert!(ms.swap_on(BACKING_BIT_TAO), "in-flight swap carried, not drained");
+    assert_eq!(ms.busy_slot(BACKING_BIT_SOL), 42);
+    assert_eq!(ms.busy_slot(BACKING_BIT_TAO), 43);
+    assert_eq!(ms.settling_slot(BACKING_BIT_TAO), 9);
+    assert_eq!(ms.reserved(BACKING_BIT_TAO), 1_100);
+    assert_eq!((ms.deactivation_at, ms.successful_swaps, ms.failed_swaps), (7, 5, 2));
+
+    // One-shot: the seed is read only by the crank that grows the account.
+    let reseed = [0, 1, 0, 0, 0, 0, 0, 0];
+    send(&mut svm, migrate_miner_seeded_ix(&admin.pubkey(), &m, reseed), &admin.pubkey(), &admin).expect("again");
+    assert_eq!(miner_state(&svm, &m).accrued_fee(BACKING_BIT_TAO, 3), 37_160_837, "re-run can't rewrite it");
+}
+
+#[test]
+fn test_migrate_miner_state_refuses_a_fee_seed_on_the_local_hub() {
+    let (mut svm, admin, _vals, miner) = setup();
+    let m = miner.pubkey();
+    downgrade_to_v14(&mut svm, &m, false);
+    let err = send(
+        &mut svm,
+        migrate_miner_seeded_ix(&admin.pubkey(), &m, [5, 0, 0, 0, 0, 0, 0, 0]),
+        &admin.pubkey(),
+        &admin,
+    )
+    .expect_err("a sol fee never owes a vault");
+    assert!(err.contains("InvalidAccountForMigration"), "{err}");
 }
 
 #[test]

@@ -1,8 +1,10 @@
-"""Ether unit tests — all offline (RPC layer mocked, signing is pure crypto).
+"""EvmCoin / EvmChain unit tests, run on eth — all offline (RPC layer mocked, signing is pure crypto).
 
-Covers the ETH-specific hazards: EIP-55 casing at every comparison boundary, inclusion≠settlement
-(reverted txs carry intact to/value fields), receipt-unavailable must read as 'unknown' not
-'absent', and the endpoint failover ladder.
+The representative suite for the shared native-coin provider and the EVM transport: casing at
+comparison boundaries, the settled cache, the endpoint failover ladder and absence quorum, send
+dedup, delivery gates and the fulfillment gas floor. The per-row invariants (network guards,
+settlement depth, unknown-not-absent, the signed payload) run over every EVM row in
+tests/test_evm_providers.py.
 """
 
 from typing import Optional
@@ -10,8 +12,8 @@ from typing import Optional
 import pytest
 from eth_account import Account
 
+from allways.assets import asset_spec
 from allways.assets.asset import ProviderUnreachableError
-from allways.assets.eth import Ether
 from allways.assets.evm import EvmRpcError
 from allways.assets.evm_coin import DUST_PROBE_WEI, SWAP_PROBE_WEI, ZERO_ADDRESS
 
@@ -28,7 +30,7 @@ def provider(monkeypatch):
     monkeypatch.setenv('ETH_NETWORK', 'mainnet')
     monkeypatch.delenv('ETH_RPC_URLS', raising=False)
     monkeypatch.delenv('ETH_PRIVATE_KEY', raising=False)
-    return Ether()
+    return asset_spec('eth').cls()
 
 
 def rpc_stub(provider, responses: dict):
@@ -90,127 +92,38 @@ def counting_rpc_stub(provider, responses: dict):
     return calls
 
 
-class TestAddresses:
-    def test_valid_lowercase(self, provider):
-        assert provider.chain.is_valid_address(TEST_ADDR.lower())
-
-    def test_valid_checksummed(self, provider):
-        assert provider.chain.is_valid_address(TEST_ADDR)
-
-    def test_bad_checksum_mixed_case_rejected(self, provider):
-        # Flip one letter's case: mixed-case implies EIP-55, and the checksum no longer verifies.
-        bad = TEST_ADDR.replace('aad', 'aaD')
-        assert not provider.chain.is_valid_address(bad)
-
-    def test_wrong_length_and_junk(self, provider):
-        assert not provider.chain.is_valid_address('0x1234')
-        assert not provider.chain.is_valid_address('')
-        assert not provider.chain.is_valid_address(None)
-        assert not provider.chain.is_valid_address('f39Fd6e51aad88F6F4ce6aB8827279cffFb92266')  # no 0x
-        assert not provider.chain.is_valid_address(TEST_ADDR.lower() + '\n')  # unpayable, yet `$` matched it
-
-    def test_zero_address_rejected(self, provider):
-        # ERC-20 transfer() reverts to the zero address (no blacklist/pause gate catches it), so an
-        # honest miner reserved for it would be forced into a slash. Reject at the format gate.
-        assert not provider.chain.is_valid_address('0x' + '00' * 20)
-        assert not provider.chain.is_valid_address('0x' + '0' * 40)
-
-    def test_normalize_lowercases(self, provider):
-        assert provider.chain.normalize_address(TEST_ADDR) == TEST_ADDR.lower()
-
-
 class TestProofSigning:
-    def test_sign_verify_roundtrip(self, provider):
+    def test_sign_verify_roundtrip_any_address_case(self, provider):
         sig = provider.chain.sign_from_proof(TEST_ADDR, 'proof: abc', key=TEST_KEY)
         assert sig
         assert provider.chain.verify_from_proof(TEST_ADDR, 'proof: abc', sig)
+        assert provider.chain.verify_from_proof(TEST_ADDR.lower(), 'proof: abc', sig)
 
-    def test_verify_is_case_insensitive_on_address(self, provider):
-        sig = provider.chain.sign_from_proof(TEST_ADDR, 'msg', key=TEST_KEY)
-        assert provider.chain.verify_from_proof(TEST_ADDR.lower(), 'msg', sig)
-
-    def test_verify_accepts_unprefixed_signature(self, provider):
-        sig = provider.chain.sign_from_proof(TEST_ADDR, 'msg', key=TEST_KEY)
-        assert provider.chain.verify_from_proof(TEST_ADDR, 'msg', sig.removeprefix('0x'))
-
-    def test_wrong_message_fails(self, provider):
+    def test_wrong_message_address_or_garbage_fails(self, provider):
         sig = provider.chain.sign_from_proof(TEST_ADDR, 'msg', key=TEST_KEY)
         assert not provider.chain.verify_from_proof(TEST_ADDR, 'other', sig)
-
-    def test_wrong_address_fails(self, provider):
-        sig = provider.chain.sign_from_proof(TEST_ADDR, 'msg', key=TEST_KEY)
         assert not provider.chain.verify_from_proof(RECIPIENT, 'msg', sig)
-
-    def test_garbage_signature_fails(self, provider):
         assert not provider.chain.verify_from_proof(TEST_ADDR, 'msg', 'not-hex')
 
     def test_sign_key_address_mismatch_refused(self, provider):
         # Signing for an address the key doesn't derive is a wasted (and misleading) proof.
         assert provider.chain.sign_from_proof(RECIPIENT, 'msg', key=TEST_KEY) == ''
 
-    def test_sign_falls_back_to_env_key(self, provider, monkeypatch):
-        monkeypatch.setenv('ETH_PRIVATE_KEY', TEST_KEY)
-        sig = provider.chain.sign_from_proof(TEST_ADDR, 'msg')
-        assert provider.chain.verify_from_proof(TEST_ADDR, 'msg', sig)
-
 
 class TestCanSendFrom:
-    def test_matches_derived_address_any_case(self, provider, monkeypatch):
+    def test_only_the_keys_own_address_any_case(self, provider, monkeypatch):
+        assert not provider.can_send_from(TEST_ADDR)
         monkeypatch.setenv('ETH_PRIVATE_KEY', TEST_KEY)
         assert provider.can_send_from(TEST_ADDR)
         assert provider.can_send_from(TEST_ADDR.lower())
-
-    def test_no_key_or_wrong_address(self, provider, monkeypatch):
-        assert not provider.can_send_from(TEST_ADDR)
-        monkeypatch.setenv('ETH_PRIVATE_KEY', TEST_KEY)
         assert not provider.can_send_from(RECIPIENT)
 
 
 class TestFetchMatchingTx:
-    def test_not_found(self, provider):
-        rpc_stub(provider, {'eth_getTransactionByHash': None})
-        assert provider.fetch_matching_tx(TX, RECIPIENT, 1) is None
-
-    def test_mined_and_settled(self, provider):
-        rpc_stub(provider, mined_tx_responses())
-        info = provider.fetch_matching_tx(TX, RECIPIENT, 10**18)
-        assert info is not None
-        assert info.amount == 10**18
-        assert info.block_number == 1_000_000
-        assert info.confirmations == 64  # tip 1_000_063 - block 1_000_000 + 1
-        assert info.confirmed  # >= 32
-        assert info.block_time == 100
-        assert info.sender == '0x' + '11' * 20
-
-    def test_recipient_casing_is_irrelevant(self, provider):
-        # RPC returns lowercase; the reservation may hold the EIP-55 form. Must still match.
-        rpc_stub(provider, mined_tx_responses(to=RECIPIENT.lower()))
-        assert provider.fetch_matching_tx(TX, RECIPIENT, 10**18) is not None
-
-    def test_underpayment_rejected(self, provider):
-        rpc_stub(provider, mined_tx_responses())
-        assert provider.fetch_matching_tx(TX, RECIPIENT, 10**18 + 1) is None
-
-    def test_wrong_recipient_rejected(self, provider):
-        rpc_stub(provider, mined_tx_responses())
-        assert provider.fetch_matching_tx(TX, '0x' + '22' * 20, 1) is None
-
     def test_contract_creation_rejected(self, provider):
         # 'to' is null for contract creation — must not crash or match.
         rpc_stub(provider, mined_tx_responses(to=None))
         assert provider.fetch_matching_tx(TX, RECIPIENT, 1) is None
-
-    def test_reverted_tx_rejected(self, provider):
-        # Inclusion is not settlement: a reverted tx still decodes to/value intact.
-        rpc_stub(provider, mined_tx_responses(status='0x0'))
-        assert provider.fetch_matching_tx(TX, RECIPIENT, 10**18) is None
-
-    def test_missing_receipt_is_unknown_not_absent(self, provider):
-        # A mined tx whose receipt can't be read must raise, never read as 'no deposit' —
-        # returning None on a dest leg is a slash-eligible verdict.
-        rpc_stub(provider, mined_tx_responses(receipt=None))
-        with pytest.raises(ProviderUnreachableError):
-            provider.fetch_matching_tx(TX, RECIPIENT, 10**18)
 
     def test_pending_tx_returns_unconfirmed(self, provider):
         responses = mined_tx_responses()
@@ -222,12 +135,6 @@ class TestFetchMatchingTx:
         assert info.confirmations == 0
         assert info.block_number is None
 
-    def test_reorged_block_rejected_when_confirmed(self, provider):
-        responses = mined_tx_responses()
-        responses['eth_getBlockByNumber'] = {'hash': '0x' + 'ee' * 32, 'timestamp': '0x64'}
-        rpc_stub(provider, responses)
-        assert provider.fetch_matching_tx(TX, RECIPIENT, 10**18) is None
-
     def test_rpc_down_raises_unreachable(self, provider):
         def boom(method, params, timeout=15):
             raise RuntimeError('all ETH RPCs failed')
@@ -238,24 +145,8 @@ class TestFetchMatchingTx:
 
 
 class TestSettledCache:
-    """The 12s re-verify path must cost 1 RPC once a tx is settled — receipt/status/timestamp are
-    immutable per block hash, so only the tx fetch (which carries blockHash) repeats. A reorg
-    changes the hash → cache miss → full refetch. Pending/reverted reads are never cached."""
-
-    def test_reverify_skips_receipt_and_block(self, provider):
-        calls = counting_rpc_stub(provider, mined_tx_responses())
-        assert provider.fetch_matching_tx(TX, RECIPIENT, 10**18) is not None
-        assert calls['eth_getTransactionReceipt'] == 1
-        assert calls['eth_getBlockByNumber'] == 1
-        # Second and third verifies: tx fetch only (+ tip, which the base caches under its TTL).
-        info = provider.fetch_matching_tx(TX, RECIPIENT, 10**18)
-        assert provider.fetch_matching_tx(TX, RECIPIENT, 10**18) is not None
-        assert calls['eth_getTransactionByHash'] == 3
-        assert calls['eth_getTransactionReceipt'] == 1
-        assert calls['eth_getBlockByNumber'] == 1
-        # Cached fields still populate the result (freshness floor needs block_time every pass).
-        assert info.block_time == 100
-        assert info.block_number == 1_000_000
+    """A settled read is cached per block hash; a reorg changes the hash → cache miss → full
+    refetch. Pending/reverted reads are never cached."""
 
     def test_reorg_invalidates_cache(self, provider):
         responses = mined_tx_responses()
@@ -281,28 +172,8 @@ class TestSettledCache:
         assert provider.fetch_matching_tx(TX, RECIPIENT, 10**18) is None
         assert TX not in provider._settled_cache
 
-    def test_cache_is_bounded(self, provider):
-        provider._settled_cache['0x' + 'aa' * 32] = {'block_hash': 'x', 'block_number': 1, 'block_time': 1}
-        provider._SETTLED_CACHE_MAX = 2
-        rpc_stub(provider, mined_tx_responses())
-        provider.fetch_matching_tx(TX, RECIPIENT, 10**18)
-        assert len(provider._settled_cache) <= 2
-
 
 class TestVerifyTransactionCasing:
-    def test_checksummed_expected_sender_matches_lowercase_rpc_sender(self, provider):
-        responses = mined_tx_responses()
-        responses['eth_getTransactionByHash'] = dict(
-            responses['eth_getTransactionByHash'], **{'from': TEST_ADDR.lower()}
-        )
-        rpc_stub(provider, responses)
-        info = provider.verify_transaction(TX, RECIPIENT, 10**18, expected_sender=TEST_ADDR)
-        assert info is not None
-
-    def test_sender_mismatch_still_rejected(self, provider):
-        rpc_stub(provider, mined_tx_responses())
-        assert provider.verify_transaction(TX, RECIPIENT, 10**18, expected_sender=TEST_ADDR) is None
-
     def test_self_transfer_rejected_across_casing(self, provider):
         responses = mined_tx_responses()
         responses['eth_getTransactionByHash'] = dict(
@@ -334,13 +205,11 @@ class TestRpcFailover:
         provider.chain.rpc_bases = ['https://a.example', 'https://b.example']
         assert provider.chain.eth_rpc('eth_blockNumber', []) == '0x10'
         assert calls == ['https://a.example', 'https://b.example']
-
-    def test_rpc_error_object_fails_over(self, provider):
+        # A JSON-RPC error object (rate limit, pruned state) is endpoint trouble too.
         responses = iter(
             [self._Resp(body={'error': {'code': -32005, 'message': 'limit'}}), self._Resp(body={'result': '0x1'})]
         )
         provider.chain.http.post = lambda url, json=None, timeout=15: next(responses)
-        provider.chain.rpc_bases = ['https://a.example', 'https://b.example']
         assert provider.chain.eth_rpc('eth_chainId', []) == '0x1'
 
     def test_null_result_is_authoritative_no_failover(self, provider):
@@ -361,14 +230,6 @@ class TestRpcFailover:
         with pytest.raises(Exception):
             provider.chain.eth_rpc('eth_blockNumber', [])
 
-    def test_execution_revert_raises_typed_verdict(self, provider):
-        body = {'error': {'code': 3, 'message': 'execution reverted', 'data': '0x'}}
-        provider.chain.http.post = lambda url, json=None, timeout=15: self._Resp(body=body)
-        provider.chain.rpc_bases = ['https://a.example']
-        with pytest.raises(EvmRpcError) as exc:
-            provider.chain.eth_rpc('eth_estimateGas', [{}])
-        assert exc.value.is_execution_revert
-
     def test_revert_outranks_later_transport_failure(self, provider):
         # A deterministic revert on endpoint A must not be masked by endpoint B being down —
         # else the caller reads "transient" and broadcasts a doomed tx.
@@ -385,11 +246,6 @@ class TestRpcFailover:
 
 
 class TestCheckConnection:
-    def test_chain_id_mismatch_fails(self, provider):
-        rpc_stub(provider, {'eth_chainId': '0xaa36a7', 'eth_blockNumber': '0x10'})  # sepolia id on mainnet cfg
-        with pytest.raises(ConnectionError, match='chain id'):
-            provider.check_connection(require_send=False)
-
     def test_missing_key_fails_when_send_required(self, provider):
         with pytest.raises(ConnectionError, match='ETH_PRIVATE_KEY'):
             provider.check_connection(require_send=True)
@@ -401,15 +257,6 @@ class TestCheckConnection:
 
 
 class TestSendGuards:
-    def test_key_mismatch_refused(self, provider, monkeypatch):
-        monkeypatch.setenv('ETH_PRIVATE_KEY', TEST_KEY)
-        assert provider.send_amount(RECIPIENT, 10**15, from_address=RECIPIENT) is None
-        assert 'key mismatch' in provider.last_send_error
-
-    def test_no_key_refused(self, provider):
-        assert provider.send_amount(RECIPIENT, 10**15) is None
-        assert 'ETH_PRIVATE_KEY' in provider.last_send_error
-
     def test_insufficient_balance_refused(self, provider, monkeypatch):
         monkeypatch.setenv('ETH_PRIVATE_KEY', TEST_KEY)
         rpc_stub(
@@ -449,32 +296,6 @@ class TestFindRecentOutgoing:
         # Casing crossed on purpose: cursor keys and matching go through normalize_address.
         assert provider.find_recent_outgoing(TEST_ADDR, RECIPIENT, 10**18) == matching['hash']
 
-    def test_no_match_advances_cursor(self, provider):
-        def rpc(method, params, timeout=15):
-            if method == 'eth_blockNumber':
-                return hex(100)
-            if method == 'eth_getBlockByNumber':
-                return {'transactions': []}
-            raise AssertionError(method)
-
-        provider.chain.eth_rpc = rpc
-        assert provider.find_recent_outgoing(TEST_ADDR, RECIPIENT, 1) is None
-        key = (TEST_ADDR.lower(), RECIPIENT.lower(), 1)
-        assert provider.scan_cursors[key] == 100
-
-
-class TestNetworkGuard:
-    def test_unknown_network_raises(self, monkeypatch):
-        # A typo ('seplia') silently becoming mainnet would pay real ETH against test swaps.
-        monkeypatch.setenv('ETH_NETWORK', 'seplia')
-        with pytest.raises(ValueError, match='ETH_NETWORK'):
-            Ether()
-
-    def test_unset_defaults_to_mainnet(self, monkeypatch):
-        monkeypatch.delenv('ETH_NETWORK', raising=False)
-        monkeypatch.delenv('ETH_RPC_URLS', raising=False)
-        assert Ether().chain.network == 'mainnet'
-
 
 class TestAbsenceQuorum:
     """'Absent' (the verdict that slashes) requires every endpoint to reachably agree."""
@@ -511,10 +332,6 @@ class TestAbsenceQuorum:
         with pytest.raises(ProviderUnreachableError):
             provider.chain.eth_rpc('eth_getTransactionByHash', [TX], null_needs_quorum=True)
 
-    def test_without_flag_null_returns_immediately(self, provider):
-        self._posts(provider, {'https://a.example': None, 'https://b.example': {'hash': TX}})
-        assert provider.chain.eth_rpc('eth_getTransactionByHash', [TX]) is None
-
 
 class TestBlockTimeUnknownNotStale:
     """An unreadable block-time must raise (SKIP), not read as 'replay' and slash."""
@@ -526,13 +343,6 @@ class TestBlockTimeUnknownNotStale:
             raise RuntimeError('node behind')
 
         responses['eth_getBlockByNumber'] = boom
-        rpc_stub(provider, responses)
-        with pytest.raises(ProviderUnreachableError):
-            provider.fetch_matching_tx(TX, RECIPIENT, 10**18)
-
-    def test_missing_timestamp_raises(self, provider):
-        responses = mined_tx_responses()
-        responses['eth_getBlockByNumber'] = {}
         rpc_stub(provider, responses)
         with pytest.raises(ProviderUnreachableError):
             provider.fetch_matching_tx(TX, RECIPIENT, 10**18)
@@ -608,18 +418,6 @@ class TestSendResilience:
         # Swap A retrying still reuses ITS tx.
         assert provider.send_amount(RECIPIENT, 10**15, dedup_key='swap-a') == (TX, 0)
 
-    def test_settled_prior_broadcast_is_reused(self, provider):
-        provider.broadcasted_txids[TX] = (RECIPIENT.lower(), 10**15, '', 95)
-        rpc_stub(
-            provider,
-            dict(
-                SEND_RESPONSES,
-                eth_getTransactionByHash={'hash': TX, 'blockNumber': hex(96)},
-                eth_getTransactionReceipt={'status': '0x1'},
-            ),
-        )
-        assert provider.send_amount(RECIPIENT, 10**15) == (TX, 0)
-
     def test_reverted_prior_broadcast_clears_and_sends_fresh(self, provider):
         # A reverted tx moved no funds — reusing its hash would hand the validator a
         # rejected leg forever. It must clear and allow a fresh send.
@@ -674,12 +472,6 @@ class TestSendResilience:
         assert provider.send_amount(RECIPIENT, 10**15) is None
         assert 'chain head' in provider.last_send_error
 
-    def test_prior_broadcast_to_other_dest_does_not_interfere(self, provider):
-        provider.broadcasted_txids[TX] = ('0x' + '22' * 20, 10**15, '', 95)
-        rpc_stub(provider, dict(SEND_RESPONSES, eth_sendRawTransaction='0x' + 'cc' * 32))
-        result = provider.send_amount(RECIPIENT, 10**15)
-        assert result == ('0x' + 'cc' * 32, 0)
-
 
 class TestScannerCursorParking:
     """An unreadable block parks the cursor — leaping it would orphan a deposit forever."""
@@ -726,10 +518,6 @@ class TestDeliveryGates:
         assert provider.can_deliver_to(RECIPIENT, 10**15)
         assert 'eth_estimateGas' not in calls
 
-    def test_can_deliver_to_accepting_contract(self, provider):
-        rpc_stub(provider, {'eth_getCode': '0x6080', 'eth_estimateGas': '0xb000'})
-        assert provider.can_deliver_to(RECIPIENT, 10**15)
-
     def test_can_deliver_to_reverting_contract_false(self, provider):
         rpc_stub(provider, {'eth_getCode': '0x6080', 'eth_estimateGas': self._revert})
         assert not provider.can_deliver_to(RECIPIENT, 10**15)
@@ -758,11 +546,6 @@ class TestDeliveryGates:
         # at 108k — the miner would refuse to pay, so the reservation must never start.
         rpc_stub(provider, {'eth_getCode': '0x6080', 'eth_estimateGas': hex(90_000)})
         assert not provider.can_deliver_to(RECIPIENT, 10**15)
-
-    def test_address_refused_eoa_false_without_simulation(self, provider):
-        calls = counting_rpc_stub(provider, {'eth_getCode': '0x'})
-        assert not provider.address_refused(RECIPIENT)
-        assert 'eth_estimateGas' not in calls
 
     def test_address_refused_needs_a_revert_at_the_swap_value_and_at_dust(self, provider):
         # The probe knows no swap amount or sender: it sends from address(0) at both values.
@@ -805,12 +588,6 @@ class TestDeliveryGates:
         rpc_stub(provider, {'eth_getCode': '0x6080', 'eth_estimateGas': '0xb000', unreadable: down})
         with pytest.raises(ConnectionError):
             provider.address_refused(RECIPIENT)
-
-    def test_delivery_refused_code_at_latest(self, provider):
-        rpc_stub(
-            provider, {'eth_blockNumber': hex(1000), 'eth_getCode': lambda p: '0xef0100' if p[1] == 'latest' else '0x'}
-        )
-        assert provider.delivery_refused(RECIPIENT, 0)
 
     def test_delivery_refused_code_only_in_window_history(self, provider):
         # Code was attached mid-window then detached — the historical probe still sees it.
@@ -871,18 +648,6 @@ class TestTransferGas:
         assert provider.send_amount(RECIPIENT, 10**15) == (TX, 0)
         assert broadcast['raw'].removeprefix('0x') == self._signed_raw(100_000).hex().removeprefix('0x')
 
-    def test_eoa_destination_signs_with_fulfillment_gas_floor(self, provider):
-        broadcast = {}
-
-        def capture(params):
-            broadcast['raw'] = params[0]
-            return TX
-
-        responses = dict(SEND_RESPONSES, eth_estimateGas=hex(25_000), eth_sendRawTransaction=capture)
-        rpc_stub(provider, responses)
-        assert provider.send_amount(RECIPIENT, 10**15) == (TX, 0)
-        assert broadcast['raw'].removeprefix('0x') == self._signed_raw(100_000).hex().removeprefix('0x')
-
     def test_contract_destination_balance_preflight_uses_fulfillment_gas_floor(self, provider):
         balance = 10**15 + 30_000 * 3 * 10**9
         responses = dict(SEND_RESPONSES, eth_getCode='0x6080', eth_estimateGas=hex(25_000), eth_getBalance=hex(balance))
@@ -890,9 +655,6 @@ class TestTransferGas:
         assert provider.send_amount(RECIPIENT, 10**15) is None
         assert 'Insufficient' in provider.last_send_error
         assert str(100_000 * 3 * 10**9) in provider.last_send_error
-
-    def test_estimate_sizes_the_send_with_headroom(self, provider):
-        assert self._send(provider, hex(50_000)) is not None  # 60k with headroom, raised to the floor
 
     def test_reverting_destination_broadcasts_floor_gas_evidence(self, provider):
         # P0: a reverting dest no longer bails silently — the miner broadcasts a floor-gas attempt so the

@@ -1,22 +1,16 @@
 import os
-from typing import List, Optional
+from typing import Dict, Hashable, List, Optional, Tuple
 
 import bittensor as bt
 from solders.instruction import AccountMeta, Instruction
 from solders.keypair import Keypair
 from solders.pubkey import Pubkey
 
-from allways.assets.asset import (
-    Asset,
-    MissingTestnetDeployment,
-    ProviderUnreachableError,
-    SendResult,
-    TransactionInfo,
-)
-from allways.assets.sol import LOG_SOL, RESERVED_ACCOUNTS, SolanaChain
+from allways.assets.asset import MissingTestnetDeployment, ProviderUnreachableError, SendResult
+from allways.assets.sol import LOG_SOL, RESERVED_ACCOUNTS, SolanaAsset
 from allways.chains import ChainDefinition
 from allways.constants import CANCEL_REASON_SOL_RESERVED, CANCEL_REASON_SPL_FROZEN
-from allways.solana.rpc import SolanaRpc, TransientRpcError, classify_cluster
+from allways.solana.rpc import classify_cluster
 
 # Legacy SPL Token — Circle's USDC mint lives here, not under Token-2022. Pinned rather than read
 # from the mint so a Token-2022 look-alike mint can never satisfy a USDC leg.
@@ -32,14 +26,6 @@ IX_CREATE_ATA_IDEMPOTENT = 1
 # hold in SOL beside the token balance to deliver to a wallet with no ATA yet.
 ATA_RENT_LAMPORTS = 2_039_280
 TX_FEE_LAMPORTS = 5_000
-
-# Issuer deployments per (asset id, cluster) beside the mainnet mint in the registry row. Keyed by
-# the genesis-hash cluster name — Solana has no {PREFIX}_NETWORK; the cluster is whatever the RPC
-# serves. {ASSET_ID}_TOKEN_MINT overrides either (e2e fakes on localnet, emergency repoint).
-CLUSTER_MINTS = {
-    # Circle-verified USDC on devnet (developers.circle.com). No Circle USDC exists on testnet.
-    'solusdc': {'devnet': '4zMMC9srt5Ri5X14GAgXhaHii3GnPAEERYPJgZJDncDU'},
-}
 
 
 def associated_token_address(owner: str, mint: Pubkey) -> Pubkey:
@@ -93,7 +79,7 @@ def _parsed_info(account: Optional[dict]) -> Optional[dict]:
     return (data.get('parsed') or {}).get('info')
 
 
-class SplToken(Asset):
+class SplToken(SolanaAsset):
     """Swap-leg provider for an SPL token on Solana, bound by a registry row (``host_chain='solana'``,
     ``asset_locator`` = the mainnet mint). The Solana sibling of ``Erc20``.
 
@@ -115,7 +101,7 @@ class SplToken(Asset):
         timeout: int = 30,
     ):
         self._chain_def = chain_def
-        self._chain = SolanaChain(solana_rpc_url, solana_keypair, timeout=timeout)
+        super().__init__(solana_rpc_url, solana_keypair, timeout=timeout)
         # Resolved lazily: the cluster is only knowable from the RPC's genesis hash, and construction
         # must stay offline (create_assets builds every provider before any check).
         self._mint: Optional[Pubkey] = None
@@ -124,24 +110,9 @@ class SplToken(Asset):
     def chain_def(self) -> ChainDefinition:
         return self._chain_def
 
-    @property
-    def rpc(self) -> SolanaRpc:
-        return self.chain.rpc
-
-    @rpc.setter
-    def rpc(self, value) -> None:
-        self.chain.rpc = value
-
-    @property
-    def keypair(self) -> Optional[Keypair]:
-        return self.chain.keypair
-
     def describe(self) -> str:
         mint = str(self._mint) if self._mint is not None else '(mint unresolved)'
         return f'{self.chain_def.name} {mint} via {self.chain.describe()}'
-
-    def can_send_from(self, address: str) -> bool:
-        return self.chain.can_send_from(address)
 
     # --- mint resolution ---
 
@@ -162,7 +133,7 @@ class SplToken(Asset):
         cluster = classify_cluster(self.rpc.get_genesis_hash())
         if cluster == 'mainnet':
             return self.chain_def.asset_locator
-        mint = CLUSTER_MINTS.get(self.chain_def.id, {}).get(cluster)
+        mint = self.chain_def.testnet_locator(cluster)
         if not mint:
             raise MissingTestnetDeployment(f'No {self.chain_def.id} mint on the {cluster} cluster — set {var}')
         return mint
@@ -172,7 +143,9 @@ class SplToken(Asset):
 
     # --- connection ---
 
-    def check_connection(self, require_send: bool = True, **kwargs) -> None:
+    def check_connection(
+        self, require_send: bool = True, checked: Optional[Dict[Hashable, Optional[Exception]]] = None
+    ) -> None:
         if require_send and self.keypair is None:
             raise ConnectionError(f'{self.chain_def.id} send requires a Solana keypair (pass solana_keypair)')
         slot = self.chain.check_rpc()
@@ -206,60 +179,10 @@ class SplToken(Asset):
 
     # --- verification ---
 
-    def fetch_matching_tx(
-        self,
-        tx_hash: str,
-        expected_recipient: str,
-        expected_amount: int,
-        block_hint: int = 0,  # unused — Solana indexes by signature
-        max_scan_blocks: int = 150,  # unused
-    ) -> Optional[TransactionInfo]:
-        if not tx_hash:
-            return None
-        try:
-            tx = self.rpc.get_transaction(tx_hash)
-        except TransientRpcError as e:
-            # SolanaRpc._call never lets requests errors escape — it re-raises them as TransientRpcError
-            # (incl. SolanaRpcUnreachable). Catching the wrong type here fell through to `return None`,
-            # i.e. an RPC outage read as "no such payment" — slash-eligible.
-            raise ProviderUnreachableError(f'Solana RPC unreachable: {e}') from e
-        except Exception as e:
-            bt.logging.error(f'{LOG_SOL} getTransaction failed for {tx_hash[:16]}...: {e}')
-            return None
-        if not tx:
-            bt.logging.debug(f'{LOG_SOL} tx {tx_hash[:16]}... not found')
-            return None
-        return self._build_tx_info(tx_hash, tx, expected_recipient, expected_amount)
+    def _scan_address(self, owner: str) -> str:
+        return str(self.ata(owner))
 
-    def _build_tx_info(
-        self, tx_hash: str, tx: dict, expected_recipient: str, expected_amount: int
-    ) -> Optional[TransactionInfo]:
-        meta = tx.get('meta') or {}
-        if meta.get('err') is not None:
-            bt.logging.debug(f'{LOG_SOL} tx {tx_hash[:16]}... failed on-chain (err={meta.get("err")})')
-            return None
-        keys = self.chain.account_keys(tx, meta)
-        credit, sender = self._token_movement(keys, meta, expected_recipient)
-        if credit is None or credit < expected_amount:
-            bt.logging.warning(
-                f'{LOG_SOL} tx {tx_hash[:16]}... credits {expected_recipient} {credit} {self.chain_def.native_unit} '
-                f'(< {expected_amount} required)'
-            )
-            return None
-        slot = tx.get('slot')
-        confirmations = self.chain.confirmations(slot)
-        return TransactionInfo(
-            tx_hash=tx_hash,
-            confirmed=confirmations >= self.chain_def.min_confirmations,
-            sender=sender,
-            recipient=expected_recipient,
-            amount=credit,
-            block_number=slot,
-            confirmations=confirmations,
-            block_time=tx.get('blockTime'),  # unix seconds, the replay-freshness floor (B2)
-        )
-
-    def _token_movement(self, keys: List[str], meta: dict, recipient: str) -> tuple[Optional[int], str]:
+    def _credit(self, keys: List[str], tx: dict, meta: dict, recipient: str) -> Tuple[Optional[int], str]:
         """(net credit to recipient's ATA in the pinned mint, owner of the debited token account).
         Credit is None when the ATA isn't in the tx. A mined tx whose token-balance arrays are missing
         is 'unknown', never 'no such payment' — that verdict would slash a paying miner."""
@@ -294,35 +217,6 @@ class SplToken(Asset):
         debited.discard('')
         sender = next(iter(debited)) if len(debited) == 1 else ''
         return credit, sender
-
-    def find_recent_outgoing(self, from_addr: str, to_addr: str, amount: int) -> Optional[str]:
-        """Signature of a recent tx from ``from_addr`` crediting ``to_addr``'s ATA >= ``amount``, else
-        None. A hash-finder for deposit detection; ``verify_transaction`` stays the sole verifier."""
-        try:
-            sigs = self.rpc.get_signatures_for_address(str(self.ata(to_addr)), limit=20)
-        except Exception as e:
-            bt.logging.debug(f'{LOG_SOL} find_recent_outgoing signature scan failed: {e}')
-            return None
-        for entry in sigs or []:
-            sig = entry.get('signature')
-            if not sig or entry.get('err') is not None:
-                continue
-            try:
-                tx = self.rpc.get_transaction(sig)
-            except Exception:
-                continue
-            if not tx:
-                continue
-            meta = tx.get('meta') or {}
-            if meta.get('err') is not None:
-                continue
-            try:
-                credit, sender = self._token_movement(self.chain.account_keys(tx, meta), meta, to_addr)
-            except ProviderUnreachableError:
-                continue
-            if sender == from_addr and credit is not None and credit >= amount:
-                return sig
-        return None
 
     # --- balances + delivery gates ---
 
@@ -372,13 +266,10 @@ class SplToken(Asset):
         from_address: Optional[str] = None,
         block_hint: int = 0,
     ) -> Optional[int]:
+        """A reserved key or a frozen destination ATA. Raises on RPC trouble (unknown: the caller waits)."""
         if address in RESERVED_ACCOUNTS:
             return CANCEL_REASON_SOL_RESERVED
-        try:
-            return CANCEL_REASON_SPL_FROZEN if self._frozen(address) else None
-        except Exception as e:
-            bt.logging.warning(f'{LOG_SOL} {self.chain_def.id} cancel_evidence probe failed for {address}: {e}')
-            return None
+        return CANCEL_REASON_SPL_FROZEN if self._frozen(address) else None
 
     # --- send ---
 
@@ -388,33 +279,25 @@ class SplToken(Asset):
         """Deliver ``amount`` (smallest unit) to ``to_address``'s ATA, creating it if missing (miner pays
         the rent). TransferChecked pins mint + decimals on-chain; the broadcast loop and double-send
         guard are the chain's."""
-        if self.keypair is None:
-            bt.logging.error(f'{self.chain_def.id} send_amount called on a read-only provider (no keypair)')
-            return None
-        me = self.keypair.pubkey()
-        if from_address is not None and str(me) != str(from_address):
-            bt.logging.error(f'{LOG_SOL} committed sender {from_address} != wallet {me} — not sending')
-            return None
-
-        want = (str(to_address), int(amount), dedup_key or '')
         what = f'{amount} {self.chain_def.native_unit} to {to_address}'
-        decided, result = self.chain.resolve_prior_send(want, what)
+        decided, result, want = self._start_send(to_address, amount, from_address, dedup_key, what)
         if decided:
             return result
 
         # Solvency before broadcast: the token leg AND the SOL that carries it (fee, plus rent for a
         # destination with no ATA yet) — a token-rich, SOL-poor signer must refuse, not fail on-chain.
+        me = self.keypair.pubkey()
         try:
             mint = self.mint
             held = self.get_balance(str(me))
             if held < int(amount):
-                bt.logging.error(f'{LOG_SOL} {self.chain_def.id} balance {held} < {amount} — not sending')
+                self._send_error(f'{LOG_SOL} {self.chain_def.id} balance {held} < {amount} — not sending')
                 return None
             dst_account = self._token_account(to_address)
             lamports_needed = TX_FEE_LAMPORTS + (0 if dst_account else ATA_RENT_LAMPORTS)
             sol = int(self.rpc.get_balance(str(me)))
             if sol < lamports_needed:
-                bt.logging.error(
+                self._send_error(
                     f'{LOG_SOL} signer holds {sol} lamports < {lamports_needed} needed for fee+rent — not sending'
                 )
                 return None
@@ -426,6 +309,6 @@ class SplToken(Asset):
                 ),
             ]
         except Exception as e:
-            bt.logging.error(f'{LOG_SOL} {self.chain_def.id} send_amount build failed: {e}')
+            self._send_error(f'{LOG_SOL} {self.chain_def.id} send_amount build failed: {e}')
             return None
-        return self.chain.broadcast(ixs, want, what)
+        return self._broadcast(ixs, want, what)

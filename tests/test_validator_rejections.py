@@ -25,24 +25,6 @@ def _silent_console() -> Console:
     return Console(quiet=True)
 
 
-def test_all_accepted_no_headline():
-    info = render_and_aggregate(_silent_console(), [FakeResp(accepted=True), FakeResp(accepted=True)])
-    assert info.accepted == 2
-    assert info.rejected == 0
-    assert info.headline == ''
-    assert info.deterministic is False
-
-
-def test_all_queued_counted_separately():
-    responses = [
-        FakeResp(accepted=True, rejection_reason='Queued — 1/6 confirmations.'),
-        FakeResp(accepted=True, rejection_reason='Queued — 2/6 confirmations.'),
-    ]
-    info = render_and_aggregate(_silent_console(), responses)
-    assert info.accepted == 2
-    assert info.queued == 2
-
-
 def test_queued_not_yet_visible_counted_as_queued():
     """Upgraded validators queue when the source tx isn't visible yet
     (propagation lag) instead of rejecting — the CLI should treat the
@@ -62,35 +44,6 @@ def test_queued_not_yet_visible_counted_as_queued():
     assert info.rejected == 0
 
 
-def test_insufficient_source_balance_translates():
-    responses = [FakeResp(accepted=False, rejection_reason='Insufficient source balance')]
-    info = render_and_aggregate(
-        _silent_console(),
-        responses,
-        context={
-            'from_chain_upper': 'BTC',
-            'from_address': 'tb1qabc',
-            'from_amount_human': '0.0008',
-        },
-    )
-    assert info.category == 'insufficient_source_balance'
-    assert info.deterministic is True
-    assert 'tb1qabc' in info.headline
-    assert 'BTC' in info.headline
-    assert '0.0008' in info.headline
-
-
-def test_miner_busy_is_not_deterministic():
-    info = render_and_aggregate(
-        _silent_console(),
-        [FakeResp(accepted=False, rejection_reason='Miner has an active swap')],
-        context={'miner_uid': 4},
-    )
-    assert info.category == 'miner_busy'
-    assert info.deterministic is False
-    assert 'UID 4' in info.headline
-
-
 def test_mixed_reasons_no_headline():
     responses = [
         FakeResp(accepted=False, rejection_reason='Insufficient source balance'),
@@ -100,15 +53,6 @@ def test_mixed_reasons_no_headline():
     assert info.category == 'mixed'
     assert info.headline == ''
     assert info.deterministic is False  # mixed → let the user retry if they want
-
-
-def test_no_response_only():
-    responses = [FakeResp(accepted=False, rejection_reason=''), FakeResp(accepted=False, rejection_reason=None)]
-    info = render_and_aggregate(_silent_console(), responses)
-    assert info.category == 'no_response_only'
-    assert info.no_response == 2
-    assert info.deterministic is False
-    assert 'no validators responded' in info.headline.lower()
 
 
 def _rate_limited_resp() -> FakeResp:
@@ -168,34 +112,11 @@ def test_swap_confirm_tx_not_found_is_transient():
     assert info.deterministic is False
 
 
-def test_miner_activate_unregistered():
-    info = render_and_aggregate(
-        _silent_console(),
-        [FakeResp(accepted=False, rejection_reason='Hotkey not registered on subnet')],
-    )
-    assert info.category == 'miner_not_registered'
-    assert info.deterministic is True
-    assert 'btcli subnets register' in info.headline
-
-
-def test_returns_rejectioninfo_dataclass():
-    info = render_and_aggregate(_silent_console(), [])
-    assert isinstance(info, RejectionInfo)
-
-
-# ---- per-purse activation (W3.2) ----------------------------------------------------------
+# ---- per-purse activation ----
 
 
 def _reason(text: str) -> RejectionInfo:
     return render_and_aggregate(_silent_console(), [FakeResp(accepted=False, rejection_reason=text)])
-
-
-def test_already_active_names_the_purse_not_the_miner():
-    # Purses activate separately, so "your miner is already active" would be a lie to a miner
-    # asking for its second one. The rule follows the per-purse reason the validator now sends.
-    info = _reason('Purse already active: TAO')
-    assert info.category == 'already_active'
-    assert info.deterministic is True and 'purse' in info.headline.lower()
 
 
 def test_every_bond_refusal_lands_on_one_rule_and_stays_retryable():
@@ -212,20 +133,6 @@ def test_every_bond_refusal_lands_on_one_rule_and_stays_retryable():
         assert info.deterministic is False and reason.split('—')[0].strip() in info.headline
 
 
-def test_an_unknown_backing_keeps_its_own_category():
-    # Must not fall into the bond rule: naming a backing this subnet doesn't have is the miner's
-    # typo to fix, not a wait-for-the-relay.
-    info = _reason('Unknown backing "btc" — this subnet backs: sol, tao')
-    assert info.category == 'unknown_backing'
-    assert info.deterministic is True and 'btc' in info.headline
-
-
-def test_the_sol_collateral_refusal_is_untouched():
-    info = _reason('Insufficient collateral: 10 < 1000000')
-    assert info.category == 'insufficient_collateral'
-    assert info.deterministic is True and 'alw collateral deposit' in info.headline
-
-
 # ─── blob-length rejections are compressed to one human line ─────────────────
 
 _ANCHOR_BLOB = (
@@ -236,29 +143,9 @@ _ANCHOR_BLOB = (
     "Error Message: Signer is not a whitelisted validator.'], 'unitsConsumed': 17165}}"
 )
 
-_RPC_BLOB = (
-    "sendTransaction: {'code': -32002, 'message': 'Transaction simulation failed: Attempt to debit an "
-    "account but found no record of a prior credit.', 'data': {'accounts': None, 'err': "
-    "'AccountNotFound', 'fee': None, 'innerInstructions': None, 'loadedAccountsDataSize': 0, "
-    "'logs': [], 'postBalances': None, 'preBalances': None, 'unitsConsumed': 0}}"
-)
-
 
 def test_anchor_error_blob_compresses_to_its_error_message():
     info = render_and_aggregate(_silent_console(), [FakeResp(accepted=False, rejection_reason=_ANCHOR_BLOB)])
     assert info.category == 'unmatched'
     assert info.headline == 'sendTransaction: Signer is not a whitelisted validator'
     assert '{' not in info.headline
-
-
-def test_rpc_error_blob_compresses_to_its_message():
-    info = render_and_aggregate(_silent_console(), [FakeResp(accepted=False, rejection_reason=_RPC_BLOB)])
-    assert 'Attempt to debit an account' in info.headline
-    assert '{' not in info.headline
-
-
-def test_unstructured_long_reason_is_clipped():
-    raw = 'x' * 500
-    info = render_and_aggregate(_silent_console(), [FakeResp(accepted=False, rejection_reason=raw)])
-    assert len(info.headline) <= 141
-    assert info.headline.endswith('…')

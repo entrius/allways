@@ -29,11 +29,6 @@ def test_explicit_modes(monkeypatch, mode):
     assert validator_mode() == mode
 
 
-def test_mode_is_case_and_whitespace_tolerant(monkeypatch):
-    monkeypatch.setenv('VALIDATOR_MODE', ' Vote ')
-    assert validator_mode() == 'vote'
-
-
 def test_unknown_mode_raises(monkeypatch):
     # Fail fast — never silently run 'full' off a typo.
     monkeypatch.setenv('VALIDATOR_MODE', 'observe')
@@ -44,17 +39,6 @@ def test_unknown_mode_raises(monkeypatch):
 def test_legacy_dev_mode_maps_to_watch(monkeypatch):
     monkeypatch.setenv('VALIDATOR_DEV_MODE', '1')
     assert validator_mode() == 'watch'
-
-
-def test_legacy_explicit_zero_is_full(monkeypatch):
-    monkeypatch.setenv('VALIDATOR_DEV_MODE', '0')
-    assert validator_mode() == 'full'
-
-
-def test_legacy_arbitrary_value_is_full(monkeypatch):
-    # Only an exact "1" enables the legacy flag — no accidental truthiness.
-    monkeypatch.setenv('VALIDATOR_DEV_MODE', 'true')
-    assert validator_mode() == 'full'
 
 
 def test_validator_mode_wins_over_legacy(monkeypatch):

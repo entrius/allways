@@ -6,8 +6,8 @@ use {
         AccountDeserialize, AccountSerialize, InstructionData, Space, ToAccountMetas,
     },
     allways_swap_manager::constants::{
-        discounted_reservation_fee, ADDR_LOCK_FEE_LAMPORTS, FULFILL_GRACE_SOL_SECS, MAX_TOTAL_EXTENSION_SECS,
-        POOL_WINDOW_SECS, RESERVATION_FEE_LAMPORTS,
+        discounted_reservation_fee, ADDR_LOCK_FEE_LAMPORTS, BACKING_BIT_SOL, BACKING_BIT_TAO, FULFILL_GRACE_SOL_SECS,
+        MAX_TOTAL_EXTENSION_SECS, POOL_WINDOW_SECS, RESERVATION_FEE_LAMPORTS,
     },
     allways_swap_manager::state::{MinerDirectionStats, MinerState, Pool, Reservation, Swap, SwapStatus, Treasury},
     litesvm::LiteSVM,
@@ -980,6 +980,43 @@ fn test_fulfill_confirm_fee_and_invariant() {
         "confirm vote round closed on quorum"
     );
     assert!(invariant_holds(&svm, &miner.pubkey(), rent), "collateral-vault invariant after fee");
+    assert_eq!(
+        miner_state(&svm, &miner.pubkey()).accrued_fees,
+        [0; 8],
+        "a locally-settled fee already moved: it owes no vault"
+    );
+}
+
+#[test]
+fn test_off_chain_backed_confirm_accrues_the_fee_counter_and_moves_nothing() {
+    // A TAO-backed fee is owed to the bond vault, so Solana moves no lamports and records the
+    // obligation on the miner's counter instead: what the vault true-up settles against.
+    let (mut svm, vals, miner, rent) = setup();
+    let m = miner.pubkey();
+    do_initiate(&mut svm, &vals, &m, "srctx1");
+    send(&mut svm, fulfill_ix(&m, "srctx1"), &m, &miner).expect("fulfill");
+    let key = swap_key("srctx1");
+    let mut swap = read_swap(&svm, &key);
+    swap.collateral_chain = "tao".to_string();
+    let mut buf = Vec::new();
+    swap.try_serialize(&mut buf).unwrap();
+    let old = svm.get_account(&swap_pda(&key)).unwrap();
+    buf.resize(old.data.len(), 0);
+    svm.set_account(swap_pda(&key), Account { data: buf, ..old }).unwrap();
+
+    let coll_before = miner_state(&svm, &m).collateral;
+    let treasury_before = treasury_total(&svm);
+    send(&mut svm, confirm_ix(&vals[0].pubkey(), &m, "srctx1"), &vals[0].pubkey(), &vals[0]).expect("c0");
+    assert_eq!(miner_state(&svm, &m).accrued_fee(BACKING_BIT_TAO, 0), 0, "nothing accrues before quorum");
+    send(&mut svm, confirm_ix(&vals[1].pubkey(), &m, "srctx1"), &vals[1].pubkey(), &vals[1]).expect("c1");
+
+    let ms = miner_state(&svm, &m);
+    let fee = SOL_AMOUNT / 100; // sized off collateral_amount, in the backing's units
+    assert_eq!(ms.accrued_fee(BACKING_BIT_TAO, 0), fee, "the fee is on the counter");
+    assert_eq!(ms.accrued_fee(BACKING_BIT_SOL, 0), 0);
+    assert_eq!(ms.collateral, coll_before, "no local collateral taken");
+    assert_eq!(treasury_total(&svm), treasury_before, "no lamports reached the treasury");
+    assert!(invariant_holds(&svm, &m, rent));
 }
 
 fn confirm_only(svm: &mut LiteSVM, v: &Keypair, miner: &Pubkey, tx: &str) -> Result<(), String> {
@@ -1253,6 +1290,29 @@ fn test_finalize_refuses_a_reservation_already_consumed_by_initiate() {
         0,
         "reservation stays consumed — no second live hold on a miner with an active swap"
     );
+}
+
+#[test]
+fn test_a_completed_swap_inside_the_finalize_window_does_not_park_the_hub() {
+    // A swap that completes inside its seat's finalize window must not leave the consumed reservation
+    // looking like a drawn-but-unfilled seat (reserved_until == 0, finalize_by ahead).
+    let (mut svm, _admin, vals, miner, _rr) = setup_full(COLLATERAL);
+    let finalize_by = reservation_acct(&svm, &miner.pubkey()).finalize_by;
+    set_clock(&mut svm, finalize_by - 60);
+
+    do_initiate(&mut svm, &vals, &miner.pubkey(), "srctx1");
+    let mid_swap = send(&mut svm, open_ix(&vals[1].pubkey(), &miner.pubkey()), &vals[1].pubkey(), &vals[1]);
+    assert!(mid_swap.is_err(), "a hub with a swap in flight still takes no new entry");
+
+    send(&mut svm, fulfill_ix(&miner.pubkey(), "srctx1"), &miner.pubkey(), &miner).expect("fulfill");
+    send(&mut svm, confirm_ix(&vals[0].pubkey(), &miner.pubkey(), "srctx1"), &vals[0].pubkey(), &vals[0]).expect("c0");
+    send(&mut svm, confirm_ix(&vals[1].pubkey(), &miner.pubkey(), "srctx1"), &vals[1].pubkey(), &vals[1]).expect("c1");
+    assert!(!miner_state(&svm, &miner.pubkey()).has_active_swap, "swap completed");
+    let now = svm.get_sysvar::<Clock>().unix_timestamp;
+    assert!(now <= reservation_acct(&svm, &miner.pubkey()).finalize_by, "still inside the finalize window");
+
+    send(&mut svm, open_ix(&vals[1].pubkey(), &miner.pubkey()), &vals[1].pubkey(), &vals[1])
+        .expect("the hub takes a new entry as soon as its swap completed");
 }
 
 fn reservation_acct(svm: &LiteSVM, miner: &Pubkey) -> Reservation {

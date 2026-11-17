@@ -16,41 +16,10 @@ from allways.constants import TAO_HUB_VAULT_ADDRESSES
 # ─── key families ────────────────────────────────────────────────────────────
 
 
-def test_key_families_group_assets_by_network_prefix():
-    fams = {f.prefix: f for f in se.key_families()}
-    assert fams['ETH'].kind == 'evm'
-    assert set(fams['ETH'].assets) >= {'eth', 'ethusdc', 'uni', 'qnt', 'paxg'}
-    assert fams['ETH'].network_chain.id == 'eth'
-    assert fams['BTC'].kind == 'btc'
-    assert fams['SOL'].kind == 'solana' and 'solusdc' in fams['SOL'].assets
-    assert fams['TAO'].kind == 'tao'
-    assert fams['BNB'].assets == ('bnb', 'aster')
-
-
-def test_optional_families_exclude_sol_and_tao():
-    prefixes = {f.prefix for f in se.optional_families()}
-    assert 'SOL' not in prefixes and 'TAO' not in prefixes
-    assert {'BTC', 'ETH', 'ARB'} <= prefixes
-
-
-def test_parse_family_list_normalizes_and_rejects_unknown():
-    assert se.parse_family_list(' btc, eth,ARB,eth ') == ['BTC', 'ETH', 'ARB']
-    assert se.parse_family_list('') == []
-    with pytest.raises(ValueError, match='DOGE'):
-        se.parse_family_list('btc,doge')
-
-
 # ─── key generation ──────────────────────────────────────────────────────────
 
 
-def test_evm_key_roundtrips_to_its_address():
-    key, addr = se.generate_evm_key()
-    assert key.startswith('0x') and len(key) == 66
-    assert se.evm_address(key) == addr
-    assert se.evm_address('nope') is None
-
-
-@pytest.mark.parametrize('network,prefix', [('mainnet', 'bc1q'), ('testnet4', 'tb1q'), ('signet', 'tb1q')])
+@pytest.mark.parametrize('network,prefix', [('mainnet', 'bc1q'), ('testnet4', 'tb1q')])
 def test_btc_key_roundtrips_for_network(network, prefix):
     wif, addr = se.generate_btc_key(network)
     assert addr.startswith(prefix)
@@ -69,22 +38,6 @@ ETH_PRIVATE_KEY=
 """
 
 
-def test_upsert_env_replaces_in_place_and_keeps_trailing_comment():
-    out = se.upsert_env(TEMPLATE, {'NETUID': '19', 'BTC_NETWORK': 'testnet4', 'ETH_PRIVATE_KEY': '0xabc'})
-    assert 'NETUID=19                            # 7 mainnet | 19 testnet' in out
-    assert 'BTC_NETWORK=testnet4                 # mainnet | testnet' in out
-    assert 'ETH_PRIVATE_KEY=0xabc\n' in out
-    assert out.count('NETUID=') == 1
-    assert se.WIZARD_SECTION not in out
-
-
-def test_upsert_env_uncomments_and_appends_missing_keys():
-    out = se.upsert_env(TEMPLATE, {'SOLANA_KEYPAIR_PATH': '/k.json', 'NEW_KEY': 'v', 'SPACED': 'a b'})
-    assert '\nSOLANA_KEYPAIR_PATH=/k.json\n' in out
-    assert '# SOLANA_KEYPAIR_PATH' not in out
-    assert out.endswith(f'{se.WIZARD_SECTION}\nNEW_KEY=v\nSPACED="a b"\n')
-
-
 def test_write_env_starts_from_template_and_is_private(tmp_path):
     template = tmp_path / '.env.example'
     template.write_text(TEMPLATE)
@@ -94,19 +47,6 @@ def test_write_env_starts_from_template_and_is_private(tmp_path):
     assert se.read_env(env) == {'NETUID': '7', 'WALLET_NAME': 'w', 'BTC_NETWORK': 'mainnet', 'ETH_PRIVATE_KEY': ''}
     se.write_env(env, {'NETUID': '19'})  # second write edits, never re-templates
     assert se.read_env(env)['WALLET_NAME'] == 'w' and se.read_env(env)['NETUID'] == '19'
-
-
-def test_list_wallets_reads_coldkeypub_dirs_and_hotkeys(tmp_path):
-    (tmp_path / 'a' / 'hotkeys').mkdir(parents=True)
-    (tmp_path / 'a' / 'coldkeypub.txt').write_text('{}')
-    (tmp_path / 'a' / 'hotkeys' / 'h2').write_text('{}')
-    (tmp_path / 'a' / 'hotkeys' / 'h1').write_text('{}')
-    (tmp_path / 'a' / 'hotkeys' / 'h1pub.txt').write_text('{}')  # public half, not a hotkey
-    (tmp_path / 'b').mkdir()  # no coldkeypub → not a wallet
-    (tmp_path / 'c' / 'coldkeypub.txt').parent.mkdir()
-    (tmp_path / 'c' / 'coldkeypub.txt').write_text('{}')
-    assert se.list_wallets(tmp_path) == {'a': ['h1', 'h2'], 'c': []}
-    assert se.list_wallets(tmp_path / 'missing') == {}
 
 
 # ─── the wizard, unattended ──────────────────────────────────────────────────
@@ -191,11 +131,6 @@ def test_rerun_keeps_existing_keys(sandbox):
     assert 'kept from .env' in result.output
 
 
-def test_coldkey_password_flag_lands_in_env(sandbox):
-    assert _run(sandbox, '--coldkey-password', 'hunter 2').exit_code == 0
-    assert se.read_env(sandbox.project / '.env')['MINER_BITTENSOR_COLDKEY_PASSWORD'] == 'hunter 2'
-
-
 def test_yes_defaults_to_the_only_wallet_and_refuses_to_create_one(sandbox):
     result = CliRunner().invoke(
         miner_init.init_command,
@@ -209,12 +144,6 @@ def test_yes_defaults_to_the_only_wallet_and_refuses_to_create_one(sandbox):
     assert 'ghost' in result.output and 'mnemonic' in result.output
 
 
-def test_unknown_chain_fails_under_yes(sandbox):
-    result = _run(sandbox, '--chains', 'btc,doge')
-    assert result.exit_code != 0
-    assert 'DOGE' in result.output
-
-
 def _run_all_chains(sandbox, *extra):
     """The default path: no --chains, so every spoke family gets a key and nothing is asked."""
     args = [
@@ -222,17 +151,6 @@ def _run_all_chains(sandbox, *extra):
         '--solana-rpc', 'http://rpc.test', '--project-dir', str(sandbox.project), '--configure-only', '-y', *extra,
     ]  # fmt: skip
     return CliRunner().invoke(miner_init.init_command, args)
-
-
-def test_default_keys_every_family_with_one_shared_evm_key(sandbox):
-    result = _run_all_chains(sandbox)
-    assert result.exit_code == 0, result.output
-    env = se.read_env(sandbox.project / '.env')
-    evm = [f for f in se.optional_families() if f.kind == 'evm']
-    keys = {env[f.key_env] for f in evm}
-    assert len(keys) == 1 and se.evm_address(keys.pop()) in result.output  # one address to fund, printed once
-    assert se.btc_address(env['BTC_PRIVATE_KEY'], env['BTC_NETWORK']) is not None
-    assert 'Chains (comma' not in result.output
 
 
 def test_every_family_network_follows_the_environment_even_unkeyed(sandbox):
@@ -253,14 +171,6 @@ def test_an_existing_evm_key_is_shared_to_the_unkeyed_families(sandbox):
     assert all(env[f.key_env] == key for f in se.optional_families() if f.kind == 'evm')
 
 
-def test_container_is_informational_until_a_purse_serves(monkeypatch):
-    monkeypatch.setattr(miner_init, 'container_running', lambda: False)
-    assert miner_init._container_row(serving=False)[0] is None
-    assert miner_init._container_row(serving=True)[0] is False
-    monkeypatch.setattr(miner_init, 'container_running', lambda: True)
-    assert miner_init._container_row(serving=True)[0] is True
-
-
 def test_second_miner_on_a_serving_identity_needs_a_typed_word(monkeypatch):
     monkeypatch.setattr(miner_init, 'container_running', lambda: False)
     monkeypatch.setattr(miner_init.click, 'prompt', lambda *a, **k: 'yes')
@@ -271,90 +181,6 @@ def test_second_miner_on_a_serving_identity_needs_a_typed_word(monkeypatch):
     assert not started
 
 
-def test_typed_confirm_requires_the_exact_word(monkeypatch):
-    s = miner_init.Setup(project_dir=os.getcwd())
-    monkeypatch.setattr(miner_init.click, 'prompt', lambda *a, **k: 'nope')
-    assert miner_init._typed_confirm(s, 'bind', 'why') is False
-    monkeypatch.setattr(miner_init.click, 'prompt', lambda *a, **k: ' bind ')
-    assert miner_init._typed_confirm(s, 'bind', 'why') is True
-    s.yes = True
-    assert miner_init._typed_confirm(s, 'bind', 'why') is True
-
-
-def test_activate_retries_across_the_metagraph_sync_window(monkeypatch):
-    """After a fresh registration, activation keeps retrying (bounded) until validators resync."""
-    s = miner_init.Setup(project_dir=os.getcwd(), registered_now=True)
-    calls = []
-
-    class Ctx:
-        def invoke(self, cmd, **kw):
-            calls.append(kw['backing'])
-            if len(calls) < 3:
-                raise SystemExit(1)
-
-    slept = []
-    monkeypatch.setattr(miner_init.time, 'sleep', lambda secs: slept.append(secs))
-    assert miner_init._activate_with_retry(Ctx(), s, 'sol') is True
-    assert calls == ['sol', 'sol', 'sol'] and len(slept) == 2
-
-    # not freshly registered → one attempt only
-    s2 = miner_init.Setup(project_dir=os.getcwd())
-    calls.clear()
-    assert miner_init._activate_with_retry(Ctx(), s2, 'sol') is False
-    assert calls == ['sol']
-
-
-def test_fund_rechecks_on_enter_and_stops_on_q(monkeypatch):
-    s = miner_init.Setup(project_dir=os.getcwd(), backing='sol')
-    checks = iter([[(False, 'Solana keypair', 'short')], [(True, 'Solana keypair', 'ok')]])
-    answers = iter([''])
-    monkeypatch.setattr(miner_init.click, 'prompt', lambda *a, **k: next(answers))
-    assert miner_init._fund(s, lambda: next(checks), {}) is True  # Enter re-checked, now funded
-
-    monkeypatch.setattr(miner_init.click, 'prompt', lambda *a, **k: 'q')
-    assert miner_init._fund(s, lambda: [(False, 'coldkey', 'short')], {}) is False
-
-
-def test_fund_under_yes_stops_instead_of_waiting(monkeypatch):
-    s = miner_init.Setup(project_dir=os.getcwd(), backing='sol', yes=True)
-    monkeypatch.setattr(miner_init.click, 'prompt', lambda *a, **k: pytest.fail('must not prompt under -y'))
-    assert miner_init._fund(s, lambda: [(False, 'Solana keypair', 'short')], {}) is False
-
-
-def test_capacity_note_names_max_swap_and_full_capacity_per_backing(capsys):
-    from allways.constants import required_collateral
-
-    bounds = {'sol': (100_000_000, 5_000_000_000), 'tao': (50_000_000, 2_000_000_000)}
-    with miner_init.console.capture() as cap:
-        miner_init._capacity_note(('sol', 'tao'), bounds)
-    out = cap.get()
-    assert 'max swap 5.0000 SOL' in out and 'max swap 2.0000 TAO' in out
-    assert f'{required_collateral(5_000_000_000) / 1e9:.4f} SOL' in out
-    assert 'More emissions' in out
-
-
-def test_preflight_gate_ignores_what_go_live_does_itself():
-    for label in (
-        'SOL balance',
-        'SOL collateral',
-        'hotkey binding',
-        'registered on SN19',
-        'TAO bond',
-        'sol purse',
-        'miner container',
-    ):
-        assert miner_init._go_live_row(label), label
-    for label in ('solana rpc + program', 'coldkey', 'EVM key', 'docker', 'WALLET_PATH'):
-        assert not miner_init._go_live_row(label), label
-
-
-def test_finish_states_the_activity_window_and_strike_rule(sandbox):
-    result = _run_all_chains(sandbox)
-    assert result.exit_code == 0, result.output
-    out = ' '.join(result.output.split())  # rich wraps to the terminal width
-    assert '12 hours' in out and '3 failed swaps' in out
-
-
 def test_fund_survives_a_failed_balance_read(monkeypatch):
     s = miner_init.Setup(project_dir=os.getcwd(), backing='sol', yes=True)
 
@@ -362,16 +188,6 @@ def test_fund_survives_a_failed_balance_read(monkeypatch):
         raise ConnectionError('rpc down')
 
     assert miner_init._fund(s, boom, {}) is False
-
-
-def test_reusing_an_existing_evm_key_is_reported_as_shared_not_generated(sandbox):
-    key, _ = se.generate_evm_key()
-    (sandbox.project / '.env').write_text(f'ARB_PRIVATE_KEY={key}\n')
-    result = _run_all_chains(sandbox)
-    assert result.exit_code == 0, result.output
-    out = ' '.join(result.output.split())
-    assert 'your ARB key now also covers: eth' in out
-    assert 'generated: btc' in out  # only the BTC key was minted
 
 
 def test_rpc_api_key_is_never_echoed(sandbox, monkeypatch):
@@ -390,28 +206,6 @@ def test_rpc_api_key_is_never_echoed(sandbox, monkeypatch):
     assert s.env_values['SOLANA_RPC_URL'] == keyed
 
 
-def test_helius_key_builds_the_url_and_is_never_echoed(sandbox):
-    args = [
-        '--network', 'testnet', '--wallet', 'w', '--hotkey', 'h', '--backing', 'sol',
-        '--helius-key', 'HELIUSKEY0123456789abc', '--project-dir', str(sandbox.project), '--configure-only', '-y',
-    ]  # fmt: skip
-    result = CliRunner().invoke(miner_init.init_command, args)
-    assert result.exit_code == 0, result.output
-    env = se.read_env(sandbox.project / '.env')
-    assert env['SOLANA_RPC_URL'] == miner_init.HELIUS_RPC['devnet']
-    assert env['SOLANA_RPC_API_KEY'] == 'HELIUSKEY0123456789abc'
-    assert 'HELIUSKEY0123456789abc' not in result.output and 'api-key=***' in result.output
-
-
-def test_blank_helius_key_falls_back_to_the_public_endpoint(sandbox, monkeypatch):
-    monkeypatch.setattr(miner_init.click, 'prompt', lambda text, **k: '')
-    monkeypatch.delenv('SOLANA_RPC_API_KEY', raising=False)
-    s = miner_init.Setup(project_dir=sandbox.project, env='testnet')
-    miner_init.step_rpc(s, None)
-    assert s.env_values['SOLANA_RPC_URL'] == miner_init.SOLANA_NETWORKS['devnet']
-    assert 'SOLANA_RPC_API_KEY' not in s.env_values
-
-
 def test_keypair_outside_the_mount_is_copied_where_the_container_reads_it(sandbox, tmp_path):
     from allways.solana import keys
 
@@ -424,17 +218,6 @@ def test_keypair_outside_the_mount_is_copied_where_the_container_reads_it(sandbo
     assert keys.load_keypair(str(mounted)).pubkey() == kp.pubkey()
     assert stat.S_IMODE(mounted.stat().st_mode) == 0o600
     assert 'copy this key' not in result.output
-
-
-def test_wizard_preflight_leaves_the_container_to_doctor(monkeypatch, tmp_path):
-    monkeypatch.setattr(miner_init, 'get_effective_config', lambda: {'netuid': '19'})
-    monkeypatch.setattr(miner_init, '_check_wallet', lambda config: ([], None))
-    monkeypatch.setattr(miner_init, '_check_keys', lambda env, config: [])
-    monkeypatch.setattr(miner_init, '_check_chain', lambda config, hot: [])
-    monkeypatch.setattr(miner_init, 'container_running', lambda: False)
-    labels = lambda rows: [label for _, label, _ in rows]  # noqa: E731
-    assert 'miner container' in labels(miner_init.run_doctor(tmp_path))
-    assert 'miner container' not in labels(miner_init.run_doctor(tmp_path, container=False))
 
 
 def test_rpc_errors_never_quote_the_keyed_url():

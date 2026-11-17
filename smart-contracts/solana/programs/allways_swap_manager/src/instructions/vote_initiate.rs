@@ -32,7 +32,7 @@ pub struct VoteInitiate<'info> {
         bump = miner_state.bump,
         constraint = miner_state.miner == miner.key(),
     )]
-    pub miner_state: Account<'info, MinerState>,
+    pub miner_state: Box<Account<'info, MinerState>>,
 
     #[account(
         mut,

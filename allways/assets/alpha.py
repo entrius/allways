@@ -1,9 +1,9 @@
-from typing import Any, Dict, List, Optional, Tuple
+from typing import Any, Dict, Hashable, List, Optional, Tuple
 
 import bittensor as bt
 
 from allways.assets.asset import Asset, ProviderUnreachableError, SendResult, TransactionInfo
-from allways.assets.tao import Broadcasts, Decoder, Settler, Tao, Transfer
+from allways.assets.tao import Broadcasts, Decoder, Settler, TaoChain, Transfer
 from allways.chains import ChainDefinition
 from allways.constants import CANCEL_REASON_ALPHA_STAKE_REFUSED
 
@@ -35,6 +35,9 @@ MAX_THIRD_PARTY_STAKING_HOTKEYS = 128
 # already stakes to or owns, failing any other with this module error.
 REJECT_STAKING_HOTKEY_GROWTH = 1 << 1
 STAKE_HOTKEY_REFUSED = 'AccountRejectsStakingHotkeyGrowth'
+# Emitted only by set_reject_staking_hotkey_growth, signed by the coldkey itself. A coldkey swap also copies
+# AccountFlags onto its (empty) new coldkey but emits no such event, so this names who turned the flag on.
+FLAG_SET_EVENT = ('SubtensorModule', 'RejectStakingHotkeyGrowthUpdated')
 
 
 def event_name(record: Any) -> Optional[Tuple[str, str]]:
@@ -54,11 +57,11 @@ def event_name(record: Any) -> Optional[Tuple[str, str]]:
 
 
 class Alpha(Asset):
-    """A subnet alpha token: transfer_stake on the shared Tao chain, settled by ExtrinsicSuccess + StakeTransferred."""
+    """A subnet alpha token: transfer_stake on the shared TaoChain, settled by ExtrinsicSuccess + StakeTransferred."""
 
     def __init__(self, chain_def: ChainDefinition, subtensor: bt.Subtensor, wallet: Optional[bt.Wallet] = None):
         self._chain_def = chain_def
-        self._chain = Tao(subtensor, wallet)
+        self._chain = TaoChain(subtensor, wallet)
         # Per asset, not on the shared chain: a TAO send and an alpha send must never collide.
         self.scan_cursors: Dict[Tuple[str, str, int], int] = {}
         self.broadcasted_txids: Broadcasts = {}
@@ -85,13 +88,12 @@ class Alpha(Asset):
     def can_send_from(self, address: str) -> bool:
         return self.chain.can_send_from(address)
 
-    def check_connection(self, require_send: bool = True, **kwargs) -> None:
-        self.chain.check_connection(**kwargs)
+    def check_connection(
+        self, require_send: bool = True, checked: Optional[Dict[Hashable, Optional[Exception]]] = None
+    ) -> None:
+        self.chain.check_connection(checked=checked)
         if require_send and self.wallet is None:
             raise ConnectionError(f'{self.chain_def.id} send requires a wallet')
-
-    def clear_cache(self) -> None:
-        self.chain.clear_cache()
 
     def value_rao(self, amount: int, block: Optional[int] = None) -> int:
         """Value in rao of ``amount`` alpha base units at ``block`` (or head), floored."""
@@ -124,12 +126,14 @@ class Alpha(Asset):
         except (KeyError, TypeError, ValueError):
             return None
         if alpha >= ALPHA_WHOLE_POSITION:
-            bt.logging.debug(f'{LOG_ALPHA} whole-position sentinel in {Tao.extrinsic_hash(ext)[:16]}… — not an amount')
+            bt.logging.debug(
+                f'{LOG_ALPHA} whole-position sentinel in {TaoChain.extrinsic_hash(ext)[:16]}… — not an amount'
+            )
             return None
         # The hotkeys are deliberately unread: the destination coldkey owns the stake whichever hotkey
         # it lands on, so they change who takes a delegate cut, never ownership or the amount.
-        dest = Tao.as_ss58(args.get('destination_coldkey'))
-        return Tao.extrinsic_hash(ext), dest, alpha, Tao.as_ss58(ext_data.get('address'))
+        dest = TaoChain.as_ss58(args.get('destination_coldkey'))
+        return TaoChain.extrinsic_hash(ext), dest, alpha, TaoChain.as_ss58(ext_data.get('address'))
 
     def stake_moved(self, block_num: int, extrinsic_idx: int) -> bool:
         """True iff the extrinsic dispatched successfully AND emitted its transfer event; raises when unreadable."""
@@ -139,7 +143,7 @@ class Alpha(Asset):
         events = self.chain.get_block_events(block_hash)
         if not events:
             raise ProviderUnreachableError(f'no events returned for block {block_num}, which holds extrinsics')
-        indexed = [(Tao.event_extrinsic_idx(r), event_name(r)) for r in events]
+        indexed = [(TaoChain.event_extrinsic_idx(r), event_name(r)) for r in events]
         if all(idx is None for idx, _ in indexed):
             raise ProviderUnreachableError(f'no ApplyExtrinsic phase recognised in {len(events)} events at {block_num}')
         names = {name for idx, name in indexed if idx == extrinsic_idx}
@@ -163,12 +167,9 @@ class Alpha(Asset):
         block_hint: int = 0,
         max_scan_blocks: int = 150,
     ) -> Optional[TransactionInfo]:
-        info = self.chain.scan_for_tx(
+        return self.chain.scan_for_tx(
             tx_hash, expected_recipient, expected_amount, block_hint, max_scan_blocks, *self.ledger
         )
-        if info is not None and info.block_time is None:
-            raise ProviderUnreachableError(f'{self.chain_def.id} block time unavailable for {info.block_number}')
-        return info
 
     def stakes(self, coldkey: str) -> List[Tuple[str, int]]:
         """(hotkey, alpha) held by ``coldkey`` on this netuid; raises on a read failure."""
@@ -192,15 +193,18 @@ class Alpha(Asset):
 
     def staking_hotkeys(self, coldkey: str, block_hash: Optional[str] = None) -> List[str]:
         """The hotkeys ``coldkey`` stakes to (any netuid) — SubtensorModule::StakingHotkeys; raises when unreadable."""
-        return [Tao.as_ss58(hotkey) for hotkey in self.account_storage('StakingHotkeys', coldkey, block_hash) or []]
+        return [
+            TaoChain.as_ss58(hotkey) for hotkey in self.account_storage('StakingHotkeys', coldkey, block_hash) or []
+        ]
 
     def owned_hotkeys(self, coldkey: str, block_hash: Optional[str] = None) -> List[str]:
         """The hotkeys ``coldkey`` owns — SubtensorModule::OwnedHotkeys; raises when unreadable."""
-        return [Tao.as_ss58(hotkey) for hotkey in self.account_storage('OwnedHotkeys', coldkey, block_hash) or []]
+        return [TaoChain.as_ss58(hotkey) for hotkey in self.account_storage('OwnedHotkeys', coldkey, block_hash) or []]
 
-    def rejects_new_hotkeys(self, coldkey: str) -> bool:
+    def rejects_new_hotkeys(self, coldkey: str, block_hash: Optional[str] = None) -> bool:
         """Whether ``coldkey`` refuses stake on hotkeys it neither stakes to nor owns; raises when unreadable."""
-        return bool(int(self.account_storage('AccountFlags', coldkey) or 0) & REJECT_STAKING_HOTKEY_GROWTH)
+        flags = self.account_storage('AccountFlags', coldkey, block_hash)
+        return bool(int(flags or 0) & REJECT_STAKING_HOTKEY_GROWTH)
 
     def landing_hotkeys(self, from_addr: str, to_addr: str, amount: int) -> Optional[Tuple[str, str]]:
         """(origin, destination) hotkeys for a delivery of ``amount``: the sender's position holding all of it
@@ -289,7 +293,7 @@ class Alpha(Asset):
         if not block_hash:
             raise ProviderUnreachableError(f'{self.chain_def.id} block hash unavailable for {block_num}')
         for record in self.chain.get_block_events(block_hash):
-            if Tao.event_extrinsic_idx(record) != extrinsic_idx or event_name(record) != EXTRINSIC_FAILED:
+            if TaoChain.event_extrinsic_idx(record) != extrinsic_idx or event_name(record) != EXTRINSIC_FAILED:
                 continue
             attributes = record.get('event', record).get('attributes') or {}
             error = (attributes.get('dispatch_error') or {}).get('Module') if isinstance(attributes, dict) else None
@@ -301,6 +305,35 @@ class Alpha(Asset):
             return metadata.get_module_error(module_index=int(error['index']), error_index=index).name
         return None
 
+    @staticmethod
+    def landing_hotkey(ext: Any) -> str:
+        """The hotkey a stake transfer lands on: ``hotkey`` for transfer_stake, ``destination_hotkey`` for
+        transfer_stake_and_hotkey; '' when unreadable."""
+        call = (ext.value if hasattr(ext, 'value') else ext).get('call') or {}
+        args = {a.get('name'): a.get('value') for a in call.get('call_args') or [] if isinstance(a, dict)}
+        return TaoChain.as_ss58(args.get('destination_hotkey', args.get('hotkey')))
+
+    def flag_turned_on_by(self, block_num: int, before_idx: int, coldkey: str) -> bool:
+        """Whether ``coldkey`` itself turned its refuse-new-hotkey flag on in an extrinsic of ``block_num``
+        ahead of ``before_idx``; raises when unreadable."""
+        block_hash = self.chain.get_block_hash(block_num)
+        if not block_hash:
+            raise ProviderUnreachableError(f'{self.chain_def.id} block hash unavailable for {block_num}')
+        for record in self.chain.get_block_events(block_hash):
+            idx = TaoChain.event_extrinsic_idx(record)
+            if idx is None or idx >= before_idx or event_name(record) != FLAG_SET_EVENT:
+                continue
+            attributes = record.get('event', record).get('attributes')
+            if isinstance(attributes, dict):
+                who, enabled = attributes.get('coldkey'), attributes.get('enabled')
+            elif isinstance(attributes, (list, tuple)) and len(attributes) == 2:
+                who, enabled = attributes
+            else:
+                continue
+            if enabled is True and TaoChain.as_ss58(who) == coldkey:
+                return True
+        return False
+
     def cancel_evidence(
         self,
         address: str,
@@ -310,8 +343,12 @@ class Alpha(Asset):
         block_hint: int = 0,
     ) -> Optional[int]:
         """No-fault cancel: the committed miner's own transfer_stake of the full amount to ``address`` failed
-        on its refuse-new-hotkey flag while it neither staked to nor owned any hotkey, so no delivery could
-        land. A recipient with such a hotkey is payable onto it, never refused. Raises when unreadable."""
+        on its refuse-new-hotkey flag, and the miner could not have avoided it. That is either (a) at the
+        parent block the recipient neither staked to nor owned any hotkey, so no delivery could land, or
+        (b) at the parent block the flag was off and the landing hotkey would have been taken, and the
+        recipient itself turned the flag on earlier in the inclusion block. Every read is pinned to those
+        two blocks, so every validator reaches the same verdict. A recipient that was payable at the parent
+        block and did not change its own state is never refused. Raises when unreadable."""
         if not tx_hash or block_hint <= 0:
             return None
         for position, ext in enumerate(self.chain.decoded_extrinsics(block_hint)):
@@ -319,14 +356,25 @@ class Alpha(Asset):
             if transfer is None or transfer[0] != tx_hash:
                 continue
             _, dest, alpha, sender = transfer
-            if dest != Tao.as_ss58(address) or alpha < amount:
+            if dest != TaoChain.as_ss58(address) or alpha < amount:
                 return None
-            if from_address and sender != Tao.as_ss58(from_address):
+            if from_address and sender != TaoChain.as_ss58(from_address):
                 return None
             if self.dispatch_error(block_hint, position) != STAKE_HOTKEY_REFUSED:
                 return None
             parent = self.chain.get_block_hash(block_hint - 1)
-            if self.staking_hotkeys(address, parent) or self.owned_hotkeys(address, parent):
+            if not parent:
+                # A None hash reads head state, not the parent block's.
+                raise ProviderUnreachableError(f'{self.chain_def.id} block hash unavailable for {block_hint - 1}')
+            staking = self.staking_hotkeys(dest, parent)
+            if not staking and not self.owned_hotkeys(dest, parent):
+                return CANCEL_REASON_ALPHA_STAKE_REFUSED
+            if self.rejects_new_hotkeys(dest, parent):
+                return None
+            landing = self.landing_hotkey(ext)
+            if landing not in staking and len(staking) >= MAX_THIRD_PARTY_STAKING_HOTKEYS:
+                return None
+            if not self.flag_turned_on_by(block_hint, position, dest):
                 return None
             return CANCEL_REASON_ALPHA_STAKE_REFUSED
         return None
@@ -405,33 +453,55 @@ class Alpha(Asset):
             )
             return None
 
-        attempt_head = self.chain.record_send_attempt(self.broadcasted_txids, scope, to_address, amount)
-        # The SDK never raises here: every failure comes back as a response, possibly without a hash.
-        response = self.transfer(to_address, *hotkeys, amount)
-        # The signed extrinsic exists before broadcast, so its hash outlives a lost receipt.
-        receipt = getattr(response, 'extrinsic_receipt', None)
-        tx_hash = getattr(receipt, 'extrinsic_hash', None) or Tao.extrinsic_hash(getattr(response, 'extrinsic', None))
-        if tx_hash:
-            self.broadcasted_txids[scope] = (to_address, int(amount), tx_hash, attempt_head)
-        refused = not response.success and STAKE_HOTKEY_REFUSED in str(response.message)
-        if (not response.success and not refused) or not tx_hash:
-            bt.logging.error(
-                f'{LOG_ALPHA} transfer_stake unresolved: {response.message} — recorded, resolved next poll'
+        for resend in (False, True):
+            attempt_head = self.chain.record_send_attempt(self.broadcasted_txids, scope, to_address, amount)
+            # The SDK never raises here: every failure comes back as a response, possibly without a hash.
+            response = self.transfer(to_address, *hotkeys, amount)
+            # The signed extrinsic exists before broadcast, so its hash outlives a lost receipt.
+            receipt = getattr(response, 'extrinsic_receipt', None)
+            tx_hash = getattr(receipt, 'extrinsic_hash', None) or TaoChain.extrinsic_hash(
+                getattr(response, 'extrinsic', None)
             )
-            return None
-        try:
-            block_num = int(self.subtensor.substrate.get_block_number(receipt.block_hash))
-        except Exception:
-            block_num = attempt_head
-        self.broadcasted_txids[scope] = (to_address, int(amount), tx_hash, block_num)
-        if refused:
-            # Marked fulfilled like a delivery: validators read the failed tx as no-fault refusal evidence.
+            if tx_hash:
+                self.broadcasted_txids[scope] = (to_address, int(amount), tx_hash, attempt_head)
+            refused = not response.success and STAKE_HOTKEY_REFUSED in str(response.message)
+            if (not response.success and not refused) or not tx_hash:
+                bt.logging.error(
+                    f'{LOG_ALPHA} transfer_stake unresolved: {response.message} — recorded, resolved next poll'
+                )
+                return None
+            try:
+                block_num = int(self.subtensor.substrate.get_block_number(receipt.block_hash))
+            except Exception:
+                block_num = attempt_head
+            self.broadcasted_txids[scope] = (to_address, int(amount), tx_hash, block_num)
+            if not refused:
+                bt.logging.info(
+                    f'{LOG_ALPHA} sent {amount} alpha (netuid {self.netuid}) to {to_address} '
+                    f'(tx: {tx_hash}, block: {block_num})'
+                )
+                return (tx_hash, block_num)
+            # The recipient changed its flag or list after the pick. The failed tx moved nothing, so
+            # re-pick from the state that refused it and pay onto a hotkey it takes, once.
+            retry = None if resend or receipt is None else self.repick(from_ss58, to_address, amount)
+            if retry is None or retry[1] == hotkeys[1]:
+                break
             bt.logging.warning(
-                f'{LOG_ALPHA} {to_address} refuses new stake hotkeys — failed tx {tx_hash} (block {block_num}) '
-                'submitted as refusal evidence'
+                f'{LOG_ALPHA} {to_address} refused stake on {hotkeys[1]} (failed tx {tx_hash}) — '
+                f'resending onto {retry[1]}'
             )
-        else:
-            bt.logging.info(
-                f'{LOG_ALPHA} sent {amount} alpha (netuid {self.netuid}) to {to_address} (tx: {tx_hash}, block: {block_num})'
-            )
+            hotkeys = retry
+        # Marked fulfilled like a delivery: validators read the failed tx as no-fault refusal evidence.
+        bt.logging.warning(
+            f'{LOG_ALPHA} {to_address} refuses new stake hotkeys — failed tx {tx_hash} (block {block_num}) '
+            'submitted as refusal evidence'
+        )
         return (tx_hash, block_num)
+
+    def repick(self, from_addr: str, to_addr: str, amount: int) -> Optional[Tuple[str, str]]:
+        """``landing_hotkeys`` re-read after a refusal, None when unreadable."""
+        try:
+            return self.landing_hotkeys(from_addr, to_addr, amount)
+        except Exception as e:
+            bt.logging.warning(f'{LOG_ALPHA} cannot re-pick a landing hotkey for {to_addr}: {e}')
+            return None

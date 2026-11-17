@@ -1,0 +1,286 @@
+"""DatabaseStorage orchestrator — composes Repository writes into one txn.
+
+Gated by the STORE_DB_RESULTS env var. When disabled (default), the
+validator runs unchanged; the storage methods short-circuit to a
+disabled-state result.
+"""
+
+import os
+import time
+from dataclasses import dataclass, field
+from typing import Dict, List, Optional, Tuple
+
+import bittensor as bt
+
+from .database import create_database_connection, is_connection_failure
+from .repository import Repository
+
+# Floor between reconnect attempts after a dropped/failed connection. Each attempt can
+# stall up to CONNECT_TIMEOUT_SEC, so a down aw-db costs one bounded stall per interval,
+# not one per write. The warning is rate-limited by the same clock.
+RECONNECT_MIN_INTERVAL_SEC = 30.0
+
+
+@dataclass
+class StorageResult:
+    success: bool
+    errors: List[str] = field(default_factory=list)
+    stored_counts: Dict[str, int] = field(default_factory=dict)
+
+
+def export_enabled() -> bool:
+    return os.getenv('STORE_DB_RESULTS', '').lower() in ('1', 'true', 'yes')
+
+
+class DatabaseStorage:
+    """Single connection per validator instance; one transactional flush per
+    scoring round. Caller decides what to pass in. A dead connection (aw-db
+    restart, boot-order race) is dropped and lazily re-established on a later
+    write — failures are logged, never raised into scoring.
+
+    Methods accept already-shaped row tuples — the validator's scoring code
+    is responsible for producing them, not this class. That keeps the
+    storage layer ignorant of scoring internals.
+    """
+
+    def __init__(self):
+        self.logger = bt.logging
+        self.db_connection = None
+        self.repo = None
+        self._enabled = export_enabled()
+        self._last_reconnect_attempt = 0.0
+
+        if not self._enabled:
+            bt.logging.info('STORE_DB_RESULTS not set — validator DB storage disabled')
+            return
+
+        if self._connect():
+            bt.logging.success('export: connected to the dashboard database')
+        else:
+            bt.logging.error(
+                'STORE_DB_RESULTS=1 but Postgres connection failed — dashboard writes paused until reconnect'
+            )
+
+    def is_enabled(self) -> bool:
+        """Storage is configured (STORE_DB_RESULTS set) — the callers' gate. Deliberately NOT
+        "connection currently live": the write methods own connection state (drop + lazy
+        redial), so a dead connection must still reach them or reconnect would be unreachable."""
+        return self._enabled
+
+    def _connected(self) -> bool:
+        return self.db_connection is not None and self.repo is not None
+
+    def _connect(self) -> bool:
+        self.db_connection = create_database_connection()
+        self.repo = Repository(self.db_connection) if self.db_connection is not None else None
+        return self._connected()
+
+    def _ensure_connection(self) -> bool:
+        """Lazy reconnect for a dropped (or never-established) connection, at most once per
+        RECONNECT_MIN_INTERVAL_SEC. Called at the top of every write so a restarted aw-db
+        heals without a validator restart."""
+        if not self._enabled:
+            return False
+        if self._connected():
+            return True
+        now = time.monotonic()
+        if now - self._last_reconnect_attempt < RECONNECT_MIN_INTERVAL_SEC:
+            return False
+        self._last_reconnect_attempt = now
+        bt.logging.warning('Dashboard DB connection is down — attempting reconnect')
+        if self._connect():
+            bt.logging.success('Dashboard DB connection re-established')
+            return True
+        return False
+
+    def _drop_connection(self) -> None:
+        try:
+            if self.db_connection is not None:
+                self.db_connection.close()
+        except Exception:
+            pass
+        self.db_connection = None
+        self.repo = None
+
+    def _handle_write_failure(self, ex: Exception, context: str) -> str:
+        """Best-effort rollback, then drop the connection on connection-class failures so the
+        next write reconnects. Never raises — dashboard writes must not break the export."""
+        if self.db_connection is not None:
+            try:
+                self.db_connection.rollback()
+                self.db_connection.autocommit = True
+            except Exception:
+                pass
+        if is_connection_failure(ex):
+            self._drop_connection()
+        msg = f'{context}: {ex}'
+        self.logger.error(msg)
+        return msg
+
+    def flush_scoring_window(
+        self,
+        crown_rows_by_direction: Dict[Tuple[str, str, str], List[Tuple[int, int, str, str, str, str, float, float]]],
+        crown_window_bounds_by_direction: Dict[Tuple[str, str, str], Tuple[int, int]],
+        miner_score_rows: List[Tuple],
+        crown_holders_max_ts: int,
+        direction_pool_rows: Optional[List[Tuple]] = None,
+    ) -> StorageResult:
+        """All-or-nothing flush for one scoring window.
+
+        - `crown_rows_by_direction`: recomputed crown rows, keyed by lane
+          (from, to, backing).
+        - `crown_window_bounds_by_direction`: [lo, hi) unix-second range to wipe
+          before re-upserting, keyed by lane. Must match the rows above.
+        - `miner_score_rows`: per-(hotkey, lane) factor snapshots for the
+          round — written in the same transaction as the crown ledger so the
+          two can never disagree about a round.
+        - `crown_holders_max_ts` advances the sync_cursor watermark so the
+          dashboard can render an "as-of <unix ts>" freshness signal.
+        - `direction_pool_rows`: the round's pool per lane, every lane (dead
+          lanes at 0) — the emission-over-time ledger, same transaction.
+
+        rate_history is not written here — the indexer owns it (real-time,
+        per QuoteSet event), including its freshness cursor.
+
+        Failure on any write rolls back the whole window — the cursor is
+        never left ahead of (or behind) the rows it describes.
+        """
+        if not self._ensure_connection():
+            return StorageResult(success=False, errors=['Validator DB storage not enabled'])
+
+        result = StorageResult(success=True)
+
+        try:
+            assert self.db_connection is not None and self.repo is not None
+            self.db_connection.autocommit = False
+
+            with self.db_connection.pipeline():
+                crown_inserted = 0
+                for direction, rows in crown_rows_by_direction.items():
+                    from_chain, to_chain, backing = direction
+                    lo, hi = crown_window_bounds_by_direction[direction]
+                    self.repo.trim_crown_tails(from_chain, to_chain, backing, lo, commit=False)
+                    self.repo.delete_crown_in_range(from_chain, to_chain, backing, lo, hi, commit=False)
+                    crown_inserted += self.repo.store_crown_holders_bulk(rows, commit=False)
+                result.stored_counts['crown_holders'] = crown_inserted
+
+                result.stored_counts['miner_scores'] = self.repo.store_miner_scores_bulk(miner_score_rows, commit=False)
+                if direction_pool_rows:
+                    result.stored_counts['direction_pools'] = self.repo.store_direction_pools_bulk(
+                        direction_pool_rows, commit=False
+                    )
+
+                self.repo.set_sync_cursor('crown_holders_max_ts', crown_holders_max_ts, commit=False)
+
+            self.db_connection.commit()
+            self.db_connection.autocommit = True
+
+        except Exception as ex:
+            result.success = False
+            result.errors.append(self._handle_write_failure(ex, 'Failed to flush scoring window to DB'))
+
+        return result
+
+    def flush_halt_window(
+        self,
+        directions: List[Tuple[str, str, str]],
+        window_start: int,
+        window_end: int,
+        max_ts: int,
+    ) -> StorageResult:
+        """Halt-aware counterpart to flush_scoring_window.
+
+        During a halt, no miner earns crown and the pool recycles
+        (see ``build_halted_rewards``). Mirror that on the dashboard by
+        deleting any pre-existing crown_holders rows in the halted
+        window, clearing the live score tip (nothing is being paid),
+        and advancing the cursor — leaves no stale "current holder"
+        implication on the historical grid. No miner_scores rows are
+        written for a halted round: the ledger records what was paid,
+        and nothing was.
+
+        ``[window_start, window_end)`` is the unix-second range to clear per
+        lane (from, to, backing). ``max_ts`` advances the crown sync_cursor watermark.
+        """
+        if not self._ensure_connection():
+            return StorageResult(success=False, errors=['Validator DB storage not enabled'])
+
+        result = StorageResult(success=True)
+        try:
+            assert self.db_connection is not None and self.repo is not None
+            self.db_connection.autocommit = False
+
+            with self.db_connection.pipeline():
+                for from_chain, to_chain, backing in directions:
+                    self.repo.trim_crown_tails(from_chain, to_chain, backing, window_start, commit=False)
+                    self.repo.delete_crown_in_range(
+                        from_chain, to_chain, backing, window_start, window_end, commit=False
+                    )
+                self.repo.replace_current_miner_scores([], commit=False)
+                self.repo.set_sync_cursor('crown_holders_max_ts', max_ts, commit=False)
+
+            self.db_connection.commit()
+            self.db_connection.autocommit = True
+
+        except Exception as ex:
+            result.success = False
+            result.errors.append(self._handle_write_failure(ex, 'Failed to flush halt window to DB'))
+
+        return result
+
+    def upsert_current_crown_snapshot(
+        self,
+        rows_by_direction: Dict[Tuple[str, str, str], List[Tuple[str, str, str, str, float, float, int]]],
+    ) -> StorageResult:
+        """Replace current_crown_holders rows for the given lanes.
+
+        The dashboard's "who holds the crown right now" surface, rewritten
+        when the live replay's holders change; ``flush_scoring_window`` writes
+        the historical ledger.
+
+        Row format per lane: ``(from_chain, to_chain, backing, hotkey,
+        credit, rate, ts)``. Empty list for a lane means "no qualifying
+        holder right now" — that lane's rows are cleared.
+        """
+        if not self._ensure_connection():
+            return StorageResult(success=False, errors=['Validator DB storage not enabled'])
+
+        result = StorageResult(success=True)
+        try:
+            assert self.db_connection is not None and self.repo is not None
+            self.db_connection.autocommit = False
+            # One delete (and maybe an insert) per quoted lane: pipelined, one network flight.
+            with self.db_connection.pipeline():
+                count = self.repo.replace_current_crown(rows_by_direction, commit=False)
+            self.db_connection.commit()
+            self.db_connection.autocommit = True
+            result.stored_counts['current_crown_holders'] = count
+        except Exception as ex:
+            result.success = False
+            result.errors.append(self._handle_write_failure(ex, 'Failed to upsert current_crown_holders'))
+
+        return result
+
+    def replace_current_miner_scores(self, rows: List[Tuple]) -> StorageResult:
+        """Wipe + rewrite current_miner_scores, the latest round's rows (ts first).
+        An empty list clears the tip."""
+        if not self._ensure_connection():
+            return StorageResult(success=False, errors=['Validator DB storage not enabled'])
+
+        result = StorageResult(success=True)
+        try:
+            assert self.db_connection is not None and self.repo is not None
+            self.db_connection.autocommit = False
+            count = self.repo.replace_current_miner_scores(rows, commit=False)
+            self.db_connection.commit()
+            self.db_connection.autocommit = True
+            result.stored_counts['current_miner_scores'] = count
+        except Exception as ex:
+            result.success = False
+            result.errors.append(self._handle_write_failure(ex, 'Failed to replace current_miner_scores'))
+
+        return result
+
+    def close(self):
+        if self.db_connection:
+            self.db_connection.close()

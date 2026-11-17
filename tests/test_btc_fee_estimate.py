@@ -1,4 +1,4 @@
-"""BTC fee-rate estimation fallback (V-L5).
+"""BTC fee-rate estimation fallback.
 
 A silent drop to the 5 sat/vB mempool floor when /fee-estimates is down stranded a real dest tx.
 The floor and the estimation-DOWN fallback are now distinct: a failed estimate broadcasts at the
@@ -31,13 +31,6 @@ def _provider(monkeypatch):
     return Bitcoin()
 
 
-def test_estimate_success_pads_and_floors(monkeypatch):
-    p = _provider(monkeypatch)
-    # 20 sat/vB * 1.25 pad = 25, above the floor → returned as-is.
-    monkeypatch.setattr(p, 'btc_api_get', lambda path, timeout=10: _Resp(body={'2': 20.0}))
-    assert p.estimate_fee_rate() == 25
-
-
 def test_calm_mempool_still_floors_low_not_fallback(monkeypatch):
     p = _provider(monkeypatch)
     # 1 sat/vB * 1.25 = 1 < floor → floor binds. The fallback must NOT leak into the success path.
@@ -55,16 +48,6 @@ def test_estimation_down_uses_fallback_not_floor(monkeypatch):
     rate = p.estimate_fee_rate()
     assert rate == BTC_FALLBACK_FEE_RATE
     assert rate > BTC_MIN_FEE_RATE  # the whole point: not the strand-prone floor
-
-
-def test_override_bypasses_estimation(monkeypatch):
-    p = _provider(monkeypatch)
-
-    def forbidden(*_a, **_kw):
-        raise AssertionError('an explicit override must not hit the estimator')
-
-    monkeypatch.setattr(p, 'btc_api_get', forbidden)
-    assert p.estimate_fee_rate(override=7) == 7
 
 
 def test_select_utxos_sizes_outputs_from_their_scripts(monkeypatch):

@@ -35,6 +35,9 @@ class FakeProvider(Asset, Chain):
     def get_current_block_height(self) -> Optional[int]:
         return 100
 
+    def find_recent_outgoing(self, from_addr: str, to_addr: str, amount: int) -> Optional[str]:
+        return None
+
     def get_balance(self, address: str) -> int:
         return 0
 
@@ -53,7 +56,13 @@ class FakeProvider(Asset, Chain):
 
 def _tx(sender: str, recipient: str) -> TransactionInfo:
     return TransactionInfo(
-        tx_hash='0xabc', confirmed=True, sender=sender, recipient=recipient, amount=100, confirmations=6
+        tx_hash='0xabc',
+        confirmed=True,
+        sender=sender,
+        recipient=recipient,
+        amount=100,
+        confirmations=6,
+        block_time=1_700_000_000,
     )
 
 
@@ -68,24 +77,12 @@ def test_self_transfer_is_rejected():
     assert result is None
 
 
-def test_cross_party_transfer_passes():
-    provider = FakeProvider(_tx(sender='5Miner', recipient='5User'))
-    result = provider.verify_transaction(
-        tx_hash='0xabc',
-        expected_recipient='5User',
-        expected_amount=100,
-        expected_sender='5Miner',
-    )
-    assert result is not None
-    assert result.sender == '5Miner'
-
-
 def test_payout_from_uncommitted_wallet_is_rejected():
     # Accountability guardrail: the dest leg pins expected_sender to the miner's committed payout
     # wallet, so a tx delivering the right amount to the right recipient but sent from a DIFFERENT
     # wallet is rejected. Miners are held liable to the wallet they registered — not any wallet that
     # happens to pay the user. This check is intentional; loosening it (crediting a delivery regardless
-    # of sender) widens a credit-someone-else's-tx exploit surface. Do not relax without a design call.
+    # of sender) widens a surface for crediting someone else's tx. Do not relax without a design call.
     provider = FakeProvider(_tx(sender='5OtherWallet', recipient='5User'))
     result = provider.verify_transaction(
         tx_hash='0xabc',

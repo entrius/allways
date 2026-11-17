@@ -149,10 +149,13 @@ pub fn handler(
     // overwrite the reservation): a FILLED reservation still within its TTL, and a drawn-but-UNFILLED
     // reservation still inside its finalize window — the seat winner has the exclusive right to fill it
     // and must not be evicted by a fresh contest. Once `finalize_by` passes unfilled, re-open is allowed
-    // (the abandoned slot is reapable).
+    // (the abandoned slot is reapable). "Unfilled" is `created_at == 0`, the sentinel finalize_reservation
+    // and close_unfilled_reservation use: a reservation filled then consumed by vote_initiate also has
+    // reserved_until == 0, and with its finalize_by still ahead it would park the hub after its swap ended.
     let resv = &ctx.accounts.reservation;
     let active_reservation = resv.reserved_until != 0 && resv.reserved_until >= now;
-    let pending_finalize = resv.reserved_until == 0 && resv.finalize_by != 0 && now <= resv.finalize_by;
+    let pending_finalize =
+        resv.reserved_until == 0 && resv.created_at == 0 && resv.finalize_by != 0 && now <= resv.finalize_by;
     require!(!active_reservation && !pending_finalize, ErrorCode::MinerReserved);
 
     // Non-refundable anti-spam fee: router → treasury (subnet revenue), stake-discounted — the

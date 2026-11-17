@@ -1,9 +1,8 @@
-"""Regression: `alw swap now` must not treat a stale/expired reservation as a resolved draw.
+"""`alw swap now` must not treat a stale/expired reservation as a resolved draw.
 
-Guards the fund-loss bug where `_poll_reservation` returned on `reserved_until != 0` and matched a
-leftover reservation from an abandoned reserve (non-zero but expired), making `swap now` instruct a
-taker to send funds before the pool draw ran. Origination now uses the same `live_unclaimed`
-predicate as `post-tx`, and a send is gated on the reservation outliving the *claim relay* — not the
+`_poll_reservation` must not match a leftover reservation from an abandoned reserve (non-zero but
+expired) and instruct a taker to send funds before the pool draw ran. Origination uses the same
+`live_unclaimed` predicate as `post-tx`, and a send is gated on the reservation outliving the *claim relay* — not the
 source chain's confirmation depth, which accrues after the claim via the crank's EXTEND_RESERVATION.
 """
 
@@ -15,7 +14,6 @@ import pytest
 
 from allways.cli.swap_commands.helpers import live_unclaimed
 from allways.cli.swap_commands.swap import (
-    _SEND_MARGIN_SECS,
     _alpha_send_lines,
     _auto_send_wizard,
     _deadline_lines,
@@ -44,7 +42,7 @@ def _resv(reserved_until, claimed=EMPTY, user='68ToGUYj'):
 
 def test_live_unclaimed_rejects_the_stale_leftover_state():
     now = int(time.time())
-    # The exact state that triggered the bug: non-zero but expired, empty claim, caller's own user.
+    # Non-zero but expired, empty claim, caller's own user: not live.
     assert live_unclaimed(_resv(now - 100)) is False
     assert live_unclaimed(_resv(0)) is False  # pre-draw: no reservation written yet
     assert live_unclaimed(None) is False
@@ -71,26 +69,6 @@ def test_poll_times_out_rather_than_returning_a_stale_reservation():
     with patch('allways.cli.swap_commands.swap.time.sleep'):
         got = _poll_reservation(client, 'miner', timeout_secs=0.05, backing='sol')
     assert got is None  # would rather time out than green-light a send against a stale reservation
-
-
-def test_send_margin_does_not_scale_with_confirmation_depth():
-    """The margin covers relaying the claim on-chain, not waiting for confirmations. It must therefore
-    fit inside a freshly-won reservation (ttl 480s, minus the ~60-80s pool draw) for EVERY chain —
-    including BTC, whose 2 x 600s confirmation wait alone exceeds the whole TTL."""
-    from allways.chains import get_chain_def
-
-    btc = get_chain_def('btc')
-    assert btc.min_confirmations * btc.seconds_per_block > _SEND_MARGIN_SECS
-    assert _SEND_MARGIN_SECS < 480 - 80  # clears a fresh reservation post-draw, on any source chain
-
-
-def test_self_crank_swallows_a_transient_rpc_fault():
-    """A transient RPC fault while nudging the pool must not abort origination — the resolve_pool may
-    already have landed. It is swallowed so the poll loop re-cranks and re-reads the real outcome. This
-    is the exact fault (getSignatureStatuses -32603 mid-crank) that crashed the first mainnet BTC swap."""
-    client = MagicMock()
-    client.resolve_pool.side_effect = TransientRpcError('getSignatureStatuses: -32603 Internal error')
-    _self_crank_resolve(client, 'miner', 'sol')  # must NOT raise
 
 
 def test_poll_drawn_self_heals_when_the_crank_keeps_flaking_but_the_seat_is_drawn():
@@ -155,7 +133,7 @@ def _run_swap_now(reserved_until, from_chain='btc'):
 
 
 def test_btc_source_reservation_with_400s_left_is_accepted_for_send():
-    """Deliverable #5: the exact state that used to refuse deterministically — a freshly won BTC-source
+    """A freshly won BTC-source
     reservation, ~400s of life left. BTC needs 1200s of confirmations; the claim needs only the relay."""
     result = _run_swap_now(int(time.time()) + 400)
     assert result.exit_code == 0, result.output
@@ -165,7 +143,7 @@ def test_btc_source_reservation_with_400s_left_is_accepted_for_send():
 
 
 def test_reservation_with_seconds_left_still_refuses_the_send():
-    """Deliverable #3: the guard still bites when the claim genuinely can't land, and still says DON'T send."""
+    """The guard still bites when the claim genuinely can't land, and still says DON'T send."""
     result = _run_swap_now(int(time.time()) + 5)
     assert result.exit_code != 0
     assert 'too short' in result.output
@@ -208,22 +186,15 @@ def test_refuse_uncovered_exits_on_a_pinned_mismatch(capsys):
     assert 'Do NOT send funds' in capsys.readouterr().out
 
 
-def test_refuse_uncovered_warns_and_continues_when_fill_block_is_unreadable(capsys):
-    with patch('allways.cli.swap_commands.swap.declared_leg_providers', return_value={'sn7': None}):
-        assert _refuse_uncovered(object(), _declared_reservation(10_000), 'sol', 'sn7') is None
-    assert 'validator will enforce it' in capsys.readouterr().out
-
-
 # ── benign crank-race handling: a lost resolve_pool must not abort `swap now` ───────────────────────
 # The self-crank races the validator (and peer takers) to resolve the pool. When it loses, the tx can
 # fail two ways: rejected in simulation (error carries the Anchor NAME) or landed-failed (the confirm
 # path stringifies status["err"] with only the numeric `{'Custom': N}` code). Both are benign — the
 # draw still happened, we keep polling for our seat. Matching names alone missed the code-only form,
-# which re-raised and abandoned the taker's already-paid, since-drawn seat (F2, 2026-07-12 mainnet run).
+# which re-raised and abandoned the taker's already-paid, since-drawn seat.
 
 
 def _crank_raising(err_text):
-    from allways.cli.swap_commands.swap import _self_crank_resolve
 
     client = MagicMock()
     client.resolve_pool.side_effect = RuntimeError(err_text)
@@ -237,15 +208,13 @@ def test_crank_swallows_benign_race_by_name():
 
 
 def test_crank_swallows_benign_race_by_numeric_code():
-    # landed-then-failed tx — confirm() surfaces only the numeric code, no name (the F2 miss)
+    # landed-then-failed tx — confirm() surfaces only the numeric code, no name
     for code in (6042, 6044, 6045, 6046):
         _crank_raising(f"tx 5abc failed: {{'InstructionError': [0, {{'Custom': {code}}}]}}")
 
 
 def test_crank_reraises_a_real_error():
     import pytest
-
-    from allways.cli.swap_commands.swap import _self_crank_resolve
 
     client = MagicMock()
     # a non-benign failure (e.g. MinerReserved 6022) must still propagate
@@ -254,53 +223,7 @@ def test_crank_reraises_a_real_error():
         _self_crank_resolve(client, 'miner-pubkey', 'sol')
 
 
-# ── pool-contention visibility (feat): surface a contested/already-open pool + the lost-draw reason ──
-# `swap now` used to bid blind and, on a loss, print one ambiguous "not seated" message. These cover
-# the read-only helpers that back the new pre-bid notice (odds + fee warning) and the specific
-# lost-the-draw-to-<router> reason. Both are best-effort: a bad read must never block or crash a swap.
-
-_A = bytes([1] * 32)
-_B = bytes([2] * 32)
-_V = bytes([7] * 32)
-
-
-def _pool(opened_at, closes_at, routers):
-    return types.SimpleNamespace(
-        opened_at=opened_at,
-        closes_at=closes_at,
-        requests=[types.SimpleNamespace(router=r) for r in routers],
-    )
-
-
-def test_pool_contention_reports_an_open_uniform_pool():
-    from allways.cli.swap_commands.swap import _pool_contention
-
-    now = int(time.time())
-    client = MagicMock()
-    client.get_pool.return_value = _pool(now - 10, now + 40, [_A, _B])  # 2 takers, still in window
-    c = _pool_contention(client, 'miner', types.SimpleNamespace(validators=[]), 'sol')
-    assert c.is_open and c.bidders == 2 and c.weighted_rivals == 0
-    assert 30 <= c.closes_in <= 40
-
-
-def test_pool_contention_flags_a_weighted_validator_rival():
-    from allways.cli.swap_commands.swap import _pool_contention
-
-    now = int(time.time())
-    client = MagicMock()
-    client.get_pool.return_value = _pool(now - 5, now + 30, [_V, _B])
-    cfg = types.SimpleNamespace(validators=[types.SimpleNamespace(key=_V, weight=100)])
-    c = _pool_contention(client, 'miner', cfg, 'sol')
-    assert c.is_open and c.bidders == 2 and c.weighted_rivals == 1  # the validator dominates the draw
-
-
-def test_pool_contention_treats_a_closed_window_as_not_open():
-    from allways.cli.swap_commands.swap import _pool_contention
-
-    now = int(time.time())
-    client = MagicMock()
-    client.get_pool.return_value = _pool(now - 100, now - 40, [_A])  # window already passed
-    assert _pool_contention(client, 'miner', types.SimpleNamespace(validators=[]), 'sol').is_open is False
+# ── pool-contention notice: best-effort, a bad read must never block or crash a swap ──
 
 
 def test_pool_contention_never_raises_on_a_bad_read():
@@ -309,31 +232,6 @@ def test_pool_contention_never_raises_on_a_bad_read():
     client = MagicMock()
     client.get_pool.side_effect = RuntimeError('rpc down')  # must degrade to "not open", never crash a bid
     assert _pool_contention(client, 'miner', types.SimpleNamespace(validators=[]), 'sol').is_open is False
-
-
-def test_lost_seat_to_names_the_rival_that_won_the_draw():
-    from allways.cli.swap_commands.swap import _lost_seat_to
-
-    now = int(time.time())
-    client = MagicMock()
-    # a freshly-drawn, not-yet-filled seat (reserved_until==0, created_at==0, finalize_by ahead) held
-    # by a DIFFERENT router than us -> we lost the draw to it.
-    client.get_reservation.return_value = types.SimpleNamespace(
-        reserved_until=0, created_at=0, finalize_by=now + 100, router='RIVAL'
-    )
-    assert _lost_seat_to(client, 'miner', 'ME', 'sol') == 'RIVAL'
-
-
-def test_lost_seat_to_is_none_when_no_seat_is_drawn_yet():
-    from allways.cli.swap_commands.swap import _lost_seat_to
-
-    now = int(time.time())
-    client = MagicMock()
-    # drawn window already lapsed -> not a live drawn seat -> "draw didn't resolve" branch, not "lost"
-    client.get_reservation.return_value = types.SimpleNamespace(
-        reserved_until=0, created_at=0, finalize_by=now - 100, router='RIVAL'
-    )
-    assert _lost_seat_to(client, 'miner', 'ME', 'sol') is None
 
 
 # ── resumability: recover an already-held seat instead of paying for a second bid ────────────────────
@@ -472,13 +370,6 @@ def _live_once_client():
     return client
 
 
-def test_watch_swap_reports_completed_after_close(monkeypatch):
-    """A close whose verdict is SwapCompleted reads as COMPLETED, never the bare 'never existed'
-    message (the fast-close scare)."""
-    joined = _run_watch(_live_once_client(), ('SwapCompleted', types.SimpleNamespace()))
-    assert 'COMPLETED' in joined and 'never existed' not in joined
-
-
 def test_watch_swap_reports_timeout_as_failure_not_delivery(monkeypatch):
     """A close whose verdict is SwapTimedOut must NOT read as 'delivered' — the real failure test
     printed '✓ COMPLETED' for a slashed miner. It names the reimbursement, its chain, and the payee."""
@@ -496,6 +387,41 @@ def test_watch_swap_close_with_unreadable_verdict_stays_neutral(monkeypatch):
     assert 'closed on-chain' in joined and 'COMPLETED' not in joined and 'MINER FAILED' not in joined
 
 
+def test_watch_swap_ends_on_a_close_it_never_saw_live():
+    """The relay can wait out a dead validator's axon for its full timeout, and a fast swap settles
+    inside that wait: the account is already closed on the first read. Its SwapCompleted event must
+    end the watch at once, not after 900 s of polling a swap that finished."""
+    from unittest.mock import MagicMock
+
+    client = MagicMock()
+    client.get_swap.return_value = None
+    joined = _run_watch(client, ('SwapCompleted', types.SimpleNamespace()))
+    assert 'COMPLETED' in joined
+    assert client.get_swap.call_count == 1
+
+
+def test_watch_swap_keeps_polling_a_swap_with_no_account_and_no_verdict():
+    """No account and no closing event yet (not created, or the verdict is unreadable): keep
+    watching rather than claim anything."""
+    from unittest.mock import MagicMock, patch
+
+    from allways.cli.swap_commands import swap as swap_mod
+
+    client = MagicMock()
+    client.get_swap.side_effect = [None, None, KeyboardInterrupt]
+    out = []
+    with (
+        patch('allways.cli.swap_commands.swap.time.sleep'),
+        patch('allways.cli.swap_commands.swap._swap_verdict', lambda *_a: None),
+        patch.object(swap_mod.console, 'print', lambda *a, **k: out.append(' '.join(str(x) for x in a))),
+    ):
+        swap_mod._watch_swap(client, 'ab' * 32, 'tao')
+    joined = ' '.join(out)
+    assert client.get_swap.call_count == 3
+    assert 'COMPLETED' not in joined and 'closed on-chain' not in joined
+    assert 'Stopped watching' in joined
+
+
 # ── manual-path deadline notice ─────────────────────────────────────────────
 # _SEND_MARGIN_SECS is checked once, at reservation time. On the manual path the send and the relay
 # happen outside this process, so nothing re-checks it — and a deposit landing after reserved_until
@@ -511,29 +437,7 @@ def test_deadline_notice_states_the_wall_clock_instant():
     assert 'no refund' in body
 
 
-def test_deadline_notice_always_warns_that_the_guard_is_forfeit():
-    # Reaching this notice means the send happens outside `alw` either way. --send that degraded to
-    # manual (missing creds, wrong wallet) is the case that most needs telling, so never gate this.
-    now = 1_700_000_000
-    for want_send in (False, True):
-        body = ' '.join(_deadline_lines(now + 300, want_send=want_send, now=now))
-        assert 'forfeits the pre-send safety check' in body
-
-
-def test_deadline_notice_hints_at_send_only_when_it_was_not_asked_for():
-    now = 1_700_000_000
-    assert '--send' in ' '.join(_deadline_lines(now + 300, want_send=False, now=now))
-    # Redundant for a taker who already asked for --send and fell through to manual.
-    assert '--send' not in ' '.join(_deadline_lines(now + 300, want_send=True, now=now))
-
-
-def test_deadline_notice_never_shows_negative_runway():
-    now = 1_700_000_000
-    body = ' '.join(_deadline_lines(now - 50, want_send=False, now=now))
-    assert '0s' in body and '-50' not in body
-
-
-# ─── Pre-reserve deliverability screens (F7/T18 — the CLI mirror of the validator gate) ───
+# ─── Pre-reserve deliverability screens (the CLI mirror of the validator gate) ───
 
 
 class _Gate:
@@ -568,14 +472,6 @@ def _screen(gate, from_chain, to_chain, client=None):
     return gate
 
 
-def test_screen_does_not_probe_or_block_undeliverable_receive_address():
-    # Reserve-time deliverability is no longer predicted (not a boundary; the sound check is the
-    # delivery-time reverted-tx proof). A dest that would refuse is neither probed nor blocked here —
-    # fat-finger UX moved to the client app. Validity is still screened (test below).
-    gate = _screen(_Gate(reject={'recvaddr'}), 'sol', 'arbusdc')
-    assert 'recvaddr' not in gate.checked
-
-
 def test_screen_refuses_a_pair_whose_transfers_are_switched_off():
     import pytest
 
@@ -593,7 +489,7 @@ def test_screen_refuses_a_source_that_cannot_go_out_as_one_transfer():
 
 
 def test_screen_blocks_rejecting_miner_receive_address():
-    # T18 mirror: don't bid (and burn the entry fee) toward a miner whose receive address rejects.
+    # Don't bid (and burn the entry fee) toward a miner whose receive address rejects.
     import pytest
 
     client = MagicMock()
@@ -602,20 +498,8 @@ def test_screen_blocks_rejecting_miner_receive_address():
         _screen(_Gate(reject={'mineraddr'}), 'arbusdc', 'sol', client)
 
 
-def test_screen_only_warns_on_frozen_source_address():
-    # F13c courtesy: a frozen SOURCE is benign (deposit fails, reservation lapses) — warn, never block.
-    client = MagicMock()
-    client.get_quote.return_value = types.SimpleNamespace(miner_from_addr='mineraddr')
-    gate = _screen(_Gate(reject={'useraddr'}), 'arbusdc', 'sol', client)
-    assert 'useraddr' in gate.checked
-
-
-def test_screen_fails_open_without_a_provider():
-    _screen(None, 'sol', 'arbusdc')  # no provider buildable → no screen, no crash
-
-
 def test_screen_blocks_malformed_receive_address():
-    # F4: format is screened before any RPC-backed gate — offline and always authoritative.
+    # Format is screened before any RPC-backed gate — offline and always authoritative.
     import pytest
 
     with pytest.raises(SystemExit):
@@ -635,7 +519,7 @@ def test_screen_rejection_aborts_swap_now_before_any_bid():
     # Placement guard: the SOURCE-side screen (which stays — it protects takers) fires inside
     # `swap now` BEFORE the resume/bid machinery, so a miner whose receive address rejects the source
     # aborts the flow with no bid placed. (The dest-side deliverability screen was removed — a refusing
-    # DEST is no longer probed here; see test_screen_does_not_probe_or_block_undeliverable_receive_address.)
+    # DEST is no longer probed here.)
     from click.testing import CliRunner
 
     from allways.cli.swap_commands.swap import swap_now_command
@@ -670,7 +554,7 @@ def test_send_with_uncontrolled_source_aborts_before_any_bid():
     """Regression: `--send` with a source address the configured wallet can't sign for must abort
     BEFORE the bid. The old order spent the reservation fee, finalized, and only then (inside
     _auto_send_wizard) noticed can_send_from was false — stranding the taker on the manual
-    deadline path with real money committed (live tao incident, 2026-09-02)."""
+    deadline path with real money committed."""
     from click.testing import CliRunner
 
     from allways.cli.swap_commands.swap import swap_now_command

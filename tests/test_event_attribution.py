@@ -1,20 +1,16 @@
 """Program events are read only from lines the allways program itself logged."""
 
 import base64
-import tempfile
-from pathlib import Path
 from types import SimpleNamespace
 
 from solders.keypair import Keypair
 
 from allways.solana.client import AllwaysSolanaClient
-from allways.solana.events import EventRecord, decode_event, program_event_payloads
+from allways.solana.events import decode_event, program_event_payloads
 from allways.solana.layouts import EVENT_DISCRIMINATORS, EVENT_LAYOUTS
 from allways.solana.program_feed import events_from_logs
-from allways.validator.event_index import SolanaEventIndex
-from allways.validator.solana_swap_loop import SwapDecision
-from allways.validator.state_store import ValidatorStateStore
-from tests.test_solana_swap_loop import loop_with, make_swap
+from allways.validator.feed.events import EventFeed, LiveFeed
+from allways.validator.runtime.bus import Topic
 
 PROGRAM = str(Keypair().pubkey())
 OTHER = str(Keypair().pubkey())
@@ -97,23 +93,52 @@ def test_lines_outside_any_frame_are_dropped():
     assert program_event_payloads([_fulfilled()], PROGRAM) == []
 
 
-def test_events_outside_our_frame_never_reach_the_delivery_ledger():
-    # Another program's lines naming this swap's delivery for an unrelated swap leave the swap confirmable.
+def _mixed_logs() -> list:
+    # A forged frame naming an unrelated swap, then our program's genuine frame.
+    return [*_frame(OTHER, _fulfilled(UNRELATED_KEY), _completed(UNRELATED_KEY)), *_frame(PROGRAM, _fulfilled())]
+
+
+def _keys(events):
+    return [(name, bytes(fields['swap_key'])) for name, fields in events]
+
+
+def test_the_live_feed_publishes_only_our_frames_events():
+    feed = LiveFeed('ws://x', PROGRAM)
+    notification = {
+        'params': {'result': {'context': {'slot': 7}, 'value': {'signature': 's', 'err': None, 'logs': _mixed_logs()}}}
+    }
+    assert feed.handle_notification(notification) == 1
+    (pending,) = feed.take()
+    assert _keys(pending.events) == [('SwapFulfilled', SWAP_KEY)]
+
+
+def test_the_backfill_publishes_only_our_frames_events():
+    class Rpc:
+        def get_signatures_for_address(self, program_id, before=None, until=None, limit=1000):
+            return [] if before else [{'signature': 's', 'slot': 7, 'blockTime': 1400, 'err': None}]
+
+        def get_transaction(self, sig):
+            return {'blockTime': 1400, 'meta': {'logMessages': _mixed_logs()}}
+
+        def _call(self, method, params):
+            return None
+
+    live = SimpleNamespace(session=1, start=lambda: live, take=lambda: [])
+    out, gaps = Topic('events'), Topic('gaps')
+    feed = EventFeed(lambda: Rpc(), live, lambda: 'before-history', out, gaps, PROGRAM, clock=lambda: 1400)
+    events = out.subscribe('t')
+    feed.setup()
+    feed._backfill.until_sig = None
+    for _ in range(3):
+        feed.tick(1400)
+    assert _keys((r.name, r.fields) for r in events.drain()) == [('SwapFulfilled', SWAP_KEY)]
+
+
+def test_get_event_logs_returns_only_our_frames_events():
+    # Another program's lines naming an unrelated swap never decode as ours.
     txs = {'a': _frame(OTHER, _fulfilled(UNRELATED_KEY)), 'b': _frame(OTHER, _completed(UNRELATED_KEY))}
     client = SimpleNamespace(
         program_id=PROGRAM,
         rpc=SimpleNamespace(get_transaction=lambda sig: {'meta': {'logMessages': txs[sig]}}),
     )
-    records = [
-        EventRecord(name=name, fields=fields, slot=1, block_time=1400, signature=sig)
-        for sig in txs
-        for name, fields in map(decode_event, AllwaysSolanaClient.get_event_logs(client, sig))
-    ]
-    assert records == []
-
-    store = ValidatorStateStore(Path(tempfile.mkdtemp()) / 'state.db')
-    SolanaEventIndex(store).ingest(records, {})
-    loop, _ = loop_with(state_store=store)
-    swap = make_swap(key=SWAP_KEY)
-    swap.miner = str(MINER)
-    assert loop.decide(swap, now=1500).decision == SwapDecision.CONFIRM
+    assert [decode_event(raw) for sig in txs for raw in AllwaysSolanaClient.get_event_logs(client, sig)] == []

@@ -305,7 +305,31 @@ WEIGHTS_VOTE_RETRY_SECS = 1_800
 RELAY_HEARTBEAT_INTERVAL_SECS = 12 * 3600
 # Time-aligned global fee true-up. Every validator fires at the same boundary and reads totals at
 # it, so the batch vector is byte-identical; a boundary with zero delta is skipped as pure postage.
-RELAY_FEE_CADENCE_SECS = 2 * 86400
+# Six hours keeps every fee a fresh validator must count inside the feed's catch-up window: the
+# vault may still stand at the boundary before last (that round waiting on this validator's vote),
+# so the window has to reach two boundaries back (see feed.events.HISTORY_HORIZON_SECS). A round
+# costs each validator ~0.001-0.003 TAO (measured on finney 2026-10-19), and quiet boundaries cost nothing.
+RELAY_FEE_CADENCE_SECS = 6 * 3600
+# How long after a boundary the true-up waits before reading totals at it, so a fee confirmed
+# just before the boundary has reached every validator's ledger first.
+RELAY_FEE_SETTLE_GRACE_SECS = 120
+# How long every fee debtor's on-chain counter and this validator's fee ledger must both hold still
+# before the true-up reads them. They arrive by different paths (the World re-reads the counter, the
+# feed delivers the confirm), so for a few seconds after a confirm one can lead the other, and a
+# total read then puts that fee at the wrong boundary. Over two relay ticks, so a drain lands inside it.
+RELAY_FEE_INPUT_SETTLE_SECS = 30
+# The vault signer (the validator hotkey) pays every vault vote and needs ~0.075 TAO free up front
+# per call; below this the relay warns, hourly.
+RELAY_LOW_BALANCE_RAO = 500_000_000
+RELAY_BALANCE_CHECK_SECS = 3600
+# How often the relay re-reads whether its hotkey is in the vault's validator set (one contract read).
+VAULT_MEMBERSHIP_CHECK_SECS = 600
+# The Solana key every program vote is signed with. A vote costs ~5,000 lamports, and the first voter of a
+# round also fronts its rent until the last voter's close refunds it, so this covers many rounds.
+VOTER_LOW_BALANCE_LAMPORTS = 100_000_000
+VOTER_BALANCE_CHECK_SECS = 3600
+# While a signing wallet stays low, its warning repeats this often (once on the way down, then reminders).
+LOW_BALANCE_REMIND_SECS = 6 * 3600
 # Slow continuous vault↔attestation repair loop (crash-between-paired-writes, missed refreshes):
 # after the boot audit, every bound miner is re-checked once per interval, a few per forward step.
 RELAY_RECONCILE_INTERVAL_SECS = 900
@@ -345,8 +369,11 @@ DECLARED_COLLATERAL_BAND_BPS = 100
 
 
 def required_collateral(collateral_amount: int) -> int:
-    """Lamports a miner must hold to back ``collateral_amount`` (1.10×). Mirrors the contract."""
-    return collateral_amount * COLLATERAL_REQUIREMENT_BPS // 10_000
+    """What a miner must hold to back ``collateral_amount`` (1.10×), in the backing's units. Rounds up,
+    as the contract's ``required_collateral`` does: a floor reads one unit short whenever 1.10× isn't
+    whole, so this side judged a miner covered that the program refuses (and named a penalty one unit
+    under the one the verdict carries)."""
+    return -(-collateral_amount * COLLATERAL_REQUIREMENT_BPS // 10_000)
 
 
 # ─── Emission Recycling ────────────────────────────────────

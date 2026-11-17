@@ -46,3 +46,93 @@ def test_own_unconfirmed_change_is_spendable(monkeypatch):
     p.broadcasted_txids['bb' * 32] = 'swap-1'
     selected, _, _ = _select(p, [change], 100_000)
     assert selected == [change]
+
+
+def test_confirmed_coin_preferred_over_larger_own_change(monkeypatch):
+    """Own unconfirmed change sits in a mempool chain the payee of that tx can grow; spend confirmed first."""
+    p = _provider(monkeypatch)
+    change = _utxo('bb', 300_000, confirmed=False)
+    p.broadcasted_txids['bb' * 32] = 'swap-1'
+    confirmed = _utxo('aa', 150_000, confirmed=True)
+    selected, _, _ = _select(p, [change, confirmed], 100_000)
+    assert selected == [confirmed]
+
+
+# --- broadcast refused for a mempool chain limit -> rebuild without that change ---
+
+TEST_WIF = 'L1RrrnXkcKut5DEMwtDthjwRcTTwED36thyL1DebVrKuwvohjMNi'
+PAYEE = 'bc1qw508d6qejxtdg4y5r3zarvary0c5xw7kv8f3t4'
+CHAIN_LIMIT_BODY = (
+    'sendrawtransaction RPC error: {"code":-26,"message":"too-long-mempool-chain, '
+    'too many descendants for tx ' + 'bb' * 32 + ' [limit: 25]"}'
+)
+
+
+class _Resp:
+    def __init__(self, status_code: int, text: str = '', body=None):
+        self.status_code = status_code
+        self.text = text
+        self._body = body
+
+    def json(self):
+        return self._body
+
+    def raise_for_status(self):
+        pass
+
+
+def _send_setup(monkeypatch, utxos, post_bodies):
+    from embit.ec import PrivateKey
+    from embit.networks import NETWORKS
+    from embit.script import p2wpkh
+
+    monkeypatch.setenv('BTC_NETWORK', 'mainnet')
+    monkeypatch.setenv('BTC_PRIVATE_KEY', TEST_WIF)
+    p = _provider(monkeypatch)
+    sender = p2wpkh(PrivateKey.from_wif(TEST_WIF).get_public_key()).address(NETWORKS['main'])
+    monkeypatch.setattr(p, 'btc_api_get', lambda path, timeout=15: _Resp(200, body=[dict(u) for u in utxos]))
+    monkeypatch.setattr(p, 'find_recent_outgoing', lambda *a: None)
+    monkeypatch.setattr(p, 'tx_exists', lambda txid: False)
+    posted = []
+
+    def post(path, data, timeout=30):
+        posted.append(data)
+        status, text = post_bodies[len(posted) - 1]
+        return _Resp(status, text)
+
+    monkeypatch.setattr(p, 'btc_api_post', post)
+    return p, sender, posted
+
+
+def _spent_txids(raw_hex: str) -> set:
+    from embit.transaction import Transaction
+
+    return {vin.txid.hex() for vin in Transaction.from_string(raw_hex).vin}
+
+
+def test_chain_limit_rejection_rebuilds_without_that_change(monkeypatch):
+    pinned = _utxo('bb', 300_000, confirmed=False)
+    other = _utxo('cc', 250_000, confirmed=False)
+    p, sender, posted = _send_setup(monkeypatch, [pinned, other], [(400, CHAIN_LIMIT_BODY), (200, 'f' * 64)])
+    p.broadcasted_txids['bb' * 32] = 'swap-A'
+    p.broadcasted_txids['cc' * 32] = 'swap-C'
+
+    result = p.send_amount_lightweight(PAYEE, 100_000, from_address=sender, fee_rate_override=1, dedup_key='swap-B')
+
+    assert result == ('f' * 64, 0)
+    assert len(posted) == 2
+    assert _spent_txids(posted[0]) == {'bb' * 32}
+    assert _spent_txids(posted[1]) == {'cc' * 32}
+    # Remembered: the next payout doesn't walk into the same refusal.
+    assert not p.is_spendable_utxo(pinned)
+    assert p.is_spendable_utxo({**pinned, 'status': {'confirmed': True}})
+
+
+def test_chain_limit_with_no_alternative_fails_without_looping(monkeypatch):
+    pinned = _utxo('bb', 300_000, confirmed=False)
+    p, sender, posted = _send_setup(monkeypatch, [pinned], [(400, CHAIN_LIMIT_BODY)])
+    p.broadcasted_txids['bb' * 32] = 'swap-A'
+
+    assert p.send_amount_lightweight(PAYEE, 100_000, from_address=sender, fee_rate_override=1) is None
+    assert len(posted) == 1
+    assert 'awaiting confirmation' in p.last_send_error

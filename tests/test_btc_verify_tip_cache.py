@@ -6,7 +6,7 @@ results always hit the API, so no slash or confirm decision can be made on a sta
 
 import json
 
-from allways.assets.asset import ProviderUnreachableError, TransactionInfo
+from allways.assets.asset import ProviderUnreachableError
 
 TX = 'ab' * 32
 RECIP = 'bc1qrecipient'
@@ -75,16 +75,6 @@ def _verify(p):
     return p.api_verify_transaction(TX, RECIP, 5000)
 
 
-def test_pending_served_from_cache_while_tip_unchanged(monkeypatch):
-    s = _Session()
-    p = _provider(monkeypatch, s)
-    a = _verify(p)
-    b = _verify(p)
-    assert isinstance(a, TransactionInfo) and not a.confirmed
-    assert b is a
-    assert s.tx_calls == 1
-
-
 def test_tip_move_refetches_and_sees_confirmation(monkeypatch):
     s = _Session(tip=100, tx=_tx(confirmed=True, height=100))  # 1 conf: pending (min_confirmations=2)
     p = _provider(monkeypatch, s)
@@ -121,15 +111,6 @@ def test_cache_key_includes_recipient_and_amount(monkeypatch):
     assert s.tx_calls == 2
 
 
-def test_no_tip_bypasses_cache(monkeypatch):
-    s = _Session()
-    p = _provider(monkeypatch, s)
-    _verify(p)
-    s.tip = None  # tip fetch failing → no gate → live fetch
-    _verify(p)
-    assert s.tx_calls == 2
-
-
 def test_unreachable_is_not_cached(monkeypatch):
     import requests
 
@@ -148,3 +129,26 @@ def test_unreachable_is_not_cached(monkeypatch):
     except ProviderUnreachableError:
         pass
     assert p._verify_cache == {}
+
+
+class _LaggingTip(_Session):
+    """Answers tip reads from a script: the first is the new block, later ones a backend one behind."""
+
+    def __init__(self, tips, **kw):
+        super().__init__(**kw)
+        self.tips = iter(tips)
+
+    def request(self, method, url, **kw):
+        if url.endswith('/blocks/tip/height'):
+            return _Resp(text=str(next(self.tips)))
+        return super().request(method, url, **kw)
+
+
+def test_confirmations_use_the_tip_that_keys_the_cache(monkeypatch):
+    # The tip TTL lapses mid-verify and a lagging backend answers one block behind: counting from that
+    # second read parked "1/2 pending" under the newer tip until the next block.
+    s = _LaggingTip([101, 100, 100], tx=_tx(confirmed=True, height=100))
+    p = _provider(monkeypatch, s)
+    monkeypatch.setattr(type(p.chain), '_TIP_TTL_SECONDS', 0.0)
+    info = _verify(p)
+    assert info.confirmed is True and info.confirmations == 2

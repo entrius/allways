@@ -43,9 +43,13 @@ class ChainDefinition:
     # Every EVM row sets it — native coin and token alike — so both resolve their chain the same
     # way. None only for assets that ARE their own network (btc/tao/sol).
     host_chain: str | None = None
-    # Canonical MAINNET contract (or SPL mint) of a hosted asset. Testnet deployments + env
-    # overrides resolve in the provider (assets/erc20.py, spl_token.py) — each address lives once.
+    # Canonical MAINNET contract (or SPL mint) of a hosted asset. Env overrides resolve in the
+    # provider (assets/erc20.py, spl_token.py); each address lives once, in its row.
     asset_locator: str | None = None
+    # The same asset's deployments on test networks, as (network, address) pairs: an EVM network
+    # name ('sepolia', 'amoy') or a Solana cluster ('devnet'). A test network with no pair here has
+    # no deployment, and the provider refuses to build rather than fall back to the mainnet address.
+    testnet_locators: tuple[tuple[str, str], ...] = ()
     # ABI signatures the issuer refuses delivery with: 'f()' stops the whole token, 'f(address)'
     # freezes one destination. Required on every token row; () claims no freeze surface at all.
     refusal_checks: tuple[str, ...] | None = None
@@ -58,6 +62,10 @@ class ChainDefinition:
     # The backing family this asset settles penalties in ('tao' for an sn<N> alpha). The program
     # derives the same fact from the id prefix, so only 'tao' rows may carry an sn<digits> id.
     backing_family: str | None = None
+
+    def testnet_locator(self, network: str) -> str | None:
+        """This asset's address on the test network ``network``, or None when it has no deployment there."""
+        return dict(self.testnet_locators).get(network)
 
 
 # ─── Supported Chains ────────────────────────────────────
@@ -122,8 +130,10 @@ CHAIN_SOLUSDC = ChainDefinition(
     # the same ledger — so 0 is justified on skew grounds, unlike the cross-chain spokes' 60s.
     replay_grace_secs=0,
     host_chain='solana',
-    # Circle's USDC mint on mainnet-beta; devnet lives in assets/spl_token.py CLUSTER_MINTS.
+    # Circle's USDC mint on mainnet-beta.
     asset_locator='EPjFWdd5AufqSSqeM2qN1xzybapC8G4wEGGkZwyTDt1v',
+    # Circle-verified USDC on devnet (developers.circle.com). No Circle USDC exists on testnet.
+    testnet_locators=(('devnet', '4zMMC9srt5Ri5X14GAgXhaHii3GnPAEERYPJgZJDncDU'),),
 )
 
 CHAIN_ETH = ChainDefinition(
@@ -169,6 +179,8 @@ CHAIN_ARBUSDC = ChainDefinition(
     host_chain='arbitrum',
     # Circle-verified native USDC on Arbitrum One (developers.circle.com, 2026-08-07).
     asset_locator='0xaf88d065e77c8cC2239327C5EDb3A432268e5831',
+    # Circle-verified native USDC on Arbitrum Sepolia (developers.circle.com, 2026-08-07).
+    testnet_locators=(('sepolia', '0x75faf114eafb1BDbe2F0316DF893fd58CE46AA4d'),),
     refusal_checks=('isBlacklisted(address)', 'paused()'),
 )
 
@@ -265,6 +277,8 @@ CHAIN_BASEUSDC = ChainDefinition(
     # Circle-verified native USDC on Base (developers.circle.com, 2026-08-11) — NOT the
     # bridged USDbC at 0xd9aAEc86B65D86f6A7B5B1b0c42FFA531710b6CA.
     asset_locator='0x833589fCD6eDb6E08f4c7C32D4f71b54bdA02913',
+    # Circle-verified native USDC on Base Sepolia (developers.circle.com, 2026-08-11).
+    testnet_locators=(('sepolia', '0x036CbD53842c5426634e7929541eC2318f3dCF7e'),),
     refusal_checks=('isBlacklisted(address)', 'paused()'),
 )
 
@@ -293,6 +307,8 @@ CHAIN_ETHUSDC = ChainDefinition(
     replay_grace_secs=60,
     # Circle-verified native USDC on Ethereum (developers.circle.com, 2026-08-11).
     asset_locator='0xA0b86991c6218b36c1d19D4a2e9Eb0cE3606eB48',
+    # Circle-verified native USDC on Ethereum Sepolia (developers.circle.com, 2026-08-11).
+    testnet_locators=(('sepolia', '0x1c7D4B196Cb0C7B01d743Fbc6116a902379C7238'),),
     refusal_checks=('isBlacklisted(address)', 'paused()'),
 )
 
@@ -381,6 +397,9 @@ CHAIN_UNI = ChainDefinition(
     replay_grace_secs=60,
     # UNI as published by Uniswap (docs.uniswap.org governance/UNI reference, 2026-08-12).
     asset_locator='0x1f9840a85d5aF5bf1D1762F925BDADdC4201F984',
+    # Same address as mainnet and byte-identical runtime bytecode (keccak
+    # 0xdeba17f1…0868, 12567 bytes) — verified symbol UNI, 18 decimals, 1e27 supply.
+    testnet_locators=(('sepolia', '0x1f9840a85d5aF5bf1D1762F925BDADdC4201F984'),),
     # No freeze surface: the PUSH4 dispatch table resolves 27 selectors, exactly Uni.sol's ABI, so
     # there is no blacklist/pause/owner entry point to call. It cannot gain one either — EIP-1967
     # implementation/admin/beacon slots are all zero. The minter (governance timelock) only
@@ -416,6 +435,10 @@ CHAIN_QNT = ChainDefinition(
     # Quant's ICO token, deployed 2018 by Quant and verified byte-for-byte on Sourcify (solc
     # 0.4.21 StandardToken, not a proxy). mint is crowdsale-gated; nothing else is privileged.
     asset_locator='0x4a220E6096B25EADb88358cb44068A3248254675',
+    # Quant's official test QNT, dispensed by its documented getTestQNT faucet
+    # (0xCe8623CD…54825, docs.overledger.dev). Verified plain ERC20 — immutable, no
+    # pause/blacklist, probes revert — so the row's declared surface holds on Sepolia.
+    testnet_locators=(('sepolia', '0x81Dc68CB065ec6D9a4d24f6e2F442dc2A236D853'),),
     # No freeze surface: the verified source has no blacklist, no pause and no owner. And none can
     # be added: EIP-1967 slots empty, and the runtime holds no DELEGATECALL/SELFDESTRUCT/CREATE.
     refusal_checks=(),
@@ -479,6 +502,8 @@ CHAIN_POLUSDC = ChainDefinition(
     # bridged USDC.e at 0x2791Bca1f2de4661eD88A30C99A7a9449Aa84174, which also answers
     # symbol() == 'USDC' and the FiatToken freeze surface, so only this pin tells them apart.
     asset_locator='0x3c499c542cEF5E3811e1192ce70d8cC03d5c3359',
+    # Circle-verified native USDC on Polygon Amoy (developers.circle.com, 2026-08-12).
+    testnet_locators=(('amoy', '0x41E94Eb019C0762f9Bfcf9Fb1E58725BfB0e7582'),),
     refusal_checks=('isBlacklisted(address)', 'paused()'),
 )
 

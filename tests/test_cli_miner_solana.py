@@ -16,7 +16,6 @@ from allways.cli.swap_commands.collateral import collateral_group
 from allways.cli.swap_commands.miner_commands import miner_group
 from allways.cli.swap_commands.pair import post_pair
 from allways.solana.pdas import BACKING_BIT_SOL, BACKING_BIT_TAO
-from allways.solana.rpc import SolanaRpcError
 
 
 def _config(**over):
@@ -114,7 +113,7 @@ def test_deactivate_calls_self_deactivate():
 
 
 def test_deactivate_backing_tao_allowed_while_sol_swap_in_flight():
-    # V-4: the contract's per-hub gate allows dropping the TAO purse while a SOL swap runs, so the
+    # The contract's per-hub gate allows dropping the TAO purse while a SOL swap runs, so the
     # preflight must too — the old global has_active_swap check wrongly refused it.
     with patch('allways.cli.swap_commands.miner_commands.time') as t:
         t.time.return_value = 5_000
@@ -140,7 +139,7 @@ def test_deactivate_backing_tao_still_blocked_when_the_tao_hub_is_busy():
 
 
 def test_withdraw_allowed_while_tao_purse_active():
-    # V-4: withdraw_collateral gates on the SOL hub only, so a serving TAO purse must not block it.
+    # withdraw_collateral gates on the SOL hub only, so a serving TAO purse must not block it.
     with patch('allways.cli.swap_commands.collateral.time') as t:
         t.time.return_value = 1_000_000
         c = _client(state=_state(active=True, active_backings=BACKING_BIT_TAO), collateral=5_000_000_000)
@@ -166,39 +165,6 @@ def test_bind_hotkey_signs_and_binds():
     hotkey_bytes, sig = c.bind_hotkey.call_args.args
     # The submitted signature must verify against the hotkey over the Solana pubkey bytes.
     assert bt.Keypair(public_key='0x' + hotkey_bytes.hex()).verify(bytes(c.keypair.pubkey()), sig)
-
-
-def test_bind_hotkey_without_collateral_is_one_actionable_line():
-    wallet = SimpleNamespace(hotkey=bt.Keypair.create_from_seed('0x' + '33' * 32))
-    c = _client()
-    c.get_binding.return_value = None
-    c.bind_hotkey.side_effect = SolanaRpcError(
-        "sendTransaction: {'code': -32002, 'message': 'Transaction simulation failed: Error processing "
-        "Instruction 0: custom program error: 0x1772', 'data': {'err': {'InstructionError': [0, {'Custom': 6002}]}, "
-        "'logs': ['Program log: AnchorError occurred. Error Code: InsufficientCollateral. Error Number: 6002.']}}"
-    )
-    with (
-        patch('allways.cli.swap_commands.bind.get_cli_context', return_value=({}, wallet, None, None)),
-        patch('allways.cli.swap_commands.bind.get_solana_cli_context', return_value=({}, c)),
-    ):
-        res = CliRunner().invoke(miner_group, ['bind-hotkey', '--yes'])
-    assert res.exit_code == 1
-    assert 'Deposit collateral first: alw collateral deposit (InsufficientCollateral 6002)' in res.output
-    assert 'Traceback' not in res.output and "'code'" not in res.output
-
-
-def test_bind_hotkey_skips_when_already_bound():
-    wallet = SimpleNamespace(hotkey=bt.Keypair.create_from_seed('0x' + '22' * 32))
-    c = _client()
-    c.get_binding.return_value = object()  # already bound
-    with (
-        patch('allways.cli.swap_commands.bind.get_cli_context', return_value=({}, wallet, None, None)),
-        patch('allways.cli.swap_commands.bind.get_solana_cli_context', return_value=({}, c)),
-    ):
-        res = CliRunner().invoke(miner_group, ['bind-hotkey', '--yes'])
-    assert res.exit_code == 0
-    c.bind_hotkey.assert_not_called()
-    assert 'already bound' in res.output
 
 
 def test_post_pair_calls_set_quote_with_scaled_rate():

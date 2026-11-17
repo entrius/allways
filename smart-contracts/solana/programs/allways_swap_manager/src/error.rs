@@ -191,4 +191,6 @@ pub enum ErrorCode {
     QuoteLocked,
     #[msg("Wallet lock key or account does not match the wallet")]
     AddrLockKeyMismatch,
+    #[msg("Attestation payload equals the stored attestation; nothing to write")]
+    AttestationUnchanged,
 }

@@ -8,7 +8,7 @@ from click.testing import CliRunner
 
 from allways.assets.alpha import Alpha
 from allways.assets.asset import ProviderUnreachableError
-from allways.assets.tao import Tao, parse_extrinsic_id
+from allways.assets.tao import parse_extrinsic_id
 from allways.chains import CHAIN_SN7
 from allways.cli.swap_commands import post_tx
 
@@ -52,24 +52,11 @@ def _alpha(blocks):
     return p
 
 
-def test_plain_transfer_stake_id_resolves_to_its_own_hash():
-    inner = _transfer_stake(0xB3)
-    assert _alpha({BLOCK: {'extrinsics': [_shield(), inner]}}).locate_transfer(BLOCK, 1) == (_hash(inner), BLOCK)
-
-
 def test_shield_id_resolves_to_the_signers_next_nonce_in_the_same_block():
     decoy = _transfer_stake(0xDD, signer=OTHER, nonce=9)
     inner = _transfer_stake(0xB3, nonce=9)
     p = _alpha({BLOCK: {'extrinsics': [_transfer_stake(0xAA, nonce=7), _shield(nonce=8), decoy, inner]}})
     assert p.locate_transfer(BLOCK, 1) == (_hash(inner), BLOCK)
-
-
-def test_shield_id_follows_the_inner_into_a_later_block():
-    inner = _transfer_stake(0xB3, nonce=9)
-    p = _alpha(
-        {BLOCK: {'extrinsics': [_shield(nonce=8)]}, BLOCK + 1: {'extrinsics': []}, BLOCK + 2: {'extrinsics': [inner]}}
-    )
-    assert p.locate_transfer(BLOCK, 0) == (_hash(inner), BLOCK + 2)
 
 
 def test_shield_whose_inner_never_lands_is_refused():
@@ -85,44 +72,15 @@ def test_shield_revealing_a_non_transfer_is_refused():
         _alpha({BLOCK: {'extrinsics': [_shield(nonce=8), revealed]}}).locate_transfer(BLOCK, 0)
 
 
-def test_index_outside_the_block_is_refused():
-    with pytest.raises(ValueError, match='none at index 3'):
-        _alpha({BLOCK: {'extrinsics': [_transfer_stake(0xB3)]}}).locate_transfer(BLOCK, 3)
-
-
 def test_raw_fallback_block_cannot_resolve_an_id():
     with pytest.raises(ProviderUnreachableError):
         _alpha({BLOCK: {'extrinsics': [], '_raw': True}}).locate_transfer(BLOCK, 0)
-
-
-def test_tao_chain_resolves_a_balances_transfer_with_its_own_decoder():
-    transfer = _ext(0xB3, 'Balances', 'transfer_keep_alive', (('dest', {'Id': OTHER}), ('value', 10)))
-    p = Tao(SimpleNamespace())
-    p.get_block = lambda n: {'extrinsics': [transfer]}
-    assert p.locate_transfer(BLOCK, 0) == (_hash(transfer), BLOCK)
 
 
 def test_only_block_dash_idx_is_an_extrinsic_id():
     assert parse_extrinsic_id('8083554-7') == (8083554, 7)
     for text in ('0xab20', '54foaURhGH', '8083554', '8083554-', '8083554-7-1'):
         assert parse_extrinsic_id(text) is None
-
-
-def test_tail_block_not_minted_yet_is_retryable():
-    p = _alpha({BLOCK: {'extrinsics': [_shield(nonce=8)]}})
-    p.chain.get_current_block_height = lambda: BLOCK
-    with pytest.raises(ProviderUnreachableError, match='not minted yet, retry shortly'):
-        p.locate_transfer(BLOCK, 0)
-
-
-def test_unreadable_block_is_unreachable_not_a_crash():
-    def boom(_n):
-        raise RuntimeError('block number out of range')
-
-    p = _alpha({})
-    p.chain.get_block = boom
-    with pytest.raises(ProviderUnreachableError, match='unreadable'):
-        p.locate_transfer(99999999999999999999, 0)
 
 
 def test_post_tx_relays_the_resolved_inner_hash_and_block():

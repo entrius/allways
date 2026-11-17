@@ -1,4 +1,4 @@
-"""F7 — re-pricing a direction under a new backing orphans the old backing's quote.
+"""Re-pricing a direction under a new backing orphans the old backing's quote.
 
 `alw miner quotes` must WARN when a sibling quote on the OTHER purse is still live at its old price,
 and `alw miner remove-quote` must give a miner a per-backing path to take one down (its sibling

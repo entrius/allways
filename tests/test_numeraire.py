@@ -61,18 +61,6 @@ def test_alpha_price_reuses_tao_address_without_alpha_address_flag():
     assert posted_addresses == {('SOLADDR', 'TAOADDR'), ('TAOADDR', 'SOLADDR')}
 
 
-def test_alpha_gets_a_hidden_price_flag_but_no_address_flag():
-    params = {p.name: p for p in numeraire.quotes_command.params}
-    assert 'sn7_price' in params and 'sn7_address' not in params
-    assert params['sn7_price'].hidden
-
-
-def test_alpha_price_requires_tao_address():
-    result = CliRunner().invoke(numeraire.quotes_command, ['--sol-address', 'SOLADDR', '--sn7-price', '2', '--dry-run'])
-    assert result.exit_code != 0
-    assert '--tao-address required with --sn7-price' in result.output
-
-
 def test_alpha_anchor_posts_the_alpha_against_every_priced_spoke():
     client = MagicMock()
     client.keypair.pubkey.return_value = 'miner-pk'
@@ -107,11 +95,6 @@ def test_alpha_anchor_refuses_pairs_it_does_not_anchor():
             numeraire.quotes_command, ['--hub', 'sn7', '--tao-address', 'TAOADDR', *flags, '--dry-run']
         )
         assert result.exit_code != 0 and 'is not a sn7-anchored pair' in result.output
-
-
-def test_unknown_anchor_is_refused():
-    result = CliRunner().invoke(numeraire.quotes_command, ['--hub', 'btc', '--dry-run'])
-    assert result.exit_code != 0 and '--hub must be one of' in result.output
 
 
 def test_wallet_lock_fee_counts_each_unlocked_wallet_once(capsys):

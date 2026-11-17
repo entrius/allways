@@ -7,7 +7,7 @@ Seeds mirror smart-contracts/solana/.../constants.rs. Composite seeds:
   swap          : [b"swap", swap_key]   (swap_key = keccak(from_tx_hash), 32 bytes)
   hkbind        : [b"hkbind", hotkey]   (hotkey = 32-byte sr25519 pubkey)
   attest        : [b"attest", miner, chain_id]
-  attest round  : [b"vote", [REQ_SET_ATTESTATION], miner, chain_id]  (composite target)
+  attest round  : [b"tally", miner, chain_id]  (a TallyRound, counted per value)
 """
 
 from typing import Optional
@@ -80,9 +80,9 @@ def bond_attestation_pda(miner, chain: str, program_id: Optional[Pubkey] = None)
 
 
 def attestation_round_pda(miner, chain: str, program_id: Optional[Pubkey] = None) -> Pubkey:
-    """The reusable per-(miner, backing chain) attestation round — a composite target, so it can't go
-    through `vote_round_pda` (which takes a single 32-byte one)."""
-    return _derive([b'vote', bytes([REQ_SET_ATTESTATION]), _pk_bytes(miner), chain.encode()], program_id)
+    """The reusable per-(miner, backing chain) attestation round — a TallyRound, not a VoteRound, so it
+    has its own seed rather than going through `vote_round_pda`."""
+    return _derive([b'tally', _pk_bytes(miner), chain.encode()], program_id)
 
 
 def reservation_pda(miner, backing: str = BACKING_CHAIN_SOL, program_id: Optional[Pubkey] = None) -> Pubkey:

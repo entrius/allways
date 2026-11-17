@@ -1,6 +1,7 @@
 from abc import ABC, abstractmethod
+from collections import OrderedDict
 from dataclasses import dataclass
-from typing import Optional, Tuple
+from typing import Dict, Hashable, Optional, Tuple
 
 import bittensor as bt
 
@@ -16,6 +17,24 @@ class MissingTestnetDeployment(ValueError):
 
 class ProviderUnreachableError(Exception):
     """Raised when a chain provider cannot reach its backend during verification."""
+
+
+# A rejected tx is re-verified on every pass while its swap or reservation is live (every ~2s), and a
+# mined tx's verdict never changes: warn the first time, log the repeats at debug.
+_WARNED_MAX = 4096
+_warned: 'OrderedDict[str, None]' = OrderedDict()
+
+
+def warn_once(message: str) -> None:
+    """Log ``message`` as a warning the first time it is seen, at debug after that."""
+    if message in _warned:
+        _warned.move_to_end(message)
+        bt.logging.debug(message, stacklevel=2)
+        return
+    _warned[message] = None
+    if len(_warned) > _WARNED_MAX:
+        _warned.popitem(last=False)
+    bt.logging.warning(message, stacklevel=2)
 
 
 # What ``send_amount`` resolves to: (tx_hash, block_number) on success — block_number is 0 when
@@ -38,22 +57,23 @@ class TransactionInfo:
 class Asset(ABC):
     """A thing you can swap: verify a payment of it, send it, gate it.
 
-    Every asset lives on a `Chain` (`self.chain`). Single-asset networks (btc/tao/sol,
-    and eth until a second EVM asset lands) fuse the two: the class implements both and
-    `.chain` returns itself. The registry row stays a `ChainDefinition` in chains.py —
-    the wire says chain; in code an id resolves to an Asset.
+    Every asset lives on a `Chain` (`self.chain`). A single-asset network (btc) fuses the
+    two: the class implements both and `.chain` returns itself. The registry row stays a
+    `ChainDefinition` in chains.py — the wire says chain; in code an id resolves to an Asset.
 
     Seam rule: asset-side code asks chain questions through ``self.chain``; chain
     members calling each other keep plain ``self`` (they move together on a split).
 
     Adding a new asset:
     1. Add its ChainDefinition to chains.py
-    2. Implement this interface (or reuse a family class, e.g. an ERC-20)
-    3. Register it in ASSET_REGISTRY; add {ENV_PREFIX}_* vars to .env
+    2. Reuse a family class (EvmCoin, Erc20, SplToken) or implement this interface
+    3. Register it in ASSET_REGISTRY (a family class binds its row with ``partial``); add {ENV_PREFIX}_* vars to .env
     """
 
     # Non-fused assets (tokens on a multi-asset chain) set this at construction.
     _chain: Optional[Chain] = None
+    # Why the last ``send_amount`` returned None, so callers can surface it without scraping logs.
+    last_send_error: Optional[str] = None
 
     @property
     @abstractmethod
@@ -76,8 +96,11 @@ class Asset(ABC):
         """One-line summary of the backend/API this provider talks to, for startup logs."""
         return self.chain_def.name
 
-    def clear_cache(self) -> None:
-        """Reset per-asset scratch caches at the start of a validator pass. No-op by default."""
+    def share_chain(self, shared: Dict[Hashable, Chain]) -> None:
+        """Bind this asset to the chain object ``shared`` already holds for its network, or register its own."""
+        key = self.chain.share_key()
+        if key is not None:
+            self._chain = shared.setdefault(key, self.chain)
 
     def can_send_from(self, address: str) -> bool:
         """True iff this provider's signing credentials control ``address`` — i.e. a ``send_amount``
@@ -86,12 +109,22 @@ class Asset(ABC):
         prove it); each provider overrides with a real check."""
         return False
 
+    def _send_error(self, msg: str) -> None:
+        self.last_send_error = msg
+        bt.logging.error(msg)
+
     @abstractmethod
-    def check_connection(self, **kwargs) -> None:
+    def check_connection(
+        self, require_send: bool = True, checked: Optional[Dict[Hashable, Optional[Exception]]] = None
+    ) -> None:
         """Verify the chain provider can reach its backend (RPC node, subtensor, etc).
 
         Raises ConnectionError with a descriptive message on failure.
         Called during startup to fail fast if a provider is misconfigured.
+
+        ``require_send`` also checks the signing credentials. ``checked`` (a backend's key → its probe's
+        error, None = passed) lets every asset on one backend share one probe; an asset whose probe is cheap
+        may ignore it.
         """
         ...
 
@@ -162,6 +195,11 @@ class Asset(ABC):
         if tx_info is None:
             return None
 
+        # A mined tx always has a block time, so a missing one is a failed read. Raising keeps it out of
+        # the freshness floor, which fails closed on None and would slash an honest leg.
+        if tx_info.confirmed and tx_info.block_time is None:
+            raise ProviderUnreachableError(f'{self.chain_def.id} block time unavailable for tx {tx_hash[:16]}...')
+
         if require_confirmed and not tx_info.confirmed:
             bt.logging.debug(
                 f'verify_transaction: tx {tx_hash[:16]}... not yet confirmed '
@@ -170,7 +208,7 @@ class Asset(ABC):
             return None
 
         if expected_sender and chain.normalize_address(tx_info.sender) != expected_sender:
-            bt.logging.warning(
+            warn_once(
                 f'verify_transaction: sender mismatch on tx {tx_hash[:16]}... '
                 f'(expected {expected_sender}, got {tx_info.sender!r})'
             )
@@ -187,6 +225,13 @@ class Asset(ABC):
             return None
 
         return tx_info
+
+    @abstractmethod
+    def find_recent_outgoing(self, from_addr: str, to_addr: str, amount: int) -> Optional[str]:
+        """Hash of a recent tx from ``from_addr`` paying ``to_addr`` >= ``amount``, else None. A hash-finder for
+        deposit detection only: ``verify_transaction`` stays the sole verifier, so a miss just means the manual
+        rescue paths."""
+        ...
 
     @abstractmethod
     def get_balance(self, address: str) -> int: ...
@@ -235,7 +280,8 @@ class Asset(ABC):
         ``delivery_refused`` (a mere deferral hint): a wrong verdict here converts a genuine miner
         default into a free pass, so passive chains (BTC/TAO) and the default return None — they cannot
         refuse a payout. ``from_address`` is the committed miner sender the delivery must come from, so a
-        provider that keys on the miner's OWN reverted tx can reject one from any other address.
+        provider that keys on the miner's OWN reverted tx can reject one from any other address. Raises when
+        the evidence can't be read: unknown is neither evidence nor its absence, and the caller waits.
         EVM/ERC-20/Sol/Alpha override."""
         return None
 

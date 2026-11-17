@@ -1,9 +1,9 @@
 //! Upgrade cranks. A legacy account is shorter AND laid out differently, so the live types can't
 //! parse it: each crank reads it through a frozen mirror of the OLD layout, rebuilds it in the new one,
 //! and grows the allocation. Safe to re-run — gated on a marker the crank itself moves, moving no funds.
-//! v16 accepts FOUR from-versions: v10 (mainnet, never took v3), v13 (testnet, v3 deployed), v14, and
-//! v15 — whose crank is a pure version stamp (the fee-discount shape is compile-time constants, so
-//! v15 and v16 share a layout).
+//! v17 accepts FIVE from-versions: v10 (mainnet, never took v3), v13 (testnet, v3 deployed), v14, and
+//! v15/v16 — whose config crank is a pure version stamp (v15, v16 and v17 share the `Config` layout;
+//! v17 grew `MinerState` only, by the fee counters, which its miner-state crank seeds).
 
 use anchor_lang::prelude::*;
 use anchor_lang::Discriminator;
@@ -23,9 +23,11 @@ const MIGRATE_FROM_V10: u32 = 10;
 const MIGRATE_FROM_V13: u32 = 13;
 /// v14 is the per-hub schema; v15 appends `vault_generation`.
 const MIGRATE_FROM_V14: u32 = 14;
-/// v15's layout IS the live layout (v16 changed fee semantics, not fields), so its crank only
+/// v15's layout IS the live `Config` layout (v16 changed fee semantics, not fields), so its crank only
 /// stamps the version.
 const MIGRATE_FROM_V15: u32 = 15;
+/// v16 -> v17 appends the fee counters to `MinerState`; `Config` is unchanged, so a version stamp.
+const MIGRATE_FROM_V16: u32 = 16;
 /// Byte offset of `Config.version` (discriminator + `admin`). Stable in every version, which is what
 /// lets the crank read the marker before committing to a layout.
 const CONFIG_VERSION_OFFSET: usize = 8 + 32;
@@ -85,6 +87,25 @@ struct MinerStateV13 {
     bump: u8,
 }
 
+/// `MinerState` as the v14-v16 programs wrote it: per-hub arrays, no fee counters. Field order is the
+/// contract — do not reorder to match the live struct.
+#[derive(AnchorDeserialize, InitSpace)]
+struct MinerStateV14 {
+    miner: Pubkey,
+    collateral: u64,
+    active: bool,
+    active_backings: u8,
+    has_active_swap: bool,
+    active_swap_backings: u8,
+    busy_until: [i64; MAX_BACKING_SLOTS],
+    settling_until: [i64; MAX_BACKING_SLOTS],
+    reserved_collateral: [u64; MAX_BACKING_SLOTS],
+    deactivation_at: i64,
+    successful_swaps: u32,
+    failed_swaps: u32,
+    bump: u8,
+}
+
 #[derive(Accounts)]
 pub struct MigrateConfig<'info> {
     /// Checked against the `admin` stored in the account's raw bytes — the live `Config` type can't
@@ -134,7 +155,7 @@ enum LegacyConfig {
     V10(ConfigV10),
     /// v13 and v14 share a layout, so one frozen mirror parses both.
     V14(ConfigV14),
-    /// v15 shares the LIVE layout — parsed with the live type, only the version stamp moves.
+    /// v15 and v16 share the LIVE layout — parsed with the live type, only the version stamp moves.
     V15(Config),
 }
 
@@ -161,7 +182,7 @@ pub fn migrate_config(ctx: Context<MigrateConfig>) -> Result<()> {
             msg!("config already at v{}", CONFIG_VERSION);
             return Ok(());
         }
-        if version == MIGRATE_FROM_V15 {
+        if version == MIGRATE_FROM_V15 || version == MIGRATE_FROM_V16 {
             LegacyConfig::V15(Config::deserialize(&mut &data[8..])?)
         } else if version == MIGRATE_FROM_V13 || version == MIGRATE_FROM_V14 {
             LegacyConfig::V14(ConfigV14::deserialize(&mut &data[8..])?)
@@ -180,11 +201,12 @@ pub fn migrate_config(ctx: Context<MigrateConfig>) -> Result<()> {
     let from_version = match &legacy {
         LegacyConfig::V10(_) => MIGRATE_FROM_V10,
         LegacyConfig::V14(cfg) => cfg.version,
-        LegacyConfig::V15(_) => MIGRATE_FROM_V15,
+        LegacyConfig::V15(cfg) => cfg.version,
     };
     let legacy = match legacy {
-        // v15 -> v16 changed fee SEMANTICS only (compile-time discount shape + event fields), so
-        // the account neither grows nor rebuilds — the stamp just records which rules are live.
+        // v15 -> v16 changed fee SEMANTICS only (compile-time discount shape + event fields), and v17
+        // grew MinerState only, so the account neither grows nor rebuilds — the stamp just records
+        // which rules are live.
         LegacyConfig::V15(mut cfg) => {
             cfg.version = CONFIG_VERSION;
             write_account(&info, &cfg)?;
@@ -302,11 +324,21 @@ fn broadcast(v: i64) -> [i64; MAX_BACKING_SLOTS] {
     [v; MAX_BACKING_SLOTS]
 }
 
-pub fn migrate_miner_state(ctx: Context<MigrateMinerState>) -> Result<()> {
+/// `accrued_fees` seeds the v17 fee counters: each off-chain hub's cumulative fees under the current
+/// vault generation, summed from the `SwapCompleted` history by the operator. It is read only on the
+/// crank that grows the account; an already-migrated account ignores it, so a re-run can't rewrite
+/// what the program has since accrued. A locally-settled hub's slot must be 0 (its fees never owe a vault).
+pub fn migrate_miner_state(ctx: Context<MigrateMinerState>, accrued_fees: [u64; MAX_BACKING_SLOTS]) -> Result<()> {
     let info = ctx.accounts.miner_state.to_account_info();
     let target_len = 8 + MinerState::INIT_SPACE;
     const V10_LEN: usize = 8 + MinerStateV10::INIT_SPACE;
     const V13_LEN: usize = 8 + MinerStateV13::INIT_SPACE;
+    const V14_LEN: usize = 8 + MinerStateV14::INIT_SPACE;
+    require!(
+        accrued_fees[MinerState::backing_slot(BACKING_BIT_SOL)] == 0,
+        ErrorCode::InvalidAccountForMigration
+    );
+    let fee_generation = ctx.accounts.config.vault_generation;
 
     let migrated = {
         let data = info.try_borrow_data()?;
@@ -324,7 +356,28 @@ pub fn migrate_miner_state(ctx: Context<MigrateMinerState>) -> Result<()> {
             msg!("miner state already migrated: {}", ctx.accounts.miner.key());
             return Ok(());
         }
-        if data.len() == V13_LEN {
+        if data.len() == V14_LEN {
+            // Every v14 field carries verbatim (in-flight swaps included: no existing field moved), so
+            // no drain is needed — the account only grows by the counters.
+            let legacy = MinerStateV14::deserialize(&mut &data[8..])?;
+            MinerState {
+                miner: legacy.miner,
+                collateral: legacy.collateral,
+                active: legacy.active,
+                active_backings: legacy.active_backings,
+                has_active_swap: legacy.has_active_swap,
+                active_swap_backings: legacy.active_swap_backings,
+                busy_until: legacy.busy_until,
+                settling_until: legacy.settling_until,
+                reserved_collateral: legacy.reserved_collateral,
+                deactivation_at: legacy.deactivation_at,
+                successful_swaps: legacy.successful_swaps,
+                failed_swaps: legacy.failed_swaps,
+                bump: legacy.bump,
+                fee_generation,
+                accrued_fees,
+            }
+        } else if data.len() == V13_LEN {
             let legacy = MinerStateV13::deserialize(&mut &data[8..])?;
             // Refuse a miner that still has an in-flight swap: a multi-hub v13 account has no way to
             // say WHICH hub the swap was on, so marking every active hub in-flight would brick the
@@ -344,6 +397,8 @@ pub fn migrate_miner_state(ctx: Context<MigrateMinerState>) -> Result<()> {
                 successful_swaps: legacy.successful_swaps,
                 failed_swaps: legacy.failed_swaps,
                 bump: legacy.bump,
+                fee_generation,
+                accrued_fees,
             }
         } else if data.len() == V10_LEN {
             let legacy = MinerStateV10::deserialize(&mut &data[8..])?;
@@ -363,6 +418,8 @@ pub fn migrate_miner_state(ctx: Context<MigrateMinerState>) -> Result<()> {
                 successful_swaps: legacy.successful_swaps,
                 failed_swaps: legacy.failed_swaps,
                 bump: legacy.bump,
+                fee_generation,
+                accrued_fees,
             }
         } else {
             return err!(ErrorCode::InvalidAccountForMigration);

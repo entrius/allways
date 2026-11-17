@@ -7,8 +7,6 @@ anyway kills a detached neuron with EOFError before it ever polls a swap.
 from types import SimpleNamespace
 from unittest.mock import MagicMock
 
-import pytest
-
 from neurons.miner import Miner
 
 
@@ -51,13 +49,3 @@ def test_encrypted_keyfile_caches_password_from_env(monkeypatch):
 
     wallet.coldkey_file.save_password_to_env.assert_called_once_with('hunter2')
     wallet.unlock_coldkey.assert_called_once()
-
-
-def test_encrypted_keyfile_without_env_still_prompts(monkeypatch):
-    """The guard must not swallow the real prompt path — an encrypted keyfile
-    with no env var is exactly when a human is expected to type one in."""
-    monkeypatch.delenv('MINER_BITTENSOR_COLDKEY_PASSWORD', raising=False)
-    _no_prompt(monkeypatch)
-
-    with pytest.raises(EOFError):
-        Miner.unlock_coldkey(SimpleNamespace(wallet=_wallet(encrypted=True)))

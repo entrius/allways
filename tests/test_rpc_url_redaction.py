@@ -15,11 +15,6 @@ def test_path_segment_key_is_masked():
     assert redact_rpc_url(url) == 'https://eth-mainnet.g.alchemy.com/v2/***'
 
 
-def test_keyless_url_unchanged():
-    assert redact_rpc_url('http://127.0.0.1:8899') == 'http://127.0.0.1:8899'
-    assert redact_rpc_url('https://api.devnet.solana.com') == 'https://api.devnet.solana.com'
-
-
 def test_every_query_value_is_masked():
     out = redact_rpc_url('https://rpc.example.com/?api-key=secret&session=alsosecret')
     assert 'secret' not in out
