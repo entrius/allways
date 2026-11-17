@@ -20,7 +20,7 @@ preserved on the [`allways-old`](https://github.com/entrius/allways/tree/allways
 | Constant          | Meaning                                                                     |
 | ----------------- | --------------------------------------------------------------------------- |
 | `NETUID_FINNEY`   | The subnet the treasury constants are pinned for (7)                        |
-| `TREASURY_UID`    | The UID that receives the full weight. `None` until the miner is registered |
+| `TREASURY_UID`    | The UID that receives the full weight (78). `None` burns everything instead |
 | `TREASURY_HOTKEY` | The hotkey expected at that UID. A guard, not a lookup                      |
 
 On every pass the validator syncs the metagraph and sets weights `[1.0]` on:
